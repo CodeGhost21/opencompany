@@ -67,10 +67,11 @@ function entryType(e: MemoryEntry): string {
 
 /** The badge label + style for a row, from its kind (facts) or origin (context). */
 function entryBadge(e: MemoryEntry): { label: string; style: string } {
-  if (e.origin === "fact" && e.kind) {
-    return { label: e.kind, style: KIND_STYLES[e.kind] };
+  if (e.origin === "fact") {
+    const kind = e.kind ?? "fact";
+    return { label: kind, style: KIND_STYLES[kind] };
   }
-  return { label: ORIGIN_LABELS[e.origin], style: ORIGIN_STYLES[e.origin as "agent-memory" | "task-outcome"] };
+  return { label: ORIGIN_LABELS[e.origin], style: ORIGIN_STYLES[e.origin] };
 }
 
 /** The type-filter options in display order: fact kinds, then context origins. */
