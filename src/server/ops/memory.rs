@@ -293,12 +293,26 @@ async fn list_facts(
             .filter(|m| !m.label.starts_with(&mirror_prefix))
             .take(MAX_CONTEXT_ENTRIES)
         {
-            let body = company
+            // A peek failure degrades one row to an empty body rather than
+            // failing the whole list, but log it so a real storage fault
+            // surfaces instead of silently rendering blank cards.
+            let body = match company
                 .runtime
                 .context
                 .peek(company.id(), &meta.addr, None)
                 .await
-                .unwrap_or_default();
+            {
+                Ok(body) => body,
+                Err(err) => {
+                    tracing::warn!(
+                        company = %company.id(),
+                        addr = %meta.addr,
+                        error = %err,
+                        "failed to peek context chunk; rendering empty body"
+                    );
+                    String::new()
+                }
+            };
             chunks.push(RawChunk {
                 addr: meta.addr.to_string(),
                 label: meta.label,
