@@ -162,10 +162,10 @@ fn context_entries(chunks: Vec<RawChunk>, query: Option<&str>) -> Vec<MemoryEntr
         if chunk.label.starts_with(&mirror_prefix) {
             continue;
         }
-        if let Some(ref q) = needle {
-            if !chunk.body.to_lowercase().contains(q) {
-                continue;
-            }
+        if let Some(ref q) = needle
+            && !chunk.body.to_lowercase().contains(q)
+        {
+            continue;
         }
 
         let (origin, source, bucket): (MemoryOrigin, String, &mut Vec<MemoryEntry>) =
