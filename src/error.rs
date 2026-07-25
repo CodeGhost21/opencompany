@@ -112,7 +112,7 @@ pub enum OpenCompanyError {
     NotFound(String),
 
     /// No MCP install exists in the addressed company's registry store.
-    #[cfg(feature = "mcp")]
+    #[cfg(any(feature = "openhuman", feature = "mcp"))]
     #[error("MCP server not found: {0}")]
     McpServerNotFound(String),
 
@@ -231,7 +231,7 @@ impl OpenCompanyError {
             Self::Serde(_) => "serialization_error".to_string(),
             Self::CompanyNotFound(_) => "company_not_found".to_string(),
             Self::NotFound(_) => "not_found".to_string(),
-            #[cfg(feature = "mcp")]
+            #[cfg(any(feature = "openhuman", feature = "mcp"))]
             Self::McpServerNotFound(_) => "mcp_server_not_found".to_string(),
             Self::ToolNotGranted(_) => "tool_not_granted".to_string(),
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),

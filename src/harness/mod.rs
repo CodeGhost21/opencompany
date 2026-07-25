@@ -179,6 +179,15 @@ pub struct HarnessDeps {
     /// resolved filter; when the plan is `None` this stays the no-plan
     /// fallback/test override.
     pub capabilities: toolbelt::CapabilityFilter,
+    /// The company's source directory (`companies/<name>`), from which a
+    /// workflow's `sub_workflow` nodes resolve a child by `workflow_id`
+    /// (`workflows/<id>.toml`). Distinct from
+    /// [`Self::skills_source_dir`](Self::skills_source_dir) so the two seams stay
+    /// independent even though both currently derive from the same `seed_dir`.
+    /// `None` (default/tests, and platform-provisioned tenants with nothing on
+    /// disk) keeps the loud `UnwiredResolver`, so a reached `sub_workflow` node
+    /// fails clearly instead of resolving nothing.
+    pub workflow_source_dir: Option<PathBuf>,
     /// The tenant's capability tier plan (issue #108). `None` (the default)
     /// leaves gating **off** — byte-identical to Cell A, [`Self::capabilities`]
     /// is used verbatim. When set, [`HarnessPool::ensure`] resolves a per-tenant,
@@ -1147,6 +1156,7 @@ description = "Builds the product."
                 secrets: None,
                 web_allowed_domains: Vec::new(),
                 capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+                workflow_source_dir: None,
                 plan: None,
                 media: None,
                 steer: crate::company::steer::InflightRegistry::default(),
@@ -1202,6 +1212,7 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
@@ -1480,6 +1491,7 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
@@ -1633,6 +1645,7 @@ description = "Builds the product."
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
@@ -1743,6 +1756,7 @@ description = "Builds the product."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),
@@ -1884,6 +1898,7 @@ description = "Sets direction."
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: Some(plan),
             media: None,
             steer: crate::company::steer::InflightRegistry::default(),

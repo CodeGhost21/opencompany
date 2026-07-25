@@ -859,6 +859,11 @@ impl RuntimeBuilder {
                                     .tools
                                     .web_allowed_domains
                                     .clone(),
+                                // #113 P2: the company source dir so a workflow's
+                                // `sub_workflow` node resolves a child by id from
+                                // `workflows/<id>.toml`. Same origin as the skills
+                                // source dir but a distinct seam.
+                                workflow_source_dir: self.seed_dir.clone(),
                                 // Issue #108: `capabilities` is the no-plan
                                 // fallback (identity). When `[plan]` is set,
                                 // `HarnessPool::ensure` resolves the per-tenant
@@ -876,6 +881,11 @@ impl RuntimeBuilder {
                                 // closed — `build_agent` wires no media tools even
                                 // for a company that grants `media`.
                                 media: self.media_backend.clone(),
+                                // #113 P2: the company source dir so a workflow's
+                                // `sub_workflow` node resolves a child by id from
+                                // `workflows/<id>.toml`. Same origin as the skills
+                                // source dir but a distinct seam.
+                                workflow_source_dir: self.seed_dir.clone(),
                                 steer,
                             };
                             let record = CompanyRecord {

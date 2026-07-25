@@ -22,12 +22,23 @@
 //!   No tinyflows node OpenCompany emits consumes it yet; it is deliberate
 //!   contract-plumbing a later phase (P3) consumes.
 //!
-//! Still **not wired**: the bare-completion `LlmProvider` fallback, `code`
-//! nodes, and `sub_workflow`-by-id. They are explicit stubs that return a clear
-//! capability error rather than a silent no-op, so a workflow that reaches one
-//! fails loudly; a workflow that never reaches one is unaffected.
+//! Wired in P2:
+//!
+//! * **sub_workflow** ([`StoreWorkflowResolver`](resolver::StoreWorkflowResolver))
+//!   — a `sub_workflow` node referencing a child by `workflow_id` resolves it
+//!   from the company's on-disk `workflows/` directory (full validation + a
+//!   static cycle guard), when a source directory is wired
+//!   ([`HarnessDeps::workflow_source_dir`](crate::harness::HarnessDeps)). A
+//!   platform-provisioned tenant with no source directory keeps the
+//!   [`UnwiredResolver`] stub.
+//!
+//! Still **not wired**: the bare-completion `LlmProvider` fallback and `code`
+//! nodes. They are explicit stubs that return a clear capability error rather
+//! than a silent no-op, so a workflow that reaches one fails loudly; a workflow
+//! that never reaches one is unaffected.
 
 mod http;
+mod resolver;
 mod state;
 mod tools;
 
@@ -46,6 +57,7 @@ use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
 
 use self::http::GuardedHttpClient;
+use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 use self::tools::WorkflowToolInvoker;
 
@@ -55,36 +67,29 @@ use self::tools::WorkflowToolInvoker;
 /// id, the `[policy].mode` (the exec-security autonomy tier), the `[tools].allow`
 /// grants (the fail-closed `tool_call` gate), and the `[tools].web_allowed_domains`
 /// SSRF allowlist. The tool_call / http_request capabilities are scoped to a
-/// dedicated per-company workflow workspace
-/// (`{workspace_root}/{company}/_workflow/workspace`) — the `_` prefix keeps it
-/// from ever colliding with a roster agent's own workspace directory.
+/// dedicated per-run workflow workspace
+/// (`{workspace_root}/{company}/_workflow/{workflow}/{run}/workspace`) — the
+/// `_` prefix keeps it from ever colliding with a roster agent's own workspace
+/// directory.
 ///
 /// `pool`/`deps` are shared with the rest of the harness surface — the roster the
 /// agent nodes address is the one already resident in `pool`.
-pub fn build_capabilities(
+pub async fn build_capabilities(
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     workflow_id: &str,
+    run_id: &str,
 ) -> Capabilities {
     let company = record.id.clone();
     let mode = PolicyMode::parse(&record.manifest.policy.mode);
-    // A dedicated per-company workflow workspace. The `_workflow` segment is
-    // underscore-prefixed so it can never collide with a roster agent's id (and
-    // hence its `{company}/{agent}/workspace`).
-    let workflow_ws = deps
-        .workspace_root
-        .join(company.as_ref())
-        .join("_workflow")
-        .join("workspace");
-    // Best-effort: the toolbelt tools create their own sub-dirs, but seeding the
-    // root avoids a first-write race on the very first tool_call of a run.
-    if let Err(err) = std::fs::create_dir_all(&workflow_ws) {
+    let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
+    if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
         tracing::warn!(
             company = %company,
             workspace = %workflow_ws.display(),
             %err,
-            "workflow: could not pre-create the workflow workspace; tools will create it on demand"
+            "workflow: could not create the per-run workspace"
         );
     }
 
@@ -123,17 +128,55 @@ pub fn build_capabilities(
         }
     };
 
+    // sub_workflow-by-id resolves children from the company's on-disk
+    // `workflows/` directory when a source dir is wired; a platform tenant with
+    // none keeps the loud stub. Read before `deps` moves into the agent runner.
+    let resolver: Arc<dyn WorkflowResolver> = match &deps.workflow_source_dir {
+        Some(source_dir) => Arc::new(StoreWorkflowResolver::new(
+            source_dir.clone(),
+            workflow_id.to_string(),
+        )),
+        None => Arc::new(UnwiredResolver),
+    };
+
     Capabilities {
         llm: Arc::new(UnwiredLlm),
         tools: Arc::new(tools),
         http: Arc::new(http),
         code: Arc::new(UnwiredCode),
         state,
-        resolver: Arc::new(UnwiredResolver),
+        resolver,
         // `deps` moves in last — the borrows above (`deps.capabilities`,
-        // `deps.secrets`, `deps.workspace_root`) are all done by here.
+        // `deps.secrets`, `deps.workspace_root`, `deps.workflow_source_dir`) are
+        // all done by here.
         agent: Some(Arc::new(HarnessAgentRunner::new(pool, deps, company))),
     }
+}
+
+/// Builds a traversal-safe workspace path unique to one workflow execution.
+fn workflow_workspace(
+    root: &std::path::Path,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+) -> std::path::PathBuf {
+    root.join(company.as_ref())
+        .join("_workflow")
+        .join(hex_segment(workflow_id))
+        .join(hex_segment(run_id))
+        .join("workspace")
+}
+
+/// Encodes an arbitrary identifier as one safe, reversible path segment.
+fn hex_segment(value: &str) -> String {
+    use std::fmt::Write;
+    value
+        .as_bytes()
+        .iter()
+        .fold(String::with_capacity(value.len() * 2), |mut out, byte| {
+            write!(out, "{byte:02x}").expect("writing to String cannot fail");
+            out
+        })
 }
 
 /// A tinyflows [`AgentRunner`] that executes an `agent` node on the company's
@@ -229,8 +272,11 @@ impl CodeRunner for UnwiredCode {
     }
 }
 
-/// `sub_workflow`-by-id is never emitted by translation (OpenCompany has no such
-/// node kind); wired to an error for completeness.
+/// The `sub_workflow`-by-id fallback for a deployment with no source directory
+/// (platform-provisioned mode): there is nowhere on disk to resolve a child
+/// graph from, so a reached `sub_workflow` node fails loudly rather than
+/// silently. A deployment WITH a source directory uses
+/// [`StoreWorkflowResolver`](resolver::StoreWorkflowResolver) instead.
 struct UnwiredResolver;
 
 #[async_trait]
@@ -261,5 +307,21 @@ mod tests {
         // No known string key: fall back to the serialized object.
         let out = message_from_request(&json!({ "agent_ref": "x" }));
         assert!(out.contains("agent_ref"));
+    }
+
+    #[test]
+    fn workflow_workspace_is_unique_per_run_and_traversal_safe() {
+        let root = std::path::Path::new("/tmp/workspaces");
+        let company = CompanyId::new("acme");
+        let first = workflow_workspace(root, &company, "../billing", "run:1");
+        let second = workflow_workspace(root, &company, "../billing", "run:2");
+
+        assert_ne!(first, second);
+        assert!(first.starts_with(root.join("acme").join("_workflow")));
+        assert!(!first.to_string_lossy().contains("../billing"));
+        assert_eq!(
+            first.file_name().and_then(|part| part.to_str()),
+            Some("workspace")
+        );
     }
 }
