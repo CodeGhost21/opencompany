@@ -191,23 +191,30 @@ pub fn fold_steps(events: Vec<AgentProgress>) -> Vec<TurnStep> {
 /// projection the final folded timeline does — the two views can never disagree
 /// and neither can leak. `seq` is the caller's monotonic per-turn counter, for
 /// client-side ordering/dedup.
-pub(crate) fn stream_event_from(event: &AgentProgress, seq: u64) -> Option<TurnStreamEvent> {
+pub(crate) fn stream_event_from(
+    event: &AgentProgress,
+    seq: u64,
+    thinking_open: &mut bool,
+) -> Option<TurnStreamEvent> {
     match event {
         AgentProgress::ToolCallStarted {
             call_id,
             tool_name,
             display_label,
             ..
-        } => Some(TurnStreamEvent {
-            kind: "tool_call",
-            seq,
-            agent_id: None,
-            tool_call_id: Some(call_id.clone()),
-            label: Some(label_for(display_label.clone(), tool_name)),
-            detail: None,
-            status: Some("running"),
-            elapsed_ms: None,
-        }),
+        } => {
+            *thinking_open = false;
+            Some(TurnStreamEvent {
+                kind: "tool_call",
+                seq,
+                agent_id: None,
+                tool_call_id: Some(call_id.clone()),
+                label: Some(label_for(display_label.clone(), tool_name)),
+                detail: None,
+                status: Some("running"),
+                elapsed_ms: None,
+            })
+        }
         AgentProgress::ToolCallCompleted {
             call_id,
             tool_name,
@@ -218,6 +225,7 @@ pub(crate) fn stream_event_from(event: &AgentProgress, seq: u64) -> Option<TurnS
             failure,
             ..
         } => {
+            *thinking_open = false;
             let (status, detail) = if *success {
                 ("ok", enrich_detail(tool_name, arguments.as_ref()))
             } else {
@@ -236,6 +244,30 @@ pub(crate) fn stream_event_from(event: &AgentProgress, seq: u64) -> Option<TurnS
                 status: Some(status),
                 elapsed_ms: Some(*elapsed_ms),
             })
+        }
+        // The first thinking delta of a run opens ONE coalesced "Thinking" frame,
+        // exactly as `fold_steps` opens one "Thinking" step; consecutive deltas
+        // fall through to the catch-all and emit nothing, so the live timeline
+        // shows the same thinking rows the final folded one does (they were
+        // otherwise missing live — the count jumped up when the reply landed).
+        AgentProgress::ThinkingDelta { .. } if !*thinking_open => {
+            *thinking_open = true;
+            Some(TurnStreamEvent {
+                kind: "thinking",
+                seq,
+                agent_id: None,
+                tool_call_id: None,
+                label: Some("Thinking".to_string()),
+                detail: None,
+                status: Some("ok"),
+                elapsed_ms: None,
+            })
+        }
+        // Visible assistant text closes a thinking run (the reply is the bubble
+        // body), matching `fold_steps`; it adds no step of its own.
+        AgentProgress::TextDelta { .. } => {
+            *thinking_open = false;
+            None
         }
         _ => None,
     }
@@ -697,8 +729,13 @@ mod tests {
     /// label/detail the folded timeline would.
     #[test]
     fn stream_event_from_maps_start_and_completion() {
-        let start = stream_event_from(&started("c1", "mcp_call_tool", Some("Searching")), 0)
-            .expect("start maps to a frame");
+        let mut thinking_open = false;
+        let start = stream_event_from(
+            &started("c1", "mcp_call_tool", Some("Searching")),
+            0,
+            &mut thinking_open,
+        )
+        .expect("start maps to a frame");
         assert_eq!(start.kind, "tool_call");
         assert_eq!(start.status, Some("running"));
         assert_eq!(start.tool_call_id.as_deref(), Some("c1"));
@@ -714,6 +751,7 @@ mod tests {
                 None,
             ),
             1,
+            &mut thinking_open,
         )
         .expect("completion maps to a frame");
         assert_eq!(done.kind, "tool_result");
@@ -723,13 +761,25 @@ mod tests {
         assert_eq!(done.elapsed_ms, Some(42));
     }
 
-    /// Non-tool progress (thinking/text deltas, and everything else) produces no
-    /// live frame — the live timeline shows tool calls only, same as the folded
-    /// one.
+    /// Thinking coalesces live exactly as it folds: the FIRST delta of a run
+    /// emits one `thinking` frame, consecutive deltas emit nothing, and visible
+    /// text closes the run (no frame). This is what keeps the live step count
+    /// tracking the final folded count instead of jumping up when the reply
+    /// lands.
     #[test]
-    fn stream_event_from_ignores_non_tool_events() {
-        assert!(stream_event_from(&thinking("hmm"), 0).is_none());
-        assert!(stream_event_from(&text("hello"), 0).is_none());
+    fn stream_event_from_coalesces_thinking_and_ignores_text() {
+        let mut open = false;
+        let first = stream_event_from(&thinking("hmm"), 0, &mut open).expect("first delta → frame");
+        assert_eq!(first.kind, "thinking");
+        assert_eq!(first.label.as_deref(), Some("Thinking"));
+        assert!(open, "run is now open");
+        // A consecutive delta while the run is open adds nothing.
+        assert!(stream_event_from(&thinking("more"), 1, &mut open).is_none());
+        // Visible text closes the run without a frame of its own.
+        assert!(stream_event_from(&text("hello"), 2, &mut open).is_none());
+        assert!(!open, "text closed the run");
+        // A fresh thinking run after that opens a new frame.
+        assert!(stream_event_from(&thinking("again"), 3, &mut open).is_some());
     }
 
     /// The live frame is scrubbed exactly like the folded step: a failing remote
@@ -747,6 +797,7 @@ mod tests {
                 None,
             ),
             0,
+            &mut false,
         )
         .expect("frame");
         let json = serde_json::to_string(&frame).expect("frame serialize");

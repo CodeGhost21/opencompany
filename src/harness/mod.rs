@@ -328,9 +328,12 @@ impl CompanyAgent {
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
             let mut seq: u64 = 0;
+            // Mirrors `fold_steps`' thinking-run coalescing so the live timeline
+            // emits the same "Thinking" rows the final folded one does.
+            let mut thinking_open = false;
             while let Some(event) = rx.recv().await {
                 if let Some(ctx) = &stream
-                    && let Some(frame) = steps::stream_event_from(&event, seq)
+                    && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
                 {
                     crate::turn_stream::publish(
                         &ctx.company,

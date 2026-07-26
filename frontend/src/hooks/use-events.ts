@@ -47,7 +47,11 @@ export type CompanyStreamEvent =
       detail?: string;
       status?: string;
       elapsedMs?: number;
-    };
+    }
+  // A coalesced "Thinking" run between tool calls — streamed so the live
+  // timeline shows the same rows the final folded one does (else the count
+  // jumps up when the reply lands).
+  | { type: "thinking"; seq: number; agentId?: string };
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {
@@ -190,6 +194,7 @@ function handleEvent(
     // inline in the chat.
     case "tool_call":
     case "tool_result":
+    case "thinking":
       onTurnEvent?.(event);
       break;
     case "mcp_call_failed":

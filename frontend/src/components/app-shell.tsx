@@ -374,6 +374,10 @@ export function AppShell({
             toolCallId: event.toolCallId,
           });
         }
+      } else if (event.type === "thinking") {
+        // The backend already coalesces a thinking run into one frame, so each
+        // arrival is a distinct row (mirrors the folded "Thinking" step).
+        rows.push({ kind: "thinking", status: "ok", label: "Thinking" });
       }
       return { ...prev, [threadId]: rows };
     });
