@@ -1200,6 +1200,7 @@ name = "Design"
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
             plan: None,
             media: None,
             steer,
