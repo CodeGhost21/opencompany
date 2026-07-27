@@ -57,6 +57,9 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // A sent message never carries a channel; only attribute one when the
       // line came from someone/something else, mirroring `ChatPane.send`.
       channel: from === "company" ? entry.channel : undefined,
+      // Rehydrate the persisted tool-call timeline so it survives a thread
+      // switch / reload — the render already draws `m.steps` (Conversation.tsx).
+      steps: from === "company" ? entry.steps : undefined,
     };
   });
 }
