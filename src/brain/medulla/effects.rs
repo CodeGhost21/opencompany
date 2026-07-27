@@ -90,6 +90,7 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             chat_id,
             agent_id,
             text,
+            ..
         } => (
             Role::Assistant,
             agent_id.clone(),

@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
-use crate::ports::types::{ActorKind, CompanyEvent, EventSeq, StoredEvent};
+use crate::ports::types::{ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
 /// The console's default/orchestrator thread id
@@ -86,6 +86,10 @@ pub struct MessageView {
     pub at_millis: f64,
     /// Whether it is the operator's own message.
     pub mine: bool,
+    /// The scrubbed processing steps behind a company reply, so a rehydrated
+    /// transcript renders the same tool-call timeline the live turn showed.
+    /// Empty for operator messages and tool-less replies.
+    pub steps: Vec<TurnStep>,
 }
 
 impl MessageView {
@@ -101,13 +105,19 @@ impl MessageView {
         let id = stored.seq.value().to_string();
         let at_millis = stored.at_millis as f64;
         match stored.event {
-            CompanyEvent::AgentReply { agent_id, text, .. } => MessageView {
+            CompanyEvent::AgentReply {
+                agent_id,
+                text,
+                steps,
+                ..
+            } => MessageView {
                 id,
                 channel: agent_id.clone(),
                 author: agent_id,
                 text,
                 at_millis,
                 mine: false,
+                steps,
             },
             CompanyEvent::OperatorMessage { text, by, .. } => {
                 let (author, mine) = match &by {
@@ -131,6 +141,7 @@ impl MessageView {
                     text,
                     at_millis,
                     mine,
+                    steps: Vec::new(),
                 }
             }
             // `owns` never admits other variants into a history.
@@ -141,6 +152,7 @@ impl MessageView {
                 text: format!("{other:?}"),
                 at_millis,
                 mine: false,
+                steps: Vec::new(),
             },
         }
     }
@@ -221,6 +233,7 @@ mod test {
             chat_id: chat_id.to_string(),
             agent_id: "ceo".to_string(),
             text: "hi".to_string(),
+            steps: Vec::new(),
         }
     }
 

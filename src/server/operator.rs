@@ -31,7 +31,7 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
     Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, OutboundMessage, OverlayDeskMember,
-    StoredEvent, Verdict,
+    StoredEvent, TurnStep, Verdict,
 };
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::chat_history::{MessageView, Viewer, history_for_desk};
@@ -342,11 +342,17 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             chat_id,
             agent_id,
             text,
+            steps,
         } => {
             let mut o = envelope("agent_reply");
             o["chatId"] = json!(chat_id);
             o["agentId"] = json!(agent_id);
             o["text"] = json!(text);
+            // Scrubbed timeline (same shape the POST body carries); omitted
+            // when empty so a tool-less reply's wire form is unchanged.
+            if !steps.is_empty() {
+                o["steps"] = json!(steps);
+            }
             o
         }
         CompanyEvent::TaskDispatched { task_id } => {
@@ -566,6 +572,9 @@ async fn chat_and_emit(
                     chat_id: desk.clone(),
                     agent_id: response.channel.clone(),
                     text: response.text.clone(),
+                    // Persist the per-bubble timeline so a history reload
+                    // rehydrates the tool calls, not just the text.
+                    steps: response.steps.clone(),
                 },
             )
             .await;
@@ -669,6 +678,11 @@ struct ChatHistoryMessageDto {
     at_millis: f64,
     /// Whether it is the operator's own message.
     mine: bool,
+    /// The scrubbed processing steps behind a company reply, so a rehydrated
+    /// transcript renders the same timeline the live turn showed. Omitted when
+    /// empty (operator messages, tool-less replies) — keeps the legacy shape.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    steps: Vec<TurnStep>,
 }
 
 impl From<MessageView> for ChatHistoryMessageDto {
@@ -680,6 +694,7 @@ impl From<MessageView> for ChatHistoryMessageDto {
             text: view.text,
             at_millis: view.at_millis,
             mine: view.mine,
+            steps: view.steps,
         }
     }
 }
@@ -1344,6 +1359,7 @@ mod test {
                     chat_id: "General".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under General".to_string(),
+                    steps: Vec::new(),
                 },
             )
             .await
@@ -1356,6 +1372,7 @@ mod test {
                     chat_id: "main".to_string(),
                     agent_id: "ceo".to_string(),
                     text: "reply under main".to_string(),
+                    steps: Vec::new(),
                 },
             )
             .await
@@ -1388,6 +1405,65 @@ mod test {
             texts.contains(&"reply under main"),
             "missing main-id reply: {texts:?}"
         );
+        tokio::fs::remove_dir_all(&home).await.ok();
+    }
+
+    /// Regression: a reply's tool-call timeline must survive a history reload —
+    /// switching threads and coming back reloads `chat/history`, which used to
+    /// return text only, so the steps vanished. They are now persisted on the
+    /// `AgentReply` and projected back through the DTO.
+    #[tokio::test]
+    async fn chat_history_route_rehydrates_reply_steps() {
+        let home = home();
+        let state = state_with_company(&home, "running").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        runtime
+            .events()
+            .append(
+                runtime.id(),
+                CompanyEvent::AgentReply {
+                    chat_id: "main".to_string(),
+                    agent_id: "ceo".to_string(),
+                    text: "done".to_string(),
+                    steps: vec![TurnStep {
+                        kind: crate::ports::types::TurnStepKind::ToolCall,
+                        status: crate::ports::types::TurnStepStatus::Ok,
+                        label: "Reading messages".to_string(),
+                        detail: None,
+                        elapsed_ms: Some(9),
+                    }],
+                },
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/company/chat/history")
+                    .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let reply = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["text"] == "done")
+            .expect("the reply is in history");
+        assert_eq!(
+            reply["steps"][0]["label"], "Reading messages",
+            "the persisted timeline must ride back on the history DTO"
+        );
+        assert_eq!(reply["steps"][0]["status"], "ok");
+        assert_eq!(reply["steps"][0]["elapsedMs"], 9);
         tokio::fs::remove_dir_all(&home).await.ok();
     }
 
@@ -1672,11 +1748,19 @@ mod test {
     }
 
     #[test]
-    fn projects_agent_reply_with_only_chat_fields() {
+    fn projects_agent_reply_with_chat_fields_and_steps() {
+        use crate::ports::types::{TurnStep, TurnStepKind, TurnStepStatus};
         let v = super::project_event(&stored(CompanyEvent::AgentReply {
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "shipped it".into(),
+            steps: vec![TurnStep {
+                kind: TurnStepKind::ToolCall,
+                status: TurnStepStatus::Ok,
+                label: "Reading messages".into(),
+                detail: None,
+                elapsed_ms: Some(12),
+            }],
         }))
         .expect("agent_reply is an attention signal");
         assert_eq!(v["type"], "agent_reply");
@@ -1685,6 +1769,22 @@ mod test {
         assert_eq!(v["chatId"], "General");
         assert_eq!(v["agentId"], "ceo");
         assert_eq!(v["text"], "shipped it");
+        // The scrubbed timeline rides along so a live listener sees the steps.
+        assert_eq!(v["steps"][0]["label"], "Reading messages");
+        assert_eq!(v["steps"][0]["status"], "ok");
+    }
+
+    #[test]
+    fn projects_agent_reply_omits_empty_steps() {
+        let v = super::project_event(&stored(CompanyEvent::AgentReply {
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "hi".into(),
+            steps: Vec::new(),
+        }))
+        .expect("agent_reply is an attention signal");
+        // A tool-less reply keeps the legacy wire shape — no `steps` key.
+        assert!(v.get("steps").is_none());
     }
 
     #[test]

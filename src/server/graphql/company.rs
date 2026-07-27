@@ -26,6 +26,7 @@ use super::{
 };
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
+use crate::ports::types::TurnStep;
 use crate::server::chat_history::{self, MessageView, Viewer};
 
 /// The aggregation-root handle over one company. See the module docs.
@@ -376,6 +377,42 @@ pub struct MessageGql {
     pub at_millis: f64,
     /// Whether it is the operator's own message.
     pub mine: bool,
+    /// The scrubbed processing steps behind a company reply, so a rehydrated
+    /// transcript renders the same timeline the REST route returns (issue #65
+    /// parity). Empty for operator messages and tool-less replies.
+    pub steps: Vec<MessageStepGql>,
+}
+
+/// One scrubbed step in a reply's processing timeline. GraphQL mirror of the
+/// wire [`TurnStep`] (`kind`/`status` are its snake_case string forms), so the
+/// GraphQL `Message` type carries the same timeline as the REST projection.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageStep")]
+pub struct MessageStepGql {
+    /// The step kind (`tool_call` / `thinking` / `note`).
+    pub kind: String,
+    /// How the step ended (`ok` / `error` / `running`).
+    pub status: String,
+    /// A short, human label (never tool arguments or output).
+    pub label: String,
+    /// An optional scrubbed detail (e.g. `server · tool`, a failure cause).
+    pub detail: Option<String>,
+    /// How long the step took in milliseconds, when known.
+    pub elapsed_ms: Option<f64>,
+}
+
+impl From<TurnStep> for MessageStepGql {
+    fn from(step: TurnStep) -> Self {
+        // Reuse the serde snake_case forms so GraphQL and REST agree verbatim.
+        let token = |v: &serde_json::Value| v.as_str().unwrap_or_default().to_string();
+        MessageStepGql {
+            kind: token(&serde_json::to_value(step.kind).unwrap_or_default()),
+            status: token(&serde_json::to_value(step.status).unwrap_or_default()),
+            label: step.label,
+            detail: step.detail,
+            elapsed_ms: step.elapsed_ms.map(|ms| ms as f64),
+        }
+    }
 }
 
 /// Wraps a viewer-agnostic [`MessageView`] (shared with the REST
@@ -389,6 +426,7 @@ impl From<MessageView> for MessageGql {
             text: view.text,
             at_millis: view.at_millis,
             mine: view.mine,
+            steps: view.steps.into_iter().map(MessageStepGql::from).collect(),
         }
     }
 }
