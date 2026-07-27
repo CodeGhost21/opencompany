@@ -220,7 +220,7 @@ impl AgentRunner for HarnessAgentRunner {
         );
         let outcome = self
             .pool
-            .run(&self.company, agent_ref, &message, &self.deps)
+            .run_background(&self.company, agent_ref, &message, &self.deps)
             .await
             .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the

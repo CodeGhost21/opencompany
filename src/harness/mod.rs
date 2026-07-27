@@ -301,7 +301,7 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None).await
+        self.run_with_steer(message, None, None).await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -323,13 +323,38 @@ impl CompanyAgent {
         &self,
         message: &str,
         steer: Option<&SteerControl>,
+        stream: Option<crate::turn_stream::TurnStreamCtx>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
+        //
+        // When `stream` is `Some`, the collector *tees* each event live onto the
+        // transient [`turn_stream`](crate::turn_stream) bus as it arrives —
+        // mirroring OpenHuman's `spawn_progress_bridge` — so the console renders
+        // the tool timeline while the turn is still running. The same events are
+        // still buffered and folded into the durable `TurnStep`s below, so the
+        // live view and the final reply timeline are byte-identical. With `None`
+        // (background turns, non-`openhuman` build) this is exactly the prior
+        // buffer-only behaviour.
         let (tx, mut rx) = tokio::sync::mpsc::channel::<oh::agent::progress::AgentProgress>(1024);
         let collector = tokio::spawn(async move {
             let mut events = Vec::new();
+            let mut seq: u64 = 0;
+            // Mirrors `fold_steps`' thinking-run coalescing so the live timeline
+            // emits the same "Thinking" rows the final folded one does.
+            let mut thinking_open = false;
             while let Some(event) = rx.recv().await {
+                if let Some(ctx) = &stream
+                    && let Some(frame) = steps::stream_event_from(&event, seq, &mut thinking_open)
+                {
+                    crate::turn_stream::publish(
+                        &ctx.company,
+                        frame
+                            .with_agent(ctx.agent_id.clone())
+                            .with_chat(ctx.chat_id.clone()),
+                    );
+                    seq += 1;
+                }
                 events.push(event);
             }
             events
@@ -473,6 +498,19 @@ impl Default for HarnessPool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether a turn tees its progress onto the live [`turn_stream`](crate::turn_stream)
+/// bus, and if so which chat thread its frames route to. `Off` for a turn with no
+/// operator chat bubble (a dispatched task card or workflow agent node) — those
+/// frames would misattribute to whatever thread most recently sent, so they
+/// publish nothing (#125 review). `On { chat_id }` streams; `chat_id` is the
+/// thread the durable reply is journaled under (`AgentReply.chat_id`), falling
+/// back to the default desk when the caller addressed none.
+#[derive(Clone, Copy)]
+enum LiveStream<'a> {
+    Off,
+    On { chat_id: Option<&'a str> },
 }
 
 impl HarnessPool {
@@ -724,14 +762,44 @@ impl HarnessPool {
     ///
     /// Desk routing (which agent answers a group chat) is the caller's job — v1
     /// is single-responder and the WS3 chat handler picks the addressed member.
+    ///
+    /// `chat_id` is the chat/desk **thread** this turn answers (the id journaled
+    /// as `AgentReply.chat_id`). It rides each live turn-stream frame so the
+    /// console routes the in-flight tool timeline to the right thread; `None`
+    /// falls back to the default desk, matching the durable reply.
     pub async fn run(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
         deps: &HarnessDeps,
+        chat_id: Option<&str>,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, None).await
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            None,
+            LiveStream::On { chat_id },
+        )
+        .await
+    }
+
+    /// Like [`run`](Self::run) but WITHOUT live turn streaming — for a turn that
+    /// surfaces no operator chat bubble (a workflow agent node, which drops its
+    /// steps). Its transient `tool_call`/`tool_result` frames would otherwise
+    /// leak onto the console's live timeline and misattribute to whatever thread
+    /// most recently sent, so this path publishes nothing (#125 review).
+    pub async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+    ) -> crate::Result<TurnOutcome> {
+        self.run_inner(company, agent_id, message, deps, None, LiveStream::Off)
+            .await
     }
 
     /// Routes a message to one agent with an operator **steer** control installed
@@ -739,6 +807,7 @@ impl HarnessPool {
     /// cancelled, or redirected mid-flight. Otherwise identical to
     /// [`run`](Self::run) — same retrieve→inject, cost accounting, and
     /// memory-writeback. The steer hook fires only between tool-loop iterations.
+    /// `chat_id` routes the live turn-stream frames exactly as in [`run`](Self::run).
     pub async fn run_steered(
         &self,
         company: &CompanyId,
@@ -746,9 +815,41 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         control: &SteerControl,
+        chat_id: Option<&str>,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, Some(control))
-            .await
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            Some(control),
+            LiveStream::On { chat_id },
+        )
+        .await
+    }
+
+    /// Like [`run_steered`](Self::run_steered) but WITHOUT live turn streaming —
+    /// for a dispatched task card, which discards its steps and shows no chat
+    /// bubble. Its transient turn frames must not reach the live console
+    /// timeline (they'd misattribute to a chat thread), so this path publishes
+    /// nothing while still honouring the operator steer control (#125 review).
+    pub async fn run_steered_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        control: &SteerControl,
+    ) -> crate::Result<TurnOutcome> {
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            Some(control),
+            LiveStream::Off,
+        )
+        .await
     }
 
     async fn run_inner(
@@ -758,6 +859,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         steer: Option<&SteerControl>,
+        live: LiveStream<'_>,
     ) -> crate::Result<TurnOutcome> {
         let agent = {
             let guard = self.agents.read().await;
@@ -789,7 +891,32 @@ impl HarnessPool {
         // accessor and returns one entry per attempt (two when the empty-response
         // wrapper retried once). A zero-usage attempt (offline provider) writes
         // nothing, so the inert-metering contract holds.
-        let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer).await?;
+        // Live tool-call streaming: for a turn that surfaces an operator chat
+        // bubble (`live`), hand the runner the routing context so it tees each
+        // progress event onto the company's transient turn-stream bus as it
+        // happens (the console renders the timeline live). Background turns —
+        // dispatched task cards and workflow agent nodes — pass `live = false`
+        // and stream nothing, since they carry no chat thread to render onto and
+        // their frames would otherwise misattribute to the active chat (#125
+        // review). Either way the durable `TurnStep`s still fold from the same
+        // buffered events at turn end.
+        let stream_ctx = match live {
+            LiveStream::On { chat_id } => Some(crate::turn_stream::TurnStreamCtx {
+                company: company.clone(),
+                agent_id: agent_id.to_string(),
+                // The chat/desk thread this turn answers — the same id journaled
+                // as `AgentReply.chat_id`, so the console keys the live timeline
+                // on it and concurrent turns on different threads never
+                // cross-attribute. Falls back to the default desk to match the
+                // durable reply when the caller addressed no desk (e.g. an API
+                // client that omits `chat`).
+                chat_id: chat_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+            }),
+            LiveStream::Off => None,
+        };
+        let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer, stream_ctx).await?;
         // Attribute cost to the provider this turn actually resolved to. With a
         // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
         // a console BYOK switch changes the slug between turns, so read it live
@@ -1362,7 +1489,7 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &fx.deps)
+            .run(&rec.id, "ceo", "hello-marker", &fx.deps, None)
             .await
             .expect("turn runs")
             .reply;
@@ -1382,7 +1509,7 @@ description = "Builds the product."
 
         // Cold store: nothing to inject on the first turn.
         let first = pool
-            .run(&rec.id, "ceo", "alpha task", &fx.deps)
+            .run(&rec.id, "ceo", "alpha task", &fx.deps, None)
             .await
             .expect("first turn")
             .reply;
@@ -1403,7 +1530,7 @@ description = "Builds the product."
         // Second turn: the prior outcome (its body contains "alpha") is
         // retrieved and injected, so the agent sees the preamble.
         let second = pool
-            .run(&rec.id, "ceo", "alpha", &fx.deps)
+            .run(&rec.id, "ceo", "alpha", &fx.deps, None)
             .await
             .expect("second turn")
             .reply;
@@ -1438,11 +1565,11 @@ description = "Builds the product."
         let rec = record();
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
-        pool.run(&rec.id, "ceo", "first", &fx.deps)
+        pool.run(&rec.id, "ceo", "first", &fx.deps, None)
             .await
             .expect("first turn");
         let second = pool
-            .run(&rec.id, "ceo", "second", &fx.deps)
+            .run(&rec.id, "ceo", "second", &fx.deps, None)
             .await
             .expect("second turn")
             .reply;
@@ -1458,7 +1585,7 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let err = pool
-            .run(&rec.id, "nobody", "hi", &fx.deps)
+            .run(&rec.id, "nobody", "hi", &fx.deps, None)
             .await
             .expect_err("unknown agent rejected");
         assert!(
@@ -1472,7 +1599,7 @@ description = "Builds the product."
         let fx = fixture();
         let pool = HarnessPool::new();
         let err = pool
-            .run(&CompanyId::new("ghost"), "ceo", "hi", &fx.deps)
+            .run(&CompanyId::new("ghost"), "ceo", "hi", &fx.deps, None)
             .await
             .expect_err("unknown company rejected");
         assert!(
@@ -1489,7 +1616,7 @@ description = "Builds the product."
         let pool = HarnessPool::new();
         let rec = record();
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
-        pool.run(&rec.id, "ceo", "hi", &fx.deps)
+        pool.run(&rec.id, "ceo", "hi", &fx.deps, None)
             .await
             .expect("turn");
 
@@ -1601,7 +1728,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control))
+            .run_with_steer("hi", Some(&control), None)
             .await
             .expect("runs");
         assert_eq!(
@@ -1844,7 +1971,9 @@ description = "Builds the product."
         assert_eq!(pool.resident_companies().await, 1);
         // The roster is not addressable under "growth" yet.
         assert!(
-            pool.run(&rec.id, "growth", "hi", &deps).await.is_err(),
+            pool.run(&rec.id, "growth", "hi", &deps, None)
+                .await
+                .is_err(),
             "the overlay teammate must not exist before it is added"
         );
 
@@ -1877,7 +2006,7 @@ description = "Builds the product."
         );
 
         let reply = pool
-            .run(&rec.id, "growth", "hello-marker", &deps)
+            .run(&rec.id, "growth", "hello-marker", &deps, None)
             .await
             .expect("the new teammate is addressable on the very next turn")
             .reply;

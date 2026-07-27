@@ -464,6 +464,12 @@ type Message {
 	Whether it is the operator's own message.
 	"""
 	mine: Boolean!
+	"""
+	The scrubbed processing steps behind a company reply, so a rehydrated
+	transcript renders the same timeline the REST route returns (issue #65
+	parity). Empty for operator messages and tool-less replies.
+	"""
+	steps: [MessageStep!]!
 }
 
 """
@@ -478,6 +484,34 @@ type MessagePage {
 	The total number of items across all pages (before offset/limit).
 	"""
 	total: Int!
+}
+
+"""
+One scrubbed step in a reply's processing timeline. GraphQL mirror of the
+wire [`TurnStep`] (`kind`/`status` are its snake_case string forms), so the
+GraphQL `Message` type carries the same timeline as the REST projection.
+"""
+type MessageStep {
+	"""
+	The step kind (`tool_call` / `thinking` / `note`).
+	"""
+	kind: String!
+	"""
+	How the step ended (`ok` / `error` / `running`).
+	"""
+	status: String!
+	"""
+	A short, human label (never tool arguments or output).
+	"""
+	label: String!
+	"""
+	An optional scrubbed detail (e.g. `server · tool`, a failure cause).
+	"""
+	detail: String
+	"""
+	How long the step took in milliseconds, when known.
+	"""
+	elapsedMs: Float
 }
 
 """

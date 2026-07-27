@@ -300,6 +300,16 @@ pub enum CompanyEvent {
         agent_id: String,
         /// The reply text.
         text: String,
+        /// The scrubbed processing steps behind this reply — the same
+        /// per-bubble [`TurnStep`] timeline the live turn streams and the POST
+        /// `/chat` body carries — persisted here so a desk history reload
+        /// rehydrates the tool-call timeline, not just the text. Additive:
+        /// omitted-when-empty on the wire, so every prior log (and every
+        /// non-harness reply, which folds no steps) round-trips byte-identical.
+        /// Never carries raw tool arguments, output, or call ids — only the
+        /// scrubbed shape (see [`crate::harness::steps`]).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        steps: Vec<TurnStep>,
     },
     /// The Operator deleted a durable memory fact. Journaled for the audit trail
     /// per the Operator-rights section of `docs/spec/company-brain/memory.md`.
@@ -1197,6 +1207,48 @@ mod test {
             reply_to: None,
         };
         assert_eq!(round_trip(&with_steps), with_steps);
+    }
+
+    /// `AgentReply.steps` is additive the same way: a reply journaled before
+    /// the field existed loads with an empty timeline, and a tool-less reply
+    /// omits the key so its on-disk form is byte-identical to the legacy log.
+    #[test]
+    fn agent_reply_steps_are_additive_and_omitted_when_empty() {
+        let legacy: CompanyEvent = serde_json::from_str(
+            r#"{"kind":"AgentReply","chat_id":"main","agent_id":"ceo","text":"hi"}"#,
+        )
+        .expect("a pre-steps AgentReply still loads");
+        match &legacy {
+            CompanyEvent::AgentReply { steps, .. } => assert!(steps.is_empty()),
+            other => panic!("expected AgentReply, got {other:?}"),
+        }
+
+        // A tool-less reply serializes without the `steps` key.
+        let tool_less = CompanyEvent::AgentReply {
+            chat_id: "main".to_string(),
+            agent_id: "ceo".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+        };
+        let json = serde_json::to_value(&tool_less).unwrap();
+        assert!(json.get("steps").is_none());
+
+        // A reply with a timeline round-trips it.
+        let with_steps = CompanyEvent::AgentReply {
+            chat_id: "main".to_string(),
+            agent_id: "ceo".to_string(),
+            text: "done".to_string(),
+            steps: vec![TurnStep {
+                kind: TurnStepKind::ToolCall,
+                status: TurnStepStatus::Ok,
+                label: "Reading messages".to_string(),
+                detail: None,
+                elapsed_ms: Some(12),
+            }],
+        };
+        let back: CompanyEvent =
+            serde_json::from_str(&serde_json::to_string(&with_steps).unwrap()).unwrap();
+        assert_eq!(back, with_steps);
     }
 
     #[test]

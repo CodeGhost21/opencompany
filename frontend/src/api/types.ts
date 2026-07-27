@@ -98,6 +98,12 @@ export interface ChatHistoryMessageDto {
   text: string;
   atMillis: number;
   mine: boolean;
+  /**
+   * The scrubbed processing steps behind a company reply, so a rehydrated
+   * transcript renders the same timeline the live turn showed. Omitted when
+   * empty (operator messages, tool-less replies).
+   */
+  steps?: TurnStep[];
 }
 
 /** Response of `/chat` and approval-resolution routes. */
