@@ -20,6 +20,7 @@ pub mod channels;
 pub mod composio;
 pub mod connections_read;
 pub mod domain;
+pub mod finances;
 pub mod inbox;
 pub mod inference;
 pub mod language;
@@ -32,6 +33,7 @@ pub mod skills;
 pub mod smtp;
 pub mod tasks;
 pub mod team;
+pub mod usage;
 pub mod workflows;
 pub mod workspace;
 
@@ -143,6 +145,8 @@ pub fn router() -> Router<AppState> {
         .merge(channels::router())
         .merge(composio::router())
         .merge(domain::router())
+        .merge(finances::router())
+        .merge(usage::router())
         .merge(smtp::router())
         .merge(inbox::router())
         .merge(tasks::router())
