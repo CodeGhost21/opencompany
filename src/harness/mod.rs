@@ -754,7 +754,24 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, None).await
+        self.run_inner(company, agent_id, message, deps, None, true)
+            .await
+    }
+
+    /// Like [`run`](Self::run) but WITHOUT live turn streaming — for a turn that
+    /// surfaces no operator chat bubble (a workflow agent node, which drops its
+    /// steps). Its transient `tool_call`/`tool_result` frames would otherwise
+    /// leak onto the console's live timeline and misattribute to whatever thread
+    /// most recently sent, so this path publishes nothing (#125 review).
+    pub async fn run_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+    ) -> crate::Result<TurnOutcome> {
+        self.run_inner(company, agent_id, message, deps, None, false)
+            .await
     }
 
     /// Routes a message to one agent with an operator **steer** control installed
@@ -770,7 +787,24 @@ impl HarnessPool {
         deps: &HarnessDeps,
         control: &SteerControl,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, Some(control))
+        self.run_inner(company, agent_id, message, deps, Some(control), true)
+            .await
+    }
+
+    /// Like [`run_steered`](Self::run_steered) but WITHOUT live turn streaming —
+    /// for a dispatched task card, which discards its steps and shows no chat
+    /// bubble. Its transient turn frames must not reach the live console
+    /// timeline (they'd misattribute to a chat thread), so this path publishes
+    /// nothing while still honouring the operator steer control (#125 review).
+    pub async fn run_steered_background(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        control: &SteerControl,
+    ) -> crate::Result<TurnOutcome> {
+        self.run_inner(company, agent_id, message, deps, Some(control), false)
             .await
     }
 
@@ -781,6 +815,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         steer: Option<&SteerControl>,
+        live: bool,
     ) -> crate::Result<TurnOutcome> {
         let agent = {
             let guard = self.agents.read().await;
@@ -812,17 +847,20 @@ impl HarnessPool {
         // accessor and returns one entry per attempt (two when the empty-response
         // wrapper retried once). A zero-usage attempt (offline provider) writes
         // nothing, so the inert-metering contract holds.
-        // Live tool-call streaming: hand the turn runner the routing context so
-        // it tees each progress event onto the company's transient turn-stream
-        // bus as it happens (the console renders the timeline live). The durable
-        // `TurnStep`s still fold from the same events at turn end.
-        let stream_ctx = crate::turn_stream::TurnStreamCtx {
+        // Live tool-call streaming: for a turn that surfaces an operator chat
+        // bubble (`live`), hand the runner the routing context so it tees each
+        // progress event onto the company's transient turn-stream bus as it
+        // happens (the console renders the timeline live). Background turns —
+        // dispatched task cards and workflow agent nodes — pass `live = false`
+        // and stream nothing, since they carry no chat thread to render onto and
+        // their frames would otherwise misattribute to the active chat (#125
+        // review). Either way the durable `TurnStep`s still fold from the same
+        // buffered events at turn end.
+        let stream_ctx = live.then(|| crate::turn_stream::TurnStreamCtx {
             company: company.clone(),
             agent_id: agent_id.to_string(),
-        };
-        let (outcome, turn_costs) = agent
-            .run_with_steer(&augmented, steer, Some(stream_ctx))
-            .await?;
+        });
+        let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer, stream_ctx).await?;
         // Attribute cost to the provider this turn actually resolved to. With a
         // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
         // a console BYOK switch changes the slug between turns, so read it live

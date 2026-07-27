@@ -114,7 +114,10 @@ impl HarnessBrain {
         loop {
             let outcome = self
                 .pool
-                .run_steered(
+                // A dispatched task card carries no chat bubble (its steps are
+                // discarded into the note), so its live turn frames must not leak
+                // onto the console timeline — run it un-streamed (#125 review).
+                .run_steered_background(
                     &self.record.id,
                     &responder,
                     &instruction,
