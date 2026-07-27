@@ -301,7 +301,11 @@ impl HarnessBrain {
     /// distinct-bubble path the console already renders. An unknown desk (no
     /// roster-backed lead) is a silent no-op. No sub-agent re-delegation in v1:
     /// desk members carry no delegation tools, so their turns queue nothing.
-    async fn run_delegation(&self, delegation: Delegation) -> Result<Option<OutboundMessage>> {
+    async fn run_delegation(
+        &self,
+        delegation: Delegation,
+        chat_id: Option<&str>,
+    ) -> Result<Option<OutboundMessage>> {
         match delegation {
             Delegation::SpawnTask {
                 title,
@@ -345,7 +349,14 @@ impl HarnessBrain {
                 let control = guard.control().clone();
                 let outcome = self
                     .pool
-                    .run_steered(&self.record.id, &member, &instruction, &self.deps, &control)
+                    .run_steered(
+                        &self.record.id,
+                        &member,
+                        &instruction,
+                        &self.deps,
+                        &control,
+                        chat_id,
+                    )
                     .await?;
                 // A cancel issued mid-flight discards the delegated reply — no
                 // bubble surfaces.
@@ -396,6 +407,13 @@ impl Brain for HarnessBrain {
                 CompanyEvent::OperatorMessage { text, chat, .. } => {
                     // Route to the addressed desk's lead, else the orchestrator.
                     let responder = self.responder_for(chat.as_deref());
+                    // The chat/desk thread this turn answers — the same id the
+                    // reply is journaled under (`AgentReply.chat_id`). Passed into
+                    // the pool so the live turn-stream frames carry it and the
+                    // console routes them to this thread; a delegated desk reply
+                    // in this cycle rides the same operator thread, so it gets the
+                    // same id.
+                    let chat_id = chat.as_deref();
                     // Clear stale delegations + MCP failures so nothing leaks from
                     // a prior turn, run the turn (metered through `deps`), then
                     // drain whatever the orchestrator queued (capped; discarded
@@ -404,7 +422,7 @@ impl Brain for HarnessBrain {
                     self.deps.mcp_failures.clear();
                     let outcome = self
                         .pool
-                        .run(&self.record.id, &responder, text, &self.deps)
+                        .run(&self.record.id, &responder, text, &self.deps, chat_id)
                         .await?;
                     // The orchestrator's own steps ride on the operator bubble.
                     let mut operator_steps = outcome.steps;
@@ -419,7 +437,7 @@ impl Brain for HarnessBrain {
                         .delegations
                         .drain(orchestrator::MAX_DELEGATIONS_PER_TURN)
                     {
-                        if let Some(message) = self.run_delegation(delegation).await? {
+                        if let Some(message) = self.run_delegation(delegation, chat_id).await? {
                             delegated.push(message);
                         }
                     }
@@ -986,11 +1004,14 @@ name = "Design"
         let dir = tempfile::tempdir().unwrap();
         let (brain, tasks) = brain_with_desk(dir.path());
         let out = brain
-            .run_delegation(Delegation::SpawnTask {
-                title: "Draft the plan".to_string(),
-                note: Some("by friday".to_string()),
-                assignee: Some("engineer".to_string()),
-            })
+            .run_delegation(
+                Delegation::SpawnTask {
+                    title: "Draft the plan".to_string(),
+                    note: Some("by friday".to_string()),
+                    assignee: Some("engineer".to_string()),
+                },
+                None,
+            )
             .await
             .expect("delegation runs");
         assert!(out.is_none(), "spawn_task surfaces no chat bubble");
@@ -1016,10 +1037,13 @@ name = "Design"
             .expect("roster");
 
         let out = brain
-            .run_delegation(Delegation::DelegateToDesk {
-                desk: "eng_desk".to_string(),
-                instruction: "ship-marker".to_string(),
-            })
+            .run_delegation(
+                Delegation::DelegateToDesk {
+                    desk: "eng_desk".to_string(),
+                    instruction: "ship-marker".to_string(),
+                },
+                None,
+            )
             .await
             .expect("delegation runs")
             .expect("desk lead replies");
@@ -1030,10 +1054,13 @@ name = "Design"
 
         // An unknown desk delegates to nobody.
         let none = brain
-            .run_delegation(Delegation::DelegateToDesk {
-                desk: "ghost".to_string(),
-                instruction: "hello".to_string(),
-            })
+            .run_delegation(
+                Delegation::DelegateToDesk {
+                    desk: "ghost".to_string(),
+                    instruction: "hello".to_string(),
+                },
+                None,
+            )
             .await
             .expect("delegation runs");
         assert!(none.is_none(), "an unknown desk is a silent no-op");
@@ -1339,10 +1366,13 @@ name = "Design"
         let (brain, _, _) = brain_that_steers_itself(dir.path(), "", vec![SteerAction::Cancel]);
 
         let result = brain
-            .run_delegation(Delegation::DelegateToDesk {
-                desk: "engineering".to_string(),
-                instruction: "investigate".to_string(),
-            })
+            .run_delegation(
+                Delegation::DelegateToDesk {
+                    desk: "engineering".to_string(),
+                    instruction: "investigate".to_string(),
+                },
+                None,
+            )
             .await
             .expect("cancellation is handled");
 

@@ -123,7 +123,9 @@ async fn main() -> anyhow::Result<()> {
     pool.ensure(&record, &deps).await?;
 
     println!("── prompt → ceo ──\n{prompt}\n");
-    let outcome = pool.run(&record.id, "ceo", &prompt, &deps).await?;
+    let outcome = pool
+        .run(&record.id, "ceo", &prompt, &deps, Some("General"))
+        .await?;
     let reply = outcome.reply;
     println!("── ceo reply ──\n{reply}\n");
     if !outcome.steps.is_empty() {

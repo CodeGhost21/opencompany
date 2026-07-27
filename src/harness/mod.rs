@@ -349,7 +349,9 @@ impl CompanyAgent {
                 {
                     crate::turn_stream::publish(
                         &ctx.company,
-                        frame.with_agent(ctx.agent_id.clone()),
+                        frame
+                            .with_agent(ctx.agent_id.clone())
+                            .with_chat(ctx.chat_id.clone()),
                     );
                     seq += 1;
                 }
@@ -496,6 +498,19 @@ impl Default for HarnessPool {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether a turn tees its progress onto the live [`turn_stream`](crate::turn_stream)
+/// bus, and if so which chat thread its frames route to. `Off` for a turn with no
+/// operator chat bubble (a dispatched task card or workflow agent node) — those
+/// frames would misattribute to whatever thread most recently sent, so they
+/// publish nothing (#125 review). `On { chat_id }` streams; `chat_id` is the
+/// thread the durable reply is journaled under (`AgentReply.chat_id`), falling
+/// back to the default desk when the caller addressed none.
+#[derive(Clone, Copy)]
+enum LiveStream<'a> {
+    Off,
+    On { chat_id: Option<&'a str> },
 }
 
 impl HarnessPool {
@@ -747,15 +762,28 @@ impl HarnessPool {
     ///
     /// Desk routing (which agent answers a group chat) is the caller's job — v1
     /// is single-responder and the WS3 chat handler picks the addressed member.
+    ///
+    /// `chat_id` is the chat/desk **thread** this turn answers (the id journaled
+    /// as `AgentReply.chat_id`). It rides each live turn-stream frame so the
+    /// console routes the in-flight tool timeline to the right thread; `None`
+    /// falls back to the default desk, matching the durable reply.
     pub async fn run(
         &self,
         company: &CompanyId,
         agent_id: &str,
         message: &str,
         deps: &HarnessDeps,
+        chat_id: Option<&str>,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, None, true)
-            .await
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            None,
+            LiveStream::On { chat_id },
+        )
+        .await
     }
 
     /// Like [`run`](Self::run) but WITHOUT live turn streaming — for a turn that
@@ -770,7 +798,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, None, false)
+        self.run_inner(company, agent_id, message, deps, None, LiveStream::Off)
             .await
     }
 
@@ -779,6 +807,7 @@ impl HarnessPool {
     /// cancelled, or redirected mid-flight. Otherwise identical to
     /// [`run`](Self::run) — same retrieve→inject, cost accounting, and
     /// memory-writeback. The steer hook fires only between tool-loop iterations.
+    /// `chat_id` routes the live turn-stream frames exactly as in [`run`](Self::run).
     pub async fn run_steered(
         &self,
         company: &CompanyId,
@@ -786,9 +815,17 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         control: &SteerControl,
+        chat_id: Option<&str>,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, Some(control), true)
-            .await
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            Some(control),
+            LiveStream::On { chat_id },
+        )
+        .await
     }
 
     /// Like [`run_steered`](Self::run_steered) but WITHOUT live turn streaming —
@@ -804,8 +841,15 @@ impl HarnessPool {
         deps: &HarnessDeps,
         control: &SteerControl,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, Some(control), false)
-            .await
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            Some(control),
+            LiveStream::Off,
+        )
+        .await
     }
 
     async fn run_inner(
@@ -815,7 +859,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         steer: Option<&SteerControl>,
-        live: bool,
+        live: LiveStream<'_>,
     ) -> crate::Result<TurnOutcome> {
         let agent = {
             let guard = self.agents.read().await;
@@ -856,10 +900,22 @@ impl HarnessPool {
         // their frames would otherwise misattribute to the active chat (#125
         // review). Either way the durable `TurnStep`s still fold from the same
         // buffered events at turn end.
-        let stream_ctx = live.then(|| crate::turn_stream::TurnStreamCtx {
-            company: company.clone(),
-            agent_id: agent_id.to_string(),
-        });
+        let stream_ctx = match live {
+            LiveStream::On { chat_id } => Some(crate::turn_stream::TurnStreamCtx {
+                company: company.clone(),
+                agent_id: agent_id.to_string(),
+                // The chat/desk thread this turn answers — the same id journaled
+                // as `AgentReply.chat_id`, so the console keys the live timeline
+                // on it and concurrent turns on different threads never
+                // cross-attribute. Falls back to the default desk to match the
+                // durable reply when the caller addressed no desk (e.g. an API
+                // client that omits `chat`).
+                chat_id: chat_id
+                    .map(str::to_string)
+                    .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+            }),
+            LiveStream::Off => None,
+        };
         let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer, stream_ctx).await?;
         // Attribute cost to the provider this turn actually resolved to. With a
         // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
@@ -1433,7 +1489,7 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let reply = pool
-            .run(&rec.id, "ceo", "hello-marker", &fx.deps)
+            .run(&rec.id, "ceo", "hello-marker", &fx.deps, None)
             .await
             .expect("turn runs")
             .reply;
@@ -1453,7 +1509,7 @@ description = "Builds the product."
 
         // Cold store: nothing to inject on the first turn.
         let first = pool
-            .run(&rec.id, "ceo", "alpha task", &fx.deps)
+            .run(&rec.id, "ceo", "alpha task", &fx.deps, None)
             .await
             .expect("first turn")
             .reply;
@@ -1474,7 +1530,7 @@ description = "Builds the product."
         // Second turn: the prior outcome (its body contains "alpha") is
         // retrieved and injected, so the agent sees the preamble.
         let second = pool
-            .run(&rec.id, "ceo", "alpha", &fx.deps)
+            .run(&rec.id, "ceo", "alpha", &fx.deps, None)
             .await
             .expect("second turn")
             .reply;
@@ -1509,11 +1565,11 @@ description = "Builds the product."
         let rec = record();
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
-        pool.run(&rec.id, "ceo", "first", &fx.deps)
+        pool.run(&rec.id, "ceo", "first", &fx.deps, None)
             .await
             .expect("first turn");
         let second = pool
-            .run(&rec.id, "ceo", "second", &fx.deps)
+            .run(&rec.id, "ceo", "second", &fx.deps, None)
             .await
             .expect("second turn")
             .reply;
@@ -1529,7 +1585,7 @@ description = "Builds the product."
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
 
         let err = pool
-            .run(&rec.id, "nobody", "hi", &fx.deps)
+            .run(&rec.id, "nobody", "hi", &fx.deps, None)
             .await
             .expect_err("unknown agent rejected");
         assert!(
@@ -1543,7 +1599,7 @@ description = "Builds the product."
         let fx = fixture();
         let pool = HarnessPool::new();
         let err = pool
-            .run(&CompanyId::new("ghost"), "ceo", "hi", &fx.deps)
+            .run(&CompanyId::new("ghost"), "ceo", "hi", &fx.deps, None)
             .await
             .expect_err("unknown company rejected");
         assert!(
@@ -1560,7 +1616,7 @@ description = "Builds the product."
         let pool = HarnessPool::new();
         let rec = record();
         pool.ensure(&rec, &fx.deps).await.expect("ensure");
-        pool.run(&rec.id, "ceo", "hi", &fx.deps)
+        pool.run(&rec.id, "ceo", "hi", &fx.deps, None)
             .await
             .expect("turn");
 
@@ -1915,7 +1971,9 @@ description = "Builds the product."
         assert_eq!(pool.resident_companies().await, 1);
         // The roster is not addressable under "growth" yet.
         assert!(
-            pool.run(&rec.id, "growth", "hi", &deps).await.is_err(),
+            pool.run(&rec.id, "growth", "hi", &deps, None)
+                .await
+                .is_err(),
             "the overlay teammate must not exist before it is added"
         );
 
@@ -1948,7 +2006,7 @@ description = "Builds the product."
         );
 
         let reply = pool
-            .run(&rec.id, "growth", "hello-marker", &deps)
+            .run(&rec.id, "growth", "hello-marker", &deps, None)
             .await
             .expect("the new teammate is addressable on the very next turn")
             .reply;

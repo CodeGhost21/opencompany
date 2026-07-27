@@ -208,6 +208,7 @@ pub(crate) fn stream_event_from(
                 kind: "tool_call",
                 seq,
                 agent_id: None,
+                chat_id: None,
                 tool_call_id: Some(call_id.clone()),
                 label: Some(label_for(display_label.clone(), tool_name)),
                 detail: None,
@@ -235,6 +236,7 @@ pub(crate) fn stream_event_from(
                 kind: "tool_result",
                 seq,
                 agent_id: None,
+                chat_id: None,
                 tool_call_id: Some(call_id.clone()),
                 // A label so a completion with no observed start still renders;
                 // the common case pairs by `tool_call_id` and keeps the running
@@ -256,6 +258,7 @@ pub(crate) fn stream_event_from(
                 kind: "thinking",
                 seq,
                 agent_id: None,
+                chat_id: None,
                 tool_call_id: None,
                 label: Some("Thinking".to_string()),
                 detail: None,
