@@ -30,10 +30,14 @@ export type CompanyStreamEvent =
   // ephemeral — never journaled — and drive the in-flight tool timeline the
   // console renders *while a turn runs*. `label`/`detail` are already scrubbed at
   // the source (same rules as the folded `TurnStep`s), so no raw args/output.
+  // `chatId` is the chat/desk thread the turn answers — the same id the durable
+  // `agent_reply` carries. The console keys the live tool timeline on it so
+  // concurrent turns on different threads never cross-attribute their frames.
   | {
       type: "tool_call";
       seq: number;
       agentId?: string;
+      chatId?: string;
       toolCallId?: string;
       label?: string;
       status?: string;
@@ -42,6 +46,7 @@ export type CompanyStreamEvent =
       type: "tool_result";
       seq: number;
       agentId?: string;
+      chatId?: string;
       toolCallId?: string;
       label?: string;
       detail?: string;
@@ -51,7 +56,7 @@ export type CompanyStreamEvent =
   // A coalesced "Thinking" run between tool calls — streamed so the live
   // timeline shows the same rows the final folded one does (else the count
   // jumps up when the reply lands).
-  | { type: "thinking"; seq: number; agentId?: string };
+  | { type: "thinking"; seq: number; agentId?: string; chatId?: string };
 
 /** An `AgentReply` the hook hands back for injection into a chat transcript. */
 export interface AgentReplyEvent {

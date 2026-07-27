@@ -200,22 +200,17 @@ export function AppShell({
   const [liveStepsByThread, setLiveStepsByThread] = useState<
     Record<string, (TurnStep & { toolCallId?: string })[]>
   >({});
-  // The thread with a chat POST currently in flight. Live turn frames route to
-  // it, and the SSE `agent_reply` echo for it is suppressed — the awaited POST
-  // reply is the authoritative, steps-bearing copy (fixes the duplicate-bubble
-  // race).
+  // The threads with a chat POST currently in flight, so the SSE `agent_reply`
+  // echo for each is suppressed — the awaited POST reply is the authoritative,
+  // steps-bearing copy (fixes the duplicate-bubble race).
   //
-  // LIMITATION (per-thread routing): this is a SINGLE ref, so live frames are
-  // attributed to the most recent in-flight send. That is correct for the one
-  // interactive turn an operator drives at a time, but two chats sending
-  // concurrently would cross-attribute their tool frames. A true per-thread key
-  // isn't possible frontend-only: the backend `TurnStreamEvent`
-  // (`src/turn_stream.rs`) carries only `agentId` (the responding desk *member*),
-  // not the chat/thread id — and a thread id is the desk id, which doesn't map
-  // 1:1 to a member. Plumbing a chat id through the harness pool into the frame
-  // is a larger, out-of-scope change; background turns (dispatched tasks,
-  // workflow agent nodes) no longer stream at all (gated in `run_inner`), so the
-  // only residual is concurrent interactive sends. See PR #125 review.
+  // Live turn frames route by the frame's own `chatId` (the desk thread the
+  // backend journals the reply under — plumbed through `TurnStreamCtx` in
+  // `src/turn_stream.rs`), NOT a single global ref. So two chats sending
+  // concurrently keep their tool timelines separate even when the same desk
+  // member answers both. `activeTurnThreadRef` is only a fallback for a frame
+  // that arrives without a `chatId` (older host, or a background turn — which is
+  // itself gated off in `run_inner`). See PR #125 review.
   const activeTurnThreadRef = useRef<string | null>(null);
   const pendingPostThreadsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
@@ -347,7 +342,11 @@ export function AppShell({
   // to `ok`/`error` in place (FIFO fallback when no id pairs), mirroring
   // OpenHuman's `toolCallReceived` / `toolResultReceived`.
   const onTurnEvent = useCallback((event: CompanyStreamEvent) => {
-    const threadId = activeTurnThreadRef.current;
+    // Route by the frame's own thread id so concurrent turns (even from the same
+    // desk member) never cross-attribute; fall back to the in-flight ref only
+    // when a frame carries no chatId (older host / background turn).
+    const threadId =
+      ("chatId" in event && event.chatId) || activeTurnThreadRef.current;
     if (!threadId) return; // a background/task turn — not part of a chat.
     setLiveStepsByThread((prev) => {
       const rows = prev[threadId] ? [...prev[threadId]] : [];
