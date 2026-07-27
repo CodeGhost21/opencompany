@@ -5,6 +5,7 @@
 //! report its effective configuration. The cognition kernel (Brain, cycle
 //! loop, stores) lands in later phases; see `docs/spec/roadmap.md`.
 
+pub mod composio;
 #[cfg(test)]
 mod content_test;
 pub mod dns;
@@ -22,6 +23,7 @@ mod skill_file;
 // from the operator chat. Always compiled + openhuman-free so the operator
 // control plane can steer in any build and no agent tool can ever reach it.
 pub mod steer;
+pub mod task_intent;
 pub mod telegram;
 mod types;
 #[cfg(feature = "openhuman")]
@@ -34,10 +36,11 @@ use std::path::Path;
 pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md};
 pub use types::{
-    Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, Connection,
-    DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference,
-    KNOWN_CHANNELS, McpServer, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy,
-    Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_media_explicit,
+    Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
+    Connection, DEFAULT_ALWAYS_APPROVE, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS,
+    Inference, KNOWN_CHANNELS, McpServer, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan,
+    Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit,
+    grants_media_explicit,
 };
 pub use workflow_file::{
     WORKFLOW_NODE_KINDS, WorkflowEdgeDef, WorkflowFile, WorkflowNodeDef, WorkflowNodeKind,

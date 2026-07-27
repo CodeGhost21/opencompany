@@ -22,15 +22,18 @@
 //!   `openhuman::skills::ops_parse` depends on WS1's skill parsing; the seam is
 //!   the `.workflows(...)` setter.
 //!
-//! The tool dispatcher is the text-based [`XmlToolDispatcher`], which needs no
-//! global tool registry — the harness stays self-contained.
+//! The tool dispatcher is the attribute-tolerant
+//! [`AttrTolerantXmlDispatcher`](crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher),
+//! a thin wrapper over OpenHuman's text-based `XmlToolDispatcher` that first
+//! strips attributes off `tool_call`-family open tags (issue #105) so the
+//! vendored bare-literal parser matches them. It needs no global tool registry —
+//! the harness stays self-contained.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use openhuman_core::openhuman as oh;
 
-use oh::agent::dispatcher::XmlToolDispatcher;
 use oh::agent::{Agent, AgentBuilder};
 use oh::context::prompt::SystemPromptBuilder;
 use oh::memory::tools::{MemoryRecallTool, MemoryStoreTool};
@@ -53,6 +56,7 @@ use crate::harness::memory::OcMemory;
 use crate::harness::orchestrator;
 use crate::harness::policy::ApprovalPolicy;
 use crate::harness::skills::EffectiveSkills;
+use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
 use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
@@ -238,6 +242,34 @@ pub fn build_agent(
         }
     }
 
+    // Per-tenant Composio (issue #110) — Gmail / Slack / GitHub over the
+    // company's OAuth token. Two hard gates before any tool is wired:
+    //
+    //  1. an **EXPLICIT** `composio` grant (`grants_composio_explicit`) — like
+    //     `media`, the catch-all `*` does NOT grant it, so a broadly-permissioned
+    //     company never accidentally hands its agents a live account-reaching
+    //     surface; it must opt in by name.
+    //  2. a resolved per-tenant token on the deps (`deps.composio`), read from the
+    //     company secret store by `HarnessPool::ensure` — never an env/platform
+    //     key. The backend derives the Composio entity from THIS token, so it is
+    //     the entire tenant-isolation lever.
+    //
+    // Granted-but-tokenless wires nothing and warns (fail-closed). The
+    // `authorize` / `execute` tools additionally park for operator approval via
+    // the `ApprovalPolicy`. Gated on the `composio` feature; the default/
+    // `openhuman` build never compiles this.
+    #[cfg(feature = "composio")]
+    if crate::company::grants_composio_explicit(grants) {
+        match &deps.composio {
+            Some(config) => tools.extend(crate::harness::composio::composio_tools(config)),
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `composio` but no per-tenant Composio token is configured; composio tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
     let mut persona = persona_prompt(company_name, manifest_agent);
@@ -342,7 +374,7 @@ pub fn build_agent(
         .provider_arc(deps.provider.clone())
         .memory(memory)
         .tools(tools)
-        .tool_dispatcher(Box::new(XmlToolDispatcher))
+        .tool_dispatcher(Box::new(AttrTolerantXmlDispatcher::default()))
         .tool_policy(Arc::new(policy))
         .prompt_builder(prompt_builder)
         .model_name(model)
