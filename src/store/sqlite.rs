@@ -299,6 +299,7 @@ impl CompanyStore for SqliteStore {
             lifecycle,
             overlay_agents: overlay.agents,
             overlay_desk_members: overlay.desk_members,
+            overlay_desk_order: overlay.desk_order,
             overlay_desks: overlay.desks,
         }))
     }
@@ -1829,6 +1830,8 @@ mod test {
                 lifecycle: "running".into(),
                 overlay_agents: Vec::new(),
                 overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
             })
             .await
             .unwrap();

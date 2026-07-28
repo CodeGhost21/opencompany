@@ -41,6 +41,7 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
         })
         .await
@@ -577,6 +578,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
         })
         .await
@@ -1049,6 +1051,7 @@ async fn a_routable_host_never_echoes_the_code_even_with_no_mail() {
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
         })
         .await

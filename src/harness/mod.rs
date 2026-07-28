@@ -1392,6 +1392,7 @@ description = "Builds the product."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
         }
     }
@@ -2323,6 +2324,7 @@ description = "Sets direction."
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
             overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
         }
     }
