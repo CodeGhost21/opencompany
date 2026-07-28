@@ -42,6 +42,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { CompanySwitcher } from "@/components/company-switcher";
 import { FeedbackDialog } from "@/components/feedback-dialog";
+import { TourController } from "@/tour/TourController";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { DiscordIcon } from "@/components/discord-icon";
@@ -438,13 +439,13 @@ export function AppShell({
             onBackToPicker={onBackToPicker}
           />
         </SidebarHeader>
-        <SidebarContent>
+        <SidebarContent data-tour="sidebar">
           {NAV.map((group) => (
             <SidebarGroup key={group.label}>
               <SidebarGroupLabel>{group.label}</SidebarGroupLabel>
               <SidebarMenu>
                 {group.items.map((item) => (
-                  <SidebarMenuItem key={item.view}>
+                  <SidebarMenuItem key={item.view} data-tour={`nav-${item.view}`}>
                     <SidebarMenuButton
                       isActive={view === item.view}
                       tooltip={item.label}
@@ -596,6 +597,8 @@ export function AppShell({
         open={feedbackOpen}
         onOpenChange={setFeedbackOpen}
       />
+
+      <TourController company={company} setView={setView} />
     </SidebarProvider>
   );
 }
