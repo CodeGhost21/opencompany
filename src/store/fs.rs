@@ -142,6 +142,11 @@ struct Meta {
     /// The operator desk-creation overlay (desks created at runtime).
     #[serde(default)]
     overlay_desks: Vec<crate::ports::types::OverlayDesk>,
+    /// The source-template provenance stamped at launch. `None` for companies
+    /// provisioned from a raw manifest and for legacy meta files written before
+    /// provenance existed (the `#[serde(default)]` keeps those loading).
+    #[serde(default)]
+    template_provenance: Option<crate::ports::types::TemplateProvenance>,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,25 +189,33 @@ impl CompanyStore for FsCompanyStore {
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let meta_src = read_optional(&bundle.meta_json()).await?;
-        let (lifecycle, overlay_agents, overlay_desk_members, overlay_desk_order, overlay_desks) =
-            if meta_src.trim().is_empty() {
-                (
-                    "running".to_string(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else {
-                let meta: Meta = serde_json::from_str(&meta_src)?;
-                (
-                    meta.lifecycle,
-                    meta.overlay_agents,
-                    meta.overlay_desk_members,
-                    meta.overlay_desk_order,
-                    meta.overlay_desks,
-                )
-            };
+        let (
+            lifecycle,
+            overlay_agents,
+            overlay_desk_members,
+            overlay_desk_order,
+            overlay_desks,
+            template_provenance,
+        ) = if meta_src.trim().is_empty() {
+            (
+                "running".to_string(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                None,
+            )
+        } else {
+            let meta: Meta = serde_json::from_str(&meta_src)?;
+            (
+                meta.lifecycle,
+                meta.overlay_agents,
+                meta.overlay_desk_members,
+                meta.overlay_desk_order,
+                meta.overlay_desks,
+                meta.template_provenance,
+            )
+        };
 
         let ledger = read_jsonl::<LedgerEntry>(&bundle.ledger_jsonl()).await?;
 
@@ -215,6 +228,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_members,
             overlay_desk_order,
             overlay_desks,
+            template_provenance,
         }))
     }
 
@@ -232,6 +246,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_members: record.overlay_desk_members.clone(),
             overlay_desk_order: record.overlay_desk_order.clone(),
             overlay_desks: record.overlay_desks.clone(),
+            template_provenance: record.template_provenance.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -899,6 +914,7 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         };
         store.save(&record).await.unwrap();
 
@@ -936,6 +952,7 @@ mod test {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();

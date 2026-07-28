@@ -43,6 +43,7 @@ async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -580,6 +581,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -1053,6 +1055,7 @@ async fn a_routable_host_never_echoes_the_code_even_with_no_mail() {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();

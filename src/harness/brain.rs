@@ -545,6 +545,7 @@ description = "Runs Acme."
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -684,6 +685,7 @@ description = "Builds it."
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -891,6 +893,7 @@ members = ["engineer"]
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -1001,6 +1004,7 @@ name = "Design"
             }],
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
@@ -1057,6 +1061,7 @@ members = ["eng1", "eng2"]
                 ordered: vec!["cto".to_string(), "eng1".to_string(), "eng2".to_string()],
             }],
             overlay_desks: Vec::new(),
+            template_provenance: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
@@ -1109,6 +1114,7 @@ members = ["eng1", "eng2"]
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();

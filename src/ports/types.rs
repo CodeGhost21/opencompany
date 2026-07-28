@@ -873,6 +873,31 @@ pub struct OverlayDeskMember {
     pub agent_id: String,
 }
 
+/// Where a company's manifest was seeded from — the source template's stable
+/// identity, recorded once at launch and carried across rebuilds.
+///
+/// A company launched from a template directory (`serve --company
+/// companies/<slug>`) records the directory slug as its stable `source_id`; a
+/// company provisioned from a raw manifest body (`POST /api/v1/companies`)
+/// carries no provenance (`CompanyRecord::template_provenance` stays `None`) —
+/// provenance is never fabricated for a manifest that did not come from a
+/// template. The blueprint (`company.toml`) is never rewritten: provenance
+/// lives only on the record/overlay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateProvenance {
+    /// The template's stable identifier — the source directory slug (or a
+    /// canonical id where one exists). Stable across rebuilds and restarts.
+    pub source_id: String,
+    /// The template's version, when the source exposes one. `None` when the
+    /// template is unversioned.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The source directory path the company was launched from, when recorded.
+    /// Optional and informational; `source_id` is the durable stable key.
+    #[serde(default)]
+    pub path: Option<String>,
+}
+
 /// An operator-set explicit ordering (hierarchy) for one desk's effective
 /// members. Persisted as an overlay on the [`CompanyRecord`]; the version-
 /// controlled manifest is never rewritten. Applied inside
@@ -937,16 +962,22 @@ pub struct OverlayBlob {
     /// creation existed, so `#[serde(default)]` loads them as empty.
     #[serde(default)]
     pub desks: Vec<OverlayDesk>,
+    /// The source-template provenance recorded at launch. `None` for companies
+    /// provisioned from a raw manifest and for legacy rows written before
+    /// provenance existed (the `#[serde(default)]` keeps those rows loading).
+    #[serde(default)]
+    pub provenance: Option<TemplateProvenance>,
 }
 
 impl OverlayBlob {
-    /// Builds a blob from a record's overlay collections.
+    /// Builds a blob from a record's overlay collections and provenance.
     pub fn from_record(record: &CompanyRecord) -> Self {
         Self {
             agents: record.overlay_agents.clone(),
             desk_members: record.overlay_desk_members.clone(),
             desk_order: record.overlay_desk_order.clone(),
             desks: record.overlay_desks.clone(),
+            provenance: record.template_provenance.clone(),
         }
     }
 
@@ -967,6 +998,7 @@ impl OverlayBlob {
                     desk_members: Vec::new(),
                     desk_order: Vec::new(),
                     desks: Vec::new(),
+                    provenance: None,
                 })
                 .map_err(|_| original),
         }
@@ -1001,6 +1033,13 @@ pub struct CompanyRecord {
     /// overlay). Merged with the manifest's `[[group_chat]]` desks at read time.
     #[serde(default)]
     pub overlay_desks: Vec<OverlayDesk>,
+    /// Where this company's manifest was seeded from — the source template's
+    /// stable identity, stamped once at launch and carried across rebuilds.
+    /// `None` for companies provisioned from a raw manifest body. The
+    /// `#[serde(default)]` keeps records written before provenance existed
+    /// loading without a migration.
+    #[serde(default)]
+    pub template_provenance: Option<TemplateProvenance>,
 }
 
 impl CompanyRecord {
@@ -1624,6 +1663,7 @@ mod test {
             overlay_desk_members: overlay,
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -1826,17 +1866,22 @@ mod test {
         let blob = OverlayBlob::parse(object).expect("object");
         assert_eq!(blob.agents.len(), 1);
         assert_eq!(blob.desk_members.len(), 1);
+        // Issue #85: an object written before provenance existed omits the key;
+        // `#[serde(default)]` loads it as `None` (zero-migration back-compat).
+        assert!(blob.provenance.is_none());
 
         // Legacy: overlay_json used to hold a bare Vec<OverlayAgent>.
         let legacy = r#"[{"id":"a","name":"A","role":"r"}]"#;
         let blob = OverlayBlob::parse(legacy).expect("legacy array");
         assert_eq!(blob.agents.len(), 1);
         assert!(blob.desk_members.is_empty());
+        assert!(blob.provenance.is_none());
 
         // The empty-array default persisted by fresh schema.
         let blob = OverlayBlob::parse("[]").expect("empty array");
         assert!(blob.agents.is_empty());
         assert!(blob.desk_members.is_empty());
+        assert!(blob.provenance.is_none());
         assert!(blob.desks.is_empty());
 
         // A pre-desk-creation object row (no `desks` key) loads with an empty
@@ -1844,6 +1889,22 @@ mod test {
         let pre_desks = r#"{"agents":[],"desk_members":[]}"#;
         let blob = OverlayBlob::parse(pre_desks).expect("pre-desks object");
         assert!(blob.desks.is_empty());
+    }
+
+    /// Issue #85: a record's template provenance round-trips through the
+    /// `OverlayBlob` the sqlite/mongodb stores persist, and a blob carrying
+    /// provenance re-parses with it intact.
+    #[test]
+    fn overlay_blob_carries_template_provenance() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.template_provenance = Some(TemplateProvenance {
+            source_id: "agentic_law_firm".to_string(),
+            version: Some("2.0.0".to_string()),
+            path: Some("companies/agentic_law_firm".to_string()),
+        });
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.provenance, record.template_provenance);
     }
 
     /// An operator-created overlay desk resolves through the same

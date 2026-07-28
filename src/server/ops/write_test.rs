@@ -42,6 +42,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -936,6 +937,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -1183,6 +1185,7 @@ async fn state_with_source_dir(
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -1482,6 +1485,7 @@ async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();

@@ -1532,6 +1532,7 @@ name = "Morning"
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -1875,6 +1876,7 @@ name = "Morning"
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            template_provenance: None,
         }
     }
 
