@@ -219,12 +219,26 @@ async fn register_company(
     // in one logical database. A no-op when `tenant_namespace` is unset.
     let derived = opencompany::runtime::company_id_from_name(&name);
     let company_id = state.config().namespaced_company_id(derived);
-    builder = builder.with_id(company_id);
+    builder = builder.with_id(company_id.clone());
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
     if let Some(overlay) = state.memory_overlay() {
         builder = builder.with_memory_overlay(overlay);
+    }
+    #[cfg(feature = "smtp")]
+    if let Ok(Some(cfg)) = opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
+        // Same guard as `spawn_mailbox_poller`: the injected mailbox belongs to
+        // exactly one company (the one whose id matches its local-part). In a
+        // multi-company process, wiring it to every company would make every
+        // one of them send outbound mail from the same injected address.
+        let mailbox_slug = opencompany::server::ops::smtp::local_part(&cfg.address);
+        if company_id.as_ref() == mailbox_slug {
+            builder = builder.with_mail(opencompany::company::runtime::CompanyMail {
+                sender: std::sync::Arc::new(opencompany::server::ops::smtp::LettreMailSender),
+                smtp: cfg.smtp.clone(),
+            });
+        }
     }
     if discoverable {
         builder = builder.with_discoverable(true);
@@ -272,6 +286,64 @@ fn spawn_scheduler(
             eprintln!("skipping scheduler for `{id}`: {err}");
             None
         }
+    }
+}
+
+/// Starts a company's IMAP mailbox poller as a background task, if the
+/// platform injected mailbox credentials for this tenant.
+///
+/// Mirrors [`spawn_scheduler`]: reads [`TenantMailboxConfig::from_env`]
+/// (`Ok(None)` means the manager did not wire mail for this tenant — a no-op,
+/// not an error; `Err` logs and skips rather than aborting boot). The actual
+/// IMAP transport only exists when the crate is built with the `imap`
+/// feature, so the poll itself is feature-gated; without the feature this
+/// still validates the env (surfacing config typos) but starts nothing.
+fn spawn_mailbox_poller(
+    state: &AppState,
+    id: &str,
+    shutdown: &Arc<Notify>,
+    handles: &mut Vec<tokio::task::JoinHandle<()>>,
+) {
+    let cfg = match opencompany::server::ops::mailer::TenantMailboxConfig::from_env() {
+        Ok(Some(cfg)) => cfg,
+        Ok(None) => return,
+        Err(err) => {
+            eprintln!("mailbox config error: {err}");
+            return;
+        }
+    };
+    // The injected mailbox belongs to exactly one company: the one whose id
+    // equals the mailbox address's local-part. In a multi-company process
+    // every OTHER registered company must skip this poller entirely, or
+    // inbound mail addressed to one company would be filed into another's
+    // inbox.
+    let mailbox_slug = opencompany::server::ops::smtp::local_part(&cfg.address);
+    if id != mailbox_slug {
+        return;
+    }
+    #[cfg(feature = "imap")]
+    {
+        let Some(runtime) = state.registry().get(&CompanyId::new(id)) else {
+            return;
+        };
+        let receiver: Arc<dyn opencompany::server::ops::mailer::MailReceiver> =
+            Arc::new(opencompany::server::ops::imap::AsyncImapReceiver);
+        let interval = std::env::var("OPENCOMPANY_MAIL_POLL_SECONDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        let poller = opencompany::runtime::mailbox_poller::MailboxPoller::new(
+            runtime,
+            receiver,
+            cfg.imap.clone(),
+            cfg.address.clone(),
+            interval,
+        );
+        handles.push(poller.spawn(shutdown.clone()));
+    }
+    #[cfg(not(feature = "imap"))]
+    {
+        let _ = (state, id, shutdown, handles, cfg);
     }
 }
 
@@ -769,6 +841,7 @@ async fn main() -> Result<()> {
                         dir.display()
                     );
                 }
+                spawn_mailbox_poller(&state, &id, &shutdown, &mut scheduler_handles);
             }
             if companies.is_empty() {
                 println!("serving with no companies; pass --company <dir> to load one");

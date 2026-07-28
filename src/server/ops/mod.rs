@@ -21,6 +21,7 @@ pub mod composio;
 pub mod connections_read;
 pub mod domain;
 pub mod finances;
+pub mod imap;
 pub mod inbox;
 pub mod inference;
 pub mod language;
