@@ -49,7 +49,7 @@ use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
     TokenUsage, TurnStep, TurnStepKind, TurnStepStatus,
 };
-use crate::ports::{TaskRecord, now_millis};
+use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
@@ -710,13 +710,26 @@ impl Brain for HarnessBrain {
         // No `ledger_deltas` / `token_usage` here on purpose: `HarnessPool::run`
         // is the single cost-accounting site (it writes the ledger entry and the
         // usage sample through `deps`), so surfacing the same spend again would
-        // double-count it.
+        // double-count it — the runtime meters a non-zero `token_usage` for every
+        // brain (issue #174), and `cognition()` below declares that this path has
+        // already done it.
         Ok(CycleResult {
             channel_responses,
             new_traces: vec![trace],
             ledger_deltas: Vec::new(),
             token_usage: TokenUsage::default(),
         })
+    }
+
+    /// The harness meters itself per turn in [`HarnessPool::run`], against the
+    /// live provider slug the turn resolved to — which is why `run_cycle` reports
+    /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
+    fn cognition(&self) -> Cognition {
+        Cognition {
+            path: "harness",
+            provider: "per-turn",
+            metering: UsageMetering::PerTurn,
+        }
     }
 }
 

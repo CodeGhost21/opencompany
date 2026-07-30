@@ -17,8 +17,39 @@ to a `Brain` and services the brain's callbacks through a `CycleHost`.
 pub trait Brain: Send + Sync {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost)
         -> Result<CycleResult>;
+
+    /// How this brain does cognition and where its usage is metered.
+    /// Defaults to an injected brain: per-cycle metering, unknown provider.
+    fn cognition(&self) -> Cognition { Cognition::default() }
 }
 
+/// Metering + diagnosis descriptor for a cognition path (issue #174).
+pub struct Cognition {
+    /// `harness` | `hosted` | `sidecar` | `echo` | `custom`.
+    pub path: &'static str,
+    /// Provider slug the path's cycle usage is metered under.
+    pub provider: &'static str,
+    pub metering: UsageMetering,
+}
+
+pub enum UsageMetering {
+    /// The path meters each agent turn itself (the openhuman harness) and MUST
+    /// report a zero `CycleResult::token_usage`, or its spend is double-counted.
+    PerTurn,
+    /// `CycleRunner` meters whatever the cycle reports (hosted Medulla reads it
+    /// off the `orch:usage` frame).
+    PerCycle,
+    /// No model runs on this path (the echo brain) — a zero Usage reading is the
+    /// truth, not a missing hook.
+    None,
+}
+```
+
+`CycleRunner` **enforces** both non-`PerCycle` arms: a path that declares
+`PerTurn` or `None` and then reports non-zero cycle usage is warned about and
+dropped, never metered. Only `PerCycle` reaches the meter.
+
+```rust
 /// Callbacks the brain makes into the host mid-cycle.
 pub trait CycleHost: Send + Sync {
     async fn call_tool(&self, call: ToolCall) -> Result<ToolResult>;
@@ -45,7 +76,10 @@ it back through `emit_effect` would re-decide it against the coarser
 
 `CycleRequest` carries `{cycle_id, company_id, events, compressed_history,
 roster, context_index}`; `CycleResult` carries channel responses, new
-compressed traces, ledger deltas, and token usage. Implementations:
+compressed traces, ledger deltas, and `token_usage` — tokens **and** cost, which
+`CycleRunner` meters onto the `UsageMeter` + ledger for every path that is not
+`PerTurn`-metered (issue #174), so hosted/sidecar cognition is accounted for and
+not only the openhuman harness. Implementations:
 `HostedMedullaBrain` (default — see
 [integrations/medulla.md](../integrations/medulla.md)), `StubBrain`
 (single TinyAgents call, offline tests), `SidecarBrain` (feature `sidecar`),
@@ -341,7 +375,19 @@ pub trait UsageMeter: Send + Sync {
 ```
 
 `UsageSample` records one metered event (`SampleKind::Inference` tokens or
-`SampleKind::OauthCall`). **Retention:** backends evict samples older than
+`SampleKind::OauthCall`). **Writers** — three, and they do **not** share failure
+semantics:
+
+| Writer | Called | On write failure |
+| --- | --- | --- |
+| `metering::inference::record_inference_usage` (always compiled) | per cycle by `CycleRunner`, for every cognition path that is not `PerTurn`-metered | logs and swallows — returns `()`, so the cycle still succeeds |
+| `metering::oauth::record_oauth_call` | per connected-tool call | logs and swallows — returns `()` |
+| `harness::cost::record_turn_cost` | per turn by the openhuman harness's cost hook | **propagates** — returns `Result<()>` and `HarnessPool::run_inner` applies `?`, so a ledger or meter failure fails the turn |
+
+The per-cycle and OAuth paths hold "accounting never fails the work it accounts
+for"; the per-turn harness path deliberately does not, because it writes the
+`inference.spend` ledger entry in the same call and a silently dropped ledger
+write is a money bug. **Retention:** backends evict samples older than
 **90 days** (`RETENTION_DAYS`, the console's maximum `D90` window) on write,
 anchored to the newest observed sample for deterministic eviction. Samples are
 non-secret accounting rows; money still resolves from the ledger and `[budget]`.
