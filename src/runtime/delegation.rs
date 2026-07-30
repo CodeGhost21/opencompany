@@ -282,6 +282,15 @@ impl<'a> DelegationRunner<'a> {
                     // so the completion can answer there instead of only landing in
                     // the note.
                     origin_chat_id: chat_id.map(str::to_string),
+                    // No parent (#185). `run_delegation` is only reached from an
+                    // orchestrator *chat* turn: `run_task` never drains the
+                    // delegation queue, and a dispatched card's responder is a desk
+                    // member, which carries no delegation tools ("no sub-agent
+                    // re-delegation in v1"). So no task is ever in scope here to be
+                    // the parent. Lineage is written through the task API's
+                    // `parentTaskId` instead; when task turns do gain delegation
+                    // tools, this is the site that stamps it.
+                    parent_task_id: None,
                 };
                 tasks.upsert(self.company, &card).await?;
                 Ok(DelegationOutcome::default())

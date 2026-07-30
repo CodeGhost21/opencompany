@@ -191,6 +191,7 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 assignee: String::new(),
                 updated_at_millis: 1,
                 origin_chat_id: None,
+                parent_task_id: None,
             },
         )
         .await
@@ -2105,6 +2106,389 @@ async fn telegram_token_never_leaks_even_when_delivery_fails() {
         !raw.contains(BOT_TOKEN),
         "token leaked on a failed delivery"
     );
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+/// #185: `GET …/tasks/{id}` assembles the header, the per-task timeline, and
+/// the lineage in one read.
+///
+/// The timeline half is the point: the journal is company-scoped, so this
+/// asserts that a reply tagged with *this* task is admitted while an untagged
+/// chat reply and a reply tagged to a *different* task are both excluded. Those
+/// three cases are exactly what the `task_id` threading exists to separate.
+#[tokio::test]
+async fn task_detail_assembles_timeline_and_lineage() {
+    use crate::ports::types::CompanyEvent;
+
+    let home = home();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    let card = |id: &str, title: &str, parent: Option<&str>| TaskRecord {
+        id: id.into(),
+        title: title.into(),
+        note: None,
+        column: "in_review".into(),
+        priority: "medium".into(),
+        assignee: "ceo".into(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: parent.map(str::to_string),
+    };
+    for t in [
+        card("t-parent", "Parent", None),
+        card("t-1", "Ship it", Some("t-parent")),
+        card("t-child", "Subtask", Some("t-1")),
+        card("t-other", "Unrelated", None),
+    ] {
+        runtime.tasks().upsert(&company, &t).await.unwrap();
+    }
+
+    for event in [
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+        },
+        // Tagged to this task — admitted.
+        CompanyEvent::AgentReply {
+            chat_id: "t-1".into(),
+            agent_id: "ceo".into(),
+            text: "on it".into(),
+            steps: Vec::new(),
+            task_id: Some("t-1".into()),
+        },
+        // An ordinary chat reply — excluded.
+        CompanyEvent::AgentReply {
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "unrelated chatter".into(),
+            steps: Vec::new(),
+            task_id: None,
+        },
+        // Tagged to a different task — excluded.
+        CompanyEvent::AgentReply {
+            chat_id: "t-other".into(),
+            agent_id: "ceo".into(),
+            text: "someone else's work".into(),
+            steps: Vec::new(),
+            task_id: Some("t-other".into()),
+        },
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+        },
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(body["task"]["id"], "t-1");
+    assert_eq!(body["task"]["parentTaskId"], "t-parent");
+
+    let kinds: Vec<&str> = body["timeline"]
+        .as_array()
+        .expect("timeline array")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["dispatched", "reply", "completed"]);
+
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(
+        !raw.contains("unrelated chatter") && !raw.contains("someone else's work"),
+        "another task's / an untagged chat reply leaked onto this timeline: {raw}"
+    );
+
+    assert_eq!(body["lineage"]["parent"]["id"], "t-parent");
+    let children = body["lineage"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], "t-child");
+
+    // An unknown id 404s, matching PATCH/DELETE.
+    let (status, _) = send(&state, "GET", "/api/v1/company/tasks/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+/// #185 gave `GET …/tasks/{task_id}` a handler, which now overlaps the static
+/// `GET …/tasks/inflight` the operator strip reads.
+///
+/// Before #185 the dynamic segment carried no GET, so nothing could shadow the
+/// strip. Now something can: if the routes were ever reordered (or the static
+/// one dropped), `inflight` would be parsed as a *card id*, `task_detail` would
+/// find no such card, and the strip would 404 — with no test failing anywhere
+/// else, because no card can be named `inflight` for the collision to show up
+/// in ordinary use.
+#[tokio::test]
+async fn inflight_read_is_not_shadowed_by_task_detail() {
+    let home = home();
+    let state = state_with_company(&home).await;
+
+    // The strip's read still resolves to the inflight handler: an array, not
+    // the object `task_detail` would return, and not a 404.
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/inflight", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.is_array(),
+        "GET /tasks/inflight must hit list_inflight, not task_detail: {body}"
+    );
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+/// #185 review follow-up: pin the two timeline branches the first test skipped —
+/// `tool_failed`, and the window-correlated `approval` arm.
+///
+/// The approval arm is the only branch in `task_timeline` whose correlation is
+/// heuristic (parked effects carry no task id, so it is scoped by the run
+/// window). That makes it the one most likely to regress into leaking another
+/// run's resolution, so it is asserted from both sides: a resolution *before*
+/// the dispatch anchor must be excluded, one *inside* the window admitted.
+#[tokio::test]
+async fn task_timeline_scopes_approvals_to_the_run_window() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home = home();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "t-1".into(),
+                title: "Ship it".into(),
+                note: None,
+                column: "in_review".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let approval = |id: &str| CompanyEvent::ApprovalResolved {
+        approval_id: ApprovalId::new(id),
+        verdict: Verdict::Approve,
+        by: Actor {
+            kind: ActorKind::User,
+            id: "u-1".into(),
+        },
+    };
+
+    for event in [
+        // Before the dispatch anchor — belongs to some other run, must not leak.
+        approval("before"),
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+        },
+        // Inside the window — admitted.
+        approval("during"),
+        CompanyEvent::McpCallFailed {
+            task_id: Some("t-1".into()),
+            server: "gh".into(),
+            tool: "issues".into(),
+            status: "credential_required".into(),
+            message: "needs auth".into(),
+        },
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+        },
+        // After the window closed — must not leak either.
+        approval("after"),
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let kinds: Vec<&str> = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["dispatched", "approval", "tool_failed", "completed"],
+        "exactly one approval — the one inside the run window"
+    );
+
+    // The failure carries its scrubbed message; the operator's identity on the
+    // approval is dropped, matching the SSE projection's deny-by-default stance.
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(raw.contains("needs auth"));
+    assert!(!raw.contains("u-1"), "operator identity leaked: {raw}");
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+/// #185 review follow-up: the lineage forest is enforced at the write boundary.
+///
+/// Without this a card could be its own parent (appearing as both parent and
+/// child of itself in `task_detail`), point at a card that does not exist, or
+/// close a `t1 → t2 → t1` loop — all persisted silently.
+#[tokio::test]
+async fn parent_task_id_rejects_self_unknown_and_cycles() {
+    let home = home();
+    let state = state_with_company(&home).await;
+
+    let create = |title: &str| {
+        let title = title.to_string();
+        async move { json!({ "title": title }) }
+    };
+    let (_, a) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(create("A").await),
+    )
+    .await;
+    let (_, b) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(create("B").await),
+    )
+    .await;
+    let (a_id, b_id) = (
+        a["id"].as_str().unwrap().to_string(),
+        b["id"].as_str().unwrap().to_string(),
+    );
+
+    // Unknown parent on create.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "C", "parentTaskId": "nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Self-parenting on patch.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{a_id}"),
+        Some(json!({ "parentTaskId": a_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A legitimate edge: B's parent is A.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{b_id}"),
+        Some(json!({ "parentTaskId": a_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // …which makes A → B a cycle.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{a_id}"),
+        Some(json!({ "parentTaskId": b_id })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "A → B → A must be rejected"
+    );
+
+    tokio::fs::remove_dir_all(&home).await.ok();
+}
+
+/// #185 review follow-up: validation is only as good as its atomicity.
+///
+/// Each half of `A → B` / `B → A` is individually legal against a board that
+/// has neither edge yet. Read → validate → write therefore has to be one
+/// critical section: without it both requests can validate against a snapshot
+/// taken before the other wrote, and the pair persists the very cycle
+/// `validate_parent` exists to reject.
+///
+/// With the writes serialized this is deterministic rather than probabilistic —
+/// whichever request takes the lock second sees the first one's edge and is
+/// rejected — so the assertion is *exactly* one success, not "usually one".
+#[tokio::test]
+async fn concurrent_reparents_cannot_race_a_cycle_onto_the_board() {
+    let home = home();
+    let state = std::sync::Arc::new(state_with_company(&home).await);
+
+    let mut ids = Vec::new();
+    for title in ["A", "B"] {
+        let (_, card) = send(
+            &state,
+            "POST",
+            "/api/v1/company/tasks",
+            Some(json!({ "title": title })),
+        )
+        .await;
+        ids.push(card["id"].as_str().unwrap().to_string());
+    }
+    let (a_id, b_id) = (ids[0].clone(), ids[1].clone());
+
+    // Fire both halves of the would-be cycle at once.
+    let reparent = |child: String, parent: String| {
+        let state = state.clone();
+        tokio::spawn(async move {
+            send(
+                &state,
+                "PATCH",
+                &format!("/api/v1/company/tasks/{child}"),
+                Some(json!({ "parentTaskId": parent })),
+            )
+            .await
+            .0
+        })
+    };
+    let first = reparent(b_id.clone(), a_id.clone());
+    let second = reparent(a_id.clone(), b_id.clone());
+    let (first, second) = (first.await.unwrap(), second.await.unwrap());
+
+    let outcomes = [first, second];
+    assert_eq!(
+        outcomes.iter().filter(|s| **s == StatusCode::OK).count(),
+        1,
+        "exactly one re-parent may win: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|s| **s == StatusCode::BAD_REQUEST)
+            .count(),
+        1,
+        "the loser must be rejected as a cycle, not silently applied: {outcomes:?}"
+    );
+
+    // And the board itself is a forest: the two cards cannot both have parents.
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let parented = board
+        .as_array()
+        .expect("board is a list")
+        .iter()
+        .filter(|c| c["parentTaskId"].is_string())
+        .count();
+    assert_eq!(parented, 1, "a cycle reached the board: {board}");
 
     tokio::fs::remove_dir_all(&home).await.ok();
 }

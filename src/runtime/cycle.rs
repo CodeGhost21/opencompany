@@ -619,6 +619,10 @@ impl<'a> CycleHostImpl<'a> {
             assignee: parsed.assignee.unwrap_or_default(),
             updated_at_millis: now_millis(),
             origin_chat_id: None,
+            // No parent (#185), for the same reason as the harness path: this
+            // is a chat-turn delegation, so no task is in scope to be the
+            // parent. Lineage is set through the task API's `parentTaskId`.
+            parent_task_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -687,6 +691,10 @@ impl<'a> CycleHostImpl<'a> {
             assignee: desk_id.clone(),
             updated_at_millis: now_millis(),
             origin_chat_id: None,
+            // No parent (#185), for the same reason as the harness path: this
+            // is a chat-turn delegation, so no task is in scope to be the
+            // parent. Lineage is set through the task API's `parentTaskId`.
+            parent_task_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -1791,6 +1799,7 @@ mod test {
                     assignee: "eng".into(),
                     updated_at_millis: 0,
                     origin_chat_id: None,
+                    parent_task_id: None,
                 },
             )
             .await
@@ -1852,6 +1861,7 @@ mod test {
                     assignee: "eng".into(),
                     updated_at_millis: 0,
                     origin_chat_id: None,
+                    parent_task_id: None,
                 },
             )
             .await

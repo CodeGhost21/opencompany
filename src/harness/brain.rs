@@ -80,15 +80,15 @@ impl HarnessBrain {
         self
     }
 
-    /// Runs one dispatched board task: load the card, route it to its assignee
-    /// (or the default responder) for a single turn, and write the outcome back
-    /// onto the board — moved to its success terminal column on success (see
-    /// [`success_terminal_column`]), back to `backlog` with the error noted on
-    /// failure. A missing task store or a card that has since vanished is a
-    /// silent no-op.
     /// Runs a dispatched card to completion and, when the card remembers the
     /// conversation it was spawned from, returns the reply to post back there
     /// (issue #151 §3.2).
+    ///
+    /// Loads the card, routes it to its assignee (or the default responder) for
+    /// a single turn, and writes the outcome back onto the board — moved to its
+    /// success terminal column on success (see [`success_terminal_column`]),
+    /// back to `backlog` with the error noted on failure. A missing task store
+    /// or a card that has since vanished is a silent no-op.
     ///
     /// Before this the answer only ever reached `card.note`: the card runs
     /// asynchronously, long after the turn that spawned it has answered, so the
@@ -137,7 +137,10 @@ impl HarnessBrain {
         // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
 
-        loop {
+        // The loop yields the run's operator-facing result on whichever path
+        // ends it, so the completion event (#185) reports the same text that
+        // lands in the card's note — never a second, divergent rendering.
+        let result_text = loop {
             let outcome = run_turn
                 // A dispatched task card carries no chat bubble (its steps are
                 // discarded into the note), so its live turn frames must not leak
@@ -151,35 +154,29 @@ impl HarnessBrain {
                     // A dispatched task discards its steps — the note is text-only.
                     match outcome {
                         Ok(outcome) => {
-                            card.note = Some(append_result(
-                                card.note.as_deref(),
-                                &responder,
-                                &outcome.reply,
-                            ));
+                            let result = outcome.reply;
+                            card.note =
+                                Some(append_result(card.note.as_deref(), &responder, &result));
                             let terminal = success_terminal_column(&card);
                             card.column = terminal.to_string();
+                            break result;
                         }
                         Err(err) => {
-                            card.note = Some(append_result(
-                                card.note.as_deref(),
-                                &responder,
-                                &format!("dispatch failed: {err}"),
-                            ));
+                            let result = format!("dispatch failed: {err}");
+                            card.note =
+                                Some(append_result(card.note.as_deref(), &responder, &result));
                             card.column = "backlog".to_string();
+                            break result;
                         }
                     }
-                    break;
                 }
                 Some(SteerAction::Cancel) => {
                     // Partial work is DISCARDED — only a cancellation note lands,
                     // and the card returns to `backlog`.
-                    card.note = Some(append_result(
-                        card.note.as_deref(),
-                        "operator",
-                        "cancelled while in flight",
-                    ));
+                    let result = "cancelled while in flight".to_string();
+                    card.note = Some(append_result(card.note.as_deref(), "operator", &result));
                     card.column = "backlog".to_string();
-                    break;
+                    break result;
                 }
                 Some(SteerAction::Pause) => {
                     // Partial work is PRESERVED in the note; the card parks in the
@@ -192,7 +189,7 @@ impl HarnessBrain {
                     };
                     card.note = Some(append_result(card.note.as_deref(), &responder, &partial));
                     card.column = "paused".to_string();
-                    break;
+                    break partial;
                 }
                 Some(SteerAction::Redirect { instruction: fresh }) => {
                     redirects += 1;
@@ -212,7 +209,7 @@ impl HarnessBrain {
                         card.note = Some(append_result(card.note.as_deref(), &responder, &last));
                         let terminal = success_terminal_column(&card);
                         card.column = terminal.to_string();
-                        break;
+                        break last;
                     }
                     // Re-run from the original brief plus the (codepoint-capped)
                     // operator instruction.
@@ -223,12 +220,99 @@ impl HarnessBrain {
                     continue;
                 }
             }
-        }
+        };
 
         card.updated_at_millis = now_millis();
         tasks.upsert(&self.record.id, &card).await?;
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
+
+        // Issue #185: correlate this dispatch's journal trail to its card.
+        //
+        // Ordering matters. Any MCP failures the turn queued are drained FIRST,
+        // tagged with this task, so they land on the task's own timeline. Before
+        // this they were left in the queue for whichever operator turn drained
+        // next — which both mis-attributed them to an unrelated chat bubble and
+        // left the dispatch's timeline silent about the very calls that broke.
+        //
+        // The steps the drain produces are discarded, matching the rest of
+        // `run_task`: a dispatched card has no chat bubble to render them on
+        // (they are journaled as `McpCallFailed` events instead).
+        //
+        // Every write below is **best-effort**: the card was already persisted
+        // above, so propagating a journal failure with `?` would abandon the
+        // terminal anchor *and* the #151 post-back for a dispatch that has in
+        // fact landed — leaving a timeline stuck "still running" for a card the
+        // board already shows in its terminal column, and failing the whole cycle over
+        // a bookkeeping write. Matches the existing journal-after-persist sites
+        // (`chat_and_emit`, `WorkflowCreated`, `TaskSteered`).
+        let mut discarded_steps = Vec::new();
+        if let Err(err) = self
+            .surface_mcp_failures(&mut discarded_steps, Some(&card.id))
+            .await
+        {
+            tracing::warn!(
+                task_id = %card.id,
+                error = %err,
+                "[task] failed to journal dispatch MCP failures; continuing"
+            );
+        }
+
+        if let Some(events) = self.deps.events.as_ref() {
+            // The run's reply, tagged so the per-task timeline can filter it out
+            // of the company-scoped journal.
+            //
+            // `chat_id` is the **card id**, deliberately, not the card's origin
+            // thread. `chat_history::owns` routes a reply into a desk's history
+            // by matching `chat_id` against the desk id/name, so using the
+            // origin here would inject this record into that desk's chat — a
+            // behaviour change well outside a read foundation, and a duplicate
+            // of the live post-back bubble below. A card id matches no desk, so
+            // the record stays exactly what it is: timeline material, reachable
+            // only through `task_id`. An empty string would be worse still — it
+            // folds into the General desk.
+            if let Err(err) = events
+                .append(
+                    &self.record.id,
+                    CompanyEvent::AgentReply {
+                        chat_id: card.id.clone(),
+                        agent_id: responder.clone(),
+                        text: result_text.clone(),
+                        steps: Vec::new(),
+                        task_id: Some(card.id.clone()),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %card.id,
+                    error = %err,
+                    "[task] failed to journal dispatch reply; continuing"
+                );
+            }
+            // The terminal anchor, journaled after the card's landing column is
+            // persisted so it always records a completed run. Attempted even if
+            // the reply above failed — the anchor is what closes a timeline, so
+            // dropping it is strictly worse than dropping the reply.
+            if let Err(err) = events
+                .append(
+                    &self.record.id,
+                    CompanyEvent::DeskTaskCompleted {
+                        task_id: card.id.clone(),
+                        desk: responder.clone(),
+                        output: result_text,
+                        column: card.column.clone(),
+                    },
+                )
+                .await
+            {
+                tracing::warn!(
+                    task_id = %card.id,
+                    error = %err,
+                    "[task] failed to journal task completion; continuing"
+                );
+            }
+        }
 
         // Issue #151 §3.2: answer in the conversation the card was spawned
         // from. Only a card that remembers an origin posts back — one created
@@ -318,7 +402,17 @@ impl HarnessBrain {
     /// instead of a separate warning bubble. Every string was already scrubbed at
     /// the source (`OcMcpCallTool`), so `scrubbed_message` is safe to show and to
     /// persist.
-    async fn surface_mcp_failures(&self, steps: &mut Vec<TurnStep>) -> Result<()> {
+    ///
+    /// `task_id` is the dispatched card the failing turn belonged to, when the
+    /// drain runs inside a [`CompanyEvent::TaskDispatched`] cycle (issue #185).
+    /// It is stamped onto each journaled failure so a task's broken tool calls
+    /// can be filtered out of the company-scoped journal onto its own timeline;
+    /// a chat turn passes `None` and journals exactly as before.
+    async fn surface_mcp_failures(
+        &self,
+        steps: &mut Vec<TurnStep>,
+        task_id: Option<&str>,
+    ) -> Result<()> {
         for failure in self.deps.mcp_failures.drain() {
             steps.push(TurnStep {
                 kind: TurnStepKind::Note,
@@ -328,17 +422,33 @@ impl HarnessBrain {
                 elapsed_ms: None,
             });
             if let Some(events) = self.deps.events.as_ref() {
-                events
+                // Best-effort **per failure**. `drain` is a `mem::take`, so the
+                // queue is already empty by the time this loop runs and the
+                // batch exists only in this iterator. Propagating with `?` here
+                // would discard every failure after the first journal error —
+                // permanently, since nothing remains to retry from. A failed
+                // audit write must not cost us the rest of the audit.
+                let server = failure.server.clone();
+                if let Err(err) = events
                     .append(
                         &self.record.id,
                         CompanyEvent::McpCallFailed {
+                            task_id: task_id.map(str::to_string),
                             server: failure.server,
                             tool: failure.tool,
                             status: failure.status,
                             message: failure.scrubbed_message,
                         },
                     )
-                    .await?;
+                    .await
+                {
+                    tracing::warn!(
+                        server = %server,
+                        task_id = task_id.unwrap_or("-"),
+                        error = %err,
+                        "[task] failed to journal an MCP failure; draining the rest"
+                    );
+                }
             }
         }
         Ok(())
@@ -559,7 +669,7 @@ impl Brain for HarnessBrain {
                     // Re-skin any MCP tool-call failures (from the orchestrator
                     // turn, a delegated desk turn, or the relay turn) as error
                     // steps on the operator bubble — one surface, one renderer.
-                    self.surface_mcp_failures(&mut operator_steps).await?;
+                    self.surface_mcp_failures(&mut operator_steps, None).await?;
                     channel_responses.push(OutboundMessage {
                         channel: "operator".to_string(),
                         text: operator_reply,
@@ -902,6 +1012,7 @@ description = "Builds it."
             assignee: assignee.to_string(),
             updated_at_millis: 0,
             origin_chat_id: None,
+            parent_task_id: None,
         }
     }
 
@@ -1671,8 +1782,10 @@ members = ["eng1", "eng2"]
         });
 
         let mut steps: Vec<TurnStep> = Vec::new();
+        // `None` — this is the chat-turn drain, which journals no `task_id`
+        // (#185). The dispatch drain passes the card id; see `run_task`.
         brain
-            .surface_mcp_failures(&mut steps)
+            .surface_mcp_failures(&mut steps, None)
             .await
             .expect("drain surfaces failures");
 
@@ -1697,6 +1810,121 @@ members = ["eng1", "eng2"]
                     if server == "browserbase" && status == "tool_call_rejected"
             )),
             "an McpCallFailed audit event was journaled"
+        );
+    }
+
+    /// #185 review follow-up: one bad journal write must not swallow the rest of
+    /// the batch.
+    ///
+    /// `McpFailureQueue::drain` is a `mem::take` — by the time the loop runs the
+    /// queue is empty and the batch exists only in that iterator. Propagating
+    /// the first append error with `?` therefore did not merely skip one audit
+    /// event, it discarded every failure behind it with nothing left to retry
+    /// from. Journaling is per-item best-effort so the drain always completes.
+    #[tokio::test]
+    async fn a_failed_journal_write_does_not_swallow_the_rest_of_the_drain() {
+        use crate::harness::mcp_probe::McpFailure;
+        use crate::ports::EventLog;
+        use crate::ports::types::{EventSeq, StoredEvent};
+        use futures::stream::{self, BoxStream};
+
+        /// An event log whose FIRST append fails and whose later appends
+        /// succeed, recording what got through.
+        #[derive(Default)]
+        struct FailFirstLog {
+            seen: StdMutex<Vec<CompanyEvent>>,
+            appends: std::sync::atomic::AtomicUsize,
+        }
+
+        #[async_trait]
+        impl EventLog for FailFirstLog {
+            async fn append(&self, _id: &CompanyId, event: CompanyEvent) -> Result<EventSeq> {
+                let nth = self
+                    .appends
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if nth == 0 {
+                    return Err(crate::error::OpenCompanyError::Store(
+                        "journal unavailable".to_string(),
+                    ));
+                }
+                let mut guard = self.seen.lock().unwrap();
+                guard.push(event);
+                Ok(EventSeq::new(guard.len() as u64))
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                _seq: EventSeq,
+                _limit: usize,
+            ) -> Result<Vec<StoredEvent>> {
+                Ok(Vec::new())
+            }
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let log = Arc::new(FailFirstLog::default());
+        let failures = crate::harness::mcp_probe::McpFailureQueue::default();
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(FsContextStore::new(dir.path())),
+            store: Arc::new(FsCompanyStore::new(dir.path())),
+            meter: None,
+            workspace_root: dir.path().to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: Some(log.clone()),
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: failures.clone(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+        };
+        let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
+
+        for server in ["first", "second", "third"] {
+            failures.push(McpFailure {
+                server: server.into(),
+                tool: "browse".into(),
+                status: "tool_call_rejected".into(),
+                hint: None,
+                scrubbed_message: "server rejected the call".into(),
+            });
+        }
+
+        let mut steps: Vec<TurnStep> = Vec::new();
+        brain
+            .surface_mcp_failures(&mut steps, Some("t1"))
+            .await
+            .expect("a journal error is best-effort, not fatal");
+
+        // Every failure is re-skinned onto the timeline regardless…
+        assert_eq!(steps.len(), 3, "all three failures surfaced as steps");
+        // …and the two after the failed write still reached the journal. Before
+        // this fix `seen` was empty: the `?` returned on `first` and `second` /
+        // `third` were dropped with the drained batch.
+        let seen = log.seen.lock().unwrap();
+        assert_eq!(seen.len(), 2, "the drain continued past the failed append");
+        assert!(
+            seen.iter().any(|e| matches!(
+                e,
+                CompanyEvent::McpCallFailed { server, .. } if server == "third"
+            )),
+            "the last failure in the batch was still journaled"
         );
     }
 
@@ -2228,6 +2456,7 @@ members = ["eng1", "eng2"]
             delegations: queue,
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
