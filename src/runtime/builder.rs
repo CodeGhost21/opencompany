@@ -814,7 +814,10 @@ impl RuntimeBuilder {
                                 .as_ref()
                                 .map(|(config, _)| EnvDefault {
                                     base_url: config.base_url.clone(),
-                                    api_key: config.api_key.clone(),
+                                    // A handle, not a value: the managed
+                                    // credential may be a platform token that
+                                    // rotates in place, so it is read per request.
+                                    credential: config.credential.clone(),
                                 });
                         // An explicit `OPENCOMPANY_INFERENCE_MODEL` flattens the
                         // whole roster to one workload; otherwise each agent keeps
@@ -871,15 +874,16 @@ impl RuntimeBuilder {
                                 Vec::new()
                             });
                             // Issue #110: resolve the per-tenant Composio config
-                            // at boot from the company secret store (token) + the
-                            // manifest toolkit allowlist + the env URL override,
-                            // falling back to the tenant API base so staging
-                            // Composio follows staging. Only companies that
-                            // explicitly grant `composio` touch the store; the
-                            // token has no env fallback, so a missing token stays
-                            // `None` (fail closed). `HarnessPool::ensure`
-                            // re-resolves this each turn so a console token change
-                            // takes effect without restart.
+                            // at boot from the company secret store (its own
+                            // token, if any) else this instance's platform
+                            // identity, plus the manifest toolkit allowlist and
+                            // the env URL override, falling back to the tenant API
+                            // base so staging Composio follows staging. Only
+                            // companies that explicitly grant `composio` resolve at
+                            // all; with no credential obtainable it stays `None`
+                            // (fail closed). `HarnessPool::ensure` re-resolves this
+                            // each turn so a console token change takes effect
+                            // without restart.
                             let composio_config = if crate::company::grants_composio_explicit(
                                 &self.manifest.tools.allow,
                             ) {
@@ -896,6 +900,11 @@ impl RuntimeBuilder {
                                     toolkits,
                                     url,
                                     api_url,
+                                    // Falls back to this instance's platform
+                                    // identity when the company stored no token
+                                    // of its own.
+                                    crate::company::TinyhumansTokenSource::from_env(&env)
+                                        .map(Arc::new),
                                 )
                                 .await
                             } else {
@@ -1962,7 +1971,7 @@ mod test {
             .with_harness_inference(
                 HostedProviderConfig {
                     base_url: stub,
-                    api_key: "k".to_string(),
+                    credential: crate::company::Credential::from_value("k"),
                     extra_headers: Vec::new(),
                 },
                 None,
