@@ -10,7 +10,7 @@
 //! Backends behind disabled cargo features fail loudly at open time rather
 //! than silently falling back to the filesystem.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -171,6 +171,20 @@ pub struct StorageSettings {
     /// overlaid on top of `kind`. Defaults to [`MemoryBackend::Store`] (the base
     /// backend's own memory), so unset changes nothing.
     pub memory_backend: MemoryBackend,
+    /// The instance workspace root (`OPENCOMPANY_DATA_DIR`), when known. Threaded
+    /// through so a persistent memory engine can root each company's storage
+    /// under `<data_dir>/memory/`. `None` (the [`Default`]) selects the offline
+    /// in-memory engine — the shape tests and no-data-dir callers get.
+    pub data_dir: Option<PathBuf>,
+    /// Operator's explicit durability assertion for the data dir
+    /// (`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`). The in-pod TinyCortex engine is
+    /// refused by default under `OPENCOMPANY_STORAGE=mongodb`, because the hosted
+    /// model treats `/data` as ephemeral scratch there and engine memory would be
+    /// silently lost on restart. Setting this flag is the operator asserting that
+    /// they have mounted a genuinely persistent volume at the data dir, which
+    /// lifts the refusal for the mongodb+tinycortex combination. `false` (the
+    /// [`Default`], and the safe default) keeps the silent-memory-loss guard.
+    pub allow_ephemeral_memory: bool,
 }
 
 /// Parses env var `key` into `T`. Absent → `Ok(None)` (the caller applies its
@@ -189,10 +203,24 @@ where
     }
 }
 
+/// Reads a boolean opt-in env flag. Truthy values (case-insensitive, trimmed):
+/// `1`, `true`, `yes`, `on`. Anything else — including unset — is `false`.
+fn env_flag(key: &str) -> bool {
+    std::env::var(key)
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
 impl StorageSettings {
     /// Reads the CLI-surface storage env vars (`OPENCOMPANY_STORAGE`,
     /// `OPENCOMPANY_MONGODB_URI`, `OPENCOMPANY_MONGODB_DB`,
-    /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`).
+    /// `OPENCOMPANY_TENANT_ID`, `OPENCOMPANY_MEMORY`, `OPENCOMPANY_DATA_DIR`,
+    /// `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL`).
     pub fn from_env() -> Result<Self> {
         let kind: StorageKind = parse_env("OPENCOMPANY_STORAGE")?.unwrap_or_default();
         let memory_backend: MemoryBackend = parse_env("OPENCOMPANY_MEMORY")?.unwrap_or_default();
@@ -203,6 +231,8 @@ impl StorageSettings {
             mongodb_db: non_empty("OPENCOMPANY_MONGODB_DB"),
             tenant_id: non_empty("OPENCOMPANY_TENANT_ID"),
             memory_backend,
+            data_dir: Some(crate::app::config::data_dir_from_env()),
+            allow_ephemeral_memory: env_flag("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL"),
         })
     }
 }
@@ -229,18 +259,81 @@ pub async fn open_storage(
 pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     match settings.memory_backend {
         MemoryBackend::Store => Ok(None),
-        MemoryBackend::Tinycortex => open_tinycortex(),
+        MemoryBackend::Tinycortex => open_tinycortex(settings),
     }
 }
 
+/// Opens the TinyCortex overlay. With a `data_dir` present it is the persistent,
+/// in-pod [`EngineCortex`](crate::store::tinycortex_engine::EngineCortex) rooted
+/// at `<data_dir>/memory/`; without one (tests, no-data-dir callers) it is the
+/// offline in-memory backend.
+///
+/// Two boot-time contracts are enforced here rather than left to silently
+/// surprise an operator at runtime:
+///
+/// 1. **Refuse-to-open on ephemeral `/data`, unless durability is asserted.**
+///    `OPENCOMPANY_STORAGE=mongodb` makes the container's data dir ephemeral
+///    scratch (the database is the durable base), so an in-pod engine rooted
+///    there would lose *all* memory on every restart. That is silent data loss,
+///    so by default this combination is a hard [`OpenCompanyError::Config`] — we
+///    never open a doomed engine. But storage-kind is only a *proxy* for
+///    "ephemeral `/data`": a mongodb deployment that HAS mounted a persistent
+///    volume at the data dir is perfectly safe. So the refusal is an explicit
+///    durability contract, not a hard-coded storage-kind rejection: an operator
+///    who has mounted a durable volume sets
+///    `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1` (surfaced as
+///    [`StorageSettings::allow_ephemeral_memory`]) to assert it, and the engine
+///    opens. Unset (the safe default) still refuses the mongodb+tinycortex combo.
+/// 2. **Loud degraded-mode contract.** This slice ships *lexical*
+///    (substring/recency token-overlap) recall, **not** the vector/semantic
+///    recall the `tinycortex` name implies. That is announced once, loudly, at
+///    open so it is never mistaken for real embedding recall (which lands in
+///    #201).
 #[cfg(feature = "tinycortex")]
-fn open_tinycortex() -> Result<Option<MemoryOverlay>> {
-    let (memory, context) = crate::store::tinycortex::in_memory();
+fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
+    let (memory, context) = match &settings.data_dir {
+        Some(dir) => {
+            // Refuse-to-open contract: the engine persists to `<data_dir>/memory`
+            // on the local container filesystem. Under `OPENCOMPANY_STORAGE=mongodb`
+            // the hosting model treats `/data` as ephemeral scratch (the durable
+            // base is the database), so engine memory would be silently lost on
+            // every restart. Refusing to open beats warning-then-losing-data: the
+            // failure mode we are guarding against is exactly a quiet memory wipe on
+            // restart. But storage-kind is only a proxy for "ephemeral /data" — a
+            // mongodb deploy with a genuinely persistent volume is safe — so the
+            // operator can lift the refusal by explicitly asserting durability via
+            // OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL. See docs/spec/runtime/storage.md.
+            if settings.kind == StorageKind::Mongodb && !settings.allow_ephemeral_memory {
+                return Err(OpenCompanyError::Config(
+                    "OPENCOMPANY_MEMORY=tinycortex needs a persistent volume at the data dir, but \
+                     OPENCOMPANY_STORAGE=mongodb makes /data ephemeral scratch by default, so \
+                     in-pod memory would be silently lost on restart. If you have mounted a \
+                     genuinely persistent volume at OPENCOMPANY_DATA_DIR, set \
+                     OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1 to assert its durability and open the \
+                     engine anyway. Otherwise use OPENCOMPANY_STORAGE=fs or sqlite (durable /data), \
+                     or keep memory on the base store with OPENCOMPANY_MEMORY=store."
+                        .into(),
+                ));
+            }
+            // Loud, one-time degraded-mode contract: recall here is lexical
+            // (substring/recency token-overlap), NOT the vector/semantic recall the
+            // name implies. Announce it once at open so it is never mistaken for
+            // real embedding recall — that lands in #201.
+            tracing::warn!(
+                data_dir = %dir.display(),
+                "OPENCOMPANY_MEMORY=tinycortex is running in DEGRADED lexical fallback mode: recall \
+                 is substring/recency token-overlap, NOT vector/semantic recall. Real \
+                 embedding-backed recall lands in #201.",
+            );
+            crate::store::tinycortex_engine::engine(dir.join("memory"))
+        }
+        None => crate::store::tinycortex::in_memory(),
+    };
     Ok(Some(MemoryOverlay { memory, context }))
 }
 
 #[cfg(not(feature = "tinycortex"))]
-fn open_tinycortex() -> Result<Option<MemoryOverlay>> {
+fn open_tinycortex(_settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     Err(OpenCompanyError::Config(
         "OPENCOMPANY_MEMORY=tinycortex requires a build with the `tinycortex` feature".into(),
     ))
@@ -450,6 +543,72 @@ mod test {
         assert!(leaked.is_empty(), "cross-company recall must not bleed");
     }
 
+    /// Refuse-to-open contract: `OPENCOMPANY_STORAGE=mongodb` makes `/data`
+    /// ephemeral, so opening the in-pod engine there would silently lose memory
+    /// on restart. That combination must be a hard error, not a warning.
+    #[cfg(feature = "tinycortex")]
+    #[test]
+    fn tinycortex_refuses_ephemeral_mongodb_data_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = StorageSettings {
+            kind: StorageKind::Mongodb,
+            memory_backend: MemoryBackend::Tinycortex,
+            data_dir: Some(dir.path().to_path_buf()),
+            ..Default::default()
+        };
+        let err = open_memory_overlay(&settings).expect_err("mongodb /data must refuse to open");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("silently lost on restart"),
+            "error must name the silent-memory-loss failure mode, got: {msg}"
+        );
+    }
+
+    /// The refusal is an explicit durability *contract*, not a hard storage-kind
+    /// reject: an operator who has mounted a persistent volume under a mongodb
+    /// deployment asserts it via `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL` (surfaced as
+    /// `allow_ephemeral_memory`), and the engine then opens instead of refusing.
+    #[cfg(feature = "tinycortex")]
+    #[test]
+    fn tinycortex_opens_ephemeral_mongodb_when_durability_asserted() {
+        let dir = tempfile::tempdir().unwrap();
+        let settings = StorageSettings {
+            kind: StorageKind::Mongodb,
+            memory_backend: MemoryBackend::Tinycortex,
+            data_dir: Some(dir.path().to_path_buf()),
+            allow_ephemeral_memory: true,
+            ..Default::default()
+        };
+        assert!(
+            open_memory_overlay(&settings)
+                .unwrap_or_else(|e| panic!("durability-asserted mongodb must open: {e}"))
+                .is_some(),
+            "asserting durability must lift the mongodb+tinycortex refusal"
+        );
+    }
+
+    /// The refuse is scoped to the ephemeral-`/data` combination only: durable
+    /// base backends (fs, sqlite) still open the engine overlay normally.
+    #[cfg(feature = "tinycortex")]
+    #[test]
+    fn tinycortex_opens_on_durable_fs_and_sqlite() {
+        for kind in [StorageKind::Fs, StorageKind::Sqlite] {
+            let dir = tempfile::tempdir().unwrap();
+            let settings = StorageSettings {
+                kind,
+                memory_backend: MemoryBackend::Tinycortex,
+                data_dir: Some(dir.path().to_path_buf()),
+                ..Default::default()
+            };
+            assert!(
+                open_memory_overlay(&settings)
+                    .unwrap_or_else(|e| panic!("durable {kind:?} base must open: {e}"))
+                    .is_some(),
+                "durable {kind:?} base must yield an engine overlay"
+            );
+        }
+    }
+
     #[cfg(not(feature = "tinycortex"))]
     #[test]
     fn tinycortex_overlay_requires_feature() {
@@ -482,6 +641,58 @@ mod test {
         match prev {
             Some(v) => unsafe { std::env::set_var("OPENCOMPANY_TENANT_ID", v) },
             None => unsafe { std::env::remove_var("OPENCOMPANY_TENANT_ID") },
+        }
+    }
+
+    #[test]
+    fn from_env_reads_data_dir() {
+        // SAFETY: single-threaded test; restores prior state.
+        let prev = std::env::var("OPENCOMPANY_DATA_DIR").ok();
+
+        // An explicit data dir is threaded straight through into settings.
+        unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", "/srv/oc-data") };
+        assert_eq!(
+            StorageSettings::from_env().unwrap().data_dir,
+            Some(PathBuf::from("/srv/oc-data")),
+            "OPENCOMPANY_DATA_DIR must be read into StorageSettings::data_dir"
+        );
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_DATA_DIR", v) },
+            None => unsafe { std::env::remove_var("OPENCOMPANY_DATA_DIR") },
+        }
+    }
+
+    #[test]
+    fn from_env_reads_allow_ephemeral_memory() {
+        // SAFETY: single-threaded test; restores prior state.
+        let prev = std::env::var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL").ok();
+
+        // Unset → the safe default: refuse (flag false).
+        unsafe { std::env::remove_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL") };
+        assert!(!StorageSettings::from_env().unwrap().allow_ephemeral_memory);
+
+        // Truthy values set the durability assertion.
+        for truthy in ["1", "true", "YES", "On"] {
+            unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", truthy) };
+            assert!(
+                StorageSettings::from_env().unwrap().allow_ephemeral_memory,
+                "{truthy:?} must read as durability asserted"
+            );
+        }
+
+        // Any non-truthy value stays false (fails safe toward refusal).
+        for falsy in ["0", "false", "no", ""] {
+            unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", falsy) };
+            assert!(
+                !StorageSettings::from_env().unwrap().allow_ephemeral_memory,
+                "{falsy:?} must read as not asserted"
+            );
+        }
+
+        match prev {
+            Some(v) => unsafe { std::env::set_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL", v) },
+            None => unsafe { std::env::remove_var("OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL") },
         }
     }
 

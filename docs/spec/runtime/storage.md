@@ -94,7 +94,7 @@ engine layered on top of that base. The base still owns every other port
 | Value | Engine | Feature flag | Notes |
 |---|---|---|---|
 | `store` (default) | The base backend's own memory | — | fs substring recall, or sqlite/mongodb |
-| `tinycortex` | TinyCortex chunk store | `tinycortex` | Ranked token-overlap recall over a compounding store |
+| `tinycortex` | In-pod TinyCortex engine | `tinycortex` | Persistent per-company store; degraded lexical/recency recall |
 
 This is why TinyCortex is not a `StorageKind`: it implements only memory +
 context, so it cannot be a full backend — it overlays. `serve` and platform
@@ -104,9 +104,101 @@ provisioning build the overlay once (`open_memory_overlay`,
 the base keeps the rest. A selected-but-unavailable engine (feature disabled)
 aborts boot, same as the storage backend.
 
-The compiled TinyCortex backend is the offline in-memory client
-(`src/store/tinycortex.rs`); a networked client for true semantic recall is an
-inert seam until the service is reachable through the OpenHuman integration.
+### In-pod engine (`EngineCortex`)
+
+With the `tinycortex` feature and a data directory present, the overlay is
+`EngineCortex` (`src/store/tinycortex_engine.rs`): the OpenHuman `tinycortex`
+engine crate running **inside the pod** with durable local storage. Each company
+gets its own workspace at `<OPENCOMPANY_DATA_DIR>/memory/<company>/`, and the
+engine's canonical per-workspace SQLite database (opened + migrated through the
+crate's own shared connection) holds that company's traces, task results, and
+context chunks. The engine never makes a network call. When no data directory is
+present (tests, no-data-dir callers) the overlay falls back to the offline
+in-memory backend (`InMemoryCortex`), which is also the compiled fallback when a
+company workspace cannot be opened.
+
+**Degraded (lexical/recency) recall — no embedding compute.** This slice builds
+the engine's `MemoryConfig` directly with `embedding.strict = false`, so an inert
+embedder is tolerated and recall degrades to **lexical token-overlap** ranking
+(the same `[0, 1]`-scored, snippet-bearing contract the in-memory backend
+defines) rather than semantic. This is a real behavioural contract, not an
+implementation footnote: `search_chunks` here is substring/recency overlap, **not**
+the vector/semantic recall the `tinycortex` name implies, so the overlay announces
+it once, loudly, at open (`tracing::warn` in `src/store/select.rs`). Real
+embedding-backed recall lands in **#201**. **Zero** embedding compute is injected. Because
+the crate's retrieval primitives rank only by admission-score/recency in this
+mode (their keyword/graph scorers are defined but not yet wired), and its ingest
+path re-chunks documents under its own ids — which cannot round-trip
+OpenCompany's content-address / label-prefix / peek contract — chunk bodies and
+metadata are persisted through the engine's **KV tier** (on the same per-company
+workspace database) and searched lexically in the adapter. Injecting a real
+embedding provider — and thereby the summary-tree + hybrid-retrieval path — is a
+follow-up slice.
+
+### Durability contract & the `/data`-is-scratch caveat
+
+`EngineCortex` is durable **only to the extent the data directory is durable**.
+On a host with a persistent `OPENCOMPANY_DATA_DIR` (a mounted volume, or the
+default `$HOME/.opencompany`), engine memory survives restarts. But under the
+hosted multi-tenant model with `OPENCOMPANY_STORAGE=mongodb`, the durable base is
+the database and the container's `/data` is treated as **ephemeral scratch** — so
+engine memory written to `<data_dir>/memory` would **not** survive a container
+restart. Because that failure mode is *silent* memory loss on restart, selecting
+`OPENCOMPANY_MEMORY=tinycortex` together with `OPENCOMPANY_STORAGE=mongodb` is by
+default a hard **refuse-to-open** error at boot (`src/store/select.rs`), not a
+warning: the overlay never opens a doomed engine.
+
+Storage-kind is only a *proxy* for "ephemeral `/data`", though — a mongodb
+deployment that HAS mounted a persistent volume at the data dir is perfectly
+safe to run the in-pod engine on. So the refusal is an explicit **durability
+contract**, not a hard storage-kind rejection. To run the in-pod engine you can:
+
+- mount a persistent volume at `OPENCOMPANY_DATA_DIR` and use
+  `OPENCOMPANY_STORAGE=fs` or `sqlite` (durable `/data`); or
+- keep memory on the base store (`OPENCOMPANY_MEMORY=store`); or
+- under `OPENCOMPANY_STORAGE=mongodb`, if you have mounted a genuinely durable
+  volume at `OPENCOMPANY_DATA_DIR`, set **`OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1`**
+  to assert that durability and lift the refusal. Unset (or any non-truthy value)
+  keeps the safe default: refuse. Truthy values are `1`/`true`/`yes`/`on`.
+
+#### Config examples
+
+**(a) Supported persistent config** — durable base + in-pod engine. The data dir
+is a real mounted volume, so engine memory survives restarts and no override is
+needed:
+
+```sh
+OPENCOMPANY_STORAGE=sqlite            # durable /data (single SQLite file)
+OPENCOMPANY_MEMORY=tinycortex         # in-pod engine overlay
+OPENCOMPANY_DATA_DIR=/data            # a persistent volume mount
+# → boots; per-company workspaces persist under /data/memory/<workspace>/
+```
+
+**(b) MongoDB config — the boot-time refusal and how the opt-in changes it.**
+With mongodb as the durable base, `/data` is treated as ephemeral scratch, so the
+engine is refused by default:
+
+```sh
+OPENCOMPANY_STORAGE=mongodb           # durable base is the database; /data is scratch
+OPENCOMPANY_MEMORY=tinycortex
+OPENCOMPANY_DATA_DIR=/data
+OPENCOMPANY_MONGODB_URI=mongodb://…   # (tenant-scoped)
+# → REFUSES to boot: hard OpenCompanyError::Config. The operator-visible result is
+#   a boot abort naming the silent-memory-loss risk and the OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL
+#   opt-in — the engine never opens, so no memory is written to a doomed /data.
+```
+
+If — and only if — the operator has actually mounted a durable volume at
+`/data`, asserting it lifts the refusal:
+
+```sh
+OPENCOMPANY_STORAGE=mongodb
+OPENCOMPANY_MEMORY=tinycortex
+OPENCOMPANY_DATA_DIR=/data            # a genuinely persistent volume
+OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1  # operator asserts /data is durable
+OPENCOMPANY_MONGODB_URI=mongodb://…
+# → boots; engine memory persists under /data/memory/<workspace>/ as usual.
+```
 
 ## MongoDB backend (`src/store/mongodb.rs`)
 
