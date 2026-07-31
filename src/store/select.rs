@@ -284,11 +284,13 @@ pub fn open_memory_overlay(settings: &StorageSettings) -> Result<Option<MemoryOv
 ///    `OPENCOMPANY_MEMORY_ALLOW_EPHEMERAL=1` (surfaced as
 ///    [`StorageSettings::allow_ephemeral_memory`]) to assert it, and the engine
 ///    opens. Unset (the safe default) still refuses the mongodb+tinycortex combo.
-/// 2. **Loud degraded-mode contract.** This slice ships *lexical*
-///    (substring/recency token-overlap) recall, **not** the vector/semantic
-///    recall the `tinycortex` name implies. That is announced once, loudly, at
-///    open so it is never mistaken for real embedding recall (which lands in
-///    #201).
+/// 2. **Meaning tier, with a loud degraded-mode fallback.** A hosted embeddings
+///    backend is resolved from the environment (188c2); when one is present each
+///    stored chunk is embedded and recall runs vector-first (cosine) with a
+///    lexical top-up. When **no** backend resolves, recall degrades to *lexical*
+///    (substring/recency token-overlap) — **not** the vector/semantic recall the
+///    `tinycortex` name implies — and that is announced once, loudly, at open so
+///    it is never mistaken for real embedding recall.
 #[cfg(feature = "tinycortex")]
 fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> {
     let (memory, context) = match &settings.data_dir {
@@ -315,21 +317,50 @@ fn open_tinycortex(settings: &StorageSettings) -> Result<Option<MemoryOverlay>> 
                         .into(),
                 ));
             }
-            // Loud, one-time degraded-mode contract: recall here is lexical
-            // (substring/recency token-overlap), NOT the vector/semantic recall the
-            // name implies. Announce it once at open so it is never mistaken for
-            // real embedding recall — that lands in #201.
-            tracing::warn!(
-                data_dir = %dir.display(),
-                "OPENCOMPANY_MEMORY=tinycortex is running in DEGRADED lexical fallback mode: recall \
-                 is substring/recency token-overlap, NOT vector/semantic recall. Real \
-                 embedding-backed recall lands in #201.",
-            );
-            crate::store::tinycortex_engine::engine(dir.join("memory"))
+            // Meaning tier (188c2): resolve a hosted embeddings backend from the
+            // environment when one is configured, so recall is vector-first
+            // (semantic) rather than lexical-only. `None` (no hosted credential, or
+            // a default build without the `openhuman` harness) keeps the lexical
+            // path — the embeddings client lives in the openhuman-gated harness, so
+            // the type is only reachable there.
+            let embeddings = hosted_embeddings_backend();
+            // Loud, one-time degraded-mode contract: with no embeddings backend
+            // recall is lexical (substring/recency token-overlap), NOT the
+            // vector/semantic recall the name implies. Announce it once at open so
+            // it is never mistaken for real embedding recall.
+            if embeddings.is_none() {
+                tracing::warn!(
+                    data_dir = %dir.display(),
+                    "OPENCOMPANY_MEMORY=tinycortex is running in DEGRADED lexical fallback mode: no \
+                     embeddings backend resolved, so recall is substring/recency token-overlap, \
+                     NOT vector/semantic recall. Configure a hosted embeddings backend for \
+                     semantic recall.",
+                );
+            }
+            crate::store::tinycortex_engine::engine_with_embeddings(dir.join("memory"), embeddings)
         }
         None => crate::store::tinycortex::in_memory(),
     };
     Ok(Some(MemoryOverlay { memory, context }))
+}
+
+/// Resolves the hosted embeddings backend for the memory meaning tier from the
+/// process environment, as an `Arc<dyn EmbeddingBackend>` the vector store
+/// consumes. Only the `openhuman` build can build one (that is where the hosted
+/// embeddings client lives); every other build gets `None` and lexical recall.
+#[cfg(feature = "tinycortex")]
+fn hosted_embeddings_backend()
+-> Option<Arc<dyn tinycortex::memory::store::vectors::embedding::EmbeddingBackend>> {
+    #[cfg(feature = "openhuman")]
+    {
+        use tinycortex::memory::store::vectors::embedding::EmbeddingBackend;
+        crate::harness::embeddings::hosted_embeddings_from_env(&crate::app::config::ProcessEnv)
+            .map(|backend| Arc::new(backend) as Arc<dyn EmbeddingBackend>)
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        None
+    }
 }
 
 #[cfg(not(feature = "tinycortex"))]
