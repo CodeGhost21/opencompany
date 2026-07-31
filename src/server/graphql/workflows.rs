@@ -1,14 +1,21 @@
 //! Workflow reads: `Company.workflows` summaries (from the manifest's enabled
-//! list) and `Company.workflow(id)` graphs (parsed from
-//! `{company}/workflows/<id>.toml` via WS1's `workflow_file`).
+//! list) and `Company.workflow(id)` graphs.
+//!
+//! Graph bodies come from the union of the company's two sources — the seed
+//! files at `{company}/workflows/<id>.toml` and the runtime-authored bodies on
+//! the [`CompanyRecord`](crate::ports::types::CompanyRecord) overlay — via
+//! [`load_workflow_union`]. A hosted tenant has no source directory, so all of
+//! its graphs are overlay bodies; resolving only the seed side used to render
+//! them as bare ids with no graph (issue #168).
 
-use std::path::Path;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 use async_graphql::{Context, ID, SimpleObject};
 
 use crate::company::runtime::CompanyRuntime;
-use crate::company::{WorkflowFile, parse_workflow};
+use crate::company::{WorkflowFile, list_workflows_union, load_workflow_union};
+use crate::ports::types::OverlayWorkflow;
 
 /// A one-line workflow summary for the workflows list.
 #[derive(SimpleObject)]
@@ -18,7 +25,14 @@ pub struct WorkflowSummaryGql {
     pub id: ID,
     /// The workflow display name.
     pub name: String,
-    /// Whether the workflow is enabled in the manifest.
+    /// Whether the workflow id appears in the company manifest's
+    /// `[workflows].enabled` list.
+    ///
+    /// This is manifest membership, **not** "does this workflow exist and can it
+    /// run". A runtime-authored workflow is listed here whether or not it is
+    /// manifest-enabled, and `Company.workflow(id)` / the run routes serve any
+    /// saved graph regardless of this flag — nothing consults it to decide
+    /// whether a workflow may run. Treat it as "declared by the blueprint".
     pub enabled: bool,
 }
 
@@ -130,13 +144,17 @@ impl From<WorkflowFile> for WorkflowGql {
     }
 }
 
-/// Best-effort parse of one workflow graph from the company source directory
-/// (`companies/<name>/workflows/<id>.toml`). Yields `None` when the company has
-/// no source dir (platform-provisioned mode) or the file is missing/invalid.
-fn load_one(dir: Option<&Path>, id: &str) -> Option<WorkflowFile> {
-    let path = dir?.join("workflows").join(format!("{id}.toml"));
-    let text = std::fs::read_to_string(path).ok()?;
-    parse_workflow(&text).ok()
+/// Best-effort load of one workflow graph from the seed ∪ overlay union.
+/// Yields `None` when neither source has the id, or the body it finds is
+/// invalid — a resolver never fails the whole query over one bad graph.
+fn load_one(
+    runtime: &Arc<CompanyRuntime>,
+    overlays: &[OverlayWorkflow],
+    id: &str,
+) -> Option<WorkflowFile> {
+    load_workflow_union(runtime.source_dir(), overlays, id)
+        .ok()
+        .flatten()
 }
 
 /// The enabled workflow ids from the company manifest.
@@ -144,26 +162,65 @@ async fn enabled_ids(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec
     Ok(runtime.enabled_workflow_ids().await?)
 }
 
-/// Resolves `Company.workflows`.
+/// The company's runtime-authored graph bodies, read once per resolve. A
+/// company with no persisted record contributes none.
+async fn overlays(runtime: &Arc<CompanyRuntime>) -> async_graphql::Result<Vec<OverlayWorkflow>> {
+    Ok(runtime
+        .store()
+        .load(runtime.id())
+        .await?
+        .map(|record| record.overlay_workflows)
+        .unwrap_or_default())
+}
+
+/// Resolves `Company.workflows` — every workflow the company has saved.
+///
+/// The id set is built exactly the way the REST picker
+/// (`GET …/workflows`) builds it, so the two read surfaces cannot disagree:
+/// first every graph that has a body (seed ∪ overlay, deduped with the seed
+/// winning), then any manifest-`enabled` id that has no body in either source,
+/// named after itself.
+///
+/// Driving this off the manifest's enabled list alone — as it used to — made a
+/// runtime-authored workflow invisible here while `Company.workflow(id)`
+/// returned its full graph. That gap is not hypothetical: the boot rebuild
+/// overwrites the persisted record's manifest with the seed manifest
+/// (`RuntimeBuilder`), so a runtime-added enabled id is gone after a restart and
+/// the graph body on the record is the only surviving evidence the workflow
+/// exists.
 pub(crate) async fn resolve_summaries(
     _ctx: &Context<'_>,
     runtime: &Arc<CompanyRuntime>,
 ) -> async_graphql::Result<Vec<WorkflowSummaryGql>> {
-    let dir = runtime.source_dir();
-    let ids = enabled_ids(runtime).await?;
-    Ok(ids
-        .into_iter()
-        .map(|id| {
-            let name = load_one(dir, &id)
-                .map(|file| file.name)
-                .unwrap_or_else(|| id.clone());
-            WorkflowSummaryGql {
-                id: ID(id),
-                name,
-                enabled: true,
-            }
-        })
-        .collect())
+    let overlays = overlays(runtime).await?;
+    let enabled = enabled_ids(runtime).await?;
+    let enabled_set: HashSet<&str> = enabled.iter().map(String::as_str).collect();
+
+    let mut summaries = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for file in list_workflows_union(runtime.source_dir(), &overlays) {
+        seen.insert(file.id.clone());
+        summaries.push(WorkflowSummaryGql {
+            enabled: enabled_set.contains(file.id.as_str()),
+            id: ID(file.id),
+            name: file.name,
+        });
+    }
+
+    // Manifest-enabled ids with no loadable graph anywhere still list, named
+    // after themselves — the same fallback the REST picker uses.
+    for id in enabled {
+        if !seen.insert(id.clone()) {
+            continue;
+        }
+        summaries.push(WorkflowSummaryGql {
+            id: ID(id.clone()),
+            name: id,
+            enabled: true,
+        });
+    }
+
+    Ok(summaries)
 }
 
 /// Resolves `Company.workflow(id)`, returning null when the graph is unavailable.
@@ -172,12 +229,14 @@ pub(crate) async fn resolve_one(
     runtime: &Arc<CompanyRuntime>,
     id: &str,
 ) -> async_graphql::Result<Option<WorkflowGql>> {
-    Ok(load_one(runtime.source_dir(), id).map(WorkflowGql::from))
+    let overlays = overlays(runtime).await?;
+    Ok(load_one(runtime, &overlays, id).map(WorkflowGql::from))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::company::parse_workflow;
     use serde_json::json;
 
     #[test]
