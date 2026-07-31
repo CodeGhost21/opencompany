@@ -44,6 +44,7 @@ const IN_REVIEW: &str = "in_review";
 
 /// The terminal board column — nothing dispatches out of it.
 const DONE: &str = "done";
+use crate::ports::artifacts::{ArtifactAuthor, ArtifactKind, ArtifactRecord};
 use crate::ports::brain::{Brain, CycleHost};
 use crate::ports::types::{
     CompanyEvent, CompanyRecord, CompressedTrace, CycleRequest, CycleResult, OutboundMessage,
@@ -132,14 +133,14 @@ impl HarnessBrain {
         let base_instruction = task_instruction(&card);
         let mut instruction = base_instruction.clone();
         let mut redirects: u32 = 0;
-
         // Route the background turn through the brain-agnostic `RunTurn` seam
         // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
 
         // The loop yields the run's operator-facing result on whichever path
-        // ends it, so the completion event (#185) reports the same text that
-        // lands in the card's note — never a second, divergent rendering.
+        // ends it, so the artifact (#187) and the completion event (#185) both
+        // record exactly the text the note does rather than a second, divergent
+        // rendering of the same run.
         let result_text = loop {
             let outcome = run_turn
                 // A dispatched task card carries no chat bubble (its steps are
@@ -226,6 +227,32 @@ impl HarnessBrain {
         tasks.upsert(&self.record.id, &card).await?;
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
+
+        // Issue #187: record the run's output as a versioned artifact so the
+        // Task Detail Artifacts tab has something behind it, and so a later
+        // operator edit can be diffed against what the agent actually wrote.
+        //
+        // Only a card that landed in its **success terminal** produces one:
+        // that is the state meaning "the agent produced something reviewable".
+        // A failure, a cancellation, or a pause writes its line to the note as
+        // before but is NOT an artifact — versioning `dispatch failed: …`
+        // strings would bury the real drafts and make the churn metric
+        // meaningless.
+        //
+        // The success terminal is two columns, not one (#179): a board-created
+        // card parks in `in_review` for its operator reviewer, while a card
+        // carrying an `origin_chat_id` — a delegated handoff nobody is watching
+        // the board for — completes straight to `done`. Both ran a turn and
+        // both produced a deliverable, so testing the column against
+        // `success_terminal_column` keeps the artifact tied to "the run
+        // succeeded" rather than to one particular landing column.
+        //
+        // Recorded before the #185 journal writes below because those move
+        // `result_text` into the completion event; the artifact only borrows it.
+        if card.column == success_terminal_column(&card) {
+            self.record_task_artifact(&card, &responder, &result_text)
+                .await?;
+        }
 
         // Issue #185: correlate this dispatch's journal trail to its card.
         //
@@ -332,6 +359,51 @@ impl HarnessBrain {
             reply_to: Some(crate::ports::types::ReplyTo { chat_id: origin }),
             steps: Vec::new(),
         }))
+    }
+
+    /// Records a completed dispatch's output as a versioned artifact (#187).
+    ///
+    /// A task that is dispatched, reviewed, and dispatched again is the same
+    /// deliverable evolving — so the second run appends a **version** to the
+    /// existing artifact rather than opening a second one. The artifact to
+    /// extend is the most recently updated one already attached to this card;
+    /// only the first run creates.
+    ///
+    /// A missing artifact store is a silent no-op, exactly like a missing task
+    /// store: the note is still written, so the board behaves as it did before
+    /// this issue.
+    async fn record_task_artifact(
+        &self,
+        card: &TaskRecord,
+        responder: &str,
+        body: &str,
+    ) -> Result<()> {
+        let Some(artifacts) = self.deps.artifacts.as_ref() else {
+            return Ok(());
+        };
+        let existing = artifacts
+            .list(&self.record.id, Some(&card.id))
+            .await?
+            .into_iter()
+            .max_by_key(|a| a.updated_at_millis);
+        let at = now_millis();
+        let record = match existing {
+            Some(mut found) => {
+                found.push_version(body, ArtifactAuthor::Agent, responder, at, None);
+                found
+            }
+            None => ArtifactRecord::new(
+                generate_id(),
+                &card.id,
+                &card.title,
+                ArtifactKind::Text,
+                body,
+                responder,
+                at,
+            ),
+        };
+        artifacts.upsert(&self.record.id, &record).await?;
+        Ok(())
     }
 
     /// Resolves which roster agent runs a task: its `assignee` when that names a
@@ -586,6 +658,12 @@ fn task_instruction(card: &TaskRecord) -> String {
 /// handoff, its result was already posted back into the originating thread, and
 /// no operator is watching the board for it. So a card that remembers an origin
 /// completes to `done`; a board-created card still parks in `in_review`.
+///
+/// One thing does read this back (#187): `run_task` records a versioned
+/// artifact only for a card that landed on the column this returns, which is
+/// how "the run succeeded" is distinguished from a failure, cancellation, or
+/// pause. Compare against this function rather than against a literal column,
+/// or a delegated handoff completing to `done` silently stops versioning.
 fn success_terminal_column(card: &TaskRecord) -> &'static str {
     if card.origin_chat_id.is_some() {
         DONE
@@ -847,6 +925,7 @@ description = "Runs Acme."
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -991,6 +1070,7 @@ description = "Builds it."
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1012,6 +1092,45 @@ description = "Builds it."
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
             tasks,
+        )
+    }
+
+    /// As [`brain_with_tasks`], but with the artifact store wired to the same
+    /// [`FsOps`] handle (it implements both), so a dispatch's versioned output
+    /// is observable.
+    fn brain_with_artifacts(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        let ops = Arc::new(FsOps::new(dir));
+        let deps = HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(FsContextStore::new(dir)),
+            store: Arc::new(FsCompanyStore::new(dir)),
+            meter: Some(Arc::new(FsOps::new(dir))),
+            workspace_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: Some(ops.clone()),
+            artifacts: Some(ops.clone()),
+            skills: None,
+            skills_source_dir: None,
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: orchestrator::DelegationQueue::default(),
+            workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+        };
+        (
+            HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
+            ops,
         )
     }
 
@@ -1209,6 +1328,89 @@ description = "Builds it."
         assert!(!posted.text.contains("ready for review"), "{}", posted.text);
     }
 
+    /// Issue #179 split the success terminal in two, and artifact capture (#187)
+    /// keys off it: a delegated card completes to `done` rather than parking in
+    /// `in_review`, and its deliverable must still be versioned.
+    ///
+    /// Gating capture on the literal `in_review` would silently stop versioning
+    /// exactly the cards nobody is watching the board for — the run succeeded
+    /// and produced output either way, so the guard has to track "landed on the
+    /// success terminal", not one particular column name.
+    #[tokio::test]
+    async fn a_delegated_card_completing_to_done_still_records_an_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        // Empty assignee → the default responder, so the turn actually runs.
+        let mut c = card("t-origin", "");
+        c.origin_chat_id = Some("strategy".to_string());
+        ops.upsert(&CompanyId::new("acme"), &c).await.expect("seed");
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t-origin".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        let moved = only_card(&ops).await;
+        assert_eq!(
+            moved.column, "done",
+            "a delegated card lands on the `done` success terminal (#179)"
+        );
+        let artifacts = crate::ports::artifacts::ArtifactStore::list(
+            &*ops,
+            &CompanyId::new("acme"),
+            Some("t-origin"),
+        )
+        .await
+        .expect("list");
+        assert_eq!(
+            artifacts.len(),
+            1,
+            "a delegated card's deliverable must still be versioned"
+        );
+        assert_eq!(artifacts[0].versions.len(), 1);
+    }
+
+    /// The other half of the same guard: a run that did NOT succeed still
+    /// writes its note but must not open an artifact, whichever terminal the
+    /// card would otherwise have used.
+    #[tokio::test]
+    async fn a_cancelled_delegated_card_records_no_artifact() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops, _provider) =
+            brain_that_steers_itself(dir.path(), "t-cancel", vec![SteerAction::Cancel]);
+        let mut c = card("t-cancel", "");
+        c.origin_chat_id = Some("strategy".to_string());
+        ops.upsert(&CompanyId::new("acme"), &c).await.expect("seed");
+
+        brain
+            .run_cycle(
+                request(vec![CompanyEvent::TaskDispatched {
+                    task_id: "t-cancel".into(),
+                }]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
+
+        assert_eq!(only_card(&ops).await.column, "backlog");
+        let artifacts = crate::ports::artifacts::ArtifactStore::list(
+            &*ops,
+            &CompanyId::new("acme"),
+            Some("t-cancel"),
+        )
+        .await
+        .expect("list");
+        assert!(
+            artifacts.is_empty(),
+            "a cancelled run has no deliverable to version"
+        );
+    }
+
     /// The success terminal is chosen by origin, not by outcome: a board-created
     /// card keeps its `in_review` review gate.
     #[test]
@@ -1393,6 +1595,7 @@ members = ["engineer"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1765,6 +1968,7 @@ members = ["eng1", "eng2"]
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1889,6 +2093,7 @@ members = ["eng1", "eng2"]
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -1959,6 +2164,7 @@ members = ["eng1", "eng2"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2236,6 +2442,9 @@ members = ["eng1", "eng2"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
+            // Same handle as `tasks` (FsOps is both stores), so a steered run's
+            // artifact side effect — or the absence of one — is observable.
+            artifacts: Some(tasks.clone()),
             skills: None,
             skills_source_dir: None,
             mcp_servers: Vec::new(),
@@ -2466,8 +2675,8 @@ members = ["eng1", "eng2"]
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
+            artifacts: None,
             delegations: queue,
-            approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             workflow_runner: orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
