@@ -42,17 +42,37 @@
 //!   2. the recipient must be an **established thread** — the company's inbox
 //!      must already hold inbound mail from that address. This is the rule
 //!      ported verbatim from the agent send path
-//!      ([`crate::runtime::cycle`]); a cold recipient is **skipped and
-//!      reported**, never sent to.
+//!      ([`crate::runtime::cycle`]); a cold recipient is **parked for operator
+//!      approval**, never sent to on the workflow's own authority.
 //! * **`channel`** — the target must match a [`ChannelAdapter`] the deployment
 //!   already wired. A graph cannot conjure a channel; it can only address one an
 //!   operator installed. Constrained by construction, like `owner`.
 //!
-//! A cold `email` recipient is a real product gap, not a design end-state: the
-//! agent path parks such a send for operator approval, but the engine's approval
-//! pause has no resume path today, so gating delivery on it would dead-end the
-//! report instead of delaying it. Skipping loudly is the honest behaviour until
-//! a resume path exists.
+//! # A cold recipient is delayed, not dropped (issue #227)
+//!
+//! A cold `email` recipient used to end the report's life: a `skipped` row and
+//! nothing else, while a teammate emailing the same new contact got an approval
+//! card. Delivery now parks the send the same way the agent path does, so the
+//! two paths refuse identically and both refusals are recoverable.
+//!
+//! **This does not resume the run, and does not need to.** Delivery is
+//! post-engine by design: by the time a destination is refused,
+//! `tinyflows::engine::run` has already returned and the run is complete —
+//! there is nothing to resume. What is parked is the *send*, not the run, and
+//! approving it executes through the same
+//! [`perform_effect`](crate::runtime::cycle) path that mails an agent's
+//! approved `email.send` from an HTTP handler outside any live cycle.
+//!
+//! One consequence to be honest about: a workflow run is not persisted, so a
+//! `pending` row is a **snapshot** taken at delivery time and can never later
+//! flip to `sent`. The approvals queue is the live source of truth — it is
+//! journal-backed and survives a restart; the row only points at it.
+//!
+//! The park is **direct**, never routed through
+//! [`ApprovalGate::evaluate`](crate::ports::ApprovalGate): under `full` policy
+//! mode that returns `Allow` for a `Send` effect, which would auto-send cold
+//! workflow mail on most companies and turn the established-thread gate into a
+//! suggestion. See `park_cold_recipient` below.
 //!
 //! # Failure is reported, never fatal
 //!
@@ -76,11 +96,15 @@ use serde_json::Value;
 use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyMail;
 use crate::company::{WorkflowDestinationDef, WorkflowNodeKind};
-use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage};
-use crate::ports::{
-    ChannelAdapter, DeliveryReport, DeliveryStatus, EmailRecord, InboxStore, UserRole, UserStatus,
-    UserStore, generate_id, now_millis,
+use crate::ports::types::{
+    Actor, ActorKind, CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage, Verdict,
 };
+use crate::ports::{
+    ApprovalGate, ChannelAdapter, DeliveryReport, DeliveryStatus, EmailRecord, InboxStore,
+    UserRole, UserStatus, UserStore, generate_id, now_millis,
+};
+use crate::runtime::cycle::EMAIL_SEND_KIND;
+use crate::runtime::journal::RuntimeJournal;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 use crate::server::ops::smtp::local_part;
 
@@ -118,6 +142,30 @@ pub struct WorkflowDeliveryDeps {
     pub users: Arc<dyn UserStore>,
     /// Every wired channel adapter, including the always-present `operator`.
     pub channels: Vec<Arc<dyn ChannelAdapter>>,
+    /// What a cold `email` recipient is parked on (issue #227). `None` fails
+    /// closed to the pre-#227 behaviour: the report is `skipped`, never a
+    /// `pending` row no queue is backing.
+    pub parking: Option<DeliveryParking>,
+}
+
+/// The approval queue's two halves, bundled so a delivery can only ever hold
+/// **both or neither**.
+///
+/// Deliberately one field rather than two `Option`s. Parking on the gate
+/// without journaling would produce an approval that is invisible to
+/// `/approvals` (which reads the journal, not the gate) and gone on the next
+/// restart — a card the operator can neither see nor approve, backing a
+/// `pending` row that promises one exists. Making that state unrepresentable is
+/// cheaper than remembering not to build it.
+#[derive(Clone)]
+pub struct DeliveryParking {
+    /// Where the effect is parked, yielding the
+    /// [`ApprovalId`](crate::ports::types::ApprovalId) the operator later
+    /// resolves.
+    pub approvals: Arc<dyn ApprovalGate>,
+    /// The durable record of the park. This is what `/approvals` lists and what
+    /// boot replay rehydrates, so it is what makes the card survive a restart.
+    pub journal: Arc<RuntimeJournal>,
 }
 
 impl std::fmt::Debug for WorkflowDeliveryDeps {
@@ -126,6 +174,7 @@ impl std::fmt::Debug for WorkflowDeliveryDeps {
         // whose derived `Debug` prints the password (see `mailer::test`).
         f.debug_struct("WorkflowDeliveryDeps")
             .field("mail", &self.mail.is_some())
+            .field("parking", &self.parking.is_some())
             .field(
                 "channels",
                 &self
@@ -339,18 +388,10 @@ async fn deliver_one(
             )
             .await
             {
-                tracing::warn!(
-                    company = %record.id,
-                    node = %node_id,
-                    "workflow delivery: skipped an email destination — the recipient is not an established thread"
+                reports.push(
+                    park_cold_recipient(delivery, record, node_id, target, subject, text, row)
+                        .await,
                 );
-                reports.push(row(
-                    Some(target.to_string()),
-                    DeliveryStatus::Skipped,
-                    "this recipient has never written to the company, so a workflow may not open \
-                     the conversation — send once from the inbox first"
-                        .to_string(),
-                ));
                 return;
             }
             reports.push(
@@ -392,6 +433,198 @@ async fn deliver_one(
             format!("`{other}` is not a destination kind this runtime knows how to deliver to"),
         )),
     }
+}
+
+/// Parks a cold `email` recipient's report for operator approval, returning the
+/// row that says so (issue #227).
+///
+/// # Why this parks DIRECTLY instead of asking the gate
+///
+/// The obvious shape — evaluate the effect, then act on the decision — is
+/// wrong here, and dangerously so.
+/// [`ManifestApprovalGate::evaluate`](crate::policy::ManifestApprovalGate)
+/// returns `Allow` for a `Send` effect under `full` policy mode, and
+/// `email.send` is not in the always-approve list. Routing through it would
+/// therefore **auto-send** this mail on every full-mode company — which is most
+/// of them — quietly converting the established-thread rule from a gate into a
+/// suggestion. The refusal is already decided by the time we get here; the only
+/// question is whether the report is dropped or recoverable. So this takes the
+/// same already-decided path [`CycleHost::park_effect`](crate::ports::brain::CycleHost)
+/// does on the agent side: park, journal, done.
+///
+/// **The invariant: a cold recipient never auto-sends.** With no parking wired
+/// the report degrades to the pre-#227 `skipped` row; if parking itself errors
+/// it degrades to `skipped` too. Nothing about a cold recipient reaches a
+/// transport without a human verdict.
+async fn park_cold_recipient(
+    delivery: &WorkflowDeliveryDeps,
+    record: &CompanyRecord,
+    node_id: &str,
+    target: &str,
+    subject: &str,
+    text: &str,
+    row: impl Fn(Option<String>, DeliveryStatus, String) -> DeliveryReport,
+) -> DeliveryReport {
+    let Some(parking) = &delivery.parking else {
+        // Fail closed to the pre-#227 behaviour. A `pending` row on a runtime
+        // with no approvals queue would point the operator at a card that does
+        // not exist.
+        tracing::warn!(
+            company = %record.id,
+            node = %node_id,
+            "workflow delivery: skipped an email destination — the recipient is not an established \
+             thread and this runtime has no approvals queue to park it on"
+        );
+        return row(
+            Some(target.to_string()),
+            DeliveryStatus::Skipped,
+            "this recipient has never written to the company, so a workflow may not open the \
+             conversation — send once from the inbox first"
+                .to_string(),
+        );
+    };
+
+    // The same effect shape the agent path builds in `CycleHostImpl::send_email`
+    // — same kind, same group, same counterparty flags, same payload keys — so
+    // the operator sees one kind of card and `perform_effect` executes it on
+    // approval through the code that already ships.
+    let effect = Effect {
+        kind: EMAIL_SEND_KIND.into(),
+        group: EffectGroup::Send,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: true,
+        payload: serde_json::json!({
+            "to": target,
+            "subject": subject,
+            // Already truncated by `report_text`.
+            "body": text,
+        }),
+    };
+
+    match park_effect(parking, &record.id, effect).await {
+        Ok(()) => {
+            tracing::info!(
+                company = %record.id,
+                node = %node_id,
+                "workflow delivery: parked an email destination for operator approval — the \
+                 recipient is not an established thread"
+            );
+            row(
+                Some(target.to_string()),
+                DeliveryStatus::Pending,
+                "this recipient has never written to the company, so a workflow may not open the \
+                 conversation on its own — the report is waiting for you in Approvals, and \
+                 approving it sends the mail"
+                    .to_string(),
+            )
+        }
+        Err(err) => {
+            // The queue is the only thing that failed; the refusal itself still
+            // holds. Report the pre-#227 outcome and say why it was not parked.
+            //
+            // `err` is deliberately the only thing interpolated: this line goes
+            // to host stdout, which on a hosted tenant is us and not the
+            // operator, so the recipient's address must not ride it (issue
+            // #248). The row the operator reads names the target; the log does
+            // not.
+            tracing::warn!(
+                company = %record.id,
+                node = %node_id,
+                error = %err,
+                "workflow delivery: could not park a cold email destination for approval; the \
+                 report was NOT sent"
+            );
+            row(
+                Some(target.to_string()),
+                DeliveryStatus::Skipped,
+                "this recipient has never written to the company, and this report could not be \
+                 queued for your approval either — send once from the inbox first"
+                    .to_string(),
+            )
+        }
+    }
+}
+
+/// Parks `effect` on the gate and journals it — **both halves or neither**.
+///
+/// The gate is in-memory; the journal is the durable record `/approvals` reads
+/// and boot replay rehydrates. A gate entry the journal never recorded is the
+/// worst of the three possible outcomes: it shows up in the operator's queue
+/// now, vanishes on the next restart, and backs a `pending` row that promises a
+/// card which no longer exists.
+///
+/// Bundling the two handles in [`DeliveryParking`] makes the *mis-wiring* of
+/// that state unrepresentable, but it does nothing about a **partial failure at
+/// runtime** — `park` succeeding and `record_parked` erroring (a full disk, a
+/// read-only volume, a serialization fault). So the journal write is treated as
+/// the commit point: if it fails, the gate entry is retracted before returning
+/// the error, and the caller degrades to the `skipped` row it already emits for
+/// a parking failure.
+///
+/// Retraction has to undo **two** things, because a failed `record_parked` has
+/// already mutated the journal's in-memory queue (it inserts before it appends,
+/// so the entry is live even though nothing reached disk):
+///
+/// 1. [`ApprovalGate::resolve`] with [`Verdict::Deny`] — the trait's only
+///    removal verb, and the honest one: this effect must never execute. It is
+///    attributed to [`ActorKind::System`](crate::ports::types::ActorKind::System)
+///    (the runtime itself, as boot replay and the TTL sweep are) rather than to
+///    an operator who made no such decision.
+/// 2. [`RuntimeJournal::record_resolved`] — which also removes before it
+///    appends, so it clears the in-memory queue entry that would otherwise show
+///    the operator a card `/approvals` lists but the gate can no longer
+///    execute. Its own append will usually fail for the same reason the first
+///    one did; that is fine and expected, since there is no `ApprovalParked`
+///    line on disk for it to pair with anyway.
+///
+/// The ordering cannot simply be inverted to dodge this: `record_parked` needs
+/// the [`ApprovalId`](crate::ports::types::ApprovalId) that `park` mints, so the
+/// gate write must come first.
+///
+/// Both rollback steps deliberately ignore their own errors and the **original**
+/// journal error propagates — the report is reported unsent either way, and
+/// losing the real cause behind a cleanup error would make the failure harder to
+/// diagnose, not easier.
+async fn park_effect(
+    parking: &DeliveryParking,
+    company: &CompanyId,
+    effect: Effect,
+) -> Result<(), crate::error::OpenCompanyError> {
+    let approval_id = parking.approvals.park(company, effect.clone()).await?;
+    if let Err(err) = parking
+        .journal
+        .record_parked(&approval_id, &effect, now_millis())
+        .await
+    {
+        // Roll back to "never parked". Both steps deliberately swallow their own
+        // errors — `err` below is the one worth surfacing.
+        if let Err(rollback) = parking
+            .approvals
+            .resolve(
+                &approval_id,
+                Verdict::Deny,
+                Actor {
+                    kind: ActorKind::System,
+                    id: "workflow-delivery".to_string(),
+                },
+            )
+            .await
+        {
+            tracing::error!(
+                company = %company,
+                error = %rollback,
+                "workflow delivery: a parked effect could not be journaled AND could not be \
+                 retracted from the approval gate; it may linger in the queue until restart"
+            );
+        }
+        // Clears the in-memory queue entry `record_parked` inserted before it
+        // failed to write. Its append will usually fail too — expected, and
+        // ignored: there is no `ApprovalParked` line on disk to pair with.
+        let _ = parking.journal.record_resolved(&approval_id).await;
+        return Err(err);
+    }
+    Ok(())
 }
 
 /// The active admins' email addresses, in store order. An unreadable user store
@@ -619,6 +852,7 @@ mod tests {
 
     use crate::company::parse_workflow;
     use crate::error::OpenCompanyError;
+    use crate::policy::ManifestApprovalGate;
     use crate::ports::UserRecord;
     use crate::ports::types::CompanyId;
     use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
@@ -738,6 +972,12 @@ allow = [{allow}]
         inbox: Arc<FsInboxStore>,
         users: Arc<FsOps>,
         company: CompanyId,
+        /// The approvals queue, when [`with_parking`](Harness::with_parking)
+        /// wired one. The real gate and a real on-disk journal, not fakes: the
+        /// point of these tests is that a workflow's park lands in the same
+        /// queue an agent's does.
+        gate: Option<Arc<ManifestApprovalGate>>,
+        journal: Option<Arc<RuntimeJournal>>,
     }
 
     impl Harness {
@@ -760,13 +1000,62 @@ allow = [{allow}]
                     inbox: inbox.clone(),
                     users: users.clone(),
                     channels,
+                    parking: None,
                 },
                 mail,
                 channel,
                 inbox,
                 users,
                 company: CompanyId::new("acme"),
+                gate: None,
+                journal: None,
             }
+        }
+
+        /// Wires the approvals queue the production builder wires: a real
+        /// [`ManifestApprovalGate`] over `policy_mode` and a real
+        /// [`RuntimeJournal`] on disk under `dir`.
+        ///
+        /// `policy_mode` is a parameter because `full` is the interesting one:
+        /// it is the mode under which `evaluate` would return `Allow` for a
+        /// `Send` effect, so a test that parks under `full` is the one that
+        /// proves delivery does not route through `evaluate`.
+        fn with_parking(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
+            let policy = toml::from_str(&format!("mode = \"{policy_mode}\"\n"))
+                .expect("valid [policy] block");
+            let gate = Arc::new(ManifestApprovalGate::new(policy));
+            let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
+            self.deps.parking = Some(DeliveryParking {
+                approvals: gate.clone(),
+                journal: journal.clone(),
+            });
+            self.gate = Some(gate);
+            self.journal = Some(journal);
+            self
+        }
+
+        /// Wires a gate plus a journal whose every write **fails**, for the
+        /// partial-failure case.
+        ///
+        /// The failure is induced by pointing the journal at a path that is
+        /// already a *directory*: `append` creates the parent fine and then
+        /// `OpenOptions::open` returns `EISDIR`. Deterministic, cross-platform,
+        /// and it fails at the real I/O boundary rather than at a mock, so the
+        /// test exercises the same error path a full disk would.
+        fn with_failing_journal(mut self, dir: &std::path::Path, policy_mode: &str) -> Self {
+            let policy = toml::from_str(&format!("mode = \"{policy_mode}\"\n"))
+                .expect("valid [policy] block");
+            let gate = Arc::new(ManifestApprovalGate::new(policy));
+            let blocked = dir.join("unwritable-journal.jsonl");
+            std::fs::create_dir_all(&blocked).expect("journal path occupied by a directory");
+            let journal = Arc::new(RuntimeJournal::new(blocked));
+            self.deps.parking = Some(DeliveryParking {
+                approvals: gate.clone(),
+                journal: journal.clone(),
+            });
+            self.gate = Some(gate);
+            self.journal = Some(journal);
+            self
         }
 
         /// Adds an active admin with `email` to the company directory.
@@ -1054,6 +1343,266 @@ allow = [{allow}]
             h.mail.sent().is_empty(),
             "a cold recipient must not be mailed"
         );
+    }
+
+    // --- email: cold recipients park (issue #227) ----------------------------
+
+    /// **Issue #227, the headline.** Cold and granted, with an approvals queue
+    /// wired: the report is PARKED rather than dropped. One `pending` row,
+    /// nothing mailed, and a real card in the journal the operator's
+    /// `/approvals` list reads.
+    ///
+    /// Note the policy mode: `full`. That is deliberately the mode under which
+    /// `ApprovalGate::evaluate` returns `Allow` for a `Send` effect, so if this
+    /// path ever grew an evaluate-then-dispatch step the mail would go out here
+    /// and this test would fail on `sent()`.
+    #[tokio::test]
+    async fn a_cold_recipient_is_parked_for_approval_and_nothing_is_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_parking(dir.path(), "full");
+        h.receive_from("someone-else@example.com").await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].status, DeliveryStatus::Pending, "{reports:?}");
+        assert_eq!(
+            reports[0].target.as_deref(),
+            Some("stranger@example.com"),
+            "{reports:?}"
+        );
+        // The row has to point somewhere, or `pending` is just a nicer word for
+        // dropped.
+        assert!(reports[0].detail.contains("Approvals"), "{reports:?}");
+        // THE INVARIANT: a cold recipient never auto-sends.
+        assert!(
+            h.mail.sent().is_empty(),
+            "a cold recipient must not be mailed, parked or not"
+        );
+        assert!(
+            h.inbox_messages().await.iter().all(|m| !m.outbound),
+            "nothing was sent, so there is no outbound record to leave"
+        );
+
+        // And the card really is in the durable queue — this is what
+        // `/approvals` lists and what boot replay rehydrates.
+        let pending = h.journal.as_ref().unwrap().pending();
+        assert_eq!(pending.len(), 1, "{pending:?}");
+        assert_eq!(pending[0].effect.kind, EMAIL_SEND_KIND);
+    }
+
+    /// The parked effect must have the **same shape as the agent path's**
+    /// (`CycleHostImpl::send_email`), field for field. Not cosmetic: the
+    /// operator sees one kind of card either way, and `perform_effect` keys on
+    /// `kind` plus the `to`/`subject`/`body` payload to actually mail it on
+    /// approval. A drift here parks cards that do nothing when approved.
+    #[tokio::test]
+    async fn the_parked_effect_matches_the_agent_paths_shape() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_parking(dir.path(), "full");
+
+        deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        let pending = h.journal.as_ref().unwrap().pending();
+        let effect = &pending[0].effect;
+        assert_eq!(effect.kind, EMAIL_SEND_KIND, "same kind constant");
+        assert_eq!(effect.group, EffectGroup::Send);
+        assert_eq!(effect.amount_usd, None, "a send costs nothing to gate on");
+        // The two flags that say *why* this parked: cold counterparty.
+        assert!(!effect.established_thread);
+        assert!(effect.first_time_counterparty);
+        // The payload `perform_effect` reads.
+        assert_eq!(effect.payload["to"], "stranger@example.com");
+        assert!(
+            effect.payload["subject"].as_str().unwrap().contains("Acme"),
+            "{effect:?}"
+        );
+        assert!(
+            effect.payload["body"]
+                .as_str()
+                .unwrap()
+                .contains("Q3 is up 12%."),
+            "the report itself is the body, or approving sends an empty mail: {effect:?}"
+        );
+        // The gate holds the identical effect under the same id, so resolving
+        // the approval returns something executable.
+        let parked = h
+            .gate
+            .as_ref()
+            .unwrap()
+            .parked_effect(&pending[0].id)
+            .expect("the gate holds the same id the journal recorded");
+        assert_eq!(parked.payload, effect.payload);
+        assert_eq!(parked.kind, effect.kind);
+    }
+
+    /// **Data integrity (PR #256 review).** A journal write that fails AFTER the
+    /// gate accepted the park must leave **no gate entry behind**.
+    ///
+    /// The half-wired state the bundled [`DeliveryParking`] makes unrepresentable
+    /// is a *construction* mistake; this is the *runtime* version of it, and
+    /// bundling does nothing for it. An orphaned gate entry is the worst of the
+    /// three outcomes: an executable effect sitting in the queue with no durable
+    /// record, visible now and gone on the next restart, backing a row that
+    /// promises a card which will not survive.
+    ///
+    /// Asserts all four halves of the rollback: `skipped` (not `pending`), no
+    /// gate entry, no in-memory queue entry, and nothing sent.
+    #[tokio::test]
+    async fn a_failed_journal_write_leaves_no_orphaned_gate_entry() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_failing_journal(dir.path(), "full");
+        h.receive_from("someone-else@example.com").await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        // Degrades to the pre-#227 row, never `pending`: there is no durable
+        // card to point the operator at.
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Skipped,
+            "a park that could not be journaled is not pending: {reports:?}"
+        );
+        assert!(
+            reports[0].detail.contains("could not be queued"),
+            "{reports:?}"
+        );
+
+        // THE FINDING: the gate must not still hold the effect.
+        assert!(
+            h.gate.as_ref().unwrap().parked_ids().is_empty(),
+            "a journal write failure must retract the gate entry, not orphan it"
+        );
+        // …and the operator's queue must not list a card the gate can no longer
+        // execute. `record_parked` inserts before it appends, so this only holds
+        // because the rollback clears it too.
+        assert!(
+            h.journal.as_ref().unwrap().pending().is_empty(),
+            "no phantom card may be left in the approvals queue"
+        );
+        // The refusal still held throughout.
+        assert!(h.mail.sent().is_empty(), "nothing may leave the process");
+    }
+
+    /// **Fail-closed (issue #227).** With no approvals queue wired, delivery
+    /// degrades to the pre-#227 `skipped` row rather than promising a `pending`
+    /// card that nothing is backing. A `pending` row on a runtime with no queue
+    /// would send the operator to an empty Approvals list.
+    #[tokio::test]
+    async fn a_cold_recipient_without_a_queue_falls_back_to_skipped() {
+        let dir = tempfile::tempdir().unwrap();
+        // No `with_parking`: exactly the shape every non-production
+        // construction site builds.
+        let h = Harness::new(dir.path(), true, true);
+        assert!(h.deps.parking.is_none());
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Skipped,
+            "never `pending` with no queue to back it: {reports:?}"
+        );
+        assert!(reports[0].detail.contains("never written"), "{reports:?}");
+        assert!(h.mail.sent().is_empty());
+    }
+
+    /// The established-thread gate is unchanged by #227: a recipient who DID
+    /// write in still sends immediately, and parks nothing. Parking is what
+    /// happens to the refusal, not a new hurdle in front of a legitimate send.
+    #[tokio::test]
+    async fn an_established_recipient_still_sends_without_parking() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_parking(dir.path(), "full");
+        h.receive_from("ada@example.com").await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("ada@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
+        assert_eq!(h.mail.sent().len(), 1);
+        assert!(
+            h.journal.as_ref().unwrap().pending().is_empty(),
+            "an established send must not clutter the approvals queue"
+        );
+    }
+
+    /// The grant gate is unchanged by #227 too, and still runs FIRST: an
+    /// ungranted company's cold send is `denied` outright, never parked. Parking
+    /// an effect the company has no grant for would put a card in front of the
+    /// operator that policy already refused — approving it would be an end-run
+    /// around `[tools].allow`.
+    #[tokio::test]
+    async fn an_ungranted_cold_recipient_is_denied_not_parked() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_parking(dir.path(), "full");
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["docs.*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports[0].status, DeliveryStatus::Denied, "{reports:?}");
+        assert!(
+            h.journal.as_ref().unwrap().pending().is_empty(),
+            "a denied destination must not reach the approvals queue"
+        );
+        assert!(h.mail.sent().is_empty());
+    }
+
+    /// A company with no mailbox is still `skipped`, not parked: there is
+    /// nothing to send from, so approving a card would fail at the transport.
+    /// That arm is checked before the thread gate and #227 does not move it.
+    #[tokio::test]
+    async fn a_company_without_a_mailbox_is_skipped_not_parked() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true).with_parking(dir.path(), "full");
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            &reached_output(),
+        )
+        .await;
+
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped, "{reports:?}");
+        assert!(reports[0].detail.contains("no mailbox"), "{reports:?}");
+        assert!(h.journal.as_ref().unwrap().pending().is_empty());
     }
 
     /// **Regression (PR #226 review).** A busy company's inbox must not lose an
