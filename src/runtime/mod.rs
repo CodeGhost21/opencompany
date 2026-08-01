@@ -12,6 +12,11 @@
 //!   trigger nodes (issue #169). Both share the [`cron`] matcher and [`Clock`].
 //! - The [`journal`] backs at-most-once effects and the durable approval queue.
 
+/// Brain-agnostic resolution of a task card's `assignee` against the full
+/// roster — teammates, overlay teammates and desks (issue #205). Shared by the
+/// harness dispatch path and the REST write boundary so the board's assignee
+/// means one thing. See [`assignee`].
+pub mod assignee;
 pub mod builder;
 pub mod channel;
 pub mod cron;

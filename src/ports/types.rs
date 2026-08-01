@@ -1287,6 +1287,56 @@ impl CompanyRecord {
         self.manifest.agents.iter().any(|a| a.id == agent_id)
             || self.overlay_agents.iter().any(|a| a.id == agent_id)
     }
+
+    /// Resolves an operator-typed teammate key to its canonical roster id,
+    /// searching manifest agents first and then the overlay teammates.
+    ///
+    /// The case-insensitive companion to [`Self::is_roster_agent`], for the one
+    /// place a human types the key by hand: a card's `assignee` (issue #205).
+    /// [`Self::resolve_desk_id`] already accepts a desk by id **or** name
+    /// case-insensitively, so an assignee naming a desk resolved while the same
+    /// string naming a teammate — `"Engineer"` for `engineer` — did not.
+    ///
+    /// Matches on **id only** (never `role`, never an overlay teammate's
+    /// display name) so the key stays one unambiguous namespace; folding the
+    /// case is what stops a typed capital reading as an unknown agent.
+    ///
+    /// [`Self::is_roster_agent`] keeps its exact-match contract: it guards the
+    /// desk overlay, whose ids are machine-written rather than typed.
+    pub fn resolve_roster_agent_id(&self, agent_key: &str) -> Option<String> {
+        self.manifest
+            .agents
+            .iter()
+            .map(|a| &a.id)
+            .chain(self.overlay_agents.iter().map(|a| &a.id))
+            .find(|id| id.eq_ignore_ascii_case(agent_key))
+            .cloned()
+    }
+
+    /// Canonical ids of operator-added teammates whose **display name** matches
+    /// `name_key` case-insensitively.
+    ///
+    /// The companion to [`Self::resolve_roster_agent_id`] for the half of the
+    /// roster that has no typable id. `server::ops::team` mints an overlay
+    /// teammate with `id: generate_id()`, so an operator who adds "Shane" never
+    /// sees anything but the name — matching on ids alone made every teammate
+    /// they added unassignable, on a board whose Assignee field is free text
+    /// with no picker. Manifest agents keep their id-only namespace: their ids
+    /// (`ceo`, `engineer`) are human-authored and typable, and
+    /// [`Self::resolve_roster_agent_id`] is tried first, so a display name can
+    /// never shadow a real id.
+    ///
+    /// Returns **every** match rather than the first, so the caller can tell a
+    /// unique name from a collision the operator created. Silently routing to
+    /// whichever teammate was added first would reintroduce exactly the
+    /// misrouting this resolver exists to end.
+    pub fn overlay_agent_ids_by_name(&self, name_key: &str) -> Vec<String> {
+        self.overlay_agents
+            .iter()
+            .filter(|a| a.name.eq_ignore_ascii_case(name_key))
+            .map(|a| a.id.clone())
+            .collect()
+    }
 }
 
 /// A compact company listing entry.
