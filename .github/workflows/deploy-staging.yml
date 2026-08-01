@@ -163,7 +163,21 @@ jobs:
           # `ctr`, which defaults to `default`), but naming it means this does not
           # silently break if that wrapper default ever changes.
           k3s ctr -n k8s.io images pull --user "${PULL_USER}:${PULL_PW}" "${IMAGE}"
-          k3s ctr -n k8s.io images ls -q | grep -Fqx "${IMAGE}" \
+
+          # Retry the check: `images ls` can lag a just-finished pull by a beat
+          # while containerd commits the record (observed failing 147ms after a
+          # successful pull, with layers still reporting `extracted`). The
+          # assertion is worth keeping — a silent pull failure would leave tenants
+          # unable to start — but it must not fail the deploy on that race.
+          present=no
+          for _ in 1 2 3 4 5 6 7 8 9 10; do
+            if k3s ctr -n k8s.io images ls -q | grep -Fqx "${IMAGE}"; then
+              present=yes
+              break
+            fi
+            sleep 2
+          done
+          [ "${present}" = yes ] \
             || { echo "ERROR: ${IMAGE} is not in the k8s.io containerd namespace after pull" >&2; exit 1; }
 
           # Tenant pods pin imagePullPolicy: IfNotPresent, so a moving tag is not
@@ -183,24 +197,33 @@ jobs:
             exit 1
           fi
 
-          # New and woken tenants boot on the new image from here. ALREADY
-          # RUNNING tenants keep their current image until recreated — that is
-          # deliberate, since restarting them interrupts live agent work.
+          # OCM_TENANT_IMAGE only reaches a tenant when the manager PROVISIONS
+          # it — `ensure_running` calls `provision()` only when the StatefulSet is
+          # missing, and the reconciler does not re-apply manifests. So an
+          # existing tenant keeps its original image indefinitely, across
+          # scale-to-zero and wake alike; only a brand-new tenant picks this up.
+          #
+          # A `rollout restart` therefore does NOT move a tenant to a new image:
+          # it recreates the pod from the same spec. Refreshing means patching the
+          # image on the StatefulSet itself.
           if [ "${REFRESH_ALL}" = "true" ]; then
-            echo "Restarting all running tenants onto the new image (requested)..."
-            # `kubectl rollout restart` has no -A/--all-namespaces (only `get`
-            # does), so enumerate first and restart per namespace. Each tenant
-            # lives in its own namespace, so this is the only way to reach them
-            # all in one pass.
+            echo "Moving all tenants onto ${IMAGE} (requested)..."
+            # `kubectl set image` has no -A/--all-namespaces (only `get` does), so
+            # enumerate first and patch each in its own namespace.
             kubectl get statefulset -A -l app=opencompany \
               -o jsonpath='{range .items[*]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}' \
             | while read -r ns name; do
                 [ -n "${ns}" ] || continue
-                echo "  restarting ${ns}/${name}"
-                kubectl -n "${ns}" rollout restart "statefulset/${name}"
+                echo "  ${ns}/${name} -> ${IMAGE}"
+                kubectl -n "${ns}" set image "statefulset/${name}" "opencompany=${IMAGE}"
               done
+            # Report where each tenant actually landed rather than assuming the
+            # patch took: a tenant scaled to zero has no pod to roll, so
+            # `rollout status` would block forever on it.
+            kubectl get statefulset -A -l app=opencompany \
+              -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,IMAGE:.spec.template.spec.containers[?(@.name=="opencompany")].image
           else
-            echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to roll them."
+            echo "Running tenants keep their current image; re-run with refresh_all_tenants=true to move them."
           fi
 
           kubectl -n "${K8S_NAMESPACE}" get deploy "${MANAGER_DEPLOY}" \
