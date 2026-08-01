@@ -9,7 +9,9 @@ import { Plus, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
+  DESTINATION_KINDS,
   createWorkflow,
+  type WorkflowDestination,
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowNode,
@@ -49,6 +51,11 @@ interface DraftNode {
   /** The trigger's cron expression (issue #169). Empty means "no schedule";
    * only ever set on the trigger node, which is where the host allows it. */
   schedule: string;
+  /** Output nodes only. `""` means "don't route this anywhere" — the pre-#170
+   * behaviour, where the report only shows in the run drawer. */
+  destinationKind: "" | WorkflowDestination["kind"];
+  /** The address (`email`) or channel id (`channel`). Unused for `owner`. */
+  destinationTarget: string;
 }
 
 /** "No schedule" — the workflow runs only when something starts it. A sentinel
@@ -90,24 +97,54 @@ interface DraftEdge {
   label: string;
 }
 
+/** The "no destination" option's value. A Select item cannot carry an empty
+ * string, so the sentinel stands in for `destinationKind: ""`. */
+const NO_DESTINATION = "__none__";
+
 let seq = 0;
 function nextKey(): string {
   seq += 1;
   return `row-${seq}`;
 }
 
+/** The field updates for changing a node's kind: the new kind, plus a reset of
+ * every field only the OLD kind's controls could edit.
+ *
+ * The rule is "draft state matches the visible controls", and it covers EVERY
+ * kind-conditional field — `agent` (agent nodes), `schedule` (trigger nodes),
+ * and the destination pair (output nodes). Clearing beats tolerating a stale
+ * value: `submit()` already drops fields that don't match the kind, but a stale
+ * `destinationKind` also had to pass validation, and there was no control left
+ * on screen to fix it with. `agent` and `schedule` never trapped the form that
+ * way; they are cleared so there is one rule here rather than three, and so
+ * that switching a node's kind and back doesn't silently resurrect a value the
+ * author can no longer see.
+ *
+ * Anything added to `DraftNode` behind a `node.kind === …` control belongs in
+ * this reset.
+ */
+function changeKind(kind: string): Partial<DraftNode> {
+  return { kind, agent: "", schedule: "", destinationKind: "", destinationTarget: "" };
+}
+
+/** A blank node row, so every construction site stays in step as the shape grows. */
+function blankNode(fields: Partial<DraftNode> = {}): DraftNode {
+  return {
+    key: nextKey(),
+    id: "",
+    kind: "agent",
+    name: "",
+    summary: "",
+    agent: "",
+    schedule: "",
+    destinationKind: "",
+    destinationTarget: "",
+    ...fields,
+  };
+}
+
 function starterNodes(): DraftNode[] {
-  return [
-    {
-      key: nextKey(),
-      id: "start",
-      kind: "trigger",
-      name: "Start",
-      summary: "",
-      agent: "",
-      schedule: "",
-    },
-  ];
+  return [blankNode({ id: "start", kind: "trigger", name: "Start" })];
 }
 
 /** A safe on-disk id: only letters, digits, `_`, and `-` — a subset of what the
@@ -167,10 +204,7 @@ export function WorkflowCreateDialog({
   }, [open, client, company]);
 
   function addNode() {
-    setNodes((rows) => [
-      ...rows,
-      { key: nextKey(), id: "", kind: "agent", name: "", summary: "", agent: "", schedule: "" },
-    ]);
+    setNodes((rows) => [...rows, blankNode()]);
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
@@ -216,8 +250,22 @@ export function WorkflowCreateDialog({
       if (n.kind === "agent" && !n.agent.trim()) {
         return `Node \`${n.id}\` is an agent node — pick who does it.`;
       }
+      // Only fires for a node that IS a trigger, so this is a check on visible
+      // state, never an off-kind trap.
       if (n.kind === "trigger" && n.schedule.trim() && !looksLikeCron(n.schedule)) {
         return "A schedule is a 5-field cron, e.g. `0 9 * * MON` (minute hour day month weekday).";
+      }
+      // Mirrors the host's `destination` target rules so a wrong target is
+      // caught here rather than after a round trip. There is deliberately NO
+      // "destination on a non-output node" check: `changeKind` makes that state
+      // unreachable, and re-adding the check would only recreate the trap of an
+      // error the author has no visible control to clear.
+      const target = n.destinationTarget.trim();
+      if (n.destinationKind === "email" && !target.includes("@")) {
+        return `Node \`${n.id}\` emails its report — give the recipient's full address.`;
+      }
+      if (n.destinationKind === "channel" && !target) {
+        return `Node \`${n.id}\` posts its report to a channel — name the channel.`;
       }
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
@@ -256,6 +304,18 @@ export function WorkflowCreateDialog({
           // trigger's value is ever sent.
           schedule:
             n.kind === "trigger" && n.schedule.trim() ? n.schedule.trim() : undefined,
+          // Only output nodes route a report, and `owner` resolves server-side
+          // so it must carry no target — the host rejects one.
+          destination:
+            n.kind === "output" && n.destinationKind
+              ? {
+                  kind: n.destinationKind,
+                  target:
+                    n.destinationKind === "owner"
+                      ? undefined
+                      : n.destinationTarget.trim() || undefined,
+                }
+              : undefined,
         }),
       ),
       edges: edges.map(
@@ -413,7 +473,11 @@ function NodeRow({
           placeholder="node id"
           aria-label="Node id"
         />
-        <Select value={node.kind} onValueChange={(v) => onChange({ kind: v ?? "" })}>
+        {/* Changing the kind clears every kind-conditional field, so the draft
+            never holds a value whose control is no longer on screen. Without
+            this, picking a destination and then changing the kind left the row
+            un-submittable with nothing visible to clear. */}
+        <Select value={node.kind} onValueChange={(v) => onChange(changeKind(v ?? ""))}>
           <SelectTrigger className="h-8" aria-label="Node kind">
             <SelectValue />
           </SelectTrigger>
@@ -468,6 +532,61 @@ function NodeRow({
             schedule={node.schedule}
             onChange={(schedule) => onChange({ schedule })}
           />
+        )}
+        {/* Only an output node reports back, so only it can route that report
+            somewhere. "Nowhere" stays the default: the result still shows in the
+            run drawer, which is all an output node did before. */}
+        {node.kind === "output" && (
+          <>
+            <Select
+              value={node.destinationKind || NO_DESTINATION}
+              onValueChange={(v) =>
+                onChange({
+                  destinationKind:
+                    !v || v === NO_DESTINATION
+                      ? ""
+                      : (v as WorkflowDestination["kind"]),
+                  // Switching to `owner` (or to no destination) clears the
+                  // target — the host rejects an `owner` that carries one.
+                  ...(v === "owner" || !v || v === NO_DESTINATION
+                    ? { destinationTarget: "" }
+                    : {}),
+                })
+              }
+            >
+              <SelectTrigger className="h-8" aria-label="Send report to">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DESTINATION}>
+                  Send report to… nowhere (run result only)
+                </SelectItem>
+                {DESTINATION_KINDS.map((d) => (
+                  <SelectItem key={d.value} value={d.value}>
+                    {d.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {(node.destinationKind === "email" || node.destinationKind === "channel") && (
+              <Input
+                value={node.destinationTarget}
+                onChange={(e) => onChange({ destinationTarget: e.target.value })}
+                placeholder={
+                  node.destinationKind === "email" ? "recipient@example.com" : "channel id"
+                }
+                aria-label={
+                  node.destinationKind === "email" ? "Recipient address" : "Channel id"
+                }
+              />
+            )}
+            {node.destinationKind === "email" && (
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Only sends if this company grants email and the recipient has
+                already written in.
+              </p>
+            )}
+          </>
         )}
       </div>
       <Button

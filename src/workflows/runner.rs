@@ -116,15 +116,30 @@ async fn run_workflow_inner(
     // message carries the topic — a node's authored `prompt` is the same on
     // every run and cannot say what was asked this time.
     let run_request = super::caps::run_request_text(&input);
+    // Issue #170: the delivery ports are read off `deps` BEFORE it moves into
+    // the capability bundle. Delivery is host-side and post-engine, so it is not
+    // a capability — the engine never learns a report has a destination.
+    let delivery = deps.delivery.clone();
     let capabilities =
         super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id, run_request)
             .await;
     let outcome = tinyflows::engine::run(&compiled, input, &capabilities)
         .await
         .map_err(map_engine_error)?;
+
+    // Route every reached `output` node's report to its configured destination.
+    // Deliberately here rather than in the HTTP handler: the orchestrator's
+    // `run_workflow` tool and the trigger scheduler drive this same path, and a
+    // scheduled run is exactly the case where nobody is watching the console's
+    // run-result drawer. Never fails the run — each attempt is reported instead.
+    let deliveries =
+        super::delivery::deliver_outputs(delivery.as_ref(), record, workflow, &outcome.output)
+            .await;
+
     Ok(WorkflowRun {
         output: outcome.output,
         pending_approvals: outcome.pending_approvals,
+        deliveries,
     })
 }
 
@@ -247,6 +262,7 @@ description = "Runs Acme."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            delivery: None,
         }
     }
 
@@ -375,6 +391,105 @@ to = "done"
         assert!(output.contains("hello-marker"), "{output}");
     }
 
+    // --- Output destinations, end to end (issue #170) ------------------------
+
+    /// A graph whose terminal `output` node routes its report to the operator
+    /// channel. `trigger → output` only, so it needs no roster.
+    const REPORT_TO_OPERATOR: &str = r#"
+id = "report"
+name = "Report"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Owner summary"
+[node.destination]
+kind = "channel"
+target = "operator"
+[[edge]]
+from = "start"
+to = "done"
+"#;
+
+    /// The end-to-end proof that the RUNNER (not the HTTP handler) delivers: a
+    /// run driven straight through `run_workflow` with a wired delivery bundle
+    /// posts the report and reports the send on the run result. The
+    /// orchestrator's `run_workflow` tool and the trigger scheduler reach this
+    /// same function, which is why delivery lives here.
+    #[tokio::test]
+    async fn a_run_delivers_its_output_report_through_the_runner() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let channel = OperatorChannel::new();
+        let mut deps = deps(dir.path());
+        deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
+            users: Arc::new(FsOps::new(dir.path())),
+            channels: vec![Arc::new(channel.clone())],
+        });
+
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record(),
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+        )
+        .await
+        .expect("workflow runs");
+
+        assert_eq!(run.deliveries.len(), 1, "{:?}", run.deliveries);
+        assert_eq!(
+            run.deliveries[0].status,
+            crate::ports::DeliveryStatus::Sent,
+            "{:?}",
+            run.deliveries
+        );
+        assert_eq!(run.deliveries[0].node, "done");
+        assert_eq!(
+            channel.sent().len(),
+            1,
+            "the report should have been posted"
+        );
+    }
+
+    /// The #169 lesson, at the run level: with no delivery ports wired the run
+    /// still SUCCEEDS (its work is valid) but the result carries a loud `failed`
+    /// row — an operator can tell a working destination from a broken one
+    /// without reading a log. Every other `deps()` in this suite is unwired, so
+    /// this is the default-build shape.
+    #[tokio::test]
+    async fn an_unwired_runtime_still_runs_but_says_the_report_was_not_sent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &record(),
+            &file,
+            serde_json::json!({}),
+        )
+        .await
+        .expect("an undeliverable report must not fail the run");
+
+        assert_eq!(run.deliveries.len(), 1, "{:?}", run.deliveries);
+        assert_eq!(
+            run.deliveries[0].status,
+            crate::ports::DeliveryStatus::Failed
+        );
+        assert!(
+            run.deliveries[0].detail.contains("not wired"),
+            "{:?}",
+            run.deliveries
+        );
+    }
+
     /// The port implementation ensures the roster itself, so a caller need not
     /// pre-`ensure`.
     #[tokio::test]
@@ -413,6 +528,7 @@ to = "done"
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: Vec::new(),
         };

@@ -17,6 +17,14 @@
 //!   so an edge leaving a condition node maps its label to a `true`/`false`
 //!   port. Every other edge stays on the default `"main"` port.
 //!
+//! An `output` node's [`destination`](crate::company::WorkflowDestinationDef)
+//! is deliberately **not** translated. Delivery runs host-side after the engine
+//! returns (see [`super::delivery`]), so the engine has no use for it and a
+//! `destination` key in node config would be inert cargo. A destination-bearing
+//! `output` node therefore lowers to exactly the same bare pass-through
+//! `Transform` as one without — pinned by the
+//! `an_output_destination_never_reaches_the_engine_graph` test below.
+//!
 //! An **agent** node's roster teammate id becomes the tinyflows `agent_ref` in
 //! node config, which the engine's `agent` node routes to the injected
 //! `AgentRunner` — that is how a step lands on the harness pool (see
@@ -437,6 +445,7 @@ mod tests {
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: Vec::new(),
         };
@@ -553,6 +562,7 @@ mod tests {
                     on_error: Some("route".into()),
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 node_stub("yes_path"),
                 node_stub("no_path"),
@@ -615,6 +625,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 }],
                 edges: Vec::new(),
             };
@@ -643,6 +654,7 @@ mod tests {
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 node_stub("paid"),
                 node_stub("error_case"),
@@ -669,6 +681,73 @@ mod tests {
         assert_eq!(port("fallthrough").as_deref(), Some("default"));
     }
 
+    /// **The delivery invariant (issue #170).** An `output` node's
+    /// `destination` is host-side routing, not engine config: it must NOT reach
+    /// the compiled graph. A destination-bearing output node lowers to exactly
+    /// the same bare pass-through `Transform` it lowered to before the field
+    /// existed — so translation of a graph is unaffected by where its report
+    /// goes, and the engine never gains an inert key it does not understand.
+    #[test]
+    fn an_output_destination_never_reaches_the_engine_graph() {
+        let with_destination = crate::company::parse_workflow(
+            r#"
+id = "wf"
+name = "WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Report"
+[node.destination]
+kind = "email"
+target = "ada@example.com"
+[[edge]]
+from = "start"
+to = "done"
+"#,
+        )
+        .expect("parses");
+        let without = crate::company::parse_workflow(
+            r#"
+id = "wf"
+name = "WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Report"
+[[edge]]
+from = "start"
+to = "done"
+"#,
+        )
+        .expect("parses");
+
+        let done = |file: &crate::company::WorkflowFile| {
+            translate(file)
+                .nodes
+                .into_iter()
+                .find(|n| n.id == "done")
+                .expect("output node lowered")
+        };
+        let with = done(&with_destination);
+        let plain = done(&without);
+
+        assert_eq!(with.kind, NodeKind::Transform, "output lowers to transform");
+        // A bare pass-through: no `set` bindings, and above all no destination.
+        assert_eq!(with.config, json!({}));
+        assert_eq!(
+            with.config, plain.config,
+            "a destination must not change the engine config"
+        );
+    }
+
     fn node_stub(id: &str) -> crate::company::WorkflowNodeDef {
         crate::company::WorkflowNodeDef {
             id: id.into(),
@@ -681,6 +760,7 @@ mod tests {
             on_error: None,
             retry: None,
             requires_approval: None,
+            destination: None,
         }
     }
 
