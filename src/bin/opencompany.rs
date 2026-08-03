@@ -477,6 +477,29 @@ fn attach_tinyhumans_feedback(builder: RuntimeBuilder, _config: &AppConfig) -> R
     builder
 }
 
+/// Wires the hub identity exchange, when this build can reach the hub.
+///
+/// Rides the existing `tinyhumans` feature rather than earning one of its own:
+/// that flag already means "this instance talks to the hub about its
+/// credential's owner", and asking the hub whose sign-in token this is is the
+/// same conversation about the same owner.
+///
+/// Unwired, `…/auth/hub` reports no providers and the console shows only the
+/// magic-link form — which is the right answer for a self-hosted host that has
+/// no ecosystem to sign in against.
+#[cfg(not(feature = "tinyhumans"))]
+fn attach_hub_identity(state: AppState) -> AppState {
+    state
+}
+
+#[cfg(feature = "tinyhumans")]
+fn attach_hub_identity(state: AppState) -> AppState {
+    use opencompany::server::hub_identity::HttpHubIdentityExchange;
+
+    let exchange = HttpHubIdentityExchange::new(state.config().api_url.clone());
+    state.with_hub_identity(std::sync::Arc::new(exchange))
+}
+
 #[cfg(feature = "tinyhumans")]
 fn attach_tinyhumans_feedback(builder: RuntimeBuilder, config: &AppConfig) -> RuntimeBuilder {
     use opencompany::feedback::HttpTinyHumansClient;
@@ -790,7 +813,7 @@ async fn main() -> Result<()> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| AppConfig::default().api_url);
-            let mut state = AppState::new(AppConfig {
+            let state = AppState::new(AppConfig {
                 bind,
                 openhuman_root,
                 api_url,
@@ -806,6 +829,7 @@ async fn main() -> Result<()> {
                 env_usize("OPENCOMPANY_MAX_COMPANIES"),
                 env_usize("OPENCOMPANY_MAX_COMPANIES_PER_TENANT"),
             );
+            let mut state = attach_hub_identity(state);
             // Storage backend selection: fs (default) needs nothing; sqlite and
             // mongodb are opened once here and injected into every company's
             // builder. A selected-but-unavailable backend aborts boot rather
