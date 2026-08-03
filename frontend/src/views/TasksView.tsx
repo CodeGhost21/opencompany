@@ -203,6 +203,15 @@ export function TasksView({
         <div className="flex items-center gap-2">
           <h2 className="text-sm font-semibold">Board</h2>
           <Badge variant="secondary">{tasks.length}</Badge>
+          <Button
+            size="sm"
+            variant="outline"
+            className="ml-1 h-7"
+            onClick={() => setCreatingIn(ADD_TASK_COLUMN)}
+          >
+            <Plus className="size-4" />
+            Add task
+          </Button>
         </div>
         <p className="hidden text-xs text-muted-foreground sm:block">
           Drag a card to move it; drop into “In progress” to hand it to its assignee.
@@ -234,21 +243,12 @@ export function TasksView({
                 overCol === col.id && "border-primary/40 bg-accent/40",
               )}
             >
-              <div className="flex items-center justify-between px-3 py-2.5">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-medium">{col.label}</span>
-                  <span className="text-xs text-muted-foreground">{items.length}</span>
-                </div>
-                {/* New work enters the board in one place only (issue #206). */}
-                {col.id === ADD_TASK_COLUMN && (
-                  <button
-                    className="text-muted-foreground hover:text-foreground"
-                    aria-label={`Add task to ${col.label}`}
-                    onClick={() => setCreatingIn(col.id)}
-                  >
-                    <Plus className="size-4" />
-                  </button>
-                )}
+              {/* New work enters the board in one place only (issue #206), and
+                  that entry point now lives in the board header rather than on
+                  this column. */}
+              <div className="flex items-center gap-2 px-3 py-2.5">
+                <span className="text-sm font-medium">{col.label}</span>
+                <span className="text-xs text-muted-foreground">{items.length}</span>
               </div>
               <div className="flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto px-2 pb-2">
                 {loading && items.length === 0 ? (
@@ -433,7 +433,8 @@ function CreateTaskDialog({
 
   return (
     <Dialog open={!!column} onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="max-w-lg">
+      {/* `sm:` — DialogContent's own `sm:max-w-sm` beats an unprefixed width. */}
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle>New task</DialogTitle>
           <DialogDescription>Added to “{columnLabel}”.</DialogDescription>
@@ -454,7 +455,9 @@ function CreateTaskDialog({
             <Label htmlFor="new-note">Note</Label>
             <Textarea
               id="new-note"
-              rows={4}
+              // Textarea is `field-sizing-content`, so `rows` is inert — a
+              // min-height is what actually gives the box room.
+              className="min-h-32 resize-y"
               value={note}
               onChange={(e) => setNote(e.target.value)}
               placeholder="Any detail the assignee should act on."
