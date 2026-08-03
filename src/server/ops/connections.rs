@@ -1,4 +1,26 @@
-//! OAuth connection lifecycle: start, callback, disconnect.
+//! OAuth connection lifecycle: start, callback, disconnect — **the self-hosted
+//! hatch**.
+//!
+//! ## What this module is for
+//!
+//! Every provider reached from here is reached with **this host's own provider
+//! application**: an operator registers a client id/secret with Slack / Google /
+//! GitHub themselves and hands them to the process as
+//! `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET`. That is the only way a
+//! standalone checkout of this public repository can complete an OAuth handshake
+//! at all, and it is supported for exactly that reason.
+//!
+//! It is **not** the hosted path, and it is not parity with it. Framed the way
+//! [`ops::composio`](super::composio) frames its BYO token: a hatch, not a
+//! deployment mode. On the platform a company registers nothing and pastes
+//! nothing — the instance already carries a platform-minted, audience-bound
+//! identity, and the connection is attributed through that. A hosted tenant is
+//! injected no `OPENCOMPANY_OAUTH_*` variable at all, so on that host
+//! [`provider_config`] resolves nothing and a Connect can only ever fail here;
+//! the read plane reports that host as `credentialSource: "attested"` and the
+//! console offers no local Connect (issue #319). See
+//! [`ops::connections_read`](super::connections_read) for the resolution order
+//! and the hosted-vs-hatch split.
 //!
 //! Gated behind the `oauth` feature because token exchange needs `reqwest`;
 //! without it these routes are absent (404) and the console shows the read-only
@@ -91,11 +113,22 @@ fn well_known(provider: &str) -> Option<(&'static str, &'static str)> {
     }
 }
 
-/// Resolves a provider's config from the environment, or `None` when the app
-/// credentials are not configured (the provider is not enabled on this host).
+/// Resolves a provider's config from the process environment, or `None` when the
+/// app credentials are not configured (the provider is not enabled on this
+/// host).
 fn provider_config(provider: &str) -> Option<ProviderConfig> {
+    provider_config_from(provider, &crate::app::config::ProcessEnv)
+}
+
+/// [`provider_config`] over an [`EnvSource`](crate::app::config::EnvSource)
+/// seam, so the "is this provider enabled here?" question is answerable from a
+/// test map without mutating the process environment.
+fn provider_config_from(
+    provider: &str,
+    env: &dyn crate::app::config::EnvSource,
+) -> Option<ProviderConfig> {
     let key = provider.to_ascii_uppercase();
-    let env = |suffix: &str| std::env::var(format!("OPENCOMPANY_OAUTH_{key}_{suffix}")).ok();
+    let env = |suffix: &str| env.get(&format!("OPENCOMPANY_OAUTH_{key}_{suffix}"));
     let client_id = env("ID")?;
     let client_secret = env("SECRET")?;
     let (default_authorize, default_token) = well_known(provider).unwrap_or(("", ""));
@@ -111,6 +144,22 @@ fn provider_config(provider: &str) -> Option<ProviderConfig> {
         token_url,
         default_scopes: env("SCOPES").unwrap_or_default(),
     })
+}
+
+/// Whether a Connect for `provider` could reach a provider application on this
+/// host — i.e. whether the hatch is open for it.
+///
+/// This is [`provider_config`]'s own answer rather than a second copy of the
+/// rule: a bare "is `_ID` set?" probe would report a provider enabled even when
+/// no authorize/token URL can be resolved for it, and the console would render a
+/// Connect button that 400s. Read by
+/// [`ops::connections_read`](super::connections_read); never leaks the
+/// credential itself.
+pub(super) fn provider_app_configured(
+    provider: &str,
+    env: &dyn crate::app::config::EnvSource,
+) -> bool {
+    provider_config_from(provider, env).is_some()
 }
 
 /// The redirect URI advertised to the provider. `OPENCOMPANY_OAUTH_REDIRECT_BASE`
