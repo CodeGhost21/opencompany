@@ -40,6 +40,7 @@ fn task_enters_in_progress(prev_column: Option<&str>, next_column: &str) -> bool
     next_column == IN_PROGRESS && prev_column != Some(IN_PROGRESS)
 }
 use crate::runtime::CycleRunner;
+use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantSet};
 use crate::runtime::journal::RuntimeJournal;
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::ops::mailer::MailSender;
@@ -132,6 +133,18 @@ pub struct CompanyRuntime {
     /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) wires in the same handle
     /// the harness deps hold via [`set_steer`](Self::set_steer).
     pub(crate) steer: crate::company::steer::InflightRegistry,
+    /// Issue #243: the live single-use grants minted when an operator approves a
+    /// tool call an agent was blocked from making.
+    ///
+    /// Always present, like [`steer`](Self::steer) — [`GrantSet`] is
+    /// openhuman-free and the journal records replay in every build, so a
+    /// company that ran under the harness stays replayable by one without it. On
+    /// the harness path the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder)
+    /// hands the SAME set to the agents' `ApprovalRequestQueue`, which is what
+    /// lets a grant minted here be redeemed there. On the default build nothing
+    /// ever mints, so the set stays empty and every approval keeps its
+    /// pre-#243 native-execute behaviour.
+    pub(crate) grants: GrantSet,
     /// Held for the duration of a cycle so cycles never interleave per company.
     pub(crate) serial: TokioMutex<()>,
     /// Held across a REST board write's read → validate → write, so two
@@ -177,6 +190,7 @@ impl CompanyRuntime {
         ops: OpsStores,
         feedback: Arc<FeedbackStore>,
         filer: Arc<FeedbackFiler>,
+        grants: GrantSet,
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
@@ -201,6 +215,7 @@ impl CompanyRuntime {
             source_dir: None,
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
+            grants,
             serial: TokioMutex::new(()),
             task_writes: TokioMutex::new(()),
             #[cfg(feature = "openhuman")]
@@ -518,9 +533,67 @@ impl CompanyRuntime {
         Ok(expired)
     }
 
-    /// Replays the journal to rebuild the executed-key set and approval queue.
+    /// Expires every single-use grant the agent never redeemed, and tells the
+    /// operator (issue #243). Returns the ids that expired.
+    ///
+    /// An approval is consent to an action *now*, not a standing authorisation.
+    /// Without this, a grant minted today would still admit the call if the same
+    /// tool surfaced next month — the operator would have authorised something
+    /// they had long since forgotten, at a moment they knew nothing about.
+    ///
+    /// The expiry is announced rather than silent, and that is the point. The
+    /// failure this guards is the operator approving, seeing nothing happen, and
+    /// having no way to tell whether the work is in flight, already done, or
+    /// quietly dead. A line on the operator channel makes re-approving an
+    /// informed choice.
+    ///
+    /// The journal write is the binding record and propagates; the operator line
+    /// is best-effort, matching
+    /// [`sweep_expired_approvals`](Self::sweep_expired_approvals) — a delivery
+    /// fault must not undo an expiry that has already happened in memory.
+    pub async fn sweep_expired_grants(&self) -> Result<Vec<ApprovalId>> {
+        let now = now_millis();
+        let expired = self.grants.sweep(now, GRANT_TTL_MILLIS);
+        let mut ids = Vec::with_capacity(expired.len());
+        for grant in expired {
+            self.journal
+                .record_grant_expired(&grant.approval_id, now)
+                .await?;
+            let text = format!(
+                "Approved `{}` for `{}`, but the agent didn't act within 15 minutes — \
+                 re-approve to retry.",
+                grant.tool, grant.agent
+            );
+            for channel in &self.channels {
+                if channel.channel_id() == crate::runtime::channel::OPERATOR_CHANNEL {
+                    if let Err(e) = channel
+                        .send(crate::ports::types::OutboundMessage {
+                            task_id: None,
+                            channel: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
+                            text: text.clone(),
+                            steps: Vec::new(),
+                            reply_to: None,
+                        })
+                        .await
+                    {
+                        tracing::warn!(
+                            approval_id = %grant.approval_id,
+                            error = %e,
+                            "grant expiry journaled but the operator notice failed to send",
+                        );
+                    }
+                    break;
+                }
+            }
+            ids.push(grant.approval_id);
+        }
+        Ok(ids)
+    }
+
+    /// Replays the journal to rebuild the executed-key set, the approval queue,
+    /// and the live single-use grants (issue #243).
     pub async fn recover(&self) -> Result<()> {
-        self.journal.load().await
+        CycleRunner::new(self).recover().await
     }
 
     /// When each approval was parked, keyed by id, including approvals already

@@ -29,6 +29,7 @@ use crate::Result;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::feedback::tool::SEND_EMAIL_TOOL;
+use crate::policy::gate::ResolveOutcome;
 use crate::ports::brain::{CycleHost, UsageMetering};
 use crate::ports::tasks::TaskRecord;
 use crate::ports::types::{
@@ -42,6 +43,7 @@ use crate::runtime::delegation_tools::{
     DELEGATE_TO_DESK_TOOL, DelegateArgs, SPAWN_TASK_TOOL, SpawnTaskArgs, desk_lead,
     unknown_desk_message,
 };
+use crate::runtime::grants::GrantedCall;
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
@@ -147,6 +149,26 @@ impl<'a> CycleRunner<'a> {
         self.record_cycle_usage(&company, &result.token_usage).await;
         for response in &result.channel_responses {
             self.route_response(response).await?;
+        }
+
+        // 6c. Issue #243: journal every grant this cycle's turns redeemed.
+        //
+        // Redemption happens inside `ToolPolicy::check`, which is sync and holds
+        // no journal handle, so the id is buffered on the grant set and written
+        // here — after the cycle it belongs to. Best-effort and logged rather
+        // than propagated: the tool has already run by this point, so failing the
+        // cycle over the bookkeeping write would discard real model output to
+        // record something whose only consequence is that a restart might re-arm
+        // a spent grant (which then re-asks the operator — the safe direction).
+        for id in self.rt.grants.drain_consumed() {
+            if let Err(err) = self.rt.journal.record_grant_consumed(&id).await {
+                tracing::warn!(
+                    approval_id = %id,
+                    error = %err,
+                    "[approval] a grant was redeemed but its journal record failed; \
+                     a restart before it is re-written may re-arm it"
+                );
+            }
         }
 
         let (executed_effects, parked) = host.into_outcomes();
@@ -280,17 +302,32 @@ working on):\n{}\n]",
 
     /// Resolves a parked approval, executes the effect on approval, and runs a
     /// follow-up cycle feeding the resolution back to the brain.
+    ///
+    /// Resolving an approval that is **not parked** — an unknown id, or one a
+    /// concurrent request already resolved — is a no-op that answers with a
+    /// fixed line (issue #243). It writes no journal record and runs no cycle.
+    ///
+    /// Before this the double-submit path was indistinguishable from a deny (see
+    /// [`ResolveOutcome`]), so a double-clicked approve appended a second
+    /// `ApprovalResolved` to the journal and ran a second follow-up cycle over an
+    /// approval that no longer existed — burning a model turn to tell the brain
+    /// about a resolution it had already been told about.
     pub async fn resolve_approval(
         &self,
         id: &ApprovalId,
         verdict: Verdict,
         by: Actor,
     ) -> Result<CycleReport> {
-        let effect = self.rt.approvals.resolve(id, verdict, by.clone()).await?;
+        let outcome = self
+            .rt
+            .approval_gate
+            .resolve_outcome(id, verdict, by.clone(), now_millis());
+        if outcome == ResolveOutcome::NotParked {
+            return Ok(self.already_resolved_report());
+        }
         self.rt.journal.record_resolved(id).await?;
-        if let Some(effect) = effect {
-            let key = format!("approval:{id}");
-            execute_effect_once(self.rt, &key, &effect).await?;
+        if let ResolveOutcome::Approved(effect) = outcome {
+            self.settle_approved_effect(id, effect).await?;
         }
         // Follow-up cycle so the brain learns the verdict. Appending the
         // resolution here (rather than separately) keeps the event logged once.
@@ -300,6 +337,84 @@ working on):\n{}\n]",
             by,
         }])
         .await
+    }
+
+    /// Applies an approved effect: **mint a grant** when it came from a harness
+    /// tool call, **execute it** when it is native (issue #243).
+    ///
+    /// This is the fork the whole feature turns on, and it is decided by
+    /// [`Effect::agent`], which only
+    /// [`ApprovalPolicy::effect_for`](crate::harness::policy::ApprovalPolicy::effect_for)
+    /// ever stamps:
+    ///
+    /// * **`None` — native.** Unchanged, byte for byte: `execute_effect_once`
+    ///   under the `approval:<id>` key. Emails, workflow deliveries and Medulla
+    ///   effect frames keep their at-most-once path exactly as before.
+    /// * **`Some(agent)` — a harness tool call.** Executing it would be
+    ///   meaningless: the payload is a tool's *arguments*, and `perform_effect`
+    ///   would ledger a phantom spend and route nothing. Worse, it would look
+    ///   like success while the tool never ran. So the effect is deliberately
+    ///   NOT executed; a single-use grant is minted instead, and the brain's
+    ///   `ApprovalResolved` arm re-dispatches the agent to re-issue the call for
+    ///   real.
+    ///
+    /// The journal record is written **before** the grant enters the live set.
+    /// A crash between the two therefore replays as "granted", re-arming it —
+    /// the safe direction. The reverse order would lose the operator's approval
+    /// entirely on a crash, and the agent would come back asking for a
+    /// permission it had already been given.
+    async fn settle_approved_effect(&self, id: &ApprovalId, effect: Effect) -> Result<()> {
+        let Some(agent) = effect.agent.clone() else {
+            let key = format!("approval:{id}");
+            return execute_effect_once(self.rt, &key, &effect).await;
+        };
+        self.mint_grant(id, agent, effect).await
+    }
+
+    /// Journals then arms a single-use grant for `(agent, effect.kind,
+    /// effect.payload)`.
+    async fn mint_grant(&self, id: &ApprovalId, agent: String, effect: Effect) -> Result<()> {
+        let grant = GrantedCall {
+            approval_id: id.clone(),
+            agent,
+            tool: effect.kind.clone(),
+            // The parked effect's payload IS the tool's argument object — see
+            // `effect_for`. Granting against it verbatim is what makes the
+            // policy's match "the exact call the operator saw".
+            args: effect.payload.clone(),
+            at_millis: now_millis(),
+        };
+        self.rt.journal.record_granted(&grant).await?;
+        self.rt.grants.grant(grant);
+        tracing::debug!(
+            approval_id = %id,
+            tool = %effect.kind,
+            "[approval] minted a single-use grant; the agent will re-issue the call"
+        );
+        Ok(())
+    }
+
+    /// The deterministic answer to resolving an approval that is already gone.
+    ///
+    /// Synthetic on purpose: no events, no effects, nothing parked, and a
+    /// `persisted_seq` of `None` — the caller gets a well-formed report saying
+    /// "nothing happened" instead of an error, because from the operator's side
+    /// a double-submit is not a failure, it is a request whose work was already
+    /// done.
+    fn already_resolved_report(&self) -> CycleReport {
+        CycleReport {
+            cycle_id: generate_id(),
+            responses: vec![OutboundMessage {
+                task_id: None,
+                channel: OPERATOR_CHANNEL.to_string(),
+                text: "This approval was already resolved.".to_string(),
+                steps: Vec::new(),
+                reply_to: None,
+            }],
+            executed_effects: Vec::new(),
+            parked: Vec::new(),
+            persisted_seq: None,
+        }
     }
 
     /// Resolves a parked approval to an operator-amended effect
@@ -337,9 +452,15 @@ working on):\n{}\n]",
         }
         self.rt.journal.record_resolved(id).await?;
 
+        // Issue #243: same fork as the plain approve — a harness tool call mints
+        // a grant instead of executing. Crucially the grant is minted against the
+        // **amended** arguments, so what the policy will admit is what the
+        // operator actually approved. Granting the original would let the agent
+        // re-issue the very call the operator edited, silently discarding the
+        // edit — which is worse than not supporting amend at all, because the
+        // operator would have every reason to believe their change took effect.
         if let Some(effect) = &executed {
-            let key = format!("approval:{id}");
-            execute_effect_once(self.rt, &key, effect).await?;
+            self.settle_approved_effect(id, effect.clone()).await?;
         }
 
         // Follow-up cycle so the brain learns the approval resolved (with an
@@ -353,9 +474,19 @@ working on):\n{}\n]",
         .await
     }
 
-    /// Replays the journal to rebuild the executed-key set and approval queue.
+    /// Replays the journal to rebuild the executed-key set, the approval queue,
+    /// and the live grant set.
+    ///
+    /// The grant window spans a model turn, so a deploy or a crash inside it is
+    /// ordinary rather than exotic. Without this seeding, an operator's approval
+    /// would evaporate across a restart and the agent would come back asking for
+    /// a permission it had just been given. Consumed and expired grants are
+    /// folded out during replay, so this can only ever re-arm one that never
+    /// fired.
     pub async fn recover(&self) -> Result<()> {
-        self.rt.journal.load().await
+        self.rt.journal.load().await?;
+        self.rt.grants.rehydrate(self.rt.journal.replayed_grants());
+        Ok(())
     }
 
     async fn route_response(&self, msg: &OutboundMessage) -> Result<()> {
@@ -666,6 +797,7 @@ impl<'a> CycleHostImpl<'a> {
             established_thread: established,
             first_time_counterparty: !established,
             payload: serde_json::json!({ "to": to, "subject": subject, "body": body }),
+            agent: None,
         };
         match self.gate_effect(effect).await? {
             EffectDisposition::Executed => Ok(ToolResult {
@@ -1144,6 +1276,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
 
         execute_effect_once(&rt, "k1", &effect).await.unwrap();
@@ -1175,6 +1308,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
             .with_brain(Arc::new(EffectBrain {
@@ -1207,6 +1341,368 @@ mod test {
         assert!(rt.pending_approvals().is_empty());
     }
 
+    // --- Single-use grants on approve (issue #243) ---------------------------
+
+    /// A harness-projected effect, i.e. one carrying `agent`. Its payload is a
+    /// tool's argument object, not something the runtime can perform.
+    fn harness_effect(agent: &str, tool: &str, args: serde_json::Value) -> Effect {
+        Effect {
+            kind: tool.into(),
+            group: EffectGroup::Sign,
+            // A real spend amount, deliberately: it is what proves the effect
+            // was NOT executed. `perform_effect` ledgers any `amount_usd`, so an
+            // empty ledger is positive evidence that the native path was skipped
+            // rather than merely evidence that nothing observable happened.
+            amount_usd: Some(42.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: args,
+            agent: Some(agent.to_string()),
+        }
+    }
+
+    /// Parks `effect` through a real cycle and returns the runtime + approval id.
+    async fn park_one(home: std::path::PathBuf, effect: Effect) -> (CompanyRuntime, ApprovalId) {
+        let rt = RuntimeBuilder::new(home, manifest("supervised"))
+            .with_brain(Arc::new(EffectBrain { effect }))
+            .build()
+            .await
+            .unwrap();
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "do it".into(),
+                by: None,
+                chat: None,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(report.parked.len(), 1);
+        let id = report.parked[0].clone();
+        (rt, id)
+    }
+
+    /// The core of #243: approving an agent's blocked tool call mints a
+    /// single-use grant and does **not** execute the effect.
+    ///
+    /// Executing it would be worse than useless. The payload is the tool's
+    /// arguments, so `perform_effect` would ledger a spend for money nothing
+    /// actually moved and route no message — the operator would see an approval
+    /// marked done, a charge on the books, and no email sent. The grant is what
+    /// makes approval mean "the agent may now really do this, once".
+    #[tokio::test]
+    async fn approving_a_harness_tool_call_mints_a_grant_instead_of_executing() {
+        let home_dir = tmp_home();
+        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect("finance", "composio_execute", args.clone()),
+        )
+        .await;
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        // A grant exists, scoped to the agent, tool and exact arguments.
+        let grant = rt.grants.peek(&id).expect("a grant was minted");
+        assert_eq!(grant.agent, "finance");
+        assert_eq!(grant.tool, "composio_execute");
+        assert_eq!(grant.args, args);
+
+        // ...and the effect was NOT executed: no ledger row, no journal key.
+        let record = rt.store.load(rt.id()).await.unwrap().unwrap();
+        assert!(
+            record.ledger.is_empty(),
+            "a harness tool call must not be performed natively — its payload is \
+             arguments, so executing it books a spend for work that never happened"
+        );
+        assert!(!rt.journal.is_executed(&format!("approval:{id}")));
+    }
+
+    /// Approve-with-edit mints against the **amended** arguments.
+    ///
+    /// Granting the original would let the agent re-issue the very call the
+    /// operator edited, silently discarding the edit — worse than not supporting
+    /// amend at all, because the operator has every reason to think their change
+    /// took effect.
+    #[tokio::test]
+    async fn amending_an_approval_grants_the_edited_arguments() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect(
+                "finance",
+                "composio_execute",
+                serde_json::json!({ "to": "wrong@b.test", "body": "hi" }),
+            ),
+        )
+        .await;
+
+        rt.resolve_approval_amended(&id, serde_json::json!({ "to": "right@b.test" }), operator())
+            .await
+            .unwrap();
+
+        let grant = rt.grants.peek(&id).expect("a grant was minted");
+        assert_eq!(
+            grant.args,
+            serde_json::json!({ "to": "right@b.test", "body": "hi" }),
+            "the grant admits the operator's edit, overlaid onto the original"
+        );
+        // The un-edited call must NOT be redeemable.
+        assert!(
+            rt.grants
+                .consume(
+                    "finance",
+                    "composio_execute",
+                    &serde_json::json!({ "to": "wrong@b.test", "body": "hi" })
+                )
+                .is_none()
+        );
+    }
+
+    /// A denied approval grants nothing. "No" must not leave a live permission
+    /// behind for the agent to find.
+    #[tokio::test]
+    async fn denying_a_harness_tool_call_mints_nothing() {
+        let home_dir = tmp_home();
+        let (rt, id) = park_one(
+            home_dir.path().to_path_buf(),
+            harness_effect("finance", "composio_execute", serde_json::json!({})),
+        )
+        .await;
+
+        rt.resolve_approval(&id, Verdict::Deny, operator())
+            .await
+            .unwrap();
+
+        assert!(rt.grants.peek(&id).is_none());
+        assert_eq!(rt.grants.live_count(), 0);
+    }
+
+    /// An approval that expired past its TTL grants nothing either, even though
+    /// the operator clicked approve — default-deny-on-silence wins, and it must
+    /// win here too or expiry would become a way to smuggle a live grant out of
+    /// a stale approval.
+    #[tokio::test]
+    async fn an_expired_approval_mints_nothing_even_on_approve() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let gate = Arc::new(
+            ManifestApprovalGate::new(manifest("supervised").policy.clone()).with_ttl_millis(0),
+        );
+        let rt = RuntimeBuilder::new(home, manifest("supervised"))
+            .with_approvals(gate)
+            .with_brain(Arc::new(EffectBrain {
+                effect: harness_effect("finance", "composio_execute", serde_json::json!({})),
+            }))
+            .build()
+            .await
+            .unwrap();
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "do it".into(),
+                by: None,
+                chat: None,
+            }])
+            .await
+            .unwrap();
+        let id = report.parked[0].clone();
+
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+        assert_eq!(
+            rt.grants.live_count(),
+            0,
+            "an expired approval is a deny, so it hands out no permission"
+        );
+    }
+
+    /// A live grant survives a restart; a consumed one does not come back.
+    ///
+    /// The window between approve and re-issue spans a model turn, so a deploy
+    /// inside it is ordinary — and a resurrected single-use grant is no longer
+    /// single-use.
+    #[tokio::test]
+    async fn grants_replay_on_boot_but_a_spent_one_does_not() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let args = serde_json::json!({ "to": "a@b.test" });
+        let (rt, id) = park_one(
+            home.clone(),
+            harness_effect("finance", "composio_execute", args.clone()),
+        )
+        .await;
+        rt.resolve_approval(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+        drop(rt);
+
+        // Restart: the grant comes back.
+        let rt2 = RuntimeBuilder::fs_defaults(home.clone(), manifest("supervised"))
+            .await
+            .unwrap();
+        assert_eq!(rt2.grants.live_count(), 1);
+        // Redeem it and journal the consumption the way a cycle would.
+        assert!(
+            rt2.grants
+                .consume("finance", "composio_execute", &args)
+                .is_some()
+        );
+        for spent in rt2.grants.drain_consumed() {
+            rt2.journal.record_grant_consumed(&spent).await.unwrap();
+        }
+        drop(rt2);
+
+        // Restart again: the spent grant stays spent.
+        let rt3 = RuntimeBuilder::fs_defaults(home, manifest("supervised"))
+            .await
+            .unwrap();
+        assert_eq!(
+            rt3.grants.live_count(),
+            0,
+            "a redeemed grant must not be re-armed by a restart"
+        );
+    }
+
+    /// Issue #243: a grant the agent never redeemed expires, is journaled, and
+    /// the operator is TOLD.
+    ///
+    /// The silent version of this is the failure worth designing against: the
+    /// operator approves, watches nothing happen, and has no way to tell whether
+    /// the work is in flight, already done, or quietly dead. Announcing the lapse
+    /// is what makes re-approving an informed choice rather than a guess.
+    #[tokio::test]
+    async fn an_unredeemed_grant_expires_journals_and_tells_the_operator() {
+        let home_dir = tmp_home();
+        let operator_channel = Arc::new(crate::runtime::channel::OperatorChannel::new());
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("supervised"))
+            .with_channels(vec![operator_channel.clone()])
+            .build()
+            .await
+            .unwrap();
+
+        // `at_millis: 0` is unambiguously past the 15-minute TTL.
+        rt.grants.grant(GrantedCall {
+            approval_id: ApprovalId::new("appr-stale"),
+            agent: "finance".into(),
+            tool: "composio_execute".into(),
+            args: serde_json::json!({ "to": "a@b.test" }),
+            at_millis: 0,
+        });
+        // A fresh one, to prove the sweep is selective rather than a flush.
+        rt.grants.grant(GrantedCall {
+            approval_id: ApprovalId::new("appr-fresh"),
+            agent: "finance".into(),
+            tool: "workspace_write".into(),
+            args: serde_json::json!({}),
+            at_millis: now_millis(),
+        });
+
+        let expired = rt.sweep_expired_grants().await.unwrap();
+        assert_eq!(expired, vec![ApprovalId::new("appr-stale")]);
+        assert_eq!(rt.grants.live_count(), 1, "the fresh grant is untouched");
+        assert!(rt.grants.peek(&ApprovalId::new("appr-fresh")).is_some());
+
+        // The operator was told, and told which tool and which agent — enough to
+        // decide whether to re-approve without going digging.
+        let sent = operator_channel.sent();
+        assert_eq!(sent.len(), 1);
+        assert!(
+            sent[0].text.contains("composio_execute"),
+            "{}",
+            sent[0].text
+        );
+        assert!(sent[0].text.contains("finance"), "{}", sent[0].text);
+        assert!(sent[0].text.contains("re-approve"), "{}", sent[0].text);
+
+        // The expiry is durable: a restart must not hand the permission back.
+        assert!(
+            rt.journal
+                .replayed_grants()
+                .iter()
+                .all(|g| g.approval_id != ApprovalId::new("appr-stale"))
+        );
+    }
+
+    /// Issue #243: resolving an approval that is already gone is a no-op, not a
+    /// second resolution.
+    ///
+    /// A double-clicked approve, a retried request, or two operators on the same
+    /// queue all hit this. Before the outcome enum, the second call could not be
+    /// told apart from a deny: the gate returned `None` either way, so the
+    /// runner appended a second `ApprovalResolved` journal record AND ran a
+    /// second follow-up cycle — a whole model turn spent re-announcing a
+    /// resolution the brain had already been given.
+    #[tokio::test]
+    async fn resolving_an_already_resolved_approval_is_a_deterministic_no_op() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let sign_effect = Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+        };
+        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_brain(Arc::new(EffectBrain {
+                effect: sign_effect,
+            }))
+            .build()
+            .await
+            .unwrap();
+
+        let report = rt
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                text: "file it".into(),
+                by: None,
+                chat: None,
+            }])
+            .await
+            .unwrap();
+        let approval_id = report.parked[0].clone();
+
+        rt.resolve_approval(&approval_id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+        let events_after_first = rt
+            .events
+            .read_from(rt.id(), EventSeq::new(0), 1000)
+            .await
+            .unwrap()
+            .len();
+
+        // The second submit.
+        let again = rt
+            .resolve_approval(&approval_id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+
+        assert_eq!(again.responses.len(), 1);
+        assert_eq!(
+            again.responses[0].text, "This approval was already resolved.",
+            "the operator gets a deterministic line, not an error and not a re-run"
+        );
+        assert!(again.executed_effects.is_empty());
+        assert!(again.parked.is_empty());
+        assert!(
+            again.persisted_seq.is_none(),
+            "a no-op must not claim to have persisted anything"
+        );
+        assert_eq!(
+            rt.events
+                .read_from(rt.id(), EventSeq::new(0), 1000)
+                .await
+                .unwrap()
+                .len(),
+            events_after_first,
+            "no second ApprovalResolved event, and no follow-up cycle behind it"
+        );
+    }
+
     /// Issue #172: an already-decided approval request parks and reaches the
     /// operator's queue **without** being re-evaluated.
     ///
@@ -1226,6 +1722,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(ParkingBrain {
@@ -1279,6 +1776,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
@@ -1328,6 +1826,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::json!({ "channel": "operator", "text": "ORIGINAL" }),
+            agent: None,
         };
         // A recording operator channel we keep a handle to (Arc-shared buffer).
         let operator_channel = OperatorChannel::new();
@@ -1392,6 +1891,7 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
         };
         // A zero-TTL gate: anything parked is immediately past its deadline.
         let gate = Arc::new(
@@ -1752,6 +2252,7 @@ mod test {
             established_thread: true,
             first_time_counterparty: false,
             payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(EffectBrain {
@@ -1820,6 +2321,7 @@ mod test {
                 "subject": "[Acme] Report flow — Owner summary",
                 "body": "Q3 is up 12%.",
             }),
+            agent: None,
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
@@ -1883,6 +2385,7 @@ mod test {
                 "subject": "[Acme] Report flow — Owner summary",
                 "body": "Q3 is up 12%.",
             }),
+            agent: None,
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
@@ -1926,6 +2429,7 @@ mod test {
                 "subject": "[Acme] Report flow — Owner summary",
                 "body": "Q3 is up 12%.",
             }),
+            agent: None,
         };
         let approval_id = {
             let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
@@ -1977,6 +2481,7 @@ mod test {
             established_thread: true,
             first_time_counterparty: false,
             payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
+            agent: None,
         };
         let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
             .with_brain(Arc::new(EffectBrain {
@@ -1995,6 +2500,7 @@ mod test {
                 established_thread: true,
                 first_time_counterparty: false,
                 payload: serde_json::json!({ "to": "x@ext.com", "subject": "Hi", "body": "yo" }),
+                agent: None,
             },
         )
         .await
