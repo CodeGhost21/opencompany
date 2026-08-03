@@ -271,6 +271,45 @@ exchange) are dependency-inverted behind traits carried on `ConnectionsRuntime`
 and default to empty (offline) — a surface whose seam is absent returns
 `404 {"code":"not_wired"}`, which the console degrades gracefully.
 
+### Connections: hosted versus the self-hosted hatch
+
+`ops::connections` (feature `oauth`) runs OAuth with **this host's own provider
+application** — a client id/secret an operator registered themselves and handed
+to the process as `OPENCOMPANY_OAUTH_<PROVIDER>_ID` / `_SECRET`. That is the
+only way a standalone checkout can complete a handshake, and it is supported for
+exactly that reason. It is a hatch, not a deployment mode — the same framing
+`ops::composio` uses for its BYO token. A hosted tenant is injected no
+`OPENCOMPANY_OAUTH_*` variable at all, so on that host `provider_config`
+resolves nothing and a local Connect can only fail.
+
+The read plane says which it is. `ops::connections_read::connect_route` answers
+one question per provider — *can a Connect click possibly succeed here, and by
+which route?* — as a `credentialSource` tier, stored-wins:
+
+| Tier | When | Console |
+| --- | --- | --- |
+| `static` | a token is already stored for this provider (BYO override), **or** this host registered its own provider app (the hatch) | Connect button, as today |
+| `attested` | no stored token, and the pod carries a platform-**projected** identity (`TINYHUMANS_TOKEN_FILE` naming a file that exists) | "Managed by the platform", no local Connect |
+| `none` | neither | read-only "not available on this host" |
+
+`attested` deliberately requires the projected-file tier, not
+`TinyhumansTokenSource::from_env` as a whole: that resolver also accepts a
+long-lived `TINYHUMANS_API_KEY`, which a self-hoster commonly sets to buy
+inference. Accepting it here would tell such an operator their working Connect
+button is platform-managed and take it away. Both the REST route and the GraphQL
+`Company.connections` resolver project the field through the same
+`connect_route_from_env`, so the two read shapes cannot drift.
+
+**Provider mapping to the platform backend.** Its registered OAuth providers are
+`notion`, `google`, `gmail`, `github`, `twitter`, `discord` and `instagram`. Two
+consequences for the console catalog: `gmail` is a registered provider *name* but
+not a separate provider application — it is Google's app requested with the Gmail
+skill scopes, so a Gmail connect and a Google connect share one grant (which is
+why the backend merges scopes incrementally rather than replacing them). And
+there is **no Slack provider** at all (the backend's only Slack credential is an
+internal alerting bot), so Slack has no hosted route except Composio, which runs
+its own OAuth.
+
 ## tiny.place A2A inbound + discovery (`tinyplace` feature)
 
 Behind the `tinyplace` feature the server mounts the agent-to-agent surface
