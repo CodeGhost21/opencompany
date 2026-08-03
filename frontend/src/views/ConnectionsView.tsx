@@ -9,6 +9,7 @@ import {
   Plug,
   Plus,
   Server,
+  ShieldCheck,
   Trash2,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -114,6 +115,12 @@ export function ConnectionsView({ client, company }: Props) {
   }
 
   const connectedCount = Object.values(states).filter((s) => s.connected).length;
+  // `attested` is a property of the *instance*, not of one provider: it means
+  // this pod carries a platform-minted identity, so every connection is the
+  // platform's to run. One row reporting it is therefore enough to say so once
+  // at the top, rather than only in per-tile copy (issue #319).
+  const platformManaged =
+    load === "ready" && Object.values(states).some((s) => s.credentialSource === "attested");
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -137,6 +144,18 @@ export function ConnectionsView({ client, company }: Props) {
             <AlertDescription>
               The catalog below shows what your company can connect once the host exposes its OAuth
               endpoints. Connecting is disabled until then.
+            </AlertDescription>
+          </Alert>
+        )}
+
+        {platformManaged && (
+          <Alert data-testid="connections-platform-managed">
+            <ShieldCheck className="size-4" />
+            <AlertTitle>Connections are managed by the platform</AlertTitle>
+            <AlertDescription>
+              This instance signs in with its own platform identity, so there is no provider key to
+              register here and nothing stored on this instance. Connect a provider from the
+              platform and it shows up here.
             </AlertDescription>
           </Alert>
         )}
@@ -186,6 +205,27 @@ export function ConnectionsView({ client, company }: Props) {
   );
 }
 
+/**
+ * One provider tile.
+ *
+ * The unconnected foot of the card is a tri-state driven by the host's
+ * `credentialSource` (issue #319) — the same three tiers the Composio section
+ * above already reports, worded the same way on purpose:
+ *
+ * - `static` — a Connect can succeed here, either through a token this company
+ *   already holds or through this host's own registered provider application
+ *   (the self-hosted hatch). Unchanged: the Connect button, exactly as today.
+ * - `attested` — this instance carries a platform identity, so connections are
+ *   the platform's to run and no provider credential is (or should be) present
+ *   locally. A local Connect on such a host could only ever 400, so the button
+ *   is replaced by "Managed by the platform" and that failure becomes
+ *   unreachable from the console by construction.
+ * - `none` — nothing can complete a handshake here; the tile says so instead of
+ *   offering a button that fails.
+ *
+ * A host that predates the field sends no `credentialSource`; that falls back
+ * to the Connect button so an older host is never silently disabled.
+ */
 function ConnectionCard({
   provider,
   state,
@@ -202,6 +242,9 @@ function ConnectionCard({
   onDisconnect: () => void;
 }) {
   const connected = Boolean(state?.connected);
+  const source = state?.credentialSource;
+  const managedByPlatform = source === "attested";
+  const noRoute = source === "none";
   return (
     <Card className={cn(connected && "border-primary/30")}>
       <CardContent className="flex h-full flex-col gap-3 py-4">
@@ -227,6 +270,20 @@ function ConnectionCard({
               {busy ? <Loader2 className="size-4 animate-spin" /> : null}
               Disconnect
             </Button>
+          ) : managedByPlatform ? (
+            <p
+              className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+              data-testid={`connection-managed-${provider.id}`}
+            >
+              <ShieldCheck className="size-3" /> Managed by the platform — nothing to set up here
+            </p>
+          ) : noRoute ? (
+            <p
+              className="text-xs text-muted-foreground"
+              data-testid={`connection-unavailable-${provider.id}`}
+            >
+              Not available on this host.
+            </p>
           ) : (
             <Button
               variant={disabled ? "outline" : "default"}
