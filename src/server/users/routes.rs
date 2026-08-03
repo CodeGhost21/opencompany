@@ -66,6 +66,10 @@ pub fn router() -> Router<AppState> {
         .merge(public_scoped("/auth/login", post(login_password)))
         .merge(public_scoped("/auth/logout", post(logout)))
         .merge(public_scoped("/auth/me", get(me)))
+        .merge(public_scoped(
+            "/auth/hub",
+            get(hub_providers).post(hub_sign_in),
+        ))
         .merge(public_scoped("/auth/password", post(set_password)))
 }
 
@@ -94,6 +98,33 @@ struct RequestCodeResult {
 #[derive(Debug, Deserialize)]
 struct VerifyCode {
     code: String,
+}
+
+/// A platform token, handed back by the hub on the sign-in redirect.
+#[derive(Debug, Deserialize)]
+struct HubToken {
+    token: String,
+}
+
+/// One sign-in button, ready to render.
+///
+/// The console never assembles a hub URL itself. Only the host knows the hub's
+/// base URL and the origin the hub must return to, and a frontend guessing at
+/// either would aim a live sign-in at whatever it guessed.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct HubProviderOption {
+    id: &'static str,
+    label: &'static str,
+    start_url: String,
+}
+
+/// What the console needs to draw its sign-in screen.
+#[derive(Debug, Serialize)]
+struct HubProvidersResult {
+    /// Empty on every host with no hub wired, which is how the console knows to
+    /// render the magic-link form alone rather than buttons that lead nowhere.
+    providers: Vec<HubProviderOption>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -522,6 +553,150 @@ async fn verify_code(
         return Err(invalid_login());
     };
     let user = upsert_from_eligibility(&runtime, &code.email, role, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?;
+    mint_session(&state, &runtime, &user, &headers).await
+}
+
+/// `403` for an ecosystem sign-in this host cannot or will not honor.
+///
+/// Unlike [`invalid_login`], these say what went wrong. The generic-failure
+/// rule exists so the login routes cannot be used as a membership oracle, and
+/// nothing here leaks membership: "this host has no hub" is a fact about the
+/// *deployment* the caller already knew, and "the hub rejected that" is about
+/// the token. `not_a_member` is the one that touches a person, and it is only
+/// ever reached by someone who has just proved to the hub that they hold that
+/// address — they are not learning anything they did not already know.
+fn hub_refused(code: &'static str, message: &'static str) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({ "error": message, "code": code })),
+    )
+        .into_response()
+}
+
+/// Where the hub sends the browser back to after a sign-in.
+///
+/// Built from [`AppConfig::host_base_url`](crate::AppConfig::host_base_url) —
+/// the configured `OPENCOMPANY_PUBLIC_URL` when there is one, otherwise
+/// `http://{bind}`. That single seam is what makes hosted a configuration
+/// change rather than a code change: locally the bind fallback yields
+/// `http://127.0.0.1:<port>/`, which is the RFC 8252 loopback URI the hub
+/// already accepts; hosted, `OPENCOMPANY_PUBLIC_URL` yields the real origin and
+/// this function is untouched.
+///
+/// Carries `?company=` so the console lands scoped to the company it left from.
+/// The hub appends its own `token=…&key=auth` with `&`, so the two coexist.
+fn console_redirect_uri(state: &AppState, company: &CompanyId) -> String {
+    let origin = state.config().host_base_url();
+    format!("{}/?company={}", origin.trim_end_matches('/'), company)
+}
+
+/// `GET …/auth/hub` — the ecosystem sign-in buttons, ready to render.
+///
+/// Answers `{"providers": []}` rather than a 404 on a host with no hub, so the
+/// console has one code path: ask, render what comes back, and fall through to
+/// the magic-link form when nothing does.
+async fn hub_providers(
+    company: PublicCompany,
+    State(state): State<AppState>,
+) -> Json<HubProvidersResult> {
+    // No exchange means no way to check a token that came back, so there is no
+    // honest button to offer. Refusing here — rather than at redemption — is
+    // the difference between a console that says "sign in with a link" and one
+    // that sends someone through Google to be turned away on return.
+    if state.hub_identity().is_none() {
+        return Json(HubProvidersResult {
+            providers: Vec::new(),
+        });
+    }
+    let redirect_uri = console_redirect_uri(&state, company.runtime.id());
+    let api_url = &state.config().api_url;
+    Json(HubProvidersResult {
+        providers: crate::server::hub_identity::HUB_PROVIDERS
+            .iter()
+            .map(|provider| HubProviderOption {
+                id: provider.id,
+                label: provider.label,
+                start_url: crate::server::hub_identity::login_start_url(
+                    api_url,
+                    provider.id,
+                    &redirect_uri,
+                ),
+            })
+            .collect(),
+    })
+}
+
+/// `POST …/auth/hub` — turn an ecosystem sign-in into a session here.
+///
+/// The console sends the browser to the hub's OAuth start pointed back at this
+/// origin; the hub completes the provider dance and returns a platform JWT in
+/// the URL. This route takes that token, asks the hub whose it is, and — if
+/// that address is eligible in *this* company by the same rules a magic link
+/// answers to — mints an ordinary human session.
+///
+/// It is deliberately the same three calls the magic-link path makes:
+/// [`eligibility`], [`upsert_from_eligibility`], [`mint_session`]. First login
+/// and Nth login stay one code path, and an ecosystem sign-in gets no privilege
+/// a mailed link would not have given the same person. In particular this does
+/// not touch `platform_auth`: that surface is the hosting layer's machine
+/// credential, and a human signing in must not acquire one.
+///
+/// The token is used for exactly one outbound request and then dropped. It is
+/// never persisted, never logged, and never echoed into an error.
+async fn hub_sign_in(
+    company: PublicCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<HubToken>,
+) -> Result<Response, Response> {
+    let runtime = company.runtime.clone();
+
+    // Refuse before going anywhere when this host has no hub to ask. Accepting
+    // the token on trust would make an unverifiable JWT a bearer credential.
+    let Some(exchange) = state.hub_identity().cloned() else {
+        return Err(hub_refused(
+            "hub_unavailable",
+            "this host is not part of a TinyHumans ecosystem",
+        ));
+    };
+
+    // The hub answering is what proves the token was real — this tenant cannot
+    // check the signature and does not try. Everything below reasons about the
+    // identity the hub returned, never about the request body.
+    let identity = match exchange.identify(&body.token).await {
+        Ok(identity) => identity,
+        // A 4xx from the hub means the token is expired, revoked, or was never
+        // real — a dead credential, not a broken hub. Surfacing the 502 the
+        // error type otherwise maps to would tell the user the ecosystem is
+        // down when all they need to do is sign in again.
+        Err(OpenCompanyError::TinyHumans { code, .. }) if code.starts_with("http_4") => {
+            return Err(hub_refused(
+                "hub_rejected",
+                "that sign-in has expired — sign in again",
+            ));
+        }
+        // Anything else really is the hub being unreachable or wrong, and keeps
+        // its 502/503 so an operator can tell the two apart.
+        Err(err) => return Err(ApiError(err).into_response()),
+    };
+
+    let email = normalize_email(&identity.email);
+    let now = now_millis();
+    let Some(role) = eligibility(&runtime, &email, now)
+        .await
+        .map_err(|e| ApiError(e).into_response())?
+    else {
+        // Signed in to the ecosystem, but not a person this company knows. A
+        // distinct code so the console can say "ask an admin to invite you"
+        // instead of "that sign-in is dead".
+        return Err(hub_refused(
+            "not_a_member",
+            "that account has no access to this company",
+        ));
+    };
+    let user = upsert_from_eligibility(&runtime, &email, role, now)
         .await
         .map_err(|e| ApiError(e).into_response())?;
     mint_session(&state, &runtime, &user, &headers).await
