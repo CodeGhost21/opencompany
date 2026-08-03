@@ -1313,6 +1313,7 @@ mod tests {
                 target: Some("ada@example.com".into()),
                 status: DeliveryStatus::Skipped,
                 detail: "never written in".into(),
+                reason: crate::ports::DeliveryReason::RecipientNotEstablished,
             }],
         })
         .unwrap();
@@ -1340,6 +1341,7 @@ mod tests {
                 target: Some("stranger@example.com".into()),
                 status: DeliveryStatus::Pending,
                 detail: "waiting for you in Approvals".into(),
+                reason: crate::ports::DeliveryReason::ParkedForApproval,
             }],
         })
         .unwrap();
@@ -1727,6 +1729,7 @@ mod tests {
                 target: Some("ada@example.com".to_string()),
                 status: crate::ports::DeliveryStatus::Skipped,
                 detail: "this recipient has never written to the company".to_string(),
+                reason: crate::ports::DeliveryReason::RecipientNotEstablished,
             }
         }
 
