@@ -189,6 +189,7 @@ export function ConnectionsView({ client, company }: Props) {
                       key={p.id}
                       provider={p}
                       state={states[p.id]}
+                      platformManaged={platformManaged}
                       disabled={load === "unavailable"}
                       busy={busy === p.id}
                       onConnect={() => void connect(p)}
@@ -225,10 +226,20 @@ export function ConnectionsView({ client, company }: Props) {
  *
  * A host that predates the field sends no `credentialSource`; that falls back
  * to the Connect button so an older host is never silently disabled.
+ *
+ * `platformManaged` covers the tiles the host said nothing about. `/connections`
+ * only answers for providers the company's manifest declares, but this grid
+ * renders the whole catalog — so on a hosted instance the undeclared tiles would
+ * otherwise keep a Connect button sitting under a banner that says connections
+ * are the platform's, and clicking it would 400. `attested` is a property of the
+ * *instance*, not of one provider, so it is safe to apply to every tile. `none`
+ * is NOT: it is provider-specific, and a host can hold a provider app for a
+ * provider the manifest never declared, where Connect genuinely works.
  */
 function ConnectionCard({
   provider,
   state,
+  platformManaged,
   disabled,
   busy,
   onConnect,
@@ -236,6 +247,7 @@ function ConnectionCard({
 }: {
   provider: ConnectionProvider;
   state?: ConnectionState;
+  platformManaged: boolean;
   disabled: boolean;
   busy: boolean;
   onConnect: () => void;
@@ -243,7 +255,7 @@ function ConnectionCard({
 }) {
   const connected = Boolean(state?.connected);
   const source = state?.credentialSource;
-  const managedByPlatform = source === "attested";
+  const managedByPlatform = source === "attested" || (platformManaged && source === undefined);
   const noRoute = source === "none";
   return (
     <Card className={cn(connected && "border-primary/30")}>
