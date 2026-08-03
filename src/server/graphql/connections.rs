@@ -8,6 +8,7 @@ use async_graphql::SimpleObject;
 
 use crate::company::dns::DomainStatus;
 use crate::company::runtime::CompanyRuntime;
+use crate::server::ops::connections_read::connect_route_from_env;
 use crate::server::ops::smtp::{SmtpCredentials, SmtpStatus};
 
 /// The reserved SecretStore key holding the JSON domain status.
@@ -23,6 +24,12 @@ pub struct ConnectionStateGql {
     pub provider: String,
     /// Whether an OAuth token is stored for this provider.
     pub connected: bool,
+    /// Which route a Connect for this provider would take on this host:
+    /// `attested` (the platform runs it — nothing to register here), `static`
+    /// (a token already stored for this company, or this host's own registered
+    /// provider application: the self-hosted hatch), or `none` (no Connect can
+    /// succeed here). A tier name, never a credential and never a path.
+    pub credential_source: String,
     /// The connected account label, when known.
     pub account: Option<String>,
     /// The manifest's stated reason for wanting this connection.
@@ -125,6 +132,9 @@ pub(crate) async fn resolve_connections(
             _ => (false, None),
         };
         out.push(ConnectionStateGql {
+            credential_source: connect_route_from_env(&connection.provider, connected)
+                .as_str()
+                .to_string(),
             provider: connection.provider.clone(),
             connected,
             account,
