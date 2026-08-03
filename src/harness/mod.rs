@@ -59,6 +59,11 @@ pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
+pub mod workspace_tools;
+/// End-to-end proof that the #237 workspace tools are reachable from a real
+/// turn, with only the model's choices stubbed. Test-only.
+#[cfg(test)]
+mod workspace_turn_test;
 
 pub use brain::HarnessBrain;
 
@@ -264,6 +269,17 @@ pub struct HarnessDeps {
     /// `failed` row saying delivery is not wired, so an authored destination can
     /// never quietly do nothing.
     pub delivery: Option<crate::workflows::WorkflowDeliveryDeps>,
+    /// Issue #237 — the company's shared workspace note tree, so agents can
+    /// read (and, under an explicit `workspace` grant, revise) the operator's
+    /// standards and playbooks instead of guessing at them.
+    ///
+    /// The same [`WorkspaceStore`](crate::ports::WorkspaceStore) handle the
+    /// console's REST/GraphQL surface writes through, so an operator edit is
+    /// visible to the next agent turn with no rebuild — the tools hold no
+    /// snapshot and hit the store per call. `None` (the default at every
+    /// construction site but the production runtime builder) **fails closed**:
+    /// no workspace tools are wired and agents behave exactly as before.
+    pub workspace: Option<Arc<dyn crate::ports::WorkspaceStore>>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -1561,6 +1577,7 @@ description = "Builds the product."
                 composio: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 delivery: None,
+                workspace: None,
             },
             store,
             meter,
@@ -1621,6 +1638,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1906,6 +1924,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -2063,6 +2082,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -2372,6 +2392,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         };
         let pool = HarnessPool::new();
 
@@ -2525,6 +2546,7 @@ description = "Sets direction."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
@@ -2663,6 +2685,7 @@ description = "Sets direction."
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            workspace: None,
         }
     }
 
