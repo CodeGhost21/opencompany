@@ -54,6 +54,13 @@ pub mod orchestrator;
 pub mod policy;
 pub mod provider;
 pub mod run_turn;
+pub mod search;
+/// End-to-end proof that the #238 `web_search` tool is reachable from a real
+/// turn — the harness, the grant gates, the approval policy, the cap and the
+/// meter are all real; only the model's choices and the search backend's
+/// responses are scripted. Test-only.
+#[cfg(test)]
+mod search_turn_test;
 pub mod skills;
 pub mod steer;
 pub mod steps;
@@ -255,6 +262,22 @@ pub struct HarnessDeps {
     /// else this instance's platform identity. With neither, no tools are wired —
     /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
+    /// The MANAGED web-search backend (issue #238). `None` (the default at every
+    /// construction site but the production runtime builder) **fails closed** —
+    /// no `web_search` tool is wired and agents behave exactly as before.
+    ///
+    /// Set by the runtime builder from
+    /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env)
+    /// (env-only — never a tenant secret) with the company's
+    /// `[tools].search_daily_calls` cap applied. When `Some` **and** a company
+    /// **explicitly** grants `search` (never via `*`), [`build::build_agent`]
+    /// wires [`search::search_tools`]; a grant with no credential wires nothing
+    /// and warns, media's shape exactly.
+    ///
+    /// The handle carries the company's shared daily-call ledger, so cloning
+    /// these deps across a roster gives every agent of the company one budget
+    /// rather than one each.
+    pub search: Option<search::SearchBackend>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
     /// running it (and installs the steer stop-hook over the slot's control), so
@@ -1586,6 +1609,7 @@ description = "Builds the product."
                 composio: None,
                 steer: crate::company::steer::InflightRegistry::default(),
                 delivery: None,
+                search: None,
                 workspace: None,
             },
             store,
@@ -1648,6 +1672,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            search: None,
             workspace: None,
         };
 
@@ -1935,6 +1960,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            search: None,
             workspace: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
@@ -2094,6 +2120,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            search: None,
             workspace: None,
         };
         let pool = HarnessPool::new();
@@ -2405,6 +2432,7 @@ description = "Builds the product."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            search: None,
             workspace: None,
         };
         let pool = HarnessPool::new();
@@ -2560,6 +2588,7 @@ description = "Sets direction."
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            search: None,
             workspace: None,
         };
         let pool = HarnessPool::new();
@@ -2700,6 +2729,7 @@ description = "Sets direction."
             artifacts: None,
             steer: crate::company::steer::InflightRegistry::default(),
             delivery: None,
+            search: None,
             workspace: None,
         }
     }

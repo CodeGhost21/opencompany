@@ -284,6 +284,10 @@ async fn harness(
         steer: crate::company::steer::InflightRegistry::default(),
         delivery: None,
         workspace: Some(store.clone()),
+        // Issue #238's metered search is off in this fixture: the turn under
+        // test exercises the #237 workspace path only, and no managed search
+        // backend is the fail-closed default outside the runtime builder.
+        search: None,
     };
 
     let record = CompanyRecord {
