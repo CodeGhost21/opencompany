@@ -18,6 +18,12 @@
 //! Access is invite-only, so someone must send the first invite. There is no
 //! operator token to do it with, so the company manifest's `[users] admins`
 //! list is the root of trust: those addresses are standing admin invites.
+//!
+//! A platform-provisioned company has an empty list — its creator is recorded
+//! on the control plane, not in the manifest — so the deployment may name one
+//! more standing admin through [`AppConfig::bootstrap_admin`]. It is the same
+//! kind of grant, not a second one: eligibility only, minted on redemption,
+//! revoked by unsetting the source.
 
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
@@ -26,7 +32,6 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
-use crate::AppState;
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
@@ -39,6 +44,7 @@ use crate::server::graphql::auth::{GqlAuth, UserPrincipal, resolve_principal};
 use crate::server::ops::mailer::OutboundEmail;
 use crate::server::users::scope::{PublicCompany, public_scoped};
 use crate::server::users::{cookie, password, token};
+use crate::{AppConfig, AppState};
 
 /// How long a manifest-bootstrapped admin invite stays redeemable once
 /// materialized. Long, because it is regenerated from the manifest on demand.
@@ -180,15 +186,43 @@ pub(crate) async fn manifest_admins(
         .unwrap_or_default())
 }
 
+/// The addresses this company bootstraps as admins without an invite record:
+/// the manifest's `[users] admins`, plus the deployment's
+/// [`AppConfig::bootstrap_admin`] when one is injected.
+///
+/// Both are the same grant, so they are one list — deduplicated, because an
+/// address named in both places is still one standing invite and must render as
+/// one row on the invite page.
+pub(crate) async fn bootstrap_admins(
+    config: &AppConfig,
+    runtime: &CompanyRuntime,
+) -> Result<Vec<String>, OpenCompanyError> {
+    Ok(with_platform_admin(config, manifest_admins(runtime).await?))
+}
+
+/// Appends the deployment's bootstrap admin to a manifest admin list.
+///
+/// Split out so the invite listing can tell the two sources apart without
+/// reading the manifest twice.
+fn with_platform_admin(config: &AppConfig, mut admins: Vec<String>) -> Vec<String> {
+    if let Some(email) = config.bootstrap_admin()
+        && !admins.contains(&email)
+    {
+        admins.push(email);
+    }
+    admins
+}
+
 /// Whether `email` may hold an account in this company, and as what role.
 ///
 /// Three ways in, checked in order:
 /// 1. They already are a user (their role stands).
-/// 2. The manifest's `[users] admins` names them — the bootstrap path.
+/// 2. A [`bootstrap_admins`] entry names them — the bootstrap path.
 /// 3. An admin invited them, and the invite is still redeemable.
 ///
 /// `None` means the address gets no code and no session, indistinguishably.
 async fn eligibility(
+    config: &AppConfig,
     runtime: &CompanyRuntime,
     email: &str,
     now: u64,
@@ -199,7 +233,11 @@ async fn eligibility(
         // as an unknown address.
         return Ok((user.status == UserStatus::Active).then_some(user.role));
     }
-    if manifest_admins(runtime).await?.iter().any(|a| a == email) {
+    if bootstrap_admins(config, runtime)
+        .await?
+        .iter()
+        .any(|a| a == email)
+    {
         return Ok(Some(UserRole::Admin));
     }
     let invite = runtime.users().find_invite_by_email(id, email).await?;
@@ -338,7 +376,7 @@ async fn request_code(
     let runtime = company.runtime.clone();
     let now = now_millis();
 
-    let eligible = eligibility(&runtime, &email, now)
+    let eligible = eligibility(state.config(), &runtime, &email, now)
         .await
         .map_err(|e| ApiError(e).into_response())?;
     let Some(_role) = eligible else {
@@ -514,7 +552,7 @@ async fn verify_code(
 
     // The address comes from the *code*, never from the request: otherwise
     // anyone holding any valid link could name whoever they liked.
-    let Some(role) = eligibility(&runtime, &code.email, now)
+    let Some(role) = eligibility(state.config(), &runtime, &code.email, now)
         .await
         .map_err(|e| ApiError(e).into_response())?
     else {
@@ -686,27 +724,40 @@ pub(crate) async fn current_user(
     }
 }
 
-/// Materializes the manifest's `[users] admins` as invite records.
+/// Materializes [`bootstrap_admins`] as invite records.
 ///
 /// Exposed for the admin routes, so listing invites shows the bootstrapped
 /// admins rather than an empty page that contradicts who can actually log in.
 /// These are synthetic — no such row exists — which is why their ids are
-/// prefixed `manifest:` and revoking one is refused.
+/// prefixed `manifest:` / `platform:` and revoking one is refused.
+///
+/// The prefix names the source because the two are withdrawn in different
+/// places: a `manifest:` row goes away by editing `[users].admins`, a
+/// `platform:` row by unsetting the deployment's variable. An address in both
+/// renders as `manifest:` — that is the grant that outlives the variable.
 pub(crate) async fn manifest_admin_invites(
+    config: &AppConfig,
     runtime: &CompanyRuntime,
     now: u64,
 ) -> Result<Vec<InviteRecord>, OpenCompanyError> {
-    Ok(manifest_admins(runtime)
-        .await?
+    let from_manifest = manifest_admins(runtime).await?;
+    Ok(with_platform_admin(config, from_manifest.clone())
         .into_iter()
-        .map(|email| InviteRecord {
-            id: format!("manifest:{email}"),
-            email,
-            role: UserRole::Admin,
-            invited_by: "manifest".to_string(),
-            created_at_millis: now,
-            expires_at_millis: now + MANIFEST_INVITE_TTL_MILLIS,
-            accepted_at_millis: None,
+        .map(|email| {
+            let source = if from_manifest.contains(&email) {
+                "manifest"
+            } else {
+                "platform"
+            };
+            InviteRecord {
+                id: format!("{source}:{email}"),
+                email,
+                role: UserRole::Admin,
+                invited_by: source.to_string(),
+                created_at_millis: now,
+                expires_at_millis: now + MANIFEST_INVITE_TTL_MILLIS,
+                accepted_at_millis: None,
+            }
         })
         .collect())
 }
