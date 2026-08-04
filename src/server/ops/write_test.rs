@@ -3603,13 +3603,13 @@ async fn task_discussion_is_paged_newest_first_and_walks_back_with_a_cursor() {
 async fn task_discussion_names_a_departed_user_someone_and_a_machine_credential_operator() {
     use crate::ports::types::{Actor, ActorKind, CompanyEvent};
     use crate::server::platform_auth::{
-        PlatformAuthConfig, PlatformClaims, StaticPlatformVerifier,
+        PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier,
     };
     use std::collections::HashSet;
 
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
-    let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
+    let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new("plat-secret"));
     let state = state_with_company(&home)
         .await
         .with_platform_auth(PlatformAuthConfig::new(verifier));
@@ -3641,7 +3641,7 @@ async fn task_discussion_names_a_departed_user_someone_and_a_machine_credential_
         .await
         .unwrap();
 
-    let token = StaticPlatformVerifier::tenant_token(&PlatformClaims {
+    let token = UnsignedTenantVerifier::tenant_token(&PlatformClaims {
         tenant: "tenant:acme".to_string(),
         scopes: HashSet::from(["operator".to_string()]),
         companies: None,
