@@ -42,7 +42,12 @@ pub(crate) async fn file_with_backlinks(
     let Some((node, content)) = store.read(company, id).await? else {
         return Ok(None);
     };
-    let target = link_target(&node.name).to_string();
+    // Lowercased to match the console, which resolves a wiki link through
+    // `fileByTitle` with both sides lowercased (`frontend/src/lib/workspace.ts`).
+    // Comparing case-sensitively here would let `[[Voice]]` render as a resolved
+    // link to `voice.md` while `voice.md` reported no backlink — the two halves
+    // of one feature disagreeing about the same link.
+    let target = link_target(&node.name).to_ascii_lowercase();
 
     // Backlinks: scan every other file node's content for a `[[target]]` link.
     let mut backlinks = Vec::new();
@@ -53,7 +58,7 @@ pub(crate) async fn file_with_backlinks(
         if let Some((other_node, other_content)) = store.read(company, &other.id).await?
             && extract_wikilinks(&other_content)
                 .iter()
-                .any(|link| link == &target)
+                .any(|link| link.to_ascii_lowercase() == target)
         {
             backlinks.push(other_node);
         }
