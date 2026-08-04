@@ -254,7 +254,13 @@ export function WorkspaceView({ client, company }: Props) {
       // Keep the buffer: the operator's text is never dropped because a save
       // failed. A 404 means the note is gone on the host, which needs a decision
       // rather than a retry, so say so explicitly.
-      pending.current = job;
+      //
+      // Only restore when nothing newer arrived. The operator can keep typing
+      // during the await above, and that typing writes a fresher job into
+      // `pending.current` — overwriting it with the job we just failed to save
+      // would silently discard every keystroke made while the request was in
+      // flight, which is the exact loss this buffer exists to prevent.
+      if (!pending.current) pending.current = job;
       setSaveState("error");
       if (isNotFound(e)) {
         toast.error("This note no longer exists on the host.", {
