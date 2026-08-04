@@ -57,7 +57,10 @@ export interface PatchTask {
   assignee?: string;
 }
 
-export function listTasks(client: OpenCompanyClient, company: string | null): Promise<Task[]> {
+export function listTasks(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<Task[]> {
   return client.get<Task[]>(`${client.scopeFor(company)}/tasks`);
 }
 
@@ -200,11 +203,39 @@ export interface TaskLineage {
 }
 
 /** The assembled Task Detail response (#185): one read for the whole screen. */
+/**
+ * The worked/waiting split (#305), computed by the host.
+ *
+ * Both totals used to be derived twice — here in the console and again in the
+ * exported record — so the screen and an exported copy of the same task could
+ * disagree about how long a person was waited on, with nothing failing when
+ * they drifted. The host does the arithmetic once and both read it.
+ *
+ * A still-open span cannot be carried by a snapshot: `workedLive` / `waitingLive`
+ * mark those, and a caller that wants a ticking figure adds `now - asOfMillis`
+ * to the live half. That is exact — every closed span ends in the past, so past
+ * `asOfMillis` only the open one grows.
+ */
+export interface TaskDurations {
+  /** Milliseconds actively worked, as of `asOfMillis`. */
+  workedMillis: number;
+  /** A dispatch window is still open. */
+  workedLive: boolean;
+  /** Milliseconds spent waiting on a person, interval-merged. */
+  waitingMillis: number;
+  /** An approval is still parked. */
+  waitingLive: boolean;
+  /** The instant both totals were taken. */
+  asOfMillis: number;
+}
+
 export interface TaskDetail {
   /** The card header — the same shape a board card carries. */
   task: Task;
   /** The per-task event stream, oldest first. */
   timeline: TimelineEntry[];
+  /** The worked/waiting split, so the screen and an export cannot disagree. */
+  durations: TaskDurations;
   /**
    * What this task already did that cannot be undone (#351), oldest first.
    * Empty for a task that only read, thought and replied.
@@ -309,6 +340,23 @@ export function postTaskDiscussion(
   );
 }
 
+/**
+ * The task's record as a self-contained HTML document (#352).
+ *
+ * The host renders it *and names it*, so the console's job is delivery only:
+ * the text and the `Content-Disposition` filename come back together, and the
+ * same document — under the same name — reaches a `curl -OJ` or a scheduled job.
+ */
+export function exportTaskRecord(
+  client: OpenCompanyClient,
+  company: string | null,
+  id: string,
+): Promise<{ text: string; filename?: string }> {
+  return client.getDocument(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}/export`,
+  );
+}
+
 export function createTask(
   client: OpenCompanyClient,
   company: string | null,
@@ -323,7 +371,10 @@ export function patchTask(
   id: string,
   body: PatchTask,
 ): Promise<Task> {
-  return client.patch<Task>(`${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`, body);
+  return client.patch<Task>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`,
+    body,
+  );
 }
 
 export function deleteTask(
@@ -331,7 +382,9 @@ export function deleteTask(
   company: string | null,
   id: string,
 ): Promise<void> {
-  return client.del<void>(`${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`);
+  return client.del<void>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`,
+  );
 }
 
 /** A steer verb the operator can apply to an in-flight run (issue #111). */
@@ -366,7 +419,9 @@ export function listInflight(
   client: OpenCompanyClient,
   company: string | null,
 ): Promise<InflightRun[]> {
-  return client.get<InflightRun[]>(`${client.scopeFor(company)}/tasks/inflight`);
+  return client.get<InflightRun[]>(
+    `${client.scopeFor(company)}/tasks/inflight`,
+  );
 }
 
 /**
