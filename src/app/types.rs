@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::app::config::{BrainMode, EnvSource, redacted};
 use crate::company::{CredentialSource, SkillDoc, TinyhumansTokenSource, load_dir_skills};
+use crate::ports::normalize_email;
 use crate::ports::types::{CompanyId, SecretValue};
 use crate::runtime::CompanyRegistry;
 use crate::server::platform_auth::PlatformAuthConfig;
@@ -58,6 +59,24 @@ pub struct AppConfig {
     /// unique index. `None` (the default) is a no-op: db-per-tenant and
     /// single-tenant deployments are unaffected.
     pub tenant_namespace: Option<String>,
+    /// One address the deployment bootstraps as an admin of every company it
+    /// serves (`OPENCOMPANY_ADMIN_EMAIL`), on top of each manifest's
+    /// `[users] admins`.
+    ///
+    /// A company the *platform* provisions has no one in its manifest: the
+    /// person who asked for it is recorded on the control plane's tenant row,
+    /// which the manifest never sees. With an empty `[users] admins` and no
+    /// invite outstanding nobody is eligible, and there is no operator token to
+    /// send the first invite with — the company is unreachable by the human who
+    /// created it (issue #321). This is the seam the platform injects that
+    /// address through.
+    ///
+    /// It is a *standing invite*, not an account: exactly like a manifest
+    /// admin, listing the address makes it eligible to log in, and only
+    /// redeeming a link mints the user. Unsetting it stops future bootstrapping
+    /// and does not delete an account it already created. `None` — and an empty
+    /// or whitespace-only value — is a clean no-op.
+    pub admin_email: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -75,6 +94,7 @@ impl Default for AppConfig {
             max_companies_per_tenant: None,
             webhook: None,
             tenant_namespace: None,
+            admin_email: None,
         }
     }
 }
@@ -154,6 +174,23 @@ impl AppConfig {
             None if self.tinyhumans_credential.is_some() => CredentialSource::Static,
             None => CredentialSource::None,
         }
+    }
+
+    /// The deployment-wide bootstrap admin address, normalized, or `None`.
+    ///
+    /// Normalization goes through the same [`normalize_email`] the manifest and
+    /// login paths use, so `Ada@Example.com ` and `ada@example.com` name one
+    /// address here exactly as they do there — an injected value that only
+    /// matched with the right capitalization would be a lockout that looks like
+    /// a typo. A value that is empty or trims to nothing is `None`: the
+    /// platform renders this variable for every tenant, and a tenant with no
+    /// recorded creator must be indistinguishable from one deployed before the
+    /// variable existed.
+    pub fn bootstrap_admin(&self) -> Option<String> {
+        self.admin_email
+            .as_deref()
+            .map(normalize_email)
+            .filter(|email| !email.is_empty())
     }
 
     /// Namespaces a company id for shared-single-DB mode.
