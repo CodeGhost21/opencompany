@@ -104,19 +104,71 @@ struct ConnectionStateDto {
 ///
 /// Takes the environment as a seam so the matrix is testable without mutating
 /// the process environment.
+///
+/// Test-only because production resolves the host-level half once per request
+/// and then loops — see [`HostConnectRoutes`]. It is defined *in terms of* that
+/// type rather than restating the precedence, so what the tests exercise is the
+/// same code the request path runs.
+#[cfg(test)]
 fn connect_route(provider: &str, stored: bool, env: &dyn EnvSource) -> CredentialSource {
-    if stored {
-        return CredentialSource::Static;
+    HostConnectRoutes::resolve(env).route(provider, stored, env)
+}
+
+/// The host-level half of [`connect_route`], resolved once.
+///
+/// Step 2 of the precedence — "is this pod carrying a platform-projected
+/// identity?" — reads the environment and then *stats a file*. Its answer is a
+/// property of the pod, not of a provider, so resolving it inside a loop over a
+/// company's connections repeats a syscall for an answer that cannot differ
+/// between iterations. Both read planes build this once per request and then ask
+/// it per provider.
+///
+/// Deliberately still one rule: [`route`](Self::route) holds the whole
+/// precedence, and [`connect_route`] is defined in terms of it, so a single-shot
+/// caller and a looping caller cannot diverge.
+pub(crate) struct HostConnectRoutes {
+    /// Whether the pod carries a platform-**projected** identity — the only
+    /// tier that means the platform runs connections here.
+    attested: bool,
+}
+
+impl HostConnectRoutes {
+    /// Resolves the host-level facts once, against an environment seam.
+    fn resolve(env: &dyn EnvSource) -> Self {
+        Self {
+            attested: TinyhumansTokenSource::from_env(env).map(|source| source.tier())
+                == Some(TokenTier::ProjectedFile),
+        }
     }
-    if TinyhumansTokenSource::from_env(env).map(|source| source.tier())
-        == Some(TokenTier::ProjectedFile)
-    {
-        return CredentialSource::Attested;
+
+    /// Resolves against the real process environment. Call once per request,
+    /// then [`route_from_env`](Self::route_from_env) per provider.
+    pub(crate) fn from_env() -> Self {
+        Self::resolve(&crate::app::config::ProcessEnv)
     }
-    if host_provider_app_configured(provider, env) {
-        return CredentialSource::Static;
+
+    /// The full precedence for one provider, given the already-resolved
+    /// host-level facts.
+    fn route(&self, provider: &str, stored: bool, env: &dyn EnvSource) -> CredentialSource {
+        if stored {
+            return CredentialSource::Static;
+        }
+        if self.attested {
+            return CredentialSource::Attested;
+        }
+        if host_provider_app_configured(provider, env) {
+            return CredentialSource::Static;
+        }
+        CredentialSource::None
     }
-    CredentialSource::None
+
+    /// [`route`](Self::route) against the real process environment. The one
+    /// entry point the two read projections — this module and the GraphQL
+    /// [`resolve_connections`](crate::server::graphql::connections::resolve_connections)
+    /// — share, so they cannot drift apart.
+    pub(crate) fn route_from_env(&self, provider: &str, stored: bool) -> CredentialSource {
+        self.route(provider, stored, &crate::app::config::ProcessEnv)
+    }
 }
 
 /// Whether this host has a provider application registered for `provider`,
@@ -132,14 +184,6 @@ fn host_provider_app_configured(provider: &str, env: &dyn EnvSource) -> bool {
 #[cfg(not(feature = "oauth"))]
 fn host_provider_app_configured(_provider: &str, _env: &dyn EnvSource) -> bool {
     false
-}
-
-/// [`connect_route`] against the real process environment. The one entry point
-/// the two read projections — this module and the GraphQL
-/// [`resolve_connections`](crate::server::graphql::connections::resolve_connections)
-/// — share, so they cannot drift apart.
-pub(crate) fn connect_route_from_env(provider: &str, stored: bool) -> CredentialSource {
-    connect_route(provider, stored, &crate::app::config::ProcessEnv)
 }
 
 /// Builds the connection-status route fragment (both scope forms).
@@ -159,6 +203,8 @@ async fn project(runtime: &CompanyRuntime) -> Result<Vec<ConnectionStateDto>, Ap
         return Ok(Vec::new());
     };
     let mut out = Vec::with_capacity(record.manifest.connections.len());
+    // Host-level, so resolved once rather than per connection below.
+    let host = HostConnectRoutes::from_env();
     for connection in &record.manifest.connections {
         let key = format!("oauth/{}", connection.provider);
         let (connected, account) = match runtime
@@ -182,7 +228,7 @@ async fn project(runtime: &CompanyRuntime) -> Result<Vec<ConnectionStateDto>, Ap
             _ => (false, None),
         };
         out.push(ConnectionStateDto {
-            credential_source: connect_route_from_env(&connection.provider, connected),
+            credential_source: host.route_from_env(&connection.provider, connected),
             provider: connection.provider.clone(),
             connected,
             account,

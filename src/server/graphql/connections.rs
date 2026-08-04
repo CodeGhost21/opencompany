@@ -8,7 +8,7 @@ use async_graphql::SimpleObject;
 
 use crate::company::dns::DomainStatus;
 use crate::company::runtime::CompanyRuntime;
-use crate::server::ops::connections_read::connect_route_from_env;
+use crate::server::ops::connections_read::HostConnectRoutes;
 use crate::server::ops::smtp::{SmtpCredentials, SmtpStatus};
 
 /// The reserved SecretStore key holding the JSON domain status.
@@ -116,6 +116,8 @@ pub(crate) async fn resolve_connections(
         return Ok(Vec::new());
     };
     let mut out = Vec::with_capacity(record.manifest.connections.len());
+    // Host-level, so resolved once rather than per connection below.
+    let host = HostConnectRoutes::from_env();
     for connection in &record.manifest.connections {
         let key = format!("oauth/{}", connection.provider);
         let (connected, account) = match runtime.secrets().get(runtime.id(), &key).await? {
@@ -132,7 +134,8 @@ pub(crate) async fn resolve_connections(
             _ => (false, None),
         };
         out.push(ConnectionStateGql {
-            credential_source: connect_route_from_env(&connection.provider, connected)
+            credential_source: host
+                .route_from_env(&connection.provider, connected)
                 .as_str()
                 .to_string(),
             provider: connection.provider.clone(),
