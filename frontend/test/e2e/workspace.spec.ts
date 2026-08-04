@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
 /**
  * Regression proof for issue #177: the Workspace tab must read and write the
@@ -43,10 +43,32 @@ async function dismissOnboarding(page: Page) {
   }
 }
 
+/**
+ * Open the Workspace tab on a genuinely fresh app instance.
+ *
+ * The explicit `reload()` is load-bearing: the console is a hash router, so a
+ * second `goto("/#/workspace")` at the same URL does not remount anything and
+ * the view keeps whatever it already had in React state. Without the reload,
+ * "survives a storage-cleared reload" would assert nothing, and the migration
+ * effect (which runs on mount) would never re-run.
+ */
 async function openWorkspace(page: Page) {
   await page.goto("/#/workspace");
+  await page.reload();
   await dismissOnboarding(page);
   await expect(page.getByTestId("workspace-tree")).toBeVisible({ timeout: 30_000 });
+}
+
+/**
+ * The localStorage key the retired scratchpad used for this host, derived the
+ * same way the app derives the company it operates: the console resolves a lone
+ * registered company to its **id** (`App.tsx`), falling back to `single` when
+ * there is none. Hardcoding `oc-workspace:single` silently plants a key nothing
+ * reads, and the migration assertions below would then pass vacuously.
+ */
+async function legacyKeyFor(request: APIRequestContext): Promise<string> {
+  const companies = (await (await request.get("/api/v1/companies")).json()) as { id: string }[];
+  return `oc-workspace:${companies.length === 1 ? companies[0].id : "single"}`;
 }
 
 test("the Workspace tab reads and writes the host's store, not localStorage", async ({
@@ -152,6 +174,7 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
 }) => {
   const stamp = Date.now().toString(36);
   const rescued = `local-note-${stamp}`;
+  const legacyKey = await legacyKeyFor(request);
 
   // Plant a legacy key holding one user-authored note (`fs-…`) alongside a
   // bundled seed node (`seed-…`), exactly as the retired store would have.
@@ -181,7 +204,7 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
         ]),
       );
     },
-    ["oc-workspace:single", rescued] as const,
+    [legacyKey, rescued] as const,
   );
 
   await openWorkspace(page);
@@ -211,7 +234,7 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
   expect(nodes.some((n) => n.name.includes("Spring launch"))).toBe(false);
 
   // The legacy key is gone, so the banner does not come back.
-  const leftover = await page.evaluate(() => localStorage.getItem("oc-workspace:single"));
+  const leftover = await page.evaluate((key) => localStorage.getItem(key), legacyKey);
   expect(leftover).toBeNull();
 
   // ---- cleanup ----
