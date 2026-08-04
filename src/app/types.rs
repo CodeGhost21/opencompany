@@ -343,6 +343,10 @@ pub struct AppState {
     /// Injected network seams for the credential surfaces (DNS resolver, mail
     /// sender). Empty by default so the build stays offline.
     connections: crate::server::ops::ConnectionsRuntime,
+    /// The hub exchange backing `…/auth/hub`. `None` (the default, and every
+    /// self-hosted host) means the console offers no ecosystem sign-in at all,
+    /// rather than offering a button that leads nowhere.
+    hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
@@ -393,6 +397,7 @@ impl AppState {
             skill_registry: Arc::new(OnceLock::new()),
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
+            hub_identity: None,
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
@@ -498,6 +503,33 @@ impl AppState {
     /// The injected connection seams for the credential surfaces.
     pub fn connections(&self) -> &crate::server::ops::ConnectionsRuntime {
         &self.connections
+    }
+
+    /// Installs the hub identity exchange backing `…/auth/hub`.
+    ///
+    /// An injected seam rather than a client built per request, so the route's
+    /// refusals — rejected token, unreachable hub, address not on this
+    /// company's roster — are testable offline against
+    /// [`MockHubIdentityExchange`](crate::server::hub_identity::MockHubIdentityExchange)
+    /// in a build that links no HTTP crate at all.
+    pub fn with_hub_identity(
+        mut self,
+        exchange: Arc<dyn crate::server::hub_identity::HubIdentityExchange>,
+    ) -> Self {
+        self.hub_identity = Some(exchange);
+        self
+    }
+
+    /// The hub identity exchange, when one is wired.
+    ///
+    /// `None` means this host has no ecosystem to sign in against, which is the
+    /// correct default: a host that cannot ask the hub whose token it is
+    /// holding has no way to check one, and accepting it on trust would make an
+    /// unverifiable JWT a bearer credential for this company.
+    pub fn hub_identity(
+        &self,
+    ) -> Option<&Arc<dyn crate::server::hub_identity::HubIdentityExchange>> {
+        self.hub_identity.as_ref()
     }
 
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
