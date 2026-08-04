@@ -1753,6 +1753,30 @@ mod test {
                     "{company}/{} write access is wrong; effective grants: {grants:?}",
                     agent.id
                 );
+                // Every shipped agent asks for `mcp:*`, and `agent_effective_grants`
+                // intersects that request with the company allow-list — so an
+                // allow-list that omits it silently hands the agent no MCP at all.
+                // Both manifests were in exactly that state before this test
+                // existed (`openhuman_demo` had no allow-list, which covers
+                // nothing, so its agents resolved to an empty toolbelt). Asserted
+                // here because the symptom is a missing capability, not an error:
+                // nothing logs, nothing fails, the tools are simply absent.
+                //
+                // Probed with `grant_matches` against a concrete `mcp:<server>`
+                // name rather than `grants_cover`: MCP grants are colon-namespaced
+                // (`mcp:*`, `mcp:notion`) while `grants_cover` only understands the
+                // dot form, so it answers `false` for a grant list that plainly
+                // contains `mcp:*`.
+                if agent.tools.iter().any(|tool| tool == "mcp:*") {
+                    assert!(
+                        grants
+                            .iter()
+                            .any(|grant| grant_matches(grant, "mcp:any-server")),
+                        "{company}/{} asks for mcp:* but the allow-list does not \
+                         cover it; effective grants: {grants:?}",
+                        agent.id
+                    );
+                }
             }
         }
     }
