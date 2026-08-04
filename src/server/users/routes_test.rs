@@ -33,6 +33,13 @@ fn manifest() -> CompanyManifest {
     .unwrap()
 }
 
+/// A manifest with **no** `[users] admins` — the shape a company the platform
+/// provisions boots with, and the reason issue #321 exists: nobody is eligible
+/// and there is no operator token to send the first invite with.
+fn manifest_without_admins() -> CompanyManifest {
+    toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
+}
+
 async fn state_with(home: &std::path::Path, connections: ConnectionsRuntime) -> AppState {
     state_bound_to(home, &AppConfig::default().bind, connections).await
 }
@@ -44,12 +51,32 @@ async fn state_bound_to(
     bind: &str,
     connections: ConnectionsRuntime,
 ) -> AppState {
+    state_from(
+        home,
+        manifest(),
+        AppConfig {
+            bind: bind.to_string(),
+            ..AppConfig::default()
+        },
+        connections,
+    )
+    .await
+}
+
+/// State over an explicit manifest and config — the seam the bootstrap-admin
+/// tests need, since they turn on both.
+async fn state_from(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    config: AppConfig,
+    connections: ConnectionsRuntime,
+) -> AppState {
     let store = crate::store::FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
     store
         .save(&CompanyRecord {
             id: id.clone(),
-            manifest: manifest(),
+            manifest: manifest.clone(),
             ledger: Vec::new(),
             lifecycle: "running".to_string(),
             overlay_agents: Vec::new(),
@@ -61,23 +88,20 @@ async fn state_bound_to(
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
         .with_id(id.clone())
         .build()
         .await
         .unwrap();
-    let state = AppState::new(AppConfig {
-        bind: bind.to_string(),
-        ..AppConfig::default()
-    })
-    .with_home(home.to_path_buf())
-    .with_connections(connections);
+    let state = AppState::new(config)
+        .with_home(home.to_path_buf())
+        .with_connections(connections);
     state.registry().insert(id, Arc::new(runtime));
     state
 }
 
-/// State with a recording mail sender wired, so links are "delivered".
-async fn state_with_mail(home: &std::path::Path) -> (AppState, RecordingMailSender) {
+/// A recording mail sender wired as a transport, so links are "delivered".
+fn mail_connections() -> (ConnectionsRuntime, RecordingMailSender) {
     let sender = RecordingMailSender::new();
     let connections = ConnectionsRuntime::new()
         .with_mail(Arc::new(sender.clone()))
@@ -90,7 +114,31 @@ async fn state_with_mail(home: &std::path::Path) -> (AppState, RecordingMailSend
             from_name: "Acme".into(),
             from_email: "noreply@acme.test".into(),
         }));
+    (connections, sender)
+}
+
+/// State with a recording mail sender wired, so links are "delivered".
+async fn state_with_mail(home: &std::path::Path) -> (AppState, RecordingMailSender) {
+    let (connections, sender) = mail_connections();
     (state_with(home, connections).await, sender)
+}
+
+/// State with mail wired over an explicit manifest and `OPENCOMPANY_ADMIN_EMAIL`
+/// value — `None` being the pre-#321 deployment.
+async fn state_with_admin_email(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    admin_email: Option<&str>,
+) -> (AppState, RecordingMailSender) {
+    let (connections, sender) = mail_connections();
+    let config = AppConfig {
+        admin_email: admin_email.map(str::to_string),
+        ..AppConfig::default()
+    };
+    (
+        state_from(home, manifest, config, connections).await,
+        sender,
+    )
 }
 
 async fn body_json(response: axum::response::Response) -> serde_json::Value {
@@ -1167,4 +1215,185 @@ async fn with_mail_wired_the_code_is_never_echoed() {
     let sent = sender.sent();
     assert_eq!(sent.len(), 1);
     assert!(sent[0].1.body.contains("/login?company=acme&code="));
+}
+
+// ---------------------------------------------------------------------------
+// The deployment bootstrap admin (`OPENCOMPANY_ADMIN_EMAIL`, issue #321)
+// ---------------------------------------------------------------------------
+
+/// The bug this fixes: a platform-provisioned company's manifest names nobody,
+/// so before the variable existed *no address at all* could get in. The
+/// injected address is the only one that can, and it comes out an admin — the
+/// same grant a manifest entry gives, minted only on redemption.
+#[tokio::test]
+async fn the_env_admin_can_sign_in_to_a_company_whose_manifest_names_nobody() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) =
+        state_with_admin_email(&home, manifest_without_admins(), Some("zoe@example.com")).await;
+
+    let cookie = login_via_link(&state, &sender, "zoe@example.com").await;
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie("/api/v1/companies/acme/auth/me", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let me = body_json(response).await;
+    assert_eq!(me["email"], "zoe@example.com");
+    assert_eq!(
+        me["role"], "admin",
+        "the injected address bootstraps as an admin, exactly like a manifest entry"
+    );
+}
+
+/// Unset, empty, and whitespace-only are one behaviour: the company as it was
+/// before #321. Empty matters on its own — the platform renders the variable
+/// for every tenant, so a tenant with no recorded creator gets an empty value
+/// rather than no variable, and that must not grant anyone anything.
+#[tokio::test]
+async fn no_env_admin_leaves_a_provisioned_company_refusing_everyone() {
+    for admin_email in [None, Some(""), Some("   ")] {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let (state, sender) =
+            state_with_admin_email(&home, manifest_without_admins(), admin_email).await;
+
+        assert_eq!(request_dev_code(&state, "zoe@example.com").await, None);
+        assert!(
+            sender.sent().is_empty(),
+            "{admin_email:?} must grant no eligibility, so no link is ever sent"
+        );
+    }
+}
+
+/// The injected address admits exactly one address, not "anyone the platform
+/// vouches for". Everyone else meets the same silence as before.
+#[tokio::test]
+async fn a_different_address_is_still_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) =
+        state_with_admin_email(&home, manifest_without_admins(), Some("zoe@example.com")).await;
+
+    assert_eq!(request_dev_code(&state, "eve@example.com").await, None);
+    assert!(
+        sender.sent().is_empty(),
+        "an address the platform did not name must get no link"
+    );
+}
+
+/// Case and surrounding whitespace are normalized the way the manifest path
+/// normalizes them. A value that only matched with the right capitalization
+/// would be a lockout that reads as a typo.
+#[tokio::test]
+async fn the_env_admin_is_normalized_like_a_manifest_admin() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) = state_with_admin_email(
+        &home,
+        manifest_without_admins(),
+        Some("  ZOE@Example.COM  "),
+    )
+    .await;
+
+    let cookie = login_via_link(&state, &sender, "zoe@example.com").await;
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie("/api/v1/companies/acme/auth/me", &cookie))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(body_json(response).await["email"], "zoe@example.com");
+}
+
+/// An address named in both places is one standing invite, not two. It stays a
+/// `manifest:` row: that grant outlives the deployment's variable, so it is the
+/// one the operator has to withdraw.
+#[tokio::test]
+async fn an_env_admin_already_in_the_manifest_is_not_invited_twice() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let manifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [users]\nadmins = [\"Ada@Example.com\", \"Bob@Example.com\"]\n",
+    )
+    .unwrap();
+    let (state, sender) = state_with_admin_email(&home, manifest, Some("Bob@Example.com")).await;
+
+    // Ada signs in so there is an admin to read the invite page with; she
+    // becomes a user, which is why only bob's synthetic row is left.
+    let admin = login_via_link(&state, &sender, "ada@example.com").await;
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let invites = body_json(response).await;
+    let rows = invites.as_array().expect("invite list");
+    assert_eq!(
+        rows.len(),
+        1,
+        "bob is named twice but is one invite: {invites}"
+    );
+    assert_eq!(rows[0]["email"], "bob@example.com");
+    assert_eq!(rows[0]["id"], "manifest:bob@example.com");
+    assert_eq!(rows[0]["role"], "admin", "the role must not change");
+    assert_eq!(rows[0]["invitedBy"], "manifest");
+}
+
+/// An injected address the manifest does not name renders as its own
+/// `platform:` row, so the invite page does not contradict who can log in — and
+/// revoking it is refused, pointing at the variable rather than the manifest.
+#[tokio::test]
+async fn the_env_admin_shows_on_the_invite_page_and_cannot_be_revoked() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, sender) = state_with_admin_email(&home, manifest(), Some("zoe@example.com")).await;
+    let admin = login_via_link(&state, &sender, "ada@example.com").await;
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let invites = body_json(response).await;
+    let rows = invites.as_array().expect("invite list");
+    assert_eq!(rows.len(), 1, "expected one synthetic row: {invites}");
+    assert_eq!(rows[0]["id"], "platform:zoe@example.com");
+    assert_eq!(rows[0]["invitedBy"], "platform");
+    assert_eq!(rows[0]["role"], "admin");
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri("/api/v1/companies/acme/users/invites/platform:zoe@example.com")
+                .header("cookie", &admin)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::BAD_REQUEST,
+        "revoking would be a lie: the variable re-grants on the next login"
+    );
+    assert!(
+        body_json(response).await["error"]
+            .as_str()
+            .unwrap()
+            .contains("OPENCOMPANY_ADMIN_EMAIL")
+    );
 }
