@@ -775,6 +775,15 @@ async fn main() -> Result<()> {
             let tenant_namespace = std::env::var("OPENCOMPANY_TENANT_ID")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
+            // The address the platform records as this instance's creator. A
+            // provisioned company's manifest names no admin, so without this
+            // nobody is eligible to log in and there is no operator token to
+            // send the first invite with (issue #321). Treated exactly like a
+            // manifest `[users].admins` entry — a standing invite, not an
+            // account. Unset (self-hosted, local `serve`) is a full no-op.
+            let admin_email = std::env::var("OPENCOMPANY_ADMIN_EMAIL")
+                .ok()
+                .filter(|value| !value.trim().is_empty());
             // Hosted-brain credential, resolved with the same precedence the
             // harness uses (`harness_inference_from_env`) so `/spec`'s
             // `cycles_available` reflects whether cognition can actually run.
@@ -797,6 +806,7 @@ async fn main() -> Result<()> {
                 tinyplace_api_url,
                 public_url,
                 tenant_namespace,
+                admin_email,
                 tinyhumans_credential,
                 ..AppConfig::default()
             })
