@@ -722,7 +722,7 @@ async fn hub_sign_in(
 
     let email = normalize_email(&identity.email);
     let now = now_millis();
-    let Some(role) = eligibility(&runtime, &email, now)
+    let Some(role) = eligibility(state.config(), &runtime, &email, now)
         .await
         .map_err(|e| ApiError(e).into_response())?
     else {
