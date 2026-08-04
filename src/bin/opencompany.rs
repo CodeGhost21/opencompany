@@ -36,7 +36,7 @@ enum Command {
         #[arg(long = "company", value_name = "DIR")]
         companies: Vec<PathBuf>,
         /// OpenCompany home holding company bundles. Defaults to
-        /// `$HOME/.opencompany/companies`.
+        /// `$HOME/.opencompany`, with bundles under `companies/<slug>`.
         #[arg(long)]
         home: Option<PathBuf>,
         /// Opt every loaded company into going public on tiny.place, regardless
@@ -84,7 +84,7 @@ enum Command {
         #[arg(long)]
         include_secrets: bool,
         /// OpenCompany home holding company bundles. Defaults to
-        /// `$HOME/.opencompany/companies`.
+        /// `$HOME/.opencompany`, with bundles under `companies/<slug>`.
         #[arg(long)]
         home: Option<PathBuf>,
     },
@@ -94,7 +94,7 @@ enum Command {
         /// Bundle `.tar` or unpacked bundle directory to import.
         path: PathBuf,
         /// OpenCompany home to import into. Defaults to
-        /// `$HOME/.opencompany/companies`.
+        /// `$HOME/.opencompany`, with bundles under `companies/<slug>`.
         #[arg(long)]
         home: Option<PathBuf>,
     },
@@ -586,6 +586,20 @@ fn connections_runtime() -> Result<opencompany::server::ops::ConnectionsRuntime>
     Ok(connections)
 }
 
+/// Resolves the OpenCompany home and moves any legacy doubled install up before
+/// anything reads it.
+///
+/// Every command that touches bundles resolves through this rather than calling
+/// `store::resolve_home` directly. `serve` needs it or the operator's companies
+/// vanish from the console; `export` and `import` need it because otherwise an
+/// un-migrated install's first post-upgrade command is the one that fails to
+/// find its bundles. See `store::migrate` for the rules and the hosted no-op.
+fn resolve_home_migrated(flag: Option<PathBuf>) -> Result<PathBuf> {
+    let home = opencompany::store::resolve_home(flag)?;
+    opencompany::store::migrate_legacy_nest_announced(&home)?;
+    Ok(home)
+}
+
 /// Builds the four fs storage ports over `home` as trait objects.
 fn fs_ports(home: &std::path::Path) -> opencompany::store::export::Ports {
     use opencompany::store::{FsCompanyStore, FsContextStore, FsEventLog, FsMemoryStore};
@@ -635,7 +649,7 @@ async fn run_export(
     include_secrets: bool,
     home: Option<PathBuf>,
 ) -> Result<()> {
-    let home = opencompany::store::resolve_home(home)?;
+    let home = resolve_home_migrated(home)?;
     let id = CompanyId::new(company);
     let dest = out.unwrap_or_else(|| PathBuf::from(format!("{}-bundle", id.as_ref())));
     export_to_dir(&home, &id, include_secrets, &dest).await?;
@@ -656,7 +670,7 @@ async fn run_export(
 ) -> Result<()> {
     use opencompany::store::export::pack_tar;
 
-    let home = opencompany::store::resolve_home(home)?;
+    let home = resolve_home_migrated(home)?;
     let id = CompanyId::new(company);
     let out = out.unwrap_or_else(|| PathBuf::from(format!("{}.tar", id.as_ref())));
 
@@ -713,7 +727,7 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     use opencompany::store::export::{find_bundle_root, import_bundle, restore_fs_artifacts};
     use opencompany::store::paths::Bundle;
 
-    let home = opencompany::store::resolve_home(home)?;
+    let home = resolve_home_migrated(home)?;
     let root = find_bundle_root(dir)?;
     let (store, events, memory, context) = fs_ports(&home);
     let id = import_bundle(&root, store, events, memory, context).await?;
@@ -736,8 +750,9 @@ async fn main() -> Result<()> {
             home,
             discoverable,
         }) => {
-            // `--home` > OPENCOMPANY_DATA_DIR > $HOME/.opencompany/companies.
-            let home = opencompany::store::resolve_home(home)?;
+            // `--home` > OPENCOMPANY_DATA_DIR > $HOME/.opencompany, then any
+            // legacy doubled install is moved up before a single bundle is read.
+            let home = resolve_home_migrated(home)?;
             // Materialize the canonical data-dir workspace layout and empty the
             // ephemeral `tmp/` scratch so nothing stale survives a restart. The
             // `[workspace]` section of `config.toml` (in the data dir) toggles
@@ -1047,12 +1062,110 @@ mod test {
     fn the_home_flag_is_taken_verbatim() {
         // The binary owns no home policy of its own: it delegates to
         // `store::resolve_home`, whose precedence chain (flag >
-        // OPENCOMPANY_DATA_DIR > $HOME/.opencompany/companies) is covered in
+        // OPENCOMPANY_DATA_DIR > $HOME/.opencompany) is covered in
         // `src/store/paths.rs`. This only pins the wiring.
         assert_eq!(
             opencompany::store::resolve_home(Some(PathBuf::from("/flag"))).unwrap(),
             PathBuf::from("/flag")
         );
+    }
+
+    #[test]
+    fn every_home_resolving_command_migrates_the_legacy_nest() {
+        // `serve`, `export`, and `import` all resolve through
+        // `resolve_home_migrated`, so an un-migrated install's first
+        // post-upgrade command is not the one that finds no bundles.
+        let home = std::env::temp_dir().join(format!(
+            "oc-bin-migrate-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+        let nested = home.join("companies/companies/acme");
+        std::fs::create_dir_all(&nested).expect("legacy bundle");
+        std::fs::write(nested.join("company.toml"), "[company]\n").expect("manifest");
+
+        let resolved = resolve_home_migrated(Some(home.clone())).expect("resolves and migrates");
+
+        assert_eq!(resolved, home);
+        assert!(home.join("companies/acme/company.toml").exists());
+        assert!(!home.join("companies/companies").exists());
+        // The wiring is what is under test, but the bundle path it produces is
+        // the point of the whole change.
+        assert_eq!(
+            opencompany::store::Bundle::new(resolved, &CompanyId::new("acme"))
+                .dir()
+                .to_path_buf(),
+            home.join("companies/acme")
+        );
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn no_command_resolves_a_home_without_migrating_it() {
+        // The test above pins the helper; this pins that the helper is the only
+        // door. A command that called `store::resolve_home` directly would read
+        // an un-migrated install and find no companies — and no runtime test
+        // would catch it, because the defect is a call that never happens. The
+        // needle is split so this assertion does not match its own source line.
+        let needle = concat!("store::", "resolve_home(");
+        let source = include_str!("opencompany.rs");
+        let production = source.split("\nmod test {").next().unwrap_or(source);
+
+        let direct: Vec<&str> = production
+            .lines()
+            .filter(|line| line.contains(needle))
+            .collect();
+
+        assert_eq!(
+            direct.len(),
+            1,
+            "`resolve_home` belongs to `resolve_home_migrated` alone; found {direct:?}"
+        );
+        let (before_helper, _) = production
+            .split_once("fn resolve_home_migrated")
+            .expect("the helper is declared");
+        assert!(
+            !before_helper.contains(needle),
+            "the one call must be the one inside `resolve_home_migrated`"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_and_import_migrate_before_they_read() {
+        // Both commands run against an install whose first post-upgrade command
+        // may well be one of them, so neither may be the one that finds no
+        // bundles. Their results are irrelevant here — the migration happens
+        // before either touches a path, which is the whole point.
+        for command in ["export", "import"] {
+            let home = std::env::temp_dir().join(format!(
+                "oc-bin-{command}-migrate-{}-{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            let _ = std::fs::remove_dir_all(&home);
+            let nested = home.join("companies/companies/acme");
+            std::fs::create_dir_all(&nested).expect("legacy bundle");
+            std::fs::write(nested.join("company.toml"), "[company]\n").expect("manifest");
+
+            match command {
+                "export" => {
+                    let out = home.join("out");
+                    let _ =
+                        run_export("acme".to_string(), Some(out), false, Some(home.clone())).await;
+                }
+                _ => {
+                    let _ = import_from_dir(&home.join("nothing-here"), Some(home.clone())).await;
+                }
+            }
+
+            assert!(
+                home.join("companies/acme/company.toml").exists(),
+                "`{command}` resolved a home without migrating it"
+            );
+            assert!(!home.join("companies/companies").exists());
+            let _ = std::fs::remove_dir_all(&home);
+        }
     }
 
     #[tokio::test]
