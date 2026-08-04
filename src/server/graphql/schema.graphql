@@ -187,6 +187,14 @@ type ConnectionState {
 	"""
 	connected: Boolean!
 	"""
+	Which route a Connect for this provider would take on this host:
+	`attested` (the platform runs it — nothing to register here), `static`
+	(a token already stored for this company, or this host's own registered
+	provider application: the self-hosted hatch), or `none` (no Connect can
+	succeed here). A tier name, never a credential and never a path.
+	"""
+	credentialSource: String!
+	"""
 	The connected account label, when known.
 	"""
 	account: String

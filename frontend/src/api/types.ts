@@ -296,6 +296,21 @@ export interface InboxMessageDto {
 }
 
 /**
+ * Which route a Connect for one provider can take on this host. Deliberately
+ * the same vocabulary as `ComposioCredentialSource` (`api/composio.ts`) — the
+ * two console surfaces answer the same question and should read the same to an
+ * operator.
+ *
+ * - `attested` — this instance carries a platform-minted identity, so
+ *   connections are the platform's to run. Nothing to register here, and the
+ *   console offers no local Connect.
+ * - `static` — a token this company already stored, or this host's own
+ *   registered provider application (the self-hosted hatch). Connect works.
+ * - `none` — neither, so no Connect can succeed on this host.
+ */
+export type ConnectionCredentialSource = "attested" | "static" | "none";
+
+/**
  * One third-party connection's state, from `GET .../connections`.
  * Forward-looking: hosts that don't expose the connections surface yet simply
  * 404, and the console treats connections as unavailable.
@@ -304,6 +319,12 @@ export interface ConnectionState {
   /** Provider id, matching the console's connection catalog (e.g. "slack"). */
   provider: string;
   connected: boolean;
+  /**
+   * Which credential route a Connect for this provider would take — a tier
+   * name, never a credential. Optional so a host predating issue #319 (which
+   * omits the field) still parses; the view falls back to today's behaviour.
+   */
+  credentialSource?: ConnectionCredentialSource;
   /** The connected account label, when known (e.g. an email or workspace). */
   account?: string;
 }

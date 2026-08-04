@@ -363,6 +363,73 @@ async fn connections_reflect_manifest_intent_disconnected() {
     assert_eq!(conns[0]["reason"], "Post updates.");
 }
 
+/// The two connection projections are one shape: whatever credential tier the
+/// REST route reports for a provider, the GraphQL resolver must report the same
+/// (issue #319). They share `connect_route_from_env`, and this pins that they
+/// keep sharing it — a second copy of the resolution order is a second chance to
+/// tell the console a hosted instance can run a local Connect.
+#[tokio::test]
+async fn rest_and_graphql_agree_on_the_connection_credential_source() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+
+    let value = query(
+        router(state.clone()),
+        r#"{"query":"{ company(id:\"acme\"){ connections { provider credentialSource } } }"}"#,
+    )
+    .await;
+    let gql: Vec<(String, String)> = value["data"]["company"]["connections"]
+        .as_array()
+        .expect("connections")
+        .iter()
+        .map(|row| {
+            (
+                row["provider"].as_str().unwrap().to_string(),
+                row["credentialSource"]
+                    .as_str()
+                    .expect("every GraphQL row carries a credentialSource")
+                    .to_string(),
+            )
+        })
+        .collect();
+    assert!(!gql.is_empty(), "expected at least one connection: {value}");
+
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/v1/company/connections")
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let rest: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let rest_rows: Vec<(String, String)> = rest
+        .as_array()
+        .expect("array")
+        .iter()
+        .map(|row| {
+            (
+                row["provider"].as_str().unwrap().to_string(),
+                row["credentialSource"]
+                    .as_str()
+                    .expect("every REST row carries a credentialSource")
+                    .to_string(),
+            )
+        })
+        .collect();
+
+    assert_eq!(
+        rest_rows, gql,
+        "REST and GraphQL disagree on the connection credential source"
+    );
+}
+
 #[tokio::test]
 async fn tasks_page_reflects_upserts_and_column_filter() {
     use crate::ports::tasks::TaskRecord;
