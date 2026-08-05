@@ -4,7 +4,7 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
-import { ApiError, type TeamMemberDto } from "@/api/types";
+import { ApiError, type TeamMemberDto, type TurnStep } from "@/api/types";
 import { type ChatMessage, makeMessage } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { fromDto, newMember, starterTeam, type TeamMember } from "@/lib/team";
@@ -21,7 +21,6 @@ import {
   buildChannels,
   buildTimeline,
   channelTitle,
-  DEFAULT_CHANNEL,
   deskFromDto,
   dmChannelId,
   findChannel,
@@ -47,6 +46,31 @@ interface Props {
    */
   transcripts: Transcripts;
   setTranscripts: Dispatch<SetStateAction<Transcripts>>;
+  /**
+   * Called around the awaited chat POST with the **host thread id** it was sent
+   * on, so the shell can suppress the SSE echo of our own turn while it is in
+   * flight. Without this bracket the shell's live injection and the awaited
+   * reply below both render and the bubble doubles — the exact duplicate-bubble
+   * race the Conversation surface already brackets against.
+   */
+  onSendStart?: (threadId: string) => void;
+  onSendEnd?: (threadId: string) => void;
+  /**
+   * The in-flight tool timeline the shell folds out of the live turn frames,
+   * keyed by **host thread id** — so this view has to resolve its channel to a
+   * thread to read it (see `activeThreadId`). Covers turns this console never
+   * started, which is most of what issue #367 is about.
+   */
+  liveStepsByThread?: Record<string, TurnStep[]>;
+  /** Channel id → unread count, for the rail's badges. Owned by the shell. */
+  unread?: Record<string, number>;
+  /**
+   * Reports the channel actually on screen — which the hash need not name,
+   * since it may have been resolved by the first-channel fallback. The shell
+   * clears that channel's unread count and remembers it as where an
+   * unaddressed line belongs after this view is gone (issue #368).
+   */
+  onChannelViewed?: (channelId: string) => void;
 }
 
 /**
@@ -70,6 +94,11 @@ export function ChatView({
   onReply,
   transcripts,
   setTranscripts,
+  onSendStart,
+  onSendEnd,
+  liveStepsByThread,
+  unread,
+  onChannelViewed,
 }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
@@ -204,10 +233,13 @@ export function ChatView({
   }, [client, company]);
 
   const sections = useMemo(() => buildChannels(members, desks), [members, desks]);
-  const channel =
-    findChannel(sections, sub) ??
-    findChannel(sections, DEFAULT_CHANNEL) ??
-    firstChannel(sections);
+  // The hash's channel, else the first one that exists. There used to be a
+  // literal "main" between the two — an id only the *fallback* desks carry, so
+  // it matched nothing once a company's real desks loaded and matched the same
+  // channel `firstChannel` returns when they hadn't. It never selected anything
+  // the line below wouldn't; it only made "main" look like a real channel id
+  // (issue #368).
+  const channel = findChannel(sections, sub) ?? firstChannel(sections);
 
   const messages = channel ? (transcripts[channel.id] ?? []) : [];
   const entries = useMemo(
@@ -221,10 +253,27 @@ export function ChatView({
     setOpenThreadId(null);
   }, [channel?.id]);
 
+  // Whoever owns the unread counts needs to know what is actually being looked
+  // at. Re-runs as the open channel's transcript grows, not only on a switch:
+  // a reply that lands while you are reading the channel is read, and should
+  // not leave a badge on the channel you are sitting in.
+  useEffect(() => {
+    if (channel) onChannelViewed?.(channel.id);
+  }, [channel?.id, messages.length, onChannelViewed]);
+
   if (!channel) return null;
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
+  // The host thread this channel is addressed on. A real desk channel's id
+  // doubles as its thread id (`deskFromDto`), so addressing by it routes to
+  // that desk's lead. A DM's id is console-local (`dmChannelId`), not a host
+  // thread — but `chat` also accepts a roster teammate id directly
+  // (`responder_for` in `src/harness/brain.rs`), which is exactly what a DM's
+  // `member.id` is, so a DM addresses that teammate the same way a desk
+  // addresses its lead. It is also the id every live turn frame carries.
+  const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
+  const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
 
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
@@ -236,17 +285,15 @@ export function ChatView({
   async function send(text: string, parentId?: string) {
     if (sending) return;
     const target = active.id;
+    const chatId = activeThreadId;
     append(target, makeMessage("you", text, { parentId }));
     setSending(true);
+    // Claim the thread for the duration of the POST. The backend journals an
+    // `AgentReply` for our own turn too and pushes it over SSE mid-await, so
+    // without this the shell injects that echo *and* the awaited reply lands
+    // below — two bubbles for one turn.
+    if (chatId) onSendStart?.(chatId);
     try {
-      // A real desk channel's id doubles as its thread id (`deskFromDto`), so
-      // addressing by it routes to that desk's lead. A DM's id is
-      // console-local (`dmChannelId`), not a host thread — but `chat` also
-      // accepts a roster teammate id directly (`responder_for` in
-      // `src/harness/brain.rs`), which is exactly what a DM's `member.id`
-      // is, so a DM addresses that teammate the same way a desk addresses
-      // its lead.
-      const chatId = active.kind === "channel" ? active.id : active.member?.id;
       const reply = await client.chat(text, company, chatId);
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
@@ -259,6 +306,7 @@ export function ChatView({
       const msg = err instanceof ApiError ? err.message : "something went wrong";
       append(target, makeMessage("system", `Couldn't send — ${msg}`, { parentId }));
     } finally {
+      if (chatId) onSendEnd?.(chatId);
       setSending(false);
     }
   }
@@ -387,11 +435,7 @@ export function ChatView({
       <ChannelRail
         sections={sections}
         activeId={channel.id}
-        // Nothing arrives in a channel you are not looking at yet — every
-        // reply answers a line you just sent. The rail renders unread counts
-        // already, so this is the one seam to fill when the host starts
-        // pushing messages of its own.
-        unread={{}}
+        unread={unread ?? {}}
         onSelect={selectChannel}
         className={cn("md:flex", mobilePane === "rail" ? "flex" : "hidden")}
       />
@@ -417,6 +461,7 @@ export function ChatView({
               entries={entries}
               openThreadId={openThreadId}
               typing={sending && !openThreadId}
+              liveSteps={openThreadId ? undefined : liveSteps}
               onOpenThread={setOpenThreadId}
               onReact={react}
             />
