@@ -321,7 +321,10 @@ function handleEvent(
       // error against today's union, and the host can already send a status
       // this console's type doesn't name yet.
       const pendingStatus: string = "pending";
-      const undelivered = event.deliveries.filter(
+      // `deliveries` is host-controlled and may be absent on an event shape this
+      // console's types don't name yet (see note above) — default to empty so a
+      // missing field can never throw and blank the subscriber.
+      const undelivered = (event.deliveries ?? []).filter(
         (d) => d.status !== "sent" && d.status !== pendingStatus,
       ).length;
       if (undelivered > 0) {
