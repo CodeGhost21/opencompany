@@ -1,5 +1,8 @@
 import { type DragEvent, useCallback, useEffect, useRef, useState } from "react";
 import {
+  AlertTriangle,
+  CircleHelp,
+  ClipboardList,
   FileText,
   ListTree,
   Loader2,
@@ -9,7 +12,13 @@ import {
   ScrollText,
 } from "lucide-react";
 
-import { createTask, listTasks, patchTask, type Task } from "@/api/tasks";
+import {
+  createTask,
+  listTasks,
+  patchTask,
+  type Task,
+  type TaskPlan,
+} from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -36,6 +45,7 @@ import {
 } from "@/lib/task-output";
 import { toast } from "sonner";
 import { TaskDetailView } from "./TaskDetailView";
+import { tallyPrerequisites } from "./TaskPlanBrief";
 
 /**
  * Reads the `#/tasks/<id>` sub-hash, or null on the bare board. The app shell's
@@ -547,6 +557,7 @@ function TaskItem({
           <span className="truncate text-xs text-muted-foreground">{task.assignee}</span>
         </div>
       )}
+      {task.plan && <PlanBadgeRow plan={task.plan} />}
       {SHOWS_OUTPUT_LINK.has(task.column) && <OutputLinkRow task={task} />}
       {task.column === "paused" && (
         <Button
@@ -582,6 +593,64 @@ function TaskItem({
  * suggest the work in flight is already finished.
  */
 const SHOWS_OUTPUT_LINK = new Set(["in_review", "done"]);
+
+/**
+ * What a planned card carries, in one line on the board (issue #337).
+ *
+ * Shown on **every** column a plan survives into rather than a chosen set, and
+ * that is the difference from {@link SHOWS_OUTPUT_LINK} above. An output is
+ * only meaningful once there is one, so it earns a column filter; a plan is
+ * only ever present because a person deliberately asked for one, so hiding it
+ * anywhere would be second-guessing that request.
+ *
+ * The blocked case is the one that has to be loud. A pass that could not clear
+ * a card returns it to To-do, where it sits looking exactly like work nobody
+ * has picked up — and the difference between "not started" and "cannot start"
+ * is the whole point of having planned it. So blockers get the destructive
+ * treatment and a count; a clear plan gets a quiet step count and stays out of
+ * the way.
+ *
+ * `needsApproval` and `unknown` are deliberately not counted here. Neither
+ * stops the card host-side, and a badge that counted them would tell an
+ * operator to go fix something that is not blocking anything.
+ */
+function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
+  const { blocking, approval, unchecked } = tallyPrerequisites(plan);
+  if (blocking > 0) {
+    return (
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-destructive">
+        <AlertTriangle className="size-3 shrink-0" />
+        <span>
+          Planned — needs {blocking} thing{blocking === 1 ? "" : "s"}
+        </span>
+      </div>
+    );
+  }
+  // Nothing blocking, but not necessarily all-clear either — the same three-way
+  // distinction the brief's headline makes, kept in step with it so the board
+  // and the card can never disagree about whether a plan is settled. A count
+  // here is a prompt to open the card, where the rows say which is which.
+  const unresolved = approval + unchecked;
+  if (unresolved > 0) {
+    return (
+      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+        <CircleHelp className="size-3 shrink-0" />
+        <span>
+          Planned — {unresolved} to be aware of
+        </span>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+      <ClipboardList className="size-3 shrink-0" />
+      <span>
+        Planned
+        {plan.steps.length > 0 && ` · ${plan.steps.length} step${plan.steps.length === 1 ? "" : "s"}`}
+      </span>
+    </div>
+  );
+}
 
 function LinkIcon({ kind }: { kind: TaskLink["kind"] }) {
   const className = "size-3.5 shrink-0";

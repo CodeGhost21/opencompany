@@ -59,6 +59,7 @@ import {
   type TaskApproval,
   type TaskApprovalStatus,
   type TaskDetail,
+  type TaskPlan,
   type TimelineEntry,
   type TimelineKind,
 } from "@/api/tasks";
@@ -109,6 +110,7 @@ import { effectDone } from "@/lib/language";
 import { PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
 import { ArtifactsTab } from "./ArtifactsTab";
+import { TaskPlanBrief, tallyPrerequisites } from "./TaskPlanBrief";
 import { AssigneeSelect } from "./AssigneeSelect";
 import { TaskEditDialog } from "./TaskEditDialog";
 
@@ -198,6 +200,29 @@ function tabForFocus(focus?: TaskFocus): string {
   if (focus?.artifactId) return "artifacts";
   if (focus?.runId) return "attempts";
   return "timeline";
+}
+
+/**
+ * The count that rides the Plan tab's trigger, and the colour it wears (#337).
+ *
+ * Two different signals, never merged into one number. Red is *blocking*: only
+ * `missing` earns it, because only `missing` stopped the card. Amber is
+ * *unresolved but not blocking* — a prerequisite that will stop for an operator
+ * approval, or one the host could not check at all. Showing a single total
+ * would either send someone to fix a non-problem or hide a real one behind a
+ * colour that says it is fine.
+ *
+ * Returns `null` for a plan with nothing to report, so the trigger stays a
+ * plain word.
+ */
+function planTabCount(plan: TaskPlan): { count: number; tone: string } | null {
+  const { blocking, approval, unchecked } = tallyPrerequisites(plan);
+  if (blocking > 0) return { count: blocking, tone: "text-destructive" };
+  const unresolved = approval + unchecked;
+  if (unresolved > 0) {
+    return { count: unresolved, tone: "text-amber-600 dark:text-amber-400" };
+  }
+  return null;
 }
 
 export function TaskDetailView({
@@ -455,6 +480,29 @@ export function TaskDetailView({
                     </span>
                   )}
                 </TabsTrigger>
+                {/*
+                  * Issue #337: only for a card somebody planned. A tab that is
+                  * empty on every card until Planning is used would be clutter
+                  * on the four screens out of five that never see one.
+                  *
+                  * The blocker count rides the trigger, in the Attempts count's
+                  * shape, because it is the one thing worth seeing without a
+                  * click: a card sitting in To-do with "Plan 2" in red answers
+                  * "why didn't this start?" from the tab bar.
+                  */}
+                {detail.task.plan && (
+                  <TabsTrigger value="plan">
+                    Plan
+                    {(() => {
+                      const badge = planTabCount(detail.task.plan!);
+                      return badge ? (
+                        <span className={cn("ml-1.5 tabular-nums", badge.tone)}>
+                          {badge.count}
+                        </span>
+                      ) : null;
+                    })()}
+                  </TabsTrigger>
+                )}
                 <TabsTrigger value="approvals">Approvals</TabsTrigger>
                 <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
                 <TabsTrigger value="discussion">Discussion</TabsTrigger>
@@ -477,6 +525,12 @@ export function TaskDetailView({
                   openRunId={focus?.runId}
                 />
               </TabsContent>
+
+              {detail.task.plan && (
+                <TabsContent value="plan" className="mt-4">
+                  <TaskPlanBrief plan={detail.task.plan} />
+                </TabsContent>
+              )}
 
               <TabsContent value="approvals" className="mt-4">
                 <ApprovalsTab approvals={detail.approvals} now={now} />
