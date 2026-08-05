@@ -444,6 +444,46 @@ impl ApprovalPolicy {
         None
     }
 
+    /// Matches a live **standing** grant for this agent and tool (issue #374),
+    /// leaving it in place — a standing grant is not spent by being used.
+    ///
+    /// Two conditions beyond the match itself, and both are the arm's safety
+    /// rather than decoration:
+    ///
+    /// * **A policy with no agent bound can never match**, the same
+    ///   short-circuit [`consume_grant`](Self::consume_grant) takes, so every
+    ///   non-harness construction site behaves exactly as it did before.
+    /// * **A priced call is refused outright**, even holding a grant. The mint
+    ///   side already refuses to grant anything outside
+    ///   [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other), so a
+    ///   `Spend`-group tool can never reach here; this covers the *other* way a
+    ///   call becomes priced, which the tool name cannot predict — an `Other`
+    ///   tool invoked with a declared `amount_usd`. Refusing here means the call
+    ///   falls through to the budget and mode arms below and parks, so a
+    ///   standing grant cannot admit money **by placement**, not by promise.
+    fn standing_grant_allows(&self, tool: &str, args: &serde_json::Value) -> bool {
+        let Some(agent) = self.agent.as_deref() else {
+            return false;
+        };
+        if Self::is_priced_call(tool, Self::amount_usd(args)) {
+            return false;
+        }
+        let Some(grant) =
+            self.requests
+                .grants()
+                .match_standing(agent, tool, crate::ports::now_millis())
+        else {
+            return false;
+        };
+        log::debug!(
+            "[approval] tool '{tool}' allowed by standing grant {} for agent '{agent}' \
+             (expires at {})",
+            grant.id,
+            grant.expires_at_millis
+        );
+        true
+    }
+
     /// Does this tool call **spend money**? The predicate the daily budget arm
     /// gates on (issue #304).
     ///
@@ -686,6 +726,33 @@ impl ToolPolicy for ApprovalPolicy {
             return ToolPolicyDecision::Allow;
         }
 
+        // 2b. A live STANDING grant: the operator opened this tool up for this
+        //     teammate until a deadline (issue #374). Any arguments, unlimited
+        //     calls, until it expires or is revoked.
+        //
+        // IMMEDIATELY BELOW the single-use check and nowhere else. Above it, a
+        // standing grant would mask consumption: the operator's one-off approval
+        // would sit unredeemed until its TTL and then be announced as "the agent
+        // didn't act" — a lie about a call that ran. The single-use grant must
+        // burn if it matches, so it is asked first.
+        //
+        // Everything ABOVE stays above, and for unchanged reasons: `never_do`'s
+        // reserved slot outranks a standing grant exactly as it outranks a
+        // single-use one — more so, since this one admits many calls — and the
+        // `readonly` brake denies before either is consulted, leaving the grant
+        // intact for when the brake is released.
+        //
+        // What keeps this narrow is decided at MINT time, not here:
+        // `broadly_grantable` refuses to grant anything outside
+        // `EffectGroup::Other`, so no Spend / Send / Sign / Publish / Hire /
+        // Identity tool can have a standing grant to match. The one thing the
+        // tool name cannot predict — an `Other` tool carrying a declared amount
+        // — is refused inside `standing_grant_allows`, so this arm can never
+        // admit money.
+        if self.standing_grant_allows(tool, &request.arguments) {
+            return ToolPolicyDecision::Allow;
+        }
+
         // 2. `always_approve` wins over everything else, including Full autonomy.
         if self.always_requires_approval(tool) {
             return self.require_approval(
@@ -876,6 +943,19 @@ fn top_level_keys(args: &serde_json::Value) -> Vec<&str> {
 }
 
 /// Map a tool name onto the supervised [`EffectGroup`] taxonomy.
+///
+/// Since issue #374 this classification decides one more thing: whether a tool
+/// can be given a **standing** grant. The rule is
+/// [`EffectGroup::is_broadly_grantable`] — only the catch-all `Other` — and it
+/// is applied to the group recorded on the *parked effect*, which is the value
+/// this function produced at projection time. So there is one classifier and
+/// one rule, and the operator is checked against the same classification their
+/// card was showing.
+///
+/// That also means a tool landing in `Other` by omission now grants more than
+/// it used to. The `deploy` and `filing` arms below exist because of exactly
+/// that; a misclassification *toward* a consequence group is the safe
+/// direction, and the tests pin both.
 fn classify_group(tool_name: &str) -> EffectGroup {
     let name = tool_name.to_ascii_lowercase();
     if name == "mcp_registry_tool_call" {
@@ -904,9 +984,22 @@ fn classify_group(tool_name: &str) -> EffectGroup {
         EffectGroup::Spend
     } else if name.contains("email") || name.contains("send") || name.contains("message") {
         EffectGroup::Send
-    } else if name.contains("sign") || name.contains("file") {
+    } else if name.contains("sign") || name.contains("file") || name.contains("filing") {
+        // `filing` is the second arm issue #374 adds, found the same way as
+        // `deploy` and for the same reason. `approvals.md` lists `filing.submit`
+        // under Sign, but the substring above is `file`, which `filing` does not
+        // contain — so a `filing_submit` tool classified as `Other`, and `Other`
+        // now means "may be granted for a week". No such tool exists today, so
+        // this closes the gap before it can be walked into rather than after.
         EffectGroup::Sign
-    } else if name.contains("publish") || name.contains("post") {
+    } else if name.contains("publish") || name.contains("post") || name.contains("deploy") {
+        // `deploy` is new with issue #374 and closes the one consequence class
+        // the heuristics missed. `approvals.md` has always listed website
+        // deploys under Publish, but no arm matched the word, so a `deploy_site`
+        // tool classified as `Other` — which now means something it did not
+        // before: `Other` is exactly the set that can be granted standing. A
+        // deploy is externally visible and not reversible by the company alone,
+        // so it stays a per-call decision.
         EffectGroup::Publish
     } else if name.contains("hire") || name.contains("contract") {
         EffectGroup::Hire
@@ -2220,5 +2313,272 @@ mod tests {
             ToolPolicyDecision::Allow,
             "a free call never reaches the budget arm, so a meter outage cannot gate it"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Standing grants (issue #374)
+    // -----------------------------------------------------------------------
+
+    fn standing(
+        agent: &str,
+        tool: &str,
+        expires_at_millis: u64,
+    ) -> crate::runtime::grants::StandingGrant {
+        crate::runtime::grants::StandingGrant {
+            id: crate::runtime::grants::GrantId::new("g1"),
+            agent: agent.to_string(),
+            tool: tool.to_string(),
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("appr-1"),
+            at_millis: 1_000,
+            expires_at_millis,
+            origin_thread: None,
+        }
+    }
+
+    /// Far enough ahead that wall-clock drift during a test run cannot reach it.
+    fn far_future() -> u64 {
+        crate::ports::now_millis() + 60 * 60 * 1000
+    }
+
+    /// The issue in one test: the same tool, called repeatedly with different
+    /// arguments, stops asking.
+    #[tokio::test]
+    async fn a_standing_grant_admits_repeat_calls_with_any_arguments() {
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+
+        for args in [
+            serde_json::json!({ "path": "notes/a.md", "body": "one" }),
+            serde_json::json!({ "path": "notes/b.md", "body": "two" }),
+            serde_json::json!({}),
+        ] {
+            assert_eq!(
+                p.check(&request("workspace_write", args.clone())).await,
+                ToolPolicyDecision::Allow,
+                "a standing grant admits any arguments: {args}"
+            );
+        }
+        assert_eq!(
+            grants.standing_count(),
+            1,
+            "using a standing grant must not spend it"
+        );
+    }
+
+    /// An expired standing grant is refused at redemption, not merely swept.
+    ///
+    /// The sweep runs on the scheduler's maintenance tick; between two ticks a
+    /// lapsed grant would otherwise keep admitting calls, and "for one hour" has
+    /// to mean one hour.
+    #[tokio::test]
+    async fn an_expired_standing_grant_re_parks() {
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        // Already past — and deliberately left in the set, so this proves the
+        // redemption check rather than the sweep.
+        grants.grant_standing(standing("ops", "workspace_write", 1));
+
+        assert!(matches!(
+            p.check(&request("workspace_write", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(grants.standing_count(), 1, "the sweep did not run here");
+    }
+
+    #[tokio::test]
+    async fn a_standing_grant_is_scoped_to_its_agent_and_tool() {
+        let (p, grants) = granting_policy("supervised", &[], "marketing");
+        // Granted to a different teammate.
+        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        assert!(matches!(
+            p.check(&request("workspace_write", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+        // A different tool for the right teammate.
+        assert!(matches!(
+            p.check(&request("send_email", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// The single-use grant burns first, even when a standing grant would also
+    /// have admitted the call.
+    ///
+    /// Ordering, not coincidence. If the standing arm ran first the operator's
+    /// one-off approval would sit unredeemed until its TTL and then be announced
+    /// as "the agent didn't act within 15 minutes" — a notice about work that
+    /// had already happened, which is worse than no notice at all.
+    #[tokio::test]
+    async fn the_single_use_grant_is_consumed_first() {
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        let args = serde_json::json!({ "path": "notes/a.md" });
+        grants.grant(granted("ops", "workspace_write", args.clone()));
+        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+
+        assert_eq!(
+            p.check(&request("workspace_write", args)).await,
+            ToolPolicyDecision::Allow
+        );
+        assert_eq!(grants.live_count(), 0, "the single-use grant burned");
+        assert_eq!(grants.standing_count(), 1);
+        assert_eq!(
+            grants.drain_consumed().len(),
+            1,
+            "the consumption is journaled, so no phantom expiry notice follows"
+        );
+    }
+
+    /// A standing grant can never admit money — by placement, not by promise.
+    ///
+    /// The mint side refuses to grant anything outside `EffectGroup::Other`, so
+    /// no Spend-group tool can have one. This covers the other way a call
+    /// becomes priced, which the tool name cannot predict: an `Other` tool
+    /// invoked with a declared amount. It must fall through to the budget and
+    /// mode arms and park.
+    #[tokio::test]
+    async fn a_standing_grant_refuses_a_priced_call() {
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+
+        // Same tool, same grant — the only difference is a declared amount.
+        assert_eq!(
+            p.check(&request(
+                "workspace_write",
+                serde_json::json!({ "path": "a" })
+            ))
+            .await,
+            ToolPolicyDecision::Allow
+        );
+        assert!(
+            matches!(
+                p.check(&request(
+                    "workspace_write",
+                    serde_json::json!({ "path": "a", "amount_usd": 25.0 })
+                ))
+                .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a declared amount must park even under a standing grant"
+        );
+
+        // And the metered read, which is priced without declaring anything.
+        let (p, grants) = granting_policy("supervised", &[], "ops");
+        grants.grant_standing(standing(
+            "ops",
+            crate::harness::search::WEB_SEARCH_TOOL,
+            far_future(),
+        ));
+        assert_ne!(
+            p.check(&request(
+                crate::harness::search::WEB_SEARCH_TOOL,
+                serde_json::json!({ "query": "x" })
+            ))
+            .await,
+            ToolPolicyDecision::Deny {
+                reason: String::new()
+            },
+            "sanity: this asserts the arm was not reached, not the tier's answer"
+        );
+    }
+
+    /// `readonly` outranks a standing grant, and leaves it intact.
+    ///
+    /// Same argument as the single-use case: the brake is the emergency stop,
+    /// not a question, and consent does not survive it. But the grant is not
+    /// destroyed — the call never ran, so the operator's permission is still
+    /// there when the brake comes off.
+    #[tokio::test]
+    async fn readonly_outranks_a_standing_grant_and_leaves_it_intact() {
+        let (p, grants) = granting_policy("readonly", &[], "ops");
+        grants.grant_standing(standing("ops", "workspace_write", far_future()));
+
+        assert!(matches!(
+            p.check(&request("workspace_write", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            grants.standing_count(),
+            1,
+            "a denied call must not destroy the permission it never used"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_unbound_policy_ignores_standing_grants_entirely() {
+        let queue = ApprovalRequestQueue::default();
+        let grants = queue.grants();
+        let p = policy("supervised", &[], None).with_requests(queue);
+        grants.grant_standing(standing("ops", "send_email", far_future()));
+
+        assert!(matches!(
+            p.check(&request("send_email", serde_json::json!({}))).await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// What may be granted broadly is exactly `EffectGroup::Other`, derived —
+    /// never listed. A second hand-kept list is the drift the issue forbids.
+    #[test]
+    fn what_may_be_granted_broadly_is_exactly_the_other_group() {
+        for tool in [
+            "workspace_write",
+            "workspace_read",
+            "shell",
+            "mcp_registry_tool_call",
+            "web_fetch",
+        ] {
+            assert!(
+                classify_group(tool).is_broadly_grantable(),
+                "{tool} classifies as Other and is grantable"
+            );
+        }
+        // The classifier is substring heuristics, and it errs toward a
+        // consequence group — `read_file` matches the `file` arm and lands in
+        // `Sign` despite being a pure read. That is the SAFE direction: a
+        // misclassified tool loses the broader scope and keeps asking, rather
+        // than gaining a scope it should not have. Pinned so the asymmetry is
+        // deliberate rather than discovered.
+        assert!(!classify_group("read_file").is_broadly_grantable());
+        for tool in [
+            "composio_execute",
+            "composio_authorize",
+            "pay_invoice",
+            "transfer_funds",
+            "send_email",
+            "media_generate_image",
+            crate::harness::search::WEB_SEARCH_TOOL,
+            "publish_post",
+            "contract_accept",
+            "handle_register",
+            "filing_submit",
+            "deploy_site",
+        ] {
+            assert!(
+                !classify_group(tool).is_broadly_grantable(),
+                "{tool} carries a consequence group and must stay a per-call decision"
+            );
+        }
+    }
+
+    /// Issue #374 adds the `deploy` arm. `approvals.md` has always listed
+    /// website deploys under Publish, but no arm matched the word, so a deploy
+    /// tool classified as `Other` — which now means something it did not before:
+    /// `Other` is exactly the set that can be granted standing.
+    #[test]
+    fn a_deploy_classifies_as_publish() {
+        assert_eq!(classify_group("deploy_site"), EffectGroup::Publish);
+        assert_eq!(classify_group("website_deploy"), EffectGroup::Publish);
+        // And the arms it sits beside are unmoved.
+        assert_eq!(classify_group("publish_post"), EffectGroup::Publish);
+        assert_eq!(classify_group("workspace_write"), EffectGroup::Other);
     }
 }

@@ -125,6 +125,20 @@ export function effectDone(kind: string, amountUsd?: number | null): string {
 const TOOL_LABELS: Readonly<Record<string, string>> = {
   shell: "Run a terminal command",
   glob: "Search files in its workspace",
+  // Issue #374 added a second reader of these labels — the Standing permissions
+  // list — where the payload block that used to disambiguate an unlabelled tool
+  // does not exist. Two permissions both reading "Use one of its tools" would be
+  // indistinguishable, so the tools that can actually hold one (the catch-all
+  // `Other` group) need real words rather than the generic fallback.
+  workspace_write: "Edit a note in its workspace",
+  workspace_read: "Read a note in its workspace",
+  workspace_list: "List its workspace notes",
+  memory_store: "Save something to its memory",
+  memory_recall: "Look something up in its memory",
+  web_fetch: "Fetch a web page",
+  query_company: "Look up something about the company",
+  // `mcp_registry_tool_call` is deliberately absent: EFFECT_LABELS already
+  // names it and is consulted first, so an entry here would be unreachable.
 };
 
 /**
@@ -150,6 +164,20 @@ export function approvalAction(a: ApprovalSummary): string {
     labelFor(TOOL_LABELS, a.kind) ??
     (a.agent ? "Use one of its tools" : "Do something that needs your sign-off")
   );
+}
+
+/**
+ * What a tool does, in plain language, from its identifier alone (#374).
+ *
+ * The Standing permissions list has no approval to hand to
+ * {@link approvalAction} — the card it came from was resolved and is gone — but
+ * the glossary rule at the top of this file still applies: an operator must
+ * never be shown `workspace_write` and asked to reason about it. Same first two
+ * rungs as {@link approvalAction}, with a fallback that names a tool without
+ * pretending to know which one.
+ */
+export function toolAction(kind: string): string {
+  return labelFor(EFFECT_LABELS, kind) ?? labelFor(TOOL_LABELS, kind) ?? "Use one of its tools";
 }
 
 /** A one-line, human summary of what needs approval. */
