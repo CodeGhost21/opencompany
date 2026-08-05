@@ -686,6 +686,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             desk,
             output,
             column,
+            ..
         } => {
             let mut o = envelope("desk_task_completed");
             o["taskId"] = json!(task_id);
@@ -1687,6 +1688,7 @@ mod test {
             delegations: crate::harness::orchestrator::DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3435,6 +3437,7 @@ mod test {
             desk: "ceo".into(),
             output: "shipped".into(),
             column: "in_review".into(),
+            artifact_ids: Vec::new(),
         }))
         .expect("desk_task_completed is an attention signal");
         assert_eq!(v["type"], serde_json::json!("desk_task_completed"));

@@ -53,6 +53,17 @@ pub mod memory_loop;
 pub mod orchestrator;
 pub mod policy;
 pub mod provider;
+/// Issue #244: `publish_artifact` — the only way a workspace file becomes a
+/// deliverable — plus the staging queue the brain drains, the bounded workspace
+/// scan that detects unpublished work, and the follow-up nudge's prompt. See
+/// [`publish`].
+pub mod publish;
+/// End-to-end proof that #244's `publish_artifact` is reachable from a real
+/// dispatch, that a re-run extends by identity, and — the part nothing shorter
+/// than a real turn loop can show — that the follow-up nudge fires **once**,
+/// records a decline, and can never fail the run it follows. Test-only.
+#[cfg(test)]
+mod publish_turn_test;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
@@ -198,6 +209,17 @@ pub struct HarnessDeps {
     /// cheap-shared-handle pattern as [`Self::delegations`]; every string it
     /// carries is scrubbed at the source. Default is an empty queue.
     pub mcp_failures: McpFailureQueue,
+    /// The shared publish queue the `publish_artifact` tool stages onto and the
+    /// [`HarnessBrain`] drains at the end of a dispatch (issue #244). Same
+    /// cheap-shared-handle pattern as [`Self::mcp_failures`], and for the same
+    /// structural reason: tools are built **once per agent** while the card
+    /// varies **per dispatch**, so a tool cannot hold a task id or a store and
+    /// has to hand its work to something that does.
+    ///
+    /// Default is an empty queue, which simply means nothing is ever published
+    /// — every path degrades to "this task produced no artifact", which is a
+    /// legitimate outcome rather than a failure.
+    pub pending_publishes: crate::harness::publish::PendingPublishQueue,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -1901,6 +1923,7 @@ description = "Builds the product."
                 delegations: DelegationQueue::default(),
                 workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
                 mcp_failures: McpFailureQueue::default(),
+                pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -1965,6 +1988,7 @@ description = "Builds the product."
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2254,6 +2278,7 @@ description = "Builds the product."
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2415,6 +2440,7 @@ description = "Builds the product."
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -2728,6 +2754,7 @@ description = "Builds the product."
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2886,6 +2913,7 @@ description = "Sets direction."
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3028,6 +3056,7 @@ description = "Sets direction."
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
