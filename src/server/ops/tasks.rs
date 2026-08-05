@@ -8,8 +8,8 @@
 //!
 //! `GET /tasks/{task_id}` (issue #185) is the Task Detail screen's read
 //! foundation: it assembles the card header, the per-task timeline, the
-//! lineage, the approvals trail, and — since issue #335 — the card's discussion
-//! thread into one response so the console makes a single call. See
+//! lineage, the task's own approvals (issue #333), and — since issue #335 — the
+//! card's discussion thread into one response so the console makes a single call. See
 //! [`task_detail`] for the assembly and its scrub discipline, and
 //! [`post_discussion`] for the thread's one write.
 
@@ -436,6 +436,39 @@ pub(crate) struct TimelineEntry {
     pub(crate) waited_millis: Option<u64>,
 }
 
+/// One approval that belongs to this task (issue #333).
+///
+/// The Approvals tab's row. Distinct from the `approval` [`TimelineEntry`],
+/// which can only ever describe a *resolution* — an approval still parked has
+/// no `ApprovalResolved` event, so it cannot reach the timeline at all, and
+/// that is exactly the row an operator opening this screen needs: the one
+/// waiting on them right now.
+///
+/// Carries no payload. The parked effect can hold a recipient, a body or an
+/// amount, and this response is not the place to widen what a task read
+/// exposes — the Approvals page resolves the sign-off, and this is only the
+/// task's view of what it asked for.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TaskApproval {
+    /// The approval's id — the same one the Approvals page resolves against.
+    pub(crate) id: String,
+    /// The parked effect's dotted kind, e.g. `payment.send`.
+    pub(crate) kind: String,
+    /// Epoch-millis the effect parked.
+    pub(crate) at_millis: u64,
+    /// `pending`, `approved`, `denied`, or `expired`.
+    pub(crate) status: String,
+    /// Epoch-millis the resolution landed. Absent while pending.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) resolved_at_millis: Option<u64>,
+    /// The park → resolve span. Absent while pending (the console runs that
+    /// clock itself from `atMillis`) and for an approval whose park instant the
+    /// journal cannot recover.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) waited_millis: Option<u64>,
+}
+
 /// One irreversible effect this task already executed (issue #351).
 ///
 /// Drawn from the runtime journal's executed record — the same append-only set
@@ -697,6 +730,15 @@ pub(crate) struct TaskDetail {
     pub(crate) task: TaskCard,
     /// The per-task event stream, oldest first.
     pub(crate) timeline: Vec<TimelineEntry>,
+    /// This task's own approvals, oldest first — still-parked ones included
+    /// (issue #333).
+    ///
+    /// The Approvals tab used to filter `timeline` for `kind == "approval"`,
+    /// which could only ever show *resolutions* that happened to fall in the
+    /// run window, and showed nothing at all for the one state that matters:
+    /// an approval parked right now, blocking this card. This is the real
+    /// query, joined on the task id the approval was parked with.
+    pub(crate) approvals: Vec<TaskApproval>,
     /// The worked/waiting split, so the screen and the exported record cannot
     /// disagree about it.
     pub(crate) durations: TaskDurations,
@@ -772,12 +814,11 @@ pub(crate) struct TaskDetail {
 ///   Without that threading these events are indistinguishable from every other
 ///   desk reply in the log, which is exactly why the filter could not be built
 ///   before;
-/// * **approvals trail** — [`ApprovalResolved`](CompanyEvent::ApprovalResolved)
-///   events that fall inside the task's run window (its dispatch anchor through
-///   its completion anchor, or through the end of the log while it is still
-///   running). Parked effects carry no task id, so a window is the honest
-///   correlation here rather than a false-precision per-task link; entries are
-///   labelled as such so a reader is not misled;
+/// * **approvals** — every approval this task parked, resolved or still
+///   waiting, joined on the task id the runtime journal recorded with it
+///   (issue #333). An approval parked by a build older than that carries no id,
+///   and only those fall back to the old run-window correlation — so a second
+///   card worked in the same window can no longer absorb this one's sign-offs;
 /// * **lineage** — parent and children, from `parent_task_id`;
 /// * **irreversible effects** — what the task already did that a retry would
 ///   do again (issue #351), read straight off the journal's executed record,
@@ -856,8 +897,25 @@ async fn assemble_detail_with_cursor(
     children.sort_by_key(|t| t.updated_at_millis);
     let children = children.into_iter().map(LineageRef::from).collect();
 
+    // This card's attempts (issue #242), as a set of run ids. One query, bounded
+    // by the card's own attempt count — and the authoritative half of the
+    // correlation: a run id resolves to exactly one card, so "was this approval
+    // parked under one of *my* attempts" is answerable without opening a run.
+    let task_runs: std::collections::HashSet<String> = company
+        .runtime
+        .runs()
+        .list_runs(
+            company.id(),
+            &crate::ports::runs::RunFilter::for_task(task_id.clone()),
+        )
+        .await?
+        .into_iter()
+        .map(|run| run.id)
+        .collect();
+
     let TaskFold {
         timeline,
+        mut approvals,
         discussion,
         discussion_has_more,
         window_opened_at: open_window_at,
@@ -868,6 +926,7 @@ async fn assemble_detail_with_cursor(
             before_seq: discussion_before,
             first: DISCUSSION_PAGE,
         },
+        &task_runs,
     )
     .await?;
 
@@ -884,20 +943,51 @@ async fn assemble_detail_with_cursor(
             .collect()
     };
 
-    // The live wait (issue #305). Only meaningful while a run window is open —
-    // a parked approval on a finished task belongs to whatever runs next, not to
-    // this one — and only for approvals parked at or after the window opened, so
-    // a pre-existing park is not re-attributed to this dispatch. Earliest wins:
-    // waiting started when the first of them parked.
-    let waiting_since = open_window_at.and_then(|opened_at| {
-        company
-            .runtime
-            .pending_approvals()
-            .into_iter()
-            .map(|a| a.at_millis)
-            .filter(|at| *at >= opened_at)
-            .min()
-    });
+    // The still-parked half (issue #333), on exactly the resolution order
+    // `approval_owner` documents below — run id first, then the parked
+    // card link, and the run window only for a park that recorded neither.
+    let pending: Vec<crate::runtime::types::ApprovalSummary> = company
+        .runtime
+        .pending_approvals()
+        .into_iter()
+        .filter(|a| {
+            let origin = company.runtime.approval_origin(&a.id);
+            match approval_owner(origin.as_ref(), &task_id, &task_runs) {
+                ApprovalOwner::Mine => true,
+                ApprovalOwner::NotMine => false,
+                // The legacy rule, kept only for a park that recorded neither key:
+                // inside an open window and parked at or after it opened, so a
+                // backlog item is not re-attributed to this dispatch.
+                ApprovalOwner::Unrecorded => {
+                    open_window_at.is_some_and(|opened_at| a.at_millis >= opened_at)
+                }
+            }
+        })
+        .collect();
+
+    // The live wait (issue #305): waiting started when the first of them parked.
+    //
+    // Still gated on an open run window, unchanged by #333. The header subtracts
+    // this from the task's elapsed run time, and a finished card whose sign-off
+    // was never answered would otherwise report a wait that keeps growing after
+    // the work stopped — a "Worked 0s, waiting 3 days" that reads as a bug. The
+    // Approvals tab below lists that row regardless, which is where it belongs.
+    //
+    // Clamped to the window's opening for the same reason a resolved wait is: a
+    // card re-dispatched with one of its own approvals still parked charges this
+    // run only for the part of the wait that this run has actually sat through.
+    let waiting_since = open_window_at
+        .and_then(|opened_at| pending.iter().map(|a| a.at_millis.max(opened_at)).min());
+
+    approvals.extend(pending.into_iter().map(|a| TaskApproval {
+        id: a.id.as_ref().to_string(),
+        kind: a.kind,
+        at_millis: a.at_millis,
+        status: "pending".to_string(),
+        resolved_at_millis: None,
+        waited_millis: None,
+    }));
+    approvals.sort_by(|a, b| a.at_millis.cmp(&b.at_millis).then_with(|| a.id.cmp(&b.id)));
 
     // The split is computed here, once, so the console and the exported record
     // read the same numbers rather than deriving them separately (#352 review).
@@ -919,6 +1009,7 @@ async fn assemble_detail_with_cursor(
     Ok(TaskDetail {
         task: card.into(),
         timeline,
+        approvals,
         durations,
         irreversible_effects,
         history_incomplete: company.runtime.has_undescribed_history(),
@@ -1025,6 +1116,8 @@ impl DiscussionRow {
 struct TaskFold {
     /// The run record, oldest first.
     timeline: Vec<TimelineEntry>,
+    /// This task's resolved approvals, oldest first.
+    approvals: Vec<TaskApproval>,
     /// The discussion thread, oldest first (issue #335) — at most
     /// [`DiscussionWindow::first`] posts, the newest inside the window.
     discussion: Vec<DiscussionRow>,
@@ -1057,19 +1150,22 @@ struct TaskFold {
 /// memory win without that correctness loss; a stored per-task dispatch offset
 /// is the durable fix for the traversal cost and is left to the epic.
 ///
-/// Returns both projections alongside the instant the *still-open* window
-/// opened, or `None` when the task is not mid-run — the caller needs that anchor
-/// to scope the live wait (issue #305).
+/// Returns the timeline, discussion, and this task's resolved approvals
+/// alongside the instant the still-open window opened, or `None` when the task
+/// is not mid-run.
 async fn fold_task_journal(
     company: &ScopedCompany,
     task_id: &str,
     discussion: DiscussionWindow,
+    task_runs: &std::collections::HashSet<String>,
 ) -> Result<TaskFold, ApiError> {
-    use crate::ports::types::EventSeq;
+    use crate::ports::types::{ApprovalId, EventSeq};
 
-    // One snapshot for the whole fold, not a lookup per event: the fold is a
-    // pure function over it, and the journal lock is never held while paging.
-    let park_instants = company.runtime.approval_park_instants();
+    // Per-id, not a snapshot. The origin index is unbounded and never pruned
+    // (see `ApprovalOrigin`), while a fold resolves only the approval events on
+    // its own pages — and this route is polled, so a snapshot would copy the
+    // company's whole approval history every few seconds.
+    let approval_origin = |id: &ApprovalId| company.runtime.approval_origin(id);
 
     let mut fold = TaskFold::default();
     let mut next_seq = 0u64;
@@ -1090,7 +1186,14 @@ async fn fold_task_journal(
             .map(|ev| ev.seq.value() + 1)
             .unwrap_or(next_seq + 1);
         let exhausted = page.len() < TIMELINE_PAGE;
-        fold_page(&page, task_id, discussion, &park_instants, &mut fold);
+        fold_page(
+            &page,
+            task_id,
+            discussion,
+            approval_origin,
+            task_runs,
+            &mut fold,
+        );
         if exhausted {
             break;
         }
@@ -1098,18 +1201,96 @@ async fn fold_task_journal(
     Ok(fold)
 }
 
+/// What an approval's recorded keys say about who owns it.
+///
+/// Three states, deliberately — the whole correction this makes to #333's first
+/// cut. That version asked `origins.get(id).and_then(|o| o.task_id)`, which is
+/// `None` both for *no origin recorded* and for *origin recorded, belonging to
+/// no card*, and sent both to the run window. Since #333 every unlinked park
+/// records itself as such, so the second case is not rare — it is every workflow
+/// delivery, every chat turn, every scheduler tick, and the hosted brain's own
+/// gate — and each one landed on whatever card happened to be running, dragging
+/// that card's `waitingSince` with it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ApprovalOwner {
+    /// Recorded as belonging to the card being read.
+    Mine,
+    /// Recorded as belonging to a different card, or to no card at all.
+    NotMine,
+    /// Neither key recorded — a park written before #333. The **only** state
+    /// that may fall back to the run-window heuristic, and the caller decides
+    /// how, because the resolved and still-parked halves scope it differently.
+    Unrecorded,
+}
+
+/// Which card owns an approval, resolved attempt-first (issues #333 + #242).
+///
+/// Both keys are kept, and the order between them is load-bearing, because
+/// neither is a superset of the other:
+///
+/// 1. **`run_id` — attempt-level, authoritative.** A
+///    [`RunRecord`](crate::ports::runs::RunRecord) names its card, so a run id
+///    resolves to a task; a task id can never resolve to a run. #183 settled
+///    that repeat trips through review are normal, so two attempts on one card
+///    is the expected case, and only this key separates them. Checked against
+///    `task_runs`, this card's own attempt ids. Any present id takes precedence:
+///    an id missing from this card's run set returns `NotMine` without consulting
+///    the card-level link, including when the run record is unavailable.
+/// 2. **the parked [`TaskLink`](crate::runtime::journal::TaskLink) —
+///    card-level, the fallback.** `run_id` is
+///    `None` by design wherever no attempt is behind the park — a chat turn, a
+///    workflow delivery, a scheduler tick, the hosted brain's gate — and those
+///    parks are stamped here instead, in `CycleHostImpl::park`, which every
+///    park path passes through. So the run id cannot be the only key without
+///    losing all of them.
+/// 3. **neither recorded** — and only then is the answer "unknown" rather than
+///    "unlinked". A park that recorded a link saying `Unlinked` is a *resolved*
+///    answer: it belongs to no card, so it does not belong to this one either.
+fn approval_owner(
+    origin: Option<&crate::runtime::journal::ApprovalOrigin>,
+    task_id: &str,
+    task_runs: &std::collections::HashSet<String>,
+) -> ApprovalOwner {
+    let Some(origin) = origin else {
+        return ApprovalOwner::Unrecorded;
+    };
+    // 1. The attempt wins wherever there is one.
+    if let Some(run_id) = origin.run_id.as_deref() {
+        return if task_runs.contains(run_id) {
+            ApprovalOwner::Mine
+        } else {
+            ApprovalOwner::NotMine
+        };
+    }
+    // 2. Otherwise the card the parking cycle stamped. 3. Or nothing at all.
+    match &origin.task {
+        Some(link) if link.task_id() == Some(task_id) => ApprovalOwner::Mine,
+        Some(_) => ApprovalOwner::NotMine,
+        None => ApprovalOwner::Unrecorded,
+    }
+}
+
 /// Folds one page of journal events onto `fold`, carrying the window state
 /// across pages.
 ///
 /// `fold.window_opened_at` is both the window flag and its anchor: `Some(at)`
-/// while a dispatch is open, `None` once it closes. `park_instants` is the
-/// journal snapshot the approval arm joins against to recover waiting time
-/// (#305); keeping it a parameter leaves this a pure function of its inputs.
+/// while a dispatch is open, `None` once it closes. `approval_origin` resolves what an
+/// approval was when it parked, to recover waiting time (#305) and the owning
+/// task (#333), and `task_runs` this card's attempt ids (#242), the
+/// authoritative half of that ownership test — see [`approval_owner`]. The
+/// origin arrives as a per-id lookup rather than a snapshot: that index is
+/// unbounded and never pruned, and this route is polled. Both are parameters so
+/// this stays a pure function of its inputs.
+/// Resolved approvals land on `approvals` as well as on the timeline — same
+/// row, two surfaces.
 fn fold_page(
     page: &[crate::ports::types::StoredEvent],
     task_id: &str,
     discussion: DiscussionWindow,
-    park_instants: &std::collections::HashMap<crate::ports::types::ApprovalId, u64>,
+    approval_origin: impl Fn(
+        &crate::ports::types::ApprovalId,
+    ) -> Option<crate::runtime::journal::ApprovalOrigin>,
+    task_runs: &std::collections::HashSet<String>,
     fold: &mut TaskFold,
 ) {
     use crate::ports::types::ActorKind;
@@ -1199,7 +1380,8 @@ fn fold_page(
                     None,
                 ))
             }
-            // Window-correlated, not id-correlated — see `task_detail`'s docs.
+            // Id-correlated (#333), falling back to the window only for an
+            // park that recorded neither key — see `approval_owner`.
             // The operator's identity is deliberately dropped: it can carry a
             // user id, matching the SSE projection's deny-by-default stance.
             // Only `by.kind` is read, which names a category and never a person.
@@ -1207,20 +1389,31 @@ fn fold_page(
                 approval_id,
                 verdict,
                 by,
-            } if window_opened_at.is_some() => {
+            } if match approval_owner(approval_origin(approval_id).as_ref(), task_id, task_runs) {
+                ApprovalOwner::Mine => true,
+                ApprovalOwner::NotMine => false,
+                // Pre-#333: neither key recorded, so the old window heuristic
+                // is all there is. Scoped by the window being open at this
+                // point in the fold, which is where a resolution sits.
+                ApprovalOwner::Unrecorded => window_opened_at.is_some(),
+            } =>
+            {
+                let origin = approval_origin(approval_id);
+                let origin = origin.as_ref();
                 // The approval id joins the resolution back to the journal's
                 // park instant. Clamping to the window's opening keeps a wait
                 // that began before this task was dispatched from charging its
                 // pre-dispatch portion to this run.
-                let waited = park_instants.get(approval_id).map(|parked_at| {
-                    let from =
-                        window_opened_at.map_or(*parked_at, |opened| (*parked_at).max(opened));
+                let waited = origin.map(|origin| {
+                    let parked_at = origin.at_millis;
+                    let from = window_opened_at.map_or(parked_at, |opened| parked_at.max(opened));
                     ev.at_millis.saturating_sub(from)
                 });
                 // A system actor here is the TTL sweep, not a person: expiry
                 // resolves to a default-deny, and saying "Approval denied" for
                 // it would read as though somebody looked at it and said no.
-                let label = if by.kind == ActorKind::System {
+                let expired = by.kind == ActorKind::System;
+                let label = if expired {
                     "Approval expired (auto-denied)".to_string()
                 } else {
                     format!(
@@ -1228,6 +1421,22 @@ fn fold_page(
                         crate::brain::medulla::effects::verdict_word(*verdict)
                     )
                 };
+                fold.approvals.push(TaskApproval {
+                    id: approval_id.as_ref().to_string(),
+                    // An origin is missing only for a park this journal never
+                    // saw. The row still belongs on the tab; it just cannot say
+                    // what the effect was.
+                    kind: origin
+                        .map_or_else(|| "unknown".to_string(), |origin| origin.kind.clone()),
+                    at_millis: origin.map_or(ev.at_millis, |origin| origin.at_millis),
+                    status: if expired {
+                        "expired".to_string()
+                    } else {
+                        crate::brain::medulla::effects::verdict_word(*verdict).to_string()
+                    },
+                    resolved_at_millis: Some(ev.at_millis),
+                    waited_millis: waited,
+                });
                 Some(("approval", label, None, waited))
             }
             _ => None,

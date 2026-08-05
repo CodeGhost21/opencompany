@@ -45,7 +45,7 @@ use crate::runtime::delegation_tools::{
     unknown_desk_message,
 };
 use crate::runtime::grants::GrantedCall;
-use crate::runtime::journal::ExecutedEffect;
+use crate::runtime::journal::{ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
@@ -179,7 +179,10 @@ impl<'a> CycleRunner<'a> {
             company.clone(),
             cycle_id.clone(),
             self.rt,
-            cycle_task_id(&request.events, self.rt),
+            // Per-id lookups, not a snapshot: the origins map is unbounded and
+            // never pruned, and a cycle needs the link for at most the couple of
+            // `ApprovalResolved` ids in its own batch.
+            cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
         );
         let result = self.rt.brain.run_cycle(request, &host).await;
         // Issue #242: the terminality backstop. Whatever the brain did — settled
@@ -509,7 +512,12 @@ working on):\n{}\n]",
             // this call's caller — an approval is resolved from the Approvals
             // page, which knows only an id — so it comes off the parked record,
             // which `record_resolved` deliberately does not erase.
-            let task_id = self.rt.journal.approval_task(id);
+            let task_id = self
+                .rt
+                .journal
+                .approval_task(id)
+                .flatten()
+                .and_then(|task| task.task_id().map(str::to_string));
             return execute_effect_once(self.rt, &key, &effect, task_id.as_deref()).await;
         };
         self.mint_grant(id, agent, effect).await
@@ -565,7 +573,12 @@ working on):\n{}\n]",
         Some(ExecutedEffect {
             kind: effect.kind.clone(),
             amount_usd: effect.amount_usd,
-            task_id: self.rt.journal.approval_task(id),
+            task_id: self
+                .rt
+                .journal
+                .approval_task(id)
+                .flatten()
+                .and_then(|task| task.task_id().map(str::to_string)),
             at_millis: now_millis(),
             irreversible: self.rt.approval_gate.is_irreversible(&effect),
         })
@@ -880,56 +893,92 @@ async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
 }
 
 /// The board task a cycle is working, read off its own trigger events
-/// (issue #351) — the id every effect this cycle executes or parks is stamped
-/// with.
+/// (issue #333) — the correlation key every approval this cycle parks carries.
 ///
-/// Two ways a cycle belongs to a card, and both are a real id rather than a
-/// guess from a time window:
+/// Two ways a cycle belongs to a card, and both are a real id:
 ///
 /// * a [`TaskDispatched`](CompanyEvent::TaskDispatched) event — the card was
 ///   dragged into `in_progress` and this cycle is its run;
 /// * an [`ApprovalResolved`](CompanyEvent::ApprovalResolved) event whose
-///   approval was itself parked for a card. **This arm is load-bearing, not a
-///   nicety.** Under `supervised` an irreversible effect never executes in the
-///   cycle that emitted it — it parks, and the operator's approval opens a
-///   fresh cycle carrying only that event. Without the inheritance, every
-///   effect that went through the approval gate the way the policy intends
-///   would be attributed to no task and named on no retry dialog.
+///   approval was itself parked for a card. Approving a gated tool call
+///   re-dispatches the agent (issue #243), and that follow-up cycle is still
+///   the same card's work — so a run that needs two sign-offs keeps both,
+///   instead of losing the link the moment the first one is granted.
 ///
-/// **An ambiguous batch yields `None`.** Two dispatched cards in one cycle
-/// cannot both own an effect it executes, and guessing one would warn an
-/// operator about work another card did — a false alarm on a safety dialog is
-/// how a safety dialog stops being read.
-fn cycle_task_id(events: &[CompanyEvent], rt: &CompanyRuntime) -> Option<String> {
+/// **An ambiguous batch yields `None`.** A cycle is the unit of batching, not
+/// of work: several triggers can ride one, and only some of them belong to a
+/// card. Two rival triggers therefore mean no stamp at all, because guessing
+/// one would hand a task approvals that are not its own — the precise failure
+/// this issue exists to end. Two kinds of rivalry, both disqualifying:
+///
+/// * **two cards** — two `TaskDispatched` events, or a dispatch plus a
+///   resolution belonging to a different card;
+/// * **a card and a non-card turn** — an operator chat message, a webhook, a
+///   schedule tick, an inbound A2A task, a payment or a filed feedback item
+///   batched alongside a dispatch. That turn's parked effect is not the card's
+///   work, and stamping it with the card's id is the same misattribution one
+///   level down. (Issue #357 guards this seam at a finer grain, per *attempt*,
+///   with a queue-position boundary; this rule only has to stop the cross-turn
+///   leak.)
+///
+/// The match over [`CompanyEvent`] is **exhaustive on purpose** — no wildcard.
+/// Every variant is classified as one of: names a card, rivals a card, or is a
+/// record of something that already happened. A new variant should not silently
+/// default to "harmless"; a new *inbound trigger* defaulting that way is exactly
+/// how the misattribution above comes back. Adding one now fails the build until
+/// somebody decides which of the three it is.
+///
+/// An unstamped park is recorded as
+/// [`TaskLink::Unlinked`](crate::runtime::journal::TaskLink::Unlinked): honest,
+/// and deliberately *not* a fall-back to the run window, which would put the
+/// approval right back on whichever card was running.
+fn cycle_task_id(
+    events: &[CompanyEvent],
+    approval_task: impl Fn(&ApprovalId) -> Option<Option<TaskLink>>,
+) -> Option<String> {
     let mut found: Option<String> = None;
     for event in events {
         let candidate = match event {
-            // `run_id` (issue #242) is deliberately ignored here: it names
-            // *which attempt* this is, and an effect belongs to the card across
-            // all of them — a payment sent on attempt one is exactly what a
-            // second attempt must warn about.
             CompanyEvent::TaskDispatched { task_id, .. } => Some(task_id.clone()),
             CompanyEvent::ApprovalResolved { approval_id, .. } => {
-                rt.journal.approval_task(approval_id)
+                match approval_task(approval_id) {
+                    // Resolved an approval that belongs to a card: this cycle
+                    // continues that card's work.
+                    Some(Some(TaskLink::Task { id })) => Some(id),
+                    // Known to belong to no card — a rival turn, not a neutral
+                    // event, so the batch is ambiguous.
+                    Some(Some(TaskLink::Unlinked)) => return None,
+                    // A pre-#333 park, or an id with no origin at all: nothing
+                    // is claimed either way, so it neither stamps nor blocks.
+                    Some(None) | None => continue,
+                }
             }
-            _ => continue,
+            // An inbound trigger that is its own work, riding the same batch as
+            // a dispatch. Its parked effect is not the card's.
+            CompanyEvent::OperatorMessage { .. }
+            | CompanyEvent::WebhookReceived { .. }
+            | CompanyEvent::ScheduleFired { .. }
+            | CompanyEvent::A2aTaskReceived { .. }
+            | CompanyEvent::PaymentReceived { .. }
+            | CompanyEvent::FeedbackFiled { .. } => return None,
+            // Records of something that already happened, not triggers for new
+            // work: they neither name a card nor compete with one, so they pass
+            // through without affecting the stamp.
+            CompanyEvent::LifecycleChanged { .. }
+            | CompanyEvent::AgentReply { .. }
+            | CompanyEvent::MemoryFactDeleted { .. }
+            | CompanyEvent::McpCallFailed { .. }
+            | CompanyEvent::WorkflowCreated { .. }
+            | CompanyEvent::WorkflowUpdated { .. }
+            | CompanyEvent::WorkflowDeleted { .. }
+            | CompanyEvent::WorkflowRunFinished { .. }
+            | CompanyEvent::TaskSteered { .. }
+            | CompanyEvent::TaskDiscussionPosted { .. }
+            | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
         match &found {
-            Some(existing) if existing != &candidate => {
-                // Every production call site passes a single-event batch, so
-                // reaching here means a caller started batching. Say so: the
-                // silent consequence is that everything this cycle executes is
-                // attributed to no card and named on no retry dialog, which
-                // looks exactly like a cycle that did nothing irreversible.
-                tracing::warn!(
-                    first = %existing,
-                    second = %candidate,
-                    "[cycle] a batch named two board tasks; effects it executes will be \
-                     attributed to neither and will not appear on a retry confirmation"
-                );
-                return None;
-            }
+            Some(existing) if existing != &candidate => return None,
             Some(_) => {}
             None => found = Some(candidate),
         }
@@ -947,12 +996,13 @@ struct CycleHostImpl<'a> {
     executed: StdMutex<Vec<Effect>>,
     parked: StdMutex<Vec<ApprovalId>>,
     /// The board task this cycle is working, when it is working one
-    /// (issue #351) — stamped onto every effect the cycle executes or parks.
+    /// (issue #333) — stamped onto every approval the cycle parks.
     ///
     /// Computed once, from the cycle's own trigger events, by
-    /// [`cycle_task_id`]. Whatever turn produces the effect — the dispatched
-    /// card's own turn, a desk it delegated to, an email it tried to send — it
-    /// belongs to the task whose dispatch opened this cycle, and to no other.
+    /// [`cycle_task_id`]. It is a real id rather than a time window: whatever
+    /// turn parks the effect — the dispatched card's own turn, a desk it
+    /// delegated to, an email it tried to send — the approval belongs to the
+    /// task whose dispatch opened this cycle, and to no other.
     task_id: Option<String>,
 }
 
@@ -1021,7 +1071,12 @@ impl<'a> CycleHostImpl<'a> {
             .await?;
         self.rt
             .journal
-            .record_parked(&approval_id, &effect, now_millis(), self.task_id.as_deref())
+            .record_parked(
+                &approval_id,
+                &effect,
+                now_millis(),
+                TaskLink::from_task_id(self.task_id.as_deref()),
+            )
             .await?;
         self.parked
             .lock()
@@ -1032,6 +1087,7 @@ impl<'a> CycleHostImpl<'a> {
             group = ?effect.group,
             approval_id = %approval_id,
             cycle = %self.cycle_id,
+            task = self.task_id.as_deref().unwrap_or("-"),
             "[cycle] parked effect for operator approval"
         );
         Ok(approval_id)
@@ -2866,7 +2922,7 @@ mod test {
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
-            .record_parked(&approval_id, &effect, now_millis(), None)
+            .record_parked(&approval_id, &effect, now_millis(), TaskLink::Unlinked)
             .await
             .unwrap();
 
@@ -2931,7 +2987,7 @@ mod test {
         };
         let approval_id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
         rt.journal
-            .record_parked(&approval_id, &effect, now_millis(), None)
+            .record_parked(&approval_id, &effect, now_millis(), TaskLink::Unlinked)
             .await
             .unwrap();
 
@@ -2981,7 +3037,7 @@ mod test {
                 .unwrap();
             let id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
             rt.journal
-                .record_parked(&id, &effect, now_millis(), None)
+                .record_parked(&id, &effect, now_millis(), TaskLink::Unlinked)
                 .await
                 .unwrap();
             id
@@ -3154,288 +3210,229 @@ mod test {
         assert_eq!(sender.sent().len(), 0);
     }
 
-    /// **Issue #351**: an effect a card's run executes is recorded against that
-    /// card, classified, and readable back as what a retry would repeat.
-    ///
-    /// Runs in `full` mode deliberately. That is the configuration where an
-    /// irreversible effect fires with nobody ever being asked, so it is the one
-    /// where the retry dialog is the operator's only warning.
+    /// Issue #333: an effect parked by a card's dispatch cycle is journaled
+    /// against that card, so the card's Approvals tab can find it.
     #[tokio::test]
-    async fn an_executed_effect_is_recorded_against_the_card_that_ran_it() {
+    async fn a_dispatch_cycle_stamps_its_task_onto_every_approval_it_parks() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
-        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
+        let sender = Arc::new(RecordingMailSender::new());
+        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
             .build()
             .await
             .unwrap();
         let host = CycleHostImpl::new(
             rt.id().clone(),
-            "cyc-exec".into(),
+            "cyc-task".into(),
             &rt,
             Some("t-42".to_string()),
         );
 
-        // Irreversible: signing a contract, which the taxonomy never waves
-        // through.
-        //
-        // Deliberately NOT `filing.submit`. That kind is in
-        // `DEFAULT_ALWAYS_APPROVE`, and `always_approve` outranks the mode — so
-        // it would park even here and execute nothing. `contract.accept` is the
-        // case this test is about: `full` mode signs it with nobody asked, and
-        // the retry dialog is the only place anybody will ever be told.
-        host.gate_effect(Effect {
-            kind: "contract.accept".into(),
-            group: EffectGroup::Sign,
-            amount_usd: None,
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: serde_json::json!({ "counterparty": "annual-return" }),
-            agent: None,
-            run_id: None,
-        })
-        .await
-        .unwrap();
-        // Reversible: a read. Same card, same cycle, and it must not warn.
-        host.gate_effect(Effect {
-            kind: "web.search".into(),
-            group: EffectGroup::Other,
-            amount_usd: None,
-            established_thread: false,
-            first_time_counterparty: false,
-            payload: serde_json::Value::Null,
-            agent: None,
-            run_id: None,
-        })
-        .await
-        .unwrap();
-
-        let named = rt.irreversible_effects("t-42");
-        assert_eq!(named.len(), 1, "{named:?}");
-        assert_eq!(named[0].kind, "contract.accept");
-        assert!(named[0].irreversible);
-        assert!(
-            rt.irreversible_effects("t-other").is_empty(),
-            "another card must not inherit this one's history",
-        );
-
-        // The payload never reaches the executed record — the retry dialog is
-        // an operator surface, and `form: annual-return` is tool content.
-        let journal_path = Bundle::new(&home, rt.id()).journal_jsonl();
-        let raw = tokio::fs::read_to_string(&journal_path).await.unwrap();
-        assert!(raw.contains("EffectExecuted"), "{raw}");
-        assert!(!raw.contains("annual-return"), "{raw}");
-    }
-
-    /// The approval path (#351): under `supervised` an irreversible effect
-    /// parks, and it is the operator's approval — a *separate* cycle carrying
-    /// only `ApprovalResolved` — that executes it.
-    ///
-    /// Without the parked record naming the card, that cycle knows no task and
-    /// the effect lands attributed to nothing. This is the default mode, so it
-    /// is the ordinary path, not an edge case.
-    #[tokio::test]
-    async fn an_approved_effect_is_attributed_to_the_card_that_parked_it() {
-        let home_dir = tmp_home();
-        let home = home_dir.path().to_path_buf();
-        let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
-            .build()
+        // A cold recipient parks — the same path a card's turn takes.
+        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
             .unwrap();
 
-        // The card's run emits a filing; supervised parks it rather than
-        // executing it.
-        let host = CycleHostImpl::new(
-            rt.id().clone(),
-            "cyc-park".into(),
-            &rt,
-            Some("t-7".to_string()),
-        );
-        let disposition = host
-            .gate_effect(Effect {
-                kind: "filing.submit".into(),
-                group: EffectGroup::Sign,
-                amount_usd: None,
-                established_thread: false,
-                first_time_counterparty: false,
-                payload: serde_json::Value::Null,
-                agent: None,
-                run_id: None,
-            })
-            .await
-            .unwrap();
-        let EffectDisposition::PendingApproval(approval_id) = disposition else {
-            panic!("supervised must park a filing: {disposition:?}");
-        };
-        assert!(
-            rt.irreversible_effects("t-7").is_empty(),
-            "parked is not executed — nothing has fired yet",
-        );
-
-        // The operator approves. The follow-up cycle carries one event and no
-        // task id of its own; the card comes from the parked record.
-        let events = vec![CompanyEvent::ApprovalResolved {
-            approval_id: approval_id.clone(),
-            verdict: Verdict::Approve,
-            by: operator(),
-        }];
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
         assert_eq!(
-            cycle_task_id(&events, &rt),
-            Some("t-7".into()),
-            "the follow-up cycle must inherit the card from the approval",
+            pending[0].task,
+            Some(TaskLink::Task {
+                id: "t-42".to_string()
+            }),
+            "the parked approval must name the card that asked for it",
         );
-
-        rt.resolve_approval(&approval_id, Verdict::Approve, operator())
-            .await
-            .unwrap();
-
-        let named = rt.irreversible_effects("t-7");
-        assert_eq!(named.len(), 1, "{named:?}");
-        assert_eq!(named[0].kind, "filing.submit");
+        assert_eq!(
+            rt.approval_origins()
+                .get(&pending[0].id)
+                .and_then(|o| o.task.clone()),
+            Some(TaskLink::Task {
+                id: "t-42".to_string()
+            }),
+            "and the link must outlive the queue entry",
+        );
     }
 
-    /// **Issue #351, maintainer review on #356**: an approved *agent tool call*
-    /// is settled by minting a grant, not by `execute_effect_once`, so it writes
-    /// no `EffectExecuted` line and used to reach the retry dialog not at all.
+    /// A cycle with no card behind it records the park as *explicitly* unlinked
+    /// rather than leaving the link blank (#333 review follow-up).
     ///
-    /// A card that both sent a native email and had an operator-approved
-    /// `composio_execute` payment fire would then open a confirmation naming
-    /// only the email — a warning understating what already happened, which is
-    /// worse than no warning, because it reads as a complete account.
-    ///
-    /// The description is attached at **redemption**, not at minting: a grant
-    /// that is minted and then expires unredeemed is a call that never ran, and
-    /// warning about it would be the false alarm this whole feature is careful
-    /// to avoid.
+    /// The blank is reserved for pre-#333 journal lines, and it is the only
+    /// thing the read side still window-guesses on. If a chat turn's park were
+    /// written that way too, every one of them would land on whatever card
+    /// happened to be mid-run — the bug this issue exists to close.
     #[tokio::test]
-    async fn an_approved_tool_call_is_named_once_its_grant_is_redeemed() {
+    async fn a_cycle_with_no_card_parks_explicitly_unlinked() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
+        let sender = Arc::new(RecordingMailSender::new());
         let rt = RuntimeBuilder::new(home.clone(), manifest("supervised"))
+            .with_mail(CompanyMail {
+                sender: sender.clone(),
+                smtp: test_smtp("ceo@acme.test"),
+            })
             .build()
             .await
             .unwrap();
-        let args = serde_json::json!({ "action": "pay", "account": "acct-77" });
+        let host = CycleHostImpl::new(rt.id().clone(), "cyc-chat".into(), &rt, None);
 
-        // The card's run asks to act in a connected account. `agent` being set
-        // is precisely what makes this a tool call rather than a native effect.
-        let host = CycleHostImpl::new(
-            rt.id().clone(),
-            "cyc-park".into(),
-            &rt,
-            Some("t-9".to_string()),
-        );
-        let disposition = host
-            .gate_effect(Effect {
-                kind: "composio_execute".into(),
-                group: EffectGroup::Send,
-                amount_usd: Some(2_400.0),
-                established_thread: false,
-                first_time_counterparty: false,
-                payload: args.clone(),
-                agent: Some("finance".into()),
-                // #242's attempt id. Stamped at dispatch; this test drives the
-                // host directly, so there is no attempt behind it — which is
-                // orthogonal to the card, and exactly why both fields exist.
-                run_id: None,
-            })
+        host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
             .unwrap();
-        let EffectDisposition::PendingApproval(approval_id) = disposition else {
-            panic!("supervised must park a tool call: {disposition:?}");
-        };
 
-        rt.resolve_approval(&approval_id, Verdict::Approve, operator())
-            .await
-            .unwrap();
-        assert_eq!(rt.grants.live_count(), 1, "approving mints a grant");
-        assert!(
-            rt.irreversible_effects("t-9").is_empty(),
-            "a minted grant is permission, not a payment — nothing has run yet",
+        let pending = rt.pending_approvals();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(
+            pending[0].task,
+            Some(TaskLink::Unlinked),
+            "an unlinked park must say so, not leave the link absent",
         );
-
-        // The agent re-issues the call; the policy redeems the grant. The cycle
-        // journals the redemption after the turn, which is where the
-        // description is attached.
-        assert!(
-            rt.grants
-                .consume("finance", "composio_execute", &args)
-                .is_some()
-        );
-        let runner = CycleRunner::new(&rt);
-        for id in rt.grants.drain_consumed() {
-            let executed = runner.consumed_grant_effect(&id);
-            rt.journal
-                .record_grant_consumed(&id, executed)
-                .await
-                .unwrap();
-        }
-
-        let named = rt.irreversible_effects("t-9");
-        assert_eq!(named.len(), 1, "{named:?}");
-        assert_eq!(named[0].kind, "composio_execute");
-        assert_eq!(named[0].amount_usd, Some(2_400.0));
-        assert!(named[0].irreversible);
-        assert!(
-            rt.irreversible_effects("t-other").is_empty(),
-            "another card must not inherit this one's history",
-        );
-
-        // The description carries no arguments. The park and grant audit lines
-        // legitimately hold them; the line the retry dialog is built from does
-        // not.
-        let journal_path = Bundle::new(&home, rt.id()).journal_jsonl();
-        let raw = tokio::fs::read_to_string(&journal_path).await.unwrap();
-        let consumed = raw
-            .lines()
-            .find(|l| l.contains("GrantConsumed"))
-            .expect("the redemption is journaled");
-        assert!(!consumed.contains("acct-77"), "{consumed}");
     }
 
-    /// Two cards dispatched in one batch: the cycle refuses to guess which owns
-    /// the effects it runs, because a retry warning naming another card's work
-    /// is how a safety dialog stops being read.
-    #[tokio::test]
-    async fn an_ambiguous_batch_attributes_effects_to_no_card() {
-        let home_dir = tmp_home();
-        let home = home_dir.path().to_path_buf();
-        let rt = RuntimeBuilder::new(home.clone(), manifest("full"))
-            .build()
-            .await
-            .unwrap();
+    /// The correlation key itself (#333): which card a cycle is working, read
+    /// off its own trigger events.
+    #[test]
+    fn cycle_task_id_reads_a_dispatch_inherits_a_resolution_and_refuses_to_guess() {
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
 
-        let dispatched = |id: &str, attempt: u8| CompanyEvent::TaskDispatched {
+        // The lookup a live cycle does per id, stubbed: `appr-1` belongs to a
+        // card, `appr-none` is a recorded unlinked park, `appr-legacy` is a
+        // pre-#333 line, and anything else has no origin at all.
+        let approval_task = |id: &ApprovalId| match id.as_ref() {
+            "appr-1" => Some(Some(TaskLink::Task { id: "t-1".into() })),
+            "appr-none" => Some(Some(TaskLink::Unlinked)),
+            "appr-legacy" => Some(None),
+            _ => None,
+        };
+        let dispatched = |id: &str| CompanyEvent::TaskDispatched {
             task_id: id.to_string(),
-            run_id: Some(format!("run-{attempt}")),
+            run_id: None,
         };
+        let resolved = |id: &str| CompanyEvent::ApprovalResolved {
+            approval_id: ApprovalId::new(id),
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            },
+        };
+
+        let chat = || CompanyEvent::OperatorMessage {
+            text: "hi".into(),
+            by: None,
+            chat: None,
+        };
+
+        // A dispatch names the card outright.
         assert_eq!(
-            cycle_task_id(&[dispatched("t-1", 1)], &rt),
+            cycle_task_id(&[dispatched("t-1")], approval_task),
             Some("t-1".into())
         );
-        // Two *attempts* at the same card (#242's `run_id`) are still one card.
-        // The two ids are different granularities — which attempt vs which card
-        // — and an effect belongs to the card across all of them, so attribution
-        // must not fracture along attempts.
+        // A follow-up cycle inherits it from the approval it is resolving, so a
+        // run needing two sign-offs keeps the link through the first.
         assert_eq!(
-            cycle_task_id(&[dispatched("t-1", 1), dispatched("t-1", 2)], &rt),
-            Some("t-1".into()),
-            "the same card twice is not ambiguous, however many attempts it took",
+            cycle_task_id(&[resolved("appr-1")], approval_task),
+            Some("t-1".into())
         );
+        // An approval with no origin at all claims nothing.
         assert_eq!(
-            cycle_task_id(&[dispatched("t-1", 1), dispatched("t-2", 1)], &rt),
+            cycle_task_id(&[resolved("appr-unknown")], approval_task),
             None
+        );
+        // Nor does a pre-#333 one.
+        assert_eq!(
+            cycle_task_id(&[resolved("appr-legacy")], approval_task),
+            None
+        );
+        // Nothing task-shaped at all.
+        assert_eq!(cycle_task_id(&[chat()], approval_task), None);
+        // Two different cards in one batch: refuse to guess rather than hand one
+        // of them the other's approvals.
+        assert_eq!(
+            cycle_task_id(&[dispatched("t-1"), dispatched("t-2")], approval_task),
+            None
+        );
+        // The same card twice is not ambiguous.
+        assert_eq!(
+            cycle_task_id(&[dispatched("t-1"), resolved("appr-1")], approval_task),
+            Some("t-1".into())
+        );
+
+        // Review follow-up: a cycle is a batch, not a turn. A chat message
+        // riding the same batch as a dispatch is its own work, and an effect it
+        // parks is not the card's — so the batch is ambiguous, exactly as two
+        // cards would be. Same for a webhook, a schedule tick, or an A2A task.
+        assert_eq!(
+            cycle_task_id(&[dispatched("t-1"), chat()], approval_task),
+            None,
+            "a chat turn batched with a dispatch must not be stamped with the card",
         );
         assert_eq!(
             cycle_task_id(
-                &[CompanyEvent::OperatorMessage {
-                    text: "hi".into(),
-                    by: None,
-                    chat: None,
-                }],
-                &rt
+                &[
+                    dispatched("t-1"),
+                    CompanyEvent::ScheduleFired {
+                        cron: "* * * * *".into(),
+                        prompt: "tick".into(),
+                    },
+                ],
+                approval_task,
             ),
             None,
-            "a chat turn is nobody's card",
+        );
+        // A payment and a filed feedback item are inbound triggers too — they
+        // drive their own turn, so neither may inherit the card's stamp.
+        assert_eq!(
+            cycle_task_id(
+                &[
+                    dispatched("t-1"),
+                    CompanyEvent::PaymentReceived {
+                        amount_usd: 10.0,
+                        memo: "invoice".into(),
+                    },
+                ],
+                approval_task,
+            ),
+            None,
+        );
+        assert_eq!(
+            cycle_task_id(
+                &[
+                    dispatched("t-1"),
+                    CompanyEvent::FeedbackFiled {
+                        note: "it mis-filed".into(),
+                    },
+                ],
+                approval_task,
+            ),
+            None,
+        );
+        // A record of something that already happened is not a rival: it names
+        // no card and competes for none, so the dispatch still stamps.
+        assert_eq!(
+            cycle_task_id(
+                &[
+                    dispatched("t-1"),
+                    CompanyEvent::DeskTaskCompleted {
+                        task_id: "t-9".into(),
+                        desk: "ops".into(),
+                        column: "done".into(),
+                        output: String::new(),
+                    },
+                ],
+                approval_task,
+            ),
+            Some("t-1".into()),
+            "a completion record must not disqualify the batch",
+        );
+        // And a resolution known to belong to no card is a rival trigger too,
+        // not a neutral event — it is somebody's work, just not a card's.
+        assert_eq!(
+            cycle_task_id(&[dispatched("t-1"), resolved("appr-none")], approval_task),
+            None,
         );
     }
 

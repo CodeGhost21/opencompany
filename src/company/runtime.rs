@@ -43,7 +43,7 @@ fn task_enters_in_progress(prev_column: Option<&str>, next_column: &str) -> bool
 }
 use crate::runtime::CycleRunner;
 use crate::runtime::grants::{GRANT_TTL_MILLIS, GrantSet};
-use crate::runtime::journal::{ExecutedEffect, RuntimeJournal};
+use crate::runtime::journal::{ApprovalOrigin, ExecutedEffect, RuntimeJournal};
 use crate::runtime::types::{ApprovalSummary, CompanyStatus, CycleReport};
 use crate::server::ops::mailer::MailSender;
 use crate::server::ops::smtp::SmtpCredentials;
@@ -827,16 +827,26 @@ impl CompanyRuntime {
         CycleRunner::new(self).recover().await
     }
 
-    /// When each approval was parked, keyed by id, including approvals already
-    /// resolved or expired.
+    /// What every approval ever parked was, keyed by id — including approvals
+    /// already resolved or expired.
     ///
     /// The Task Detail read joins this against the event log's
     /// `ApprovalResolved` to recover how long the company was waiting on an
-    /// operator (issue #305). Delegates to the journal so the `pub(crate)`
-    /// field stays encapsulated, mirroring
-    /// [`pending_approvals`](Self::pending_approvals).
-    pub fn approval_park_instants(&self) -> std::collections::HashMap<ApprovalId, u64> {
-        self.journal.park_instants()
+    /// operator (issue #305) and which card the sign-off belonged to
+    /// (issue #333). Delegates to the journal so the `pub(crate)` field stays
+    /// encapsulated, mirroring [`pending_approvals`](Self::pending_approvals).
+    /// What one approval was when it parked (issues #305 + #333).
+    ///
+    /// The per-id form of [`approval_origins`](Self::approval_origins), and what
+    /// the Task Detail read actually uses: that index is unbounded and never
+    /// pruned, so cloning it per request would cost the company's whole approval
+    /// history on every poll of a route the console polls.
+    pub fn approval_origin(&self, id: &ApprovalId) -> Option<ApprovalOrigin> {
+        self.journal.approval_origin(id)
+    }
+
+    pub fn approval_origins(&self) -> std::collections::HashMap<ApprovalId, ApprovalOrigin> {
+        self.journal.approval_origins()
     }
 
     /// The irreversible effects a task has already executed, oldest first
@@ -871,6 +881,7 @@ impl CompanyRuntime {
                 kind: p.effect.kind,
                 amount_usd: p.effect.amount_usd,
                 at_millis: p.at_millis,
+                task: p.task,
             })
             .collect()
     }

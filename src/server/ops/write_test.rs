@@ -13,6 +13,7 @@ use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::TaskRecord;
 use crate::ports::types::{CompanyId, CompanyRecord, ContextChunk};
 use crate::runtime::RuntimeBuilder;
+use crate::runtime::journal::TaskLink;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
@@ -3994,7 +3995,12 @@ async fn task_timeline_reports_the_wait_an_approval_actually_caused() {
     let parked_at = dispatched_at + 40;
     runtime
         .journal
-        .record_parked(&id, &parked_effect(), parked_at, None)
+        .record_parked(
+            &id,
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+        )
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
@@ -4070,7 +4076,12 @@ async fn expired_approval_is_labelled_as_an_expiry_and_carries_its_wait() {
     let parked_at = dispatched_at + 40;
     runtime
         .journal
-        .record_parked(&id, &parked_effect(), parked_at, None)
+        .record_parked(
+            &id,
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+        )
         .await
         .unwrap();
     // Re-park into the gate at epoch 0 so it is unambiguously past any TTL.
@@ -4119,7 +4130,12 @@ async fn a_wait_that_began_before_dispatch_is_clamped_to_the_run_window() {
     let id = ApprovalId::new("appr-old");
     runtime
         .journal
-        .record_parked(&id, &parked_effect(), dispatched_at - 3_600_000, None)
+        .record_parked(
+            &id,
+            &parked_effect(),
+            dispatched_at - 3_600_000,
+            TaskLink::Task { id: "t-1".into() },
+        )
         .await
         .unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -4178,7 +4194,7 @@ async fn a_currently_parked_approval_surfaces_as_a_live_wait() {
             &ApprovalId::new("appr-live"),
             &parked_effect(),
             parked_at,
-            None,
+            TaskLink::Task { id: "t-1".into() },
         )
         .await
         .unwrap();
@@ -4245,154 +4261,480 @@ async fn a_task_that_never_waited_reports_no_waiting_fields() {
     }
 }
 
-// ── Issue #351: Retry names what the previous attempt already did ────────────
+// ── Issue #333: a task's Approvals tab shows that task's approvals ──────────
 //
-// The console gates Retry on this array being non-empty, so the read is the
-// whole feature: an effect missing from it is a warning that never appears, and
-// an effect wrongly in it is a dialog that cries wolf. Both are read failures,
-// not UI ones, which is why they are pinned here.
+// The tab used to filter the *timeline* for `kind == "approval"`, which meant
+// it could only ever show a resolution that fell inside the run window — and
+// showed nothing at all for the state that matters most, an approval parked
+// right now with the card stopped behind it. These pin the real query: the
+// task id the runtime journal records with every parked effect.
 
-/// Journals an executed effect against a task, the way `execute_effect_once`
-/// does. `irreversible` is the classification the gate made at execution time.
-async fn record_executed(
-    runtime: &crate::CompanyRuntime,
-    key: &str,
-    kind: &str,
-    task_id: Option<&str>,
-    irreversible: bool,
-    amount_usd: Option<f64>,
-) {
+/// **The acceptance test**: an approval raised while working a task appears on
+/// that task's Approvals tab while it is still parked.
+///
+/// This is the QA repro — a request sitting on the main Approvals page while
+/// the originating card's own tab read "No approvals in this run" — and it is
+/// unreachable through the timeline by construction: nothing is appended to the
+/// event log until somebody decides.
+#[tokio::test]
+async fn a_parked_approval_appears_on_its_own_task() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    let parked_at = dispatched_at + 10;
     runtime
         .journal
-        .record_executed(
-            key,
-            crate::runtime::journal::ExecutedEffect {
-                kind: kind.to_string(),
-                amount_usd,
-                task_id: task_id.map(str::to_string),
-                at_millis: 1_000,
-                irreversible,
+        .record_parked(
+            &ApprovalId::new("appr-mine"),
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["id"], "appr-mine");
+    assert_eq!(approvals[0]["status"], "pending");
+    assert_eq!(approvals[0]["kind"], "filing.submit");
+    assert_eq!(approvals[0]["atMillis"].as_u64().unwrap(), parked_at);
+    assert!(
+        approvals[0].get("resolvedAtMillis").is_none(),
+        "a pending approval has not resolved",
+    );
+    // The timeline is untouched — a parked approval still has no event.
+    assert!(
+        body["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] != "approval"),
+    );
+}
+
+/// **The acceptance test that the old window could not pass**: two cards worked
+/// in the same window keep their own approvals.
+///
+/// Under the window correlation both rows landed on both tabs, because the only
+/// question asked was "did this resolve while that card was running". The join
+/// is an id now, so a card's tab shows its own sign-off and nothing else.
+#[tokio::test]
+async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // A second card, dispatched into the same open window as `t-1`.
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "t-2".into(),
+                title: "Also ship it".into(),
+                note: None,
+                column: "in_progress".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
             },
         )
         .await
         .unwrap();
-}
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::TaskDispatched {
+                task_id: "t-2".into(),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
 
-/// **The acceptance test**: the read names every irreversible effect this task
-/// executed, and nothing else.
-///
-/// Three negatives ride along, and each is a way the warning could go wrong:
-/// a reversible effect on the same card (cries wolf), another card's payment
-/// (names work this operator is not about to repeat), and an effect with no
-/// card behind it at all (a workflow delivery, which no retry re-runs).
-#[tokio::test]
-async fn task_detail_names_only_this_task_s_irreversible_effects() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-    let company = CompanyId::new("acme");
-    let (runtime, _) = dispatched_task(&state, &company).await;
-
-    record_executed(&runtime, "c:0", "filing.submit", Some("t-1"), true, None).await;
-    record_executed(
-        &runtime,
-        "c:1",
-        "payment.send",
-        Some("t-1"),
-        true,
-        Some(2_400.0),
-    )
-    .await;
-    record_executed(&runtime, "c:2", "web.search", Some("t-1"), false, None).await;
-    record_executed(&runtime, "c:3", "external.publish", Some("t-2"), true, None).await;
-    record_executed(&runtime, "c:4", "email.send", None, true, None).await;
-
-    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
-    assert_eq!(status, StatusCode::OK);
-
-    let named = body["irreversibleEffects"].as_array().unwrap();
-    let kinds: Vec<&str> = named.iter().map(|e| e["kind"].as_str().unwrap()).collect();
-    assert_eq!(
-        kinds,
-        vec!["filing.submit", "payment.send"],
-        "only this card's irreversible effects, oldest first: {named:?}",
-    );
-    assert_eq!(named[1]["amountUsd"].as_f64(), Some(2_400.0));
-    assert!(
-        named[0].get("amountUsd").is_none(),
-        "an effect with no amount must omit it rather than claim $0",
-    );
-
-    // The response carries no payload for any of them — there is none to carry.
-    let raw = serde_json::to_string(&body["irreversibleEffects"]).unwrap();
-    assert!(!raw.contains("payload"), "{raw}");
-}
-
-/// A task that only read, thought and replied reports an empty list — which is
-/// what keeps its Retry a single click.
-#[tokio::test]
-async fn a_task_with_no_irreversible_history_reports_an_empty_list() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-    let company = CompanyId::new("acme");
-    let (runtime, _) = dispatched_task(&state, &company).await;
-
-    record_executed(&runtime, "c:0", "web.search", Some("t-1"), false, None).await;
-
-    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body["irreversibleEffects"].as_array().unwrap().is_empty(),
-        "{:?}",
-        body["irreversibleEffects"],
-    );
-    assert_eq!(
-        body["historyIncomplete"].as_bool(),
-        Some(false),
-        "an empty list is only a single click when nothing is unaccounted for",
-    );
-}
-
-/// A journal holding a pre-#351 executed line cannot describe what already
-/// happened, and the read says so rather than letting an empty list read as an
-/// all-clear (maintainer review on #356).
-///
-/// Company-wide by necessity: an undescribed record carries no card either, so
-/// there is nothing to attribute it to.
-#[tokio::test]
-async fn an_undescribable_executed_line_marks_the_history_incomplete() {
-    let home_dir = home();
-    let home = home_dir.path().to_path_buf();
-    let state = state_with_company(&home).await;
-    let company = CompanyId::new("acme");
-    let (runtime, _) = dispatched_task(&state, &company).await;
-
-    // A line as a pre-#351 build wrote it: a key, and no way to say what it was.
-    let path = runtime.journal.path().to_path_buf();
-    if let Some(dir) = path.parent() {
-        tokio::fs::create_dir_all(dir).await.unwrap();
+    // One approval each, both parked and resolved inside both windows.
+    for (id, owner) in [("appr-one", "t-1"), ("appr-two", "t-2")] {
+        let id = ApprovalId::new(id);
+        runtime
+            .journal
+            .record_parked(
+                &id,
+                &parked_effect(),
+                dispatched_at + 5,
+                TaskLink::Task { id: owner.into() },
+            )
+            .await
+            .unwrap();
+        runtime.journal.record_resolved(&id).await.unwrap();
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::ApprovalResolved {
+                    approval_id: id,
+                    verdict: Verdict::Approve,
+                    by: Actor {
+                        kind: ActorKind::User,
+                        id: "u-1".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
     }
-    let existing = tokio::fs::read_to_string(&path).await.unwrap_or_default();
-    tokio::fs::write(
-        &path,
-        format!("{existing}{{\"record\":\"EffectExecuted\",\"key\":\"cyc-old:0\"}}\n"),
-    )
-    .await
-    .unwrap();
+
+    for (task, own, other) in [
+        ("t-1", "appr-one", "appr-two"),
+        ("t-2", "appr-two", "appr-one"),
+    ] {
+        let (status, body) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/tasks/{task}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = body["approvals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![own], "{task} must own exactly its own approval");
+        assert!(!ids.contains(&other));
+        // And the timeline agrees — one surface, one correlation.
+        let rows: Vec<&Value> = body["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "approval")
+            .collect();
+        assert_eq!(rows.len(), 1, "{task}: {rows:?}");
+    }
+}
+
+/// A resolved approval keeps its row on the tab, carrying the verdict and the
+/// wait it caused. The same resolution the main Approvals page performed, seen
+/// from the card: approving on either surface reflects on both.
+#[tokio::test]
+async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    let id = ApprovalId::new("appr-done");
+    let parked_at = dispatched_at + 20;
+    runtime
+        .journal
+        .record_parked(
+            &id,
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    runtime.journal.record_resolved(&id).await.unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::ApprovalResolved {
+                approval_id: id,
+                verdict: Verdict::Deny,
+                by: Actor {
+                    kind: ActorKind::Operator,
+                    id: "owner".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    let row = &approvals[0];
+    assert_eq!(row["status"], "denied");
+    // The row is anchored at the *park*, so the tab reads in the order things
+    // were asked rather than the order they were answered.
+    assert_eq!(row["atMillis"].as_u64().unwrap(), parked_at);
+    let resolved_at = row["resolvedAtMillis"].as_u64().unwrap();
+    assert!(resolved_at > parked_at);
+    assert_eq!(
+        row["waitedMillis"].as_u64().unwrap(),
+        resolved_at - parked_at,
+    );
+    // Nothing is parked any more, so the card is not still waiting.
+    assert!(body.get("waitingSince").is_none());
+    // The join must not become a new identity leak.
+    let raw = serde_json::to_string(&body["approvals"]).unwrap();
+    assert!(!raw.contains("owner"), "operator identity leaked: {raw}");
+}
+
+/// A task with no approvals reports an empty list, not a fabricated one — the
+/// honest empty state the console renders.
+///
+/// Covers *another card's* approval parked mid-window. The case where the
+/// approval belongs to nothing at all is
+/// [`an_unlinked_approval_is_not_absorbed_by_the_running_card`], which is a
+/// different fact and was the one the old window got wrong.
+#[tokio::test]
+async fn a_task_with_no_approvals_of_its_own_reports_an_empty_list() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // Parked for a different card entirely, while this one is mid-run.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &parked_effect(),
+            dispatched_at + 5,
+            TaskLink::Task {
+                id: "t-other".into(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["approvals"].as_array().unwrap().is_empty(),
+        "{:?}",
+        body["approvals"],
+    );
+    assert!(
+        body.get("waitingSince").is_none(),
+        "another card's approval must not make this one read as waiting",
+    );
+}
+
+/// An approval that belongs to **no** card — a workflow delivery, a chat turn,
+/// a scheduler tick — parked while a card is mid-run must not be absorbed by
+/// that card (#333 review follow-up).
+///
+/// This is the case the first cut of the ownership test got wrong. It tested
+/// `origins.get(id).and_then(|o| o.task_id)`, which is `None` both for a park
+/// that recorded no card *and* for a pre-#333 park that could not record one —
+/// so every unlinked park since #333 fell through to the run window and landed
+/// on whatever happened to be running, dragging `waitingSince` with it.
+#[tokio::test]
+async fn an_unlinked_approval_is_not_absorbed_by_the_running_card() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // The shape `workflows::delivery` writes: parked mid-window, owned by
+    // nothing, and recorded as such.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-delivery"),
+            &parked_effect(),
+            dispatched_at + 5,
+            TaskLink::Unlinked,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["approvals"].as_array().unwrap().is_empty(),
+        "an approval owned by no card must not appear on a card: {:?}",
+        body["approvals"],
+    );
+    assert!(
+        body.get("waitingSince").is_none(),
+        "nor may it make that card read as waiting on the operator",
+    );
+}
+
+/// The two correlation keys, in the order the read side resolves them: the
+/// attempt (`run_id`, #242) is authoritative wherever it is present, and the
+/// parked card link (#333) is the fallback for every park with no attempt
+/// behind it.
+///
+/// Neither key is a superset of the other, which is why both are kept. A
+/// `RunRecord` names its card, so a run id resolves to a task — but a task id
+/// can never say which *attempt* parked an approval, and #183 settled that
+/// repeat trips through review are normal. Meanwhile `run_id` is `None` by
+/// design for a chat turn, a workflow delivery, or the hosted brain's gate, so
+/// it cannot be the only key either.
+#[tokio::test]
+async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
+    use crate::ports::runs::NewRun;
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // Two attempts at this card, and one at another — the case a card-level key
+    // alone cannot tell apart.
+    for (id, task) in [("run-a", "t-1"), ("run-b", "t-1"), ("run-c", "t-other")] {
+        runtime
+            .runs()
+            .create_run(
+                &company,
+                NewRun {
+                    id: id.to_string(),
+                    task_id: task.to_string(),
+                    agent_id: "ceo".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let under_run = |run: &str| {
+        let mut effect = parked_effect();
+        effect.run_id = Some(run.to_string());
+        effect
+    };
+
+    // Parked under this card's *second* attempt, and stamped Unlinked at the
+    // card level. The run id is authoritative, so it still lands here.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-attempt-2"),
+            &under_run("run-b"),
+            dispatched_at + 5,
+            TaskLink::Unlinked,
+        )
+        .await
+        .unwrap();
+    // Parked under another card's attempt, but stamped with *our* card. The run
+    // id outranks the link, so it must not appear.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &under_run("run-c"),
+            dispatched_at + 6,
+            TaskLink::Task { id: "t-1".into() },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(
+        approvals[0]["id"], "appr-attempt-2",
+        "the attempt id decides ownership, not the card link",
+    );
+}
+
+/// An approval parked by a build older than #333 carries no link at all. It
+/// keeps the pre-#333 run-window correlation rather than vanishing, so existing
+/// history still renders.
+///
+/// The legacy line is written **raw and replayed**, not produced by
+/// `record_parked` — which is the point. Since #333 there is no way to record a
+/// park without a link, so the only source of a missing one is a file written
+/// by an older host, and that is exactly what this pins. Contrast
+/// [`an_unlinked_approval_is_not_absorbed_by_the_running_card`]: same "no task
+/// id", opposite outcome, because one is unrecorded and the other is recorded.
+#[tokio::test]
+async fn a_pre_333_approval_falls_back_to_the_run_window() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+    use crate::store::paths::Bundle;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // A journal line as an older host wrote it: no `task` key whatsoever.
+    let legacy = json!({
+        "record": "ApprovalParked",
+        "id": "appr-legacy",
+        "effect": parked_effect(),
+        "at_millis": dispatched_at + 5,
+    });
+    let path = Bundle::new(&home, runtime.id()).journal_jsonl();
+    tokio::fs::write(&path, format!("{legacy}\n"))
+        .await
+        .unwrap();
     runtime.journal.load().await.unwrap();
 
-    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
-    assert_eq!(status, StatusCode::OK);
-    assert!(
-        body["irreversibleEffects"].as_array().unwrap().is_empty(),
-        "{:?}",
-        body["irreversibleEffects"],
-    );
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["id"], "appr-legacy");
     assert_eq!(
-        body["historyIncomplete"].as_bool(),
-        Some(true),
-        "an empty list over an undescribable journal is 'cannot say', not 'nothing happened'",
+        body["waitingSince"].as_u64().unwrap(),
+        dispatched_at + 5,
+        "the legacy live-wait behaviour is unchanged",
+    );
+
+    let id = ApprovalId::new("appr-legacy");
+    runtime.journal.record_resolved(&id).await.unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::ApprovalResolved {
+                approval_id: id,
+                verdict: Verdict::Approve,
+                by: Actor {
+                    kind: ActorKind::User,
+                    id: "u-1".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["id"], "appr-legacy");
+    assert_eq!(approvals[0]["status"], "approved");
+    let resolved_at = approvals[0]["resolvedAtMillis"].as_u64().unwrap();
+    assert_eq!(
+        approvals[0]["waitedMillis"].as_u64().unwrap(),
+        resolved_at.saturating_sub(dispatched_at + 5),
+        "the resolved legacy row keeps the original park-to-resolve wait",
     );
 }
 

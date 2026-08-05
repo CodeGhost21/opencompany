@@ -28,6 +28,7 @@ use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::types::{ApprovalId, Effect};
 use crate::runtime::grants::GrantedCall;
+pub use crate::runtime::types::TaskLink;
 
 /// One durable journal record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -57,23 +58,27 @@ enum JournalRecord {
         effect: Effect,
         /// Epoch-millis the effect was parked.
         at_millis: u64,
-        /// The board task whose dispatch cycle parked this effect, when it was
-        /// parked inside one.
+        /// Which board task this effect was parked for (issue #333).
         ///
-        /// Not read for the queue itself — it is what lets the **approval
-        /// follow-up cycle** know which card it is finishing (issue #351).
-        /// Under `supervised`, an irreversible effect never executes in the
-        /// cycle that emitted it: it parks, and the operator's approval starts
-        /// a fresh cycle whose only event is `ApprovalResolved`. Without this
-        /// field that cycle knows no task, so every effect executed the way the
-        /// policy intends would be attributed to nothing and named on no retry
-        /// dialog.
+        /// This is the correlation key that makes a task's Approvals tab
+        /// possible. Before it, an approval carried nothing tying it to a card,
+        /// so the only join available was "did this resolve while that task was
+        /// running" — a time window, which a second task worked in the same
+        /// window silently absorbs.
         ///
-        /// Skipped when serializing and defaulted when absent, so journal lines
-        /// written before this field existed replay as `None` rather than
-        /// failing to parse.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        task_id: Option<String>,
+        /// **Always written from #333 onward**, as either
+        /// [`TaskLink::Task`] or [`TaskLink::Unlinked`] — never omitted. That is
+        /// the whole point of the enum over a bare `Option<String>`: "parked for
+        /// no card" and "parked by a host that did not record cards" are
+        /// different facts, and only the second may fall back to the run window.
+        /// Collapsing them sent every workflow delivery, chat turn and scheduler
+        /// tick to whatever card happened to be running.
+        ///
+        /// `None` therefore means exactly one thing: a journal line written
+        /// before this field existed. `#[serde(default)]` is what lets those
+        /// replay instead of failing to parse.
+        #[serde(default)]
+        task: Option<TaskLink>,
     },
     /// A parked approval that has since been resolved (approved or denied).
     ApprovalResolved {
@@ -154,6 +159,64 @@ pub struct PendingApproval {
     pub effect: Effect,
     /// Epoch-millis the effect was parked.
     pub at_millis: u64,
+    /// Which board task this approval was parked for (issue #333). `None` only
+    /// for a journal line written before the link existed — see [`TaskLink`].
+    pub task: Option<TaskLink>,
+}
+
+/// What an approval *was*, retained for the whole life of the journal — after
+/// it resolves, expires, or is amended away (issue #333, over #305's index).
+///
+/// The parked effect itself is dropped from the queue on resolution, and
+/// [`CompanyEvent::ApprovalResolved`](crate::ports::CompanyEvent::ApprovalResolved)
+/// carries only an id, a verdict and an actor. So without this index a resolved
+/// approval is unreadable: the read side cannot say what was approved, when it
+/// parked, or which task it belonged to.
+///
+/// **Entries are never removed, and the map is unbounded.** It has the same
+/// append-only lifetime as the journal file it is replayed from: one resident
+/// entry per approval ever parked, for the life of the process, growing
+/// without a ceiling. #333 widens each entry from a `u64` to a `u64` plus two
+/// `String`s (the effect kind and, when linked, the task id). No rotation
+/// exists today, so `load` rebuilding this from every `ApprovalParked` line is
+/// the only path — and it is the correct one. If journal rotation ever lands,
+/// this index is the first thing that has to survive it, because a rotated-away
+/// park line silently turns its approval unreadable.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalOrigin {
+    /// Epoch-millis the effect was parked.
+    pub at_millis: u64,
+    /// The parked effect's dotted kind, e.g. `payment.send`.
+    pub kind: String,
+    /// Which board task the parking cycle was dispatched for. `None` only for a
+    /// pre-#333 journal line — see [`TaskLink`].
+    ///
+    /// The **card-level** key, and the fallback one: it cannot say which of a
+    /// card's attempts parked the approval. See [`run_id`](Self::run_id).
+    pub task: Option<TaskLink>,
+    /// The attempt this approval was parked under
+    /// ([`Effect::run_id`](crate::ports::types::Effect::run_id), issue #242),
+    /// copied off the effect at park time so the read side need not re-open it.
+    ///
+    /// The **attempt-level** key, and the authoritative one where present: a
+    /// [`RunRecord`](crate::ports::runs::RunRecord) names its card, so a run id
+    /// resolves to a task, while a task id can never resolve to a run. #183
+    /// settled that repeat trips through review are normal, so two attempts on
+    /// one card is the expected case — and only this key tells them apart.
+    ///
+    /// `None` by design for every park with no attempt behind it: a chat turn,
+    /// a workflow delivery, a scheduler tick, and the hosted brain's own gate.
+    /// That is why it cannot be the only key — see [`task`](Self::task).
+    pub run_id: Option<String>,
+}
+
+/// One approval currently waiting in the in-memory queue.
+#[derive(Clone, Debug)]
+struct ParkedApproval {
+    effect: Effect,
+    at_millis: u64,
+    /// `None` only for a journal line written before #333.
+    task: Option<TaskLink>,
 }
 
 /// A side effect that was **committed to run** (issue #351): what it was, which
@@ -224,7 +287,7 @@ struct State {
     /// so the console is told and confirms regardless — see
     /// [`has_undescribed_history`](RuntimeJournal::has_undescribed_history).
     undescribed_executed: bool,
-    parked: HashMap<ApprovalId, (Effect, u64)>,
+    parked: HashMap<ApprovalId, ParkedApproval>,
     /// The effect each approval was parked with, **payload scrubbed**, retained
     /// after the approval leaves [`parked`](Self::parked) (issue #351).
     ///
@@ -241,28 +304,18 @@ struct State {
     /// the life of the process to answer a question that never asks for them
     /// would be the one leak [`ExecutedEffect`] exists to avoid.
     approval_effects: HashMap<ApprovalId, Effect>,
-    /// The board task each approval was parked for, retained after it leaves
-    /// `parked` (issue #351).
+    /// What each approval was when it parked, retained after it leaves `parked`.
     ///
-    /// Read by the approval **follow-up** cycle, which knows only an
-    /// [`ApprovalId`]: it is what lets the effect an operator just approved be
-    /// attributed to the card that asked for it. Never removed, for the same
-    /// reason [`park_instants`](Self::park_instants) is not — the join happens
-    /// after the queue entry is gone, and holds only entries that have a task.
-    approval_tasks: HashMap<ApprovalId, String>,
-    /// When each approval was *parked*, retained after it leaves `parked`.
-    ///
-    /// This is what makes waiting time readable (issue #305). The park instant
-    /// is journal-only — [`CompanyEvent::ApprovalResolved`](crate::ports::CompanyEvent::ApprovalResolved)
-    /// carries the resolution but no park time — so a resolved approval's wait
-    /// is only recoverable by joining the two on [`ApprovalId`]. Entries are
-    /// therefore **never removed** on resolve or expiry: the index has the same
-    /// append-only lifetime as the file it is replayed from, and costs one
-    /// `(id, u64)` per approval ever parked.
-    park_instants: HashMap<ApprovalId, u64>,
+    /// This is what makes waiting time readable (issue #305) and what links a
+    /// resolved approval back to its board task (issue #333). Both facts are
+    /// journal-only — [`CompanyEvent::ApprovalResolved`](crate::ports::CompanyEvent::ApprovalResolved)
+    /// carries the resolution but neither the park time nor the task — so they
+    /// are recoverable only by joining the two on [`ApprovalId`]. See
+    /// [`ApprovalOrigin`] for why entries are never removed.
+    origins: HashMap<ApprovalId, ApprovalOrigin>,
     /// Grants minted and not yet consumed or expired (issue #243).
     ///
-    /// Unlike [`park_instants`](Self::park_instants) this one IS removed from on
+    /// Unlike [`origins`](Self::origins) this one IS removed from on
     /// the terminal records: a replayed grant is handed straight back to the
     /// live [`GrantSet`](crate::runtime::grants::GrantSet), so keeping a
     /// consumed or expired entry here would re-arm a tool call that already ran
@@ -358,14 +411,26 @@ impl RuntimeJournal {
                     id,
                     effect,
                     at_millis,
-                    task_id,
+                    task,
                 } => {
-                    state.park_instants.insert(id.clone(), at_millis);
-                    if let Some(task_id) = task_id {
-                        state.approval_tasks.insert(id.clone(), task_id);
-                    }
                     state.retain_approval_effect(&id, &effect);
-                    state.parked.insert(id, (effect, at_millis));
+                    state.origins.insert(
+                        id.clone(),
+                        ApprovalOrigin {
+                            at_millis,
+                            kind: effect.kind.clone(),
+                            task: task.clone(),
+                            run_id: effect.run_id.clone(),
+                        },
+                    );
+                    state.parked.insert(
+                        id,
+                        ParkedApproval {
+                            effect,
+                            at_millis,
+                            task,
+                        },
+                    );
                 }
                 JournalRecord::ApprovalResolved { id } => {
                     state.parked.remove(&id);
@@ -432,45 +497,48 @@ impl RuntimeJournal {
         .await
     }
 
-    /// Records a newly parked approval, tagged with the board task whose cycle
-    /// parked it (issue #351) — `None` when no card is behind it.
+    /// Records a newly parked approval and which board task it belongs to
+    /// (issue #333).
+    ///
+    /// `task` is deliberately **not** an `Option`: every caller must say which
+    /// it is, [`TaskLink::Task`] or [`TaskLink::Unlinked`], so that a missing
+    /// link can only ever mean "written before #333". A caller with an
+    /// `Option<&str>` in hand converts with [`TaskLink::from_task_id`].
     pub async fn record_parked(
         &self,
         id: &ApprovalId,
         effect: &Effect,
         at_millis: u64,
-        task_id: Option<&str>,
+        task: TaskLink,
     ) -> Result<()> {
-        let task_id = task_id.map(str::to_string);
         {
             let mut state = self.state.lock().expect("journal state poisoned");
-            state.park_instants.insert(id.clone(), at_millis);
-            if let Some(task_id) = task_id.clone() {
-                state.approval_tasks.insert(id.clone(), task_id);
-            }
+            state.origins.insert(
+                id.clone(),
+                ApprovalOrigin {
+                    at_millis,
+                    kind: effect.kind.clone(),
+                    task: Some(task.clone()),
+                    run_id: effect.run_id.clone(),
+                },
+            );
+            state.parked.insert(
+                id.clone(),
+                ParkedApproval {
+                    effect: effect.clone(),
+                    at_millis,
+                    task: Some(task.clone()),
+                },
+            );
             state.retain_approval_effect(id, effect);
-            state.parked.insert(id.clone(), (effect.clone(), at_millis));
         }
         self.append(&JournalRecord::ApprovalParked {
             id: id.clone(),
             effect: effect.clone(),
             at_millis,
-            task_id,
+            task: Some(task),
         })
         .await
-    }
-
-    /// The board task an approval was parked for, if any (issue #351).
-    ///
-    /// Answers the approval follow-up cycle's only question: the operator
-    /// approved *this* id — whose card was that?
-    pub fn approval_task(&self, id: &ApprovalId) -> Option<String> {
-        self.state
-            .lock()
-            .expect("journal state poisoned")
-            .approval_tasks
-            .get(id)
-            .cloned()
     }
 
     /// The effect an approval was parked with, payload scrubbed (issue #351).
@@ -583,20 +651,60 @@ impl RuntimeJournal {
         .await
     }
 
-    /// A snapshot of when each approval was parked, keyed by [`ApprovalId`],
-    /// including approvals that have since been resolved or expired.
+    /// A snapshot of what every approval ever parked *was*, keyed by
+    /// [`ApprovalId`] — including approvals since resolved or expired.
     ///
     /// The read side joins this against the event log's
     /// [`ApprovalResolved`](crate::ports::CompanyEvent::ApprovalResolved) to
-    /// recover how long an approval was actually waiting (issue #305). Taken as
-    /// one snapshot per request rather than per lookup, so a fold never holds
-    /// the state lock while it works.
-    pub fn park_instants(&self) -> HashMap<ApprovalId, u64> {
+    /// recover how long an approval was waiting (issue #305) and which board
+    /// task it belonged to (issue #333). Taken as one snapshot per request
+    /// rather than per lookup, so a fold never holds the state lock while it
+    /// works.
+    pub fn approval_origins(&self) -> HashMap<ApprovalId, ApprovalOrigin> {
         self.state
             .lock()
             .expect("journal state poisoned")
-            .park_instants
+            .origins
             .clone()
+    }
+
+    /// What one approval was when it parked, without cloning the whole
+    /// [`origins`](State::origins) map.
+    ///
+    /// The read path resolves a bounded number of ids per request — the
+    /// approval events on one page of the fold, plus the parked queue — so it
+    /// takes this per id rather than a snapshot. [`approval_origins`] copies an
+    /// index that grows with every approval ever parked and is never pruned, and
+    /// the task-detail route is polled, so a snapshot there costs the whole
+    /// history on every poll.
+    ///
+    /// [`approval_origins`]: Self::approval_origins
+    pub fn approval_origin(&self, id: &ApprovalId) -> Option<ApprovalOrigin> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .origins
+            .get(id)
+            .cloned()
+    }
+
+    /// The task link recorded for one approval, without cloning the whole
+    /// [`origins`](State::origins) map.
+    ///
+    /// The map is unbounded and never pruned (see [`ApprovalOrigin`]), so a
+    /// caller that needs the link for a couple of known ids — every cycle does,
+    /// via [`cycle_task_id`](crate::runtime::cycle) — must not pay a full clone
+    /// per cycle to read them. `approval_origins` stays the right call for a
+    /// fold that will look up an unknown number of ids.
+    ///
+    /// The outer `Option` is "no such approval"; the inner is a pre-#333 line.
+    pub fn approval_task(&self, id: &ApprovalId) -> Option<Option<TaskLink>> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .origins
+            .get(id)
+            .map(|o| o.task.clone())
     }
 
     /// Records a minted single-use grant (issue #243).
@@ -678,10 +786,11 @@ impl RuntimeJournal {
         let mut out: Vec<PendingApproval> = state
             .parked
             .iter()
-            .map(|(id, (effect, at_millis))| PendingApproval {
+            .map(|(id, parked)| PendingApproval {
                 id: id.clone(),
-                effect: effect.clone(),
-                at_millis: *at_millis,
+                effect: parked.effect.clone(),
+                at_millis: parked.at_millis,
+                task: parked.task.clone(),
             })
             .collect();
         out.sort_by(|a, b| {
@@ -711,16 +820,6 @@ impl RuntimeJournal {
             .map_err(|e| self.io_err(e))?;
         file.write_all(b"\n").await.map_err(|e| self.io_err(e))?;
         Ok(())
-    }
-
-    /// The file this journal appends to.
-    ///
-    /// Test-only, and deliberately so: nothing in the runtime needs the path,
-    /// but a test pinning replay of a record shaped the way an older build wrote
-    /// it has to write that record itself.
-    #[cfg(test)]
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 
     fn io_err(&self, source: std::io::Error) -> OpenCompanyError {
@@ -934,7 +1033,7 @@ mod test {
         let id = ApprovalId::new("appr-tool");
 
         journal
-            .record_parked(&id, &effect(), 1_000, Some("t-1"))
+            .record_parked(&id, &effect(), 1_000, TaskLink::Task { id: "t-1".into() })
             .await
             .unwrap();
         journal.record_resolved(&id).await.unwrap();
@@ -996,7 +1095,7 @@ mod test {
         };
 
         journal
-            .record_parked(&id, &parked, 1_000, None)
+            .record_parked(&id, &parked, 1_000, TaskLink::Unlinked)
             .await
             .unwrap();
         journal.record_resolved(&id).await.unwrap();
@@ -1036,7 +1135,7 @@ mod test {
                     ..effect()
                 },
                 1_000,
-                None,
+                TaskLink::Unlinked,
             )
             .await
             .unwrap();
@@ -1068,7 +1167,7 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-1");
         journal
-            .record_parked(&id, &effect(), now_millis(), None)
+            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked)
             .await
             .unwrap();
         assert_eq!(journal.pending().len(), 1);
@@ -1088,35 +1187,133 @@ mod test {
         assert!(after.pending().is_empty());
     }
 
-    /// Issue #351: the card an approval was parked for outlives the queue
-    /// entry, because the cycle that needs it runs *after* the resolution.
+    /// **Issue #333**: the board task an approval was parked for is carried on
+    /// the record, survives a restart, and outlives the resolution.
+    ///
+    /// The whole point of the field is the *resolved* case — a task's Approvals
+    /// tab has to say which sign-offs were its own long after they left the
+    /// queue — so the origin assertion after `record_resolved` is the one that
+    /// matters, not the pending one before it.
     #[tokio::test]
-    async fn an_approvals_task_survives_its_resolution_and_a_restart() {
+    async fn a_parked_approval_carries_its_task_across_a_restart_and_a_resolution() {
         let dir = tmp_dir();
         let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
 
-        let linked = ApprovalId::new("appr-linked");
+        let mine = ApprovalId::new("appr-mine");
+        let theirs = ApprovalId::new("appr-theirs");
         let orphan = ApprovalId::new("appr-orphan");
         journal
-            .record_parked(&linked, &effect(), 1_000, Some("t-1"))
+            .record_parked(&mine, &effect(), 1_000, TaskLink::Task { id: "t-1".into() })
             .await
             .unwrap();
         journal
-            .record_parked(&orphan, &effect(), 1_100, None)
+            .record_parked(
+                &theirs,
+                &effect(),
+                1_100,
+                TaskLink::Task { id: "t-2".into() },
+            )
             .await
             .unwrap();
-        journal.record_resolved(&linked).await.unwrap();
+        // No card behind it (a workflow delivery, an operator-chat turn).
+        journal
+            .record_parked(&orphan, &effect(), 1_200, TaskLink::Unlinked)
+            .await
+            .unwrap();
 
         let reloaded = RuntimeJournal::new(&path);
         reloaded.load().await.unwrap();
+        let pending = reloaded.pending();
         assert_eq!(
-            reloaded.approval_task(&linked),
-            Some("t-1".into()),
-            "the follow-up cycle looks this up after the queue entry is gone",
+            pending
+                .iter()
+                .filter(|p| p.task.as_ref().and_then(TaskLink::task_id) == Some("t-1"))
+                .count(),
+            1,
+            "the parked queue must name the task, not just the effect",
         );
-        assert_eq!(reloaded.approval_task(&orphan), None);
-        assert_eq!(reloaded.approval_task(&ApprovalId::new("never")), None);
+
+        // The resolution drains the queue but must not drain the link.
+        reloaded.record_resolved(&mine).await.unwrap();
+        assert!(reloaded.pending().iter().all(|p| p.id != mine));
+        let origins = reloaded.approval_origins();
+        assert_eq!(
+            origins.get(&mine),
+            Some(&ApprovalOrigin {
+                at_millis: 1_000,
+                kind: "filing.submit".into(),
+                task: Some(TaskLink::Task { id: "t-1".into() }),
+                run_id: None,
+            }),
+        );
+        assert_eq!(
+            origins.get(&theirs).and_then(|o| o.task.clone()),
+            Some(TaskLink::Task { id: "t-2".into() }),
+            "a second task's approval keeps its own id, so neither absorbs the other",
+        );
+        // Recorded as deliberately unlinked — *not* as a missing link, which is
+        // what tells the read side never to fall back to the run window for it.
+        assert_eq!(
+            origins.get(&orphan).and_then(|o| o.task.clone()),
+            Some(TaskLink::Unlinked),
+        );
+    }
+
+    /// A journal line written before #333 has no `task` key at all. It must
+    /// replay with **no link** rather than failing to parse — and that absence
+    /// is what the read side falls back to the old run-window correlation for.
+    ///
+    /// The distinction this pins is the one the whole feature rests on: a
+    /// missing key replays as `None`, while a park this host recorded as having
+    /// no card behind it replays as `Some(Unlinked)`. Both are "no task id",
+    /// and they must not be confused.
+    #[tokio::test]
+    async fn a_pre_333_parked_line_replays_with_no_task() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let legacy = serde_json::json!({
+            "record": "ApprovalParked",
+            "id": "appr-legacy",
+            "effect": effect(),
+            "at_millis": 4_000,
+        });
+        tokio::fs::write(&path, format!("{legacy}\n"))
+            .await
+            .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal.load().await.expect("a pre-#333 line still replays");
+        let id = ApprovalId::new("appr-legacy");
+        assert_eq!(journal.pending().len(), 1);
+        assert_eq!(journal.pending()[0].task, None, "no key means no link");
+        assert_eq!(
+            journal.approval_origins().get(&id).map(|o| o.at_millis),
+            Some(4_000),
+        );
+        assert_eq!(journal.approval_task(&id), Some(None));
+
+        // A park this host records with no card behind it is a *different*
+        // fact, written explicitly, and must not read back as the legacy shape.
+        let fresh = ApprovalId::new("appr-new");
+        journal
+            .record_parked(&fresh, &effect(), 5_000, TaskLink::Unlinked)
+            .await
+            .unwrap();
+        assert_eq!(
+            journal.approval_task(&fresh),
+            Some(Some(TaskLink::Unlinked))
+        );
+
+        let raw = tokio::fs::read_to_string(&path).await.unwrap();
+        let fresh_line = raw
+            .lines()
+            .find(|l| l.contains("appr-new"))
+            .expect("the new park was appended");
+        assert!(
+            fresh_line.contains(r#""link":"unlinked""#),
+            "an unlinked park must say so on disk: {fresh_line}",
+        );
     }
 
     #[tokio::test]
@@ -1126,7 +1323,7 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-exp");
         journal
-            .record_parked(&id, &effect(), now_millis(), None)
+            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked)
             .await
             .unwrap();
         assert_eq!(journal.pending().len(), 1);
@@ -1150,7 +1347,7 @@ mod test {
         let journal = RuntimeJournal::new(&path);
         let id = ApprovalId::new("appr-amend");
         journal
-            .record_parked(&id, &effect(), now_millis(), None)
+            .record_parked(&id, &effect(), now_millis(), TaskLink::Unlinked)
             .await
             .unwrap();
 
@@ -1183,7 +1380,7 @@ mod test {
     /// *finished* wait would be unreadable, which is exactly the case the header
     /// needs. Expiry (the default-deny path) must retain it for the same reason.
     #[tokio::test]
-    async fn park_instants_outlive_resolution_and_expiry_and_survive_reload() {
+    async fn approval_origins_outlive_resolution_and_expiry_and_survive_reload() {
         let dir = tmp_dir();
         let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
@@ -1191,11 +1388,11 @@ mod test {
         let resolved = ApprovalId::new("appr-resolved");
         let expired = ApprovalId::new("appr-expired");
         journal
-            .record_parked(&resolved, &effect(), 1_000, None)
+            .record_parked(&resolved, &effect(), 1_000, TaskLink::Unlinked)
             .await
             .unwrap();
         journal
-            .record_parked(&expired, &effect(), 2_000, None)
+            .record_parked(&expired, &effect(), 2_000, TaskLink::Unlinked)
             .await
             .unwrap();
 
@@ -1205,18 +1402,18 @@ mod test {
         // Both left the queue...
         assert!(journal.pending().is_empty());
         // ...but their park instants are still joinable.
-        let instants = journal.park_instants();
-        assert_eq!(instants.get(&resolved), Some(&1_000));
-        assert_eq!(instants.get(&expired), Some(&2_000));
+        let origins = journal.approval_origins();
+        assert_eq!(origins.get(&resolved).map(|o| o.at_millis), Some(1_000));
+        assert_eq!(origins.get(&expired).map(|o| o.at_millis), Some(2_000));
 
         // And a restart replays them out of the file, so history predating this
         // process is readable too.
         let reloaded = RuntimeJournal::new(&path);
         reloaded.load().await.unwrap();
-        let instants = reloaded.park_instants();
+        let origins = reloaded.approval_origins();
         assert!(reloaded.pending().is_empty());
-        assert_eq!(instants.get(&resolved), Some(&1_000));
-        assert_eq!(instants.get(&expired), Some(&2_000));
+        assert_eq!(origins.get(&resolved).map(|o| o.at_millis), Some(1_000));
+        assert_eq!(origins.get(&expired).map(|o| o.at_millis), Some(2_000));
     }
 
     fn grant(id: &str, at_millis: u64) -> GrantedCall {
@@ -1266,7 +1463,7 @@ mod test {
     /// NOT come back on replay.
     ///
     /// A single-use grant resurrected by a restart is no longer single-use. The
-    /// fold therefore *removes* on both terminal records, unlike `park_instants`
+    /// fold therefore *removes* on both terminal records, unlike `origins`
     /// (#305) which deliberately retains.
     #[tokio::test]
     async fn consumed_and_expired_grants_are_not_rehydrated() {
@@ -1312,17 +1509,17 @@ mod test {
     }
 
     /// The grant records must not disturb the approval-queue fold they share a
-    /// file with — including #309's `park_instants` index, which the Task Detail
+    /// file with — including #309's origin index, which the Task Detail
     /// waiting-time read joins against.
     #[tokio::test]
-    async fn grant_records_leave_the_parked_queue_and_park_instants_intact() {
+    async fn grant_records_leave_the_parked_queue_and_origins_intact() {
         let dir = tmp_dir();
         let path = dir.path().join("journal.jsonl");
         let journal = RuntimeJournal::new(&path);
 
         let parked_id = ApprovalId::new("appr-parked");
         journal
-            .record_parked(&parked_id, &effect(), 500, None)
+            .record_parked(&parked_id, &effect(), 500, TaskLink::Unlinked)
             .await
             .unwrap();
         journal
@@ -1342,7 +1539,13 @@ mod test {
             "the parked approval is untouched"
         );
         assert_eq!(reloaded.pending()[0].id, parked_id);
-        assert_eq!(reloaded.park_instants().get(&parked_id), Some(&500));
+        assert_eq!(
+            reloaded
+                .approval_origins()
+                .get(&parked_id)
+                .map(|o| o.at_millis),
+            Some(500)
+        );
         assert!(reloaded.replayed_grants().is_empty());
     }
 

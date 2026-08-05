@@ -54,6 +54,8 @@ import {
   type StepStatus,
   type SteerAction,
   type Task,
+  type TaskApproval,
+  type TaskApprovalStatus,
   type TaskDetail,
   type TimelineEntry,
   type TimelineKind,
@@ -303,13 +305,21 @@ export function TaskDetailView({
   );
 
   // Only tick the 1s clock while something is actually running: a dispatch
-  // window is open, the task is parked on an operator right now, or an attempt
-  // has not settled (#242 — a parked attempt's clock is still running, which is
-  // why this asks the run's phase and not its finish time).
+  // window is open, the task is parked on an operator right now, an attempt has
+  // not settled, or this task still owns a pending approval.
+  //
+  // The pending-approval term is not redundant with `waiting?.live`. That one
+  // derives from `waitingSince`, which the server gates on an *open run
+  // window* (#305) — so a finished card that still has a sign-off outstanding
+  // reports no `waitingSince` at all, and the Approvals tab's "waiting Xs"
+  // froze at whatever it read on mount. Since #333 the backend deliberately
+  // returns that row, so the clock has to keep up with it.
+  const awaitingApproval = Boolean(detail?.approvals.some((a) => a.status === "pending"));
   const ticking =
     Boolean(worked?.live) ||
     Boolean(waiting?.live) ||
-    Boolean(detail?.runs.some(isRunOpen));
+    Boolean(detail?.runs.some(isRunOpen)) ||
+    awaitingApproval;
   useEffect(() => {
     if (!ticking) return;
     const timer = window.setInterval(() => {
@@ -424,7 +434,7 @@ export function TaskDetailView({
               </TabsContent>
 
               <TabsContent value="approvals" className="mt-4">
-                <ApprovalsTab entries={detail.timeline} />
+                <ApprovalsTab approvals={detail.approvals} now={now} />
               </TabsContent>
 
               <TabsContent value="artifacts" className="mt-4">
@@ -567,14 +577,15 @@ function DetailHeader({
         </p>
       )}
 
-      {/* Each waiting span itself is exact — a real park instant to a real
-          resolution. What stays approximate is which task an approval belonged
-          to: parked effects carry no task id, so they are correlated to the run
+      {/* Each waiting span is exact — a real park instant to a real resolution
+          — and since #333 so is the card it is charged to: an approval is
+          journaled with the task that parked it. Only a sign-off parked by a
+          host older than #333 has no link and still falls back to the run
           window. Said plainly rather than left for a reader to discover. */}
       {showWaiting && (
         <p className="mt-2 text-[11px] text-muted-foreground/70">
-          Waiting is correlated to this task&rsquo;s run window — approvals are
-          not linked per-task.
+          Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
+          task id fall back to its run window.
         </p>
       )}
     </div>
@@ -1525,45 +1536,92 @@ function RunDrawer({
   );
 }
 
-function ApprovalsTab({ entries }: { entries: TimelineEntry[] }) {
-  const approvals = useMemo(
-    () => entries.filter((e) => e.kind === "approval"),
-    [entries],
-  );
+/** What each status reads as on a row, and how it is coloured (#333). */
+const APPROVAL_STATUS: Record<TaskApprovalStatus, { label: string; className: string }> = {
+  pending: {
+    label: "Waiting on you",
+    className: "text-amber-700 dark:text-amber-400",
+  },
+  approved: { label: "Approved", className: "text-emerald-600 dark:text-emerald-400" },
+  denied: { label: "Declined", className: "text-muted-foreground" },
+  expired: { label: "Expired (auto-declined)", className: "text-muted-foreground" },
+};
+
+/**
+ * The Approvals tab (#333): this task's own sign-offs, oldest first — ordered
+ * by when each was *asked for*, not when it was answered, so a still-parked row
+ * sits in the run where it arose rather than being pinned to the bottom.
+ *
+ * It reads `detail.approvals`, not the timeline. Filtering the timeline for
+ * `kind === "approval"` could only ever find *resolutions*, and only ones that
+ * fell inside the run window, so the tab was empty for every task that had an
+ * approval actually waiting on a human.
+ */
+function ApprovalsTab({ approvals, now }: { approvals: TaskApproval[]; now: number }) {
   return (
     <div className="space-y-3">
       <p className="text-xs text-muted-foreground">
-        Approvals resolved{" "}
-        <span className="font-medium text-foreground">during this run</span> —
-        correlated to the dispatch window, not linked per-task. Each wait is
-        measured from the moment the effect actually parked.
+        Sign-offs this task asked for, still waiting or already decided. Each wait is measured from
+        the moment the effect actually parked.
       </p>
       {approvals.length === 0 ? (
         <EmptyState
-          title="No approvals in this run"
-          body="Sign-offs resolved while this task ran will appear here."
+          title="No approvals for this task"
+          body="Anything this task parks for your sign-off will appear here."
         />
       ) : (
         <ol className="space-y-1.5">
-          {approvals.map((e) => (
-            <li
-              key={e.seq}
-              className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs"
-            >
-              <ShieldCheck className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-              <span className="min-w-0 flex-1 truncate font-medium">
-                {e.label}
-              </span>
-              {e.waitedMillis !== undefined && (
-                <span className="shrink-0 text-[11px] tabular-nums text-amber-700 dark:text-amber-400">
-                  waited {formatDuration(e.waitedMillis)}
+          {approvals.map((a) => {
+            const status = APPROVAL_STATUS[a.status] ?? APPROVAL_STATUS.pending;
+            const pending = a.status === "pending";
+            // A pending row has no resolution to measure against, so its wait
+            // runs to the polled clock instead.
+            const waited = pending ? Math.max(0, now - a.atMillis) : a.waitedMillis;
+            return (
+              <li
+                key={a.id}
+                className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs"
+              >
+                {pending ? (
+                  <Hourglass className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+                ) : (
+                  <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground" />
+                )}
+                <span className="min-w-0 flex-1 truncate font-medium">{a.kind}</span>
+                {/*
+                 * A pending row is the one thing on this tab the operator can
+                 * act on, and the tab itself cannot approve or deny — so the
+                 * status doubles as the way out, to the Approvals page where
+                 * the decision lives. Decided rows have nothing to go to.
+                 */}
+                {pending ? (
+                  <a
+                    href="#/approvals"
+                    className={cn(
+                      "shrink-0 text-[11px] underline-offset-2 hover:underline",
+                      status.className,
+                    )}
+                    aria-label={`${status.label} — review ${a.kind} on the Approvals page`}
+                    title="Review this on the Approvals page"
+                  >
+                    {status.label}
+                  </a>
+                ) : (
+                  <span className={cn("shrink-0 text-[11px]", status.className)}>
+                    {status.label}
+                  </span>
+                )}
+                {waited !== undefined && (
+                  <span className="shrink-0 text-[11px] tabular-nums text-amber-700 dark:text-amber-400">
+                    {pending ? "waiting" : "waited"} {formatDuration(waited)}
+                  </span>
+                )}
+                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+                  {timeOf(a.atMillis)}
                 </span>
-              )}
-              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                {timeOf(e.atMillis)}
-              </span>
-            </li>
-          ))}
+              </li>
+            );
+          })}
         </ol>
       )}
     </div>
