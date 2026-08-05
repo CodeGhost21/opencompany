@@ -3283,6 +3283,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to this task — admitted.
         CompanyEvent::AgentReply {
+            parent: None,
             chat_id: "t-1".into(),
             agent_id: "ceo".into(),
             text: "on it".into(),
@@ -3291,6 +3292,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // An ordinary chat reply — excluded.
         CompanyEvent::AgentReply {
+            parent: None,
             chat_id: "General".into(),
             agent_id: "ceo".into(),
             text: "unrelated chatter".into(),
@@ -3299,6 +3301,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
         },
         // Tagged to a different task — excluded.
         CompanyEvent::AgentReply {
+            parent: None,
             chat_id: "t-other".into(),
             agent_id: "ceo".into(),
             text: "someone else's work".into(),
@@ -3862,6 +3865,7 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
             run_id: None,
         },
         CompanyEvent::AgentReply {
+            parent: None,
             chat_id: "t-1".into(),
             agent_id: "writer".into(),
             text: "First draft is up.".into(),

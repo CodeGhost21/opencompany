@@ -277,6 +277,7 @@ impl HarnessBrain {
                 .append(
                     &self.record.id,
                     CompanyEvent::AgentReply {
+                        parent: None,
                         chat_id: reply_thread.clone(),
                         agent_id: grant.agent.clone(),
                         text: text.clone(),
@@ -294,6 +295,7 @@ impl HarnessBrain {
         }
 
         Ok(Some(OutboundMessage {
+            message_id: None,
             task_id: None,
             channel: grant.agent.clone(),
             text,
@@ -1193,6 +1195,7 @@ impl HarnessBrain {
             .append(
                 &self.record.id,
                 CompanyEvent::AgentReply {
+                    parent: None,
                     chat_id: card.id.clone(),
                     agent_id: responder.to_string(),
                     text: result_text.clone(),
@@ -1719,6 +1722,7 @@ impl Brain for HarnessBrain {
                     // steps on the operator bubble — one surface, one renderer.
                     self.surface_mcp_failures(&mut operator_steps, None).await?;
                     channel_responses.push(OutboundMessage {
+                        message_id: None,
                         // Issue #246: when the turn opened a board card, say so
                         // on the bubble it opened it from. Before this a
                         // `spawn_task` was invisible in chat — the card landed
@@ -1768,6 +1772,7 @@ impl Brain for HarnessBrain {
         // The runtime requires at least one channel response per cycle.
         if channel_responses.is_empty() {
             channel_responses.push(OutboundMessage {
+                message_id: None,
                 task_id: None,
                 channel: "operator".to_string(),
                 text: "Acknowledged.".to_string(),
@@ -1975,6 +1980,7 @@ description = "Runs Acme."
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "status?".into(),
                     by: None,
                     chat: None,
@@ -3541,6 +3547,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "we should announce this".into(),
                     by: None,
                     chat: None,
@@ -3598,6 +3605,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "two things".into(),
                     by: None,
                     chat: None,
@@ -3641,6 +3649,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "status?".into(),
                     by: None,
                     chat: None,
@@ -5267,6 +5276,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "why is the site down?".into(),
                     by: None,
                     chat: None,
@@ -5331,6 +5341,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "handle it".into(),
                     by: None,
                     chat: None,
@@ -5369,6 +5380,7 @@ members = ["eng1", "eng2"]
         let result = brain
             .run_cycle(
                 request(vec![CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "status?".into(),
                     by: None,
                     chat: None,
