@@ -52,6 +52,51 @@ const KIND_ICONS: Record<string, LucideIcon> = {
 const PREVIEW_LINES = 3;
 const PREVIEW_VALUE_CHARS = 160;
 
+/**
+ * Below this, a lost connection cannot have outlived the fast part of a resolve.
+ *
+ * Generous on purpose: the fast part is three local writes, so anything past a
+ * second or two of *waiting* was waiting on the agent turn. The number only has
+ * to separate "failed before it started" from "failed after it was underway".
+ */
+const RESOLVE_SLOW_ENOUGH_MS = 2_000;
+
+/**
+ * Whether the host may have carried out this request despite the error (#380).
+ *
+ * The console genuinely cannot tell "the verdict never landed" from "the
+ * verdict landed and the continuation timed out" — but it can tell who
+ * answered, and roughly how long it waited, and that is enough to stop lying in
+ * the cases that actually occur.
+ *
+ * **The host answered in its own envelope** (`fromHost`): it considered the
+ * request and refused, so nothing landed, whatever the status was. This is the
+ * arm that matters most for correctness — the host returns 503 while quiescing
+ * and 502 on an upstream transport failure, so a status-only check would read
+ * those clean refusals as timeouts and tell the operator a decision was
+ * recorded when it provably was not.
+ *
+ * **A proxy answered** (502/503/504 with no envelope): on a hosted tenant that
+ * is a reverse proxy that could not get a reply out of an upstream it had
+ * already handed the request to. The verdict very probably landed.
+ *
+ * **Nothing answered**: only evidence of a slow turn if it was actually slow.
+ * An instant rejection is an offline browser or a refused connection, where the
+ * request never reached the host — and saying "your decision was recorded"
+ * there would be a fresh lie in place of the one being fixed. Hence the
+ * elapsed-time floor: the inference is "recorded *before* the delay", so it
+ * needs a delay to stand on.
+ *
+ * Either way `feed.refresh()` at the call site settles it, since the host drops
+ * the approval from the queue before anything slow happens.
+ */
+function mayHaveLanded(err: unknown, elapsedMs: number): boolean {
+  if (!(err instanceof ApiError)) return false;
+  if (err.fromHost) return false;
+  if (err.status >= 502) return true;
+  return err.code === "network_error" && elapsedMs >= RESOLVE_SLOW_ENOUGH_MS;
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
@@ -91,6 +136,7 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
     // early return that used to live here made every other card inert too.
     if (inFlight.has(a.id)) return;
     markInFlight(a.id, verdict);
+    const startedAt = Date.now();
     try {
       await client.resolveApproval(a.id, verdict, undefined, company);
       // Issue #243: approving no longer just records a verdict — it hands the
@@ -110,9 +156,35 @@ export function ApprovalsView({ client, company, feed, onResolved, onGoToConvers
       // per-agent DM thread (#151) surface it.
       void feed.refresh();
     } catch (err) {
-      const msg = err instanceof ApiError ? err.message : "something went wrong";
-      onResolved(`Couldn't record your decision — ${msg}`);
-      toast.error(`Couldn't record your decision — ${msg}`);
+      // Issue #380: a failed request is not the same as a failed decision.
+      //
+      // The host resolves in four steps — drop the approval from the parked
+      // queue, journal the verdict durably, mint the grant, then run a whole
+      // follow-up agent turn — and only the last one is slow. So when the
+      // answer is lost in transit it is lost *after* the verdict is durable,
+      // and "Couldn't record your decision" is a lie that invites the one
+      // response that cannot help: approving again.
+      if (mayHaveLanded(err, Date.now() - startedAt)) {
+        const line =
+          verdict === "approve"
+            ? "Approved — the host didn't answer in time, but your decision was recorded. The agent may still be working; no need to approve again."
+            : "Declined — the host didn't answer in time, but your decision was recorded. No need to decline again.";
+        onResolved(line);
+        // Neither a success nor an error: the verdict is durable, the
+        // continuation is unknown. A green tick would overclaim and a red
+        // cross is the bug being fixed.
+        toast.info(line);
+        // The reconciliation, and the reason the copy above can be this
+        // confident: the host removes the approval from the queue in step one,
+        // so a refresh either drops this card — proving the verdict landed —
+        // or leaves it, showing the operator a decision that still needs
+        // making. The queue is the answer the response body never delivered.
+        void feed.refresh();
+      } else {
+        const msg = err instanceof ApiError ? err.message : "something went wrong";
+        onResolved(`Couldn't record your decision — ${msg}`);
+        toast.error(`Couldn't record your decision — ${msg}`);
+      }
     } finally {
       // Unconditional, and keyed on the id rather than clearing a single slot:
       // the feed refreshes on its own schedule and routinely drops the decided
