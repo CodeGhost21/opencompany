@@ -18,10 +18,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Mutex as StdMutex;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
@@ -29,6 +28,20 @@ use crate::error::OpenCompanyError;
 use crate::ports::types::{ApprovalId, Effect};
 use crate::runtime::grants::GrantedCall;
 pub use crate::runtime::types::TaskLink;
+use crate::store::fs::{PathLocks, append_line};
+
+/// Journal append locks, keyed by path, shared by every [`RuntimeJournal`] in
+/// the process (issue #386).
+///
+/// The lock this replaced was a field on `RuntimeJournal`, so two journals over
+/// one file serialised against nothing — which is the state the type has always
+/// been in, and which nothing stopped a caller reaching. A `static` is the only
+/// thing two independently-constructed instances can share.
+///
+/// In-process only, and deliberately so: a second *process* on the same
+/// `OPENCOMPANY_DATA_DIR` is outside any lock's reach. What keeps that case from
+/// tearing is [`append_line`]'s single `O_APPEND` write, not this.
+static JOURNAL_WRITE_LOCKS: LazyLock<PathLocks> = LazyLock::new(PathLocks::default);
 
 /// One durable journal record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -260,10 +273,30 @@ pub struct ExecutedEffect {
     pub irreversible: bool,
 }
 
+/// A journal line [`load`](RuntimeJournal::load) could not replay (issue #386).
+///
+/// Deliberately carries **no line content**. The journal holds effect payloads —
+/// recipients, message bodies, arguments — and a corruption report exists to be
+/// logged and read by an operator, which is the one place [`ExecutedEffect`]
+/// goes to some trouble to keep those out of. The line number locates it in the
+/// file, the byte length separates a merged pair (long) from a truncated tail
+/// (short), and the parse error names the column without quoting it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorruptLine {
+    /// The line's 1-based number in the journal file.
+    pub line: usize,
+    /// The line's length in bytes.
+    pub bytes: usize,
+    /// What the parse rejected.
+    pub message: String,
+}
+
 /// In-memory state rebuilt from (and kept in sync with) `journal.jsonl`.
 #[derive(Default)]
 struct State {
     executed: HashSet<String>,
+    /// Lines the last replay could not read — see [`CorruptLine`].
+    corrupt: Vec<CorruptLine>,
     /// Every irreversible effect that ran for a board task, indexed by that
     /// task and oldest first within it (issue #351).
     ///
@@ -359,112 +392,200 @@ impl State {
 /// A per-company append-only journal backing at-most-once effects and the
 /// durable approval queue.
 ///
-/// Exactly one process may write a given journal file. [`append`](Self::append)
-/// emits the record and its newline as two separate writes under an in-process
-/// lock, so a second writer on the same path can interleave between them and
-/// leave two records on one line, which then fails to parse on replay.
+/// One process should own a given journal file, but [`append`](Self::append) no
+/// longer depends on that for integrity (issue #386). Every record is written
+/// whole — terminator included — in a single `O_APPEND` write that has reached
+/// the kernel before the call returns, so a concurrent writer can land a record
+/// before or after but never inside one. Writers in *this* process additionally
+/// serialise on [`JOURNAL_WRITE_LOCKS`], which keeps records in call order, so a
+/// park cannot be replayed after the resolution that drains it.
 pub struct RuntimeJournal {
     path: PathBuf,
     state: StdMutex<State>,
-    write_lock: TokioMutex<()>,
+    write_lock: Arc<TokioMutex<()>>,
 }
 
 impl RuntimeJournal {
     /// Opens (or prepares) the journal at `path` without loading it.
     ///
     /// Call [`load`](Self::load) to replay an existing journal into memory.
+    ///
+    /// Two journals over one path share an append lock. The key is the
+    /// absolutised path, so a relative and an absolute spelling of one file
+    /// match; a symlinked or `..`-laden spelling still does not, and falls back
+    /// on the atomic write for its safety.
     pub fn new(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        let write_lock =
+            JOURNAL_WRITE_LOCKS.get(&std::path::absolute(&path).unwrap_or_else(|_| path.clone()));
         Self {
-            path: path.into(),
+            path,
             state: StdMutex::new(State::default()),
-            write_lock: TokioMutex::new(()),
+            write_lock,
         }
     }
 
     /// Replays the on-disk journal into memory, reconstructing the executed-key
     /// set and the parked-approval queue. Idempotent.
+    ///
+    /// **A damaged line does not fail the load** (issue #386). It is skipped,
+    /// logged against the file and line number, and reported through
+    /// [`corruption`](Self::corruption) for the caller to act on. Before this,
+    /// one bad line returned `Err` from here and took the whole company's boot
+    /// with it — turning the loss of a single record into the loss of every
+    /// record after it, plus the tenant. An operator cannot repair a journal
+    /// through a console that will not start.
+    ///
+    /// The skip is genuinely lossy and the safety argument is not symmetric: a
+    /// dropped `ApprovalResolved` leaves an approval parked, which a person can
+    /// still deny, while a dropped `EffectExecuted` un-commits a key and lets an
+    /// effect run twice. That is why [`replay_line`] recovers a merged line in
+    /// full rather than skipping it — the historical corruption this issue is
+    /// about is exactly the recoverable kind, and skipping it is the outcome
+    /// worth working to avoid.
     pub async fn load(&self) -> Result<()> {
-        let contents = match tokio::fs::read_to_string(&self.path).await {
+        // Read bytes, not a `String`. A torn write can split a multi-byte
+        // codepoint, and `read_to_string` would fail the whole load on that one
+        // bad byte — failing the boot for exactly the damage this function
+        // exists to survive. Decoding per line instead keeps a single mangled
+        // line on the `CorruptLine` path with the rest of the journal intact.
+        let contents = match tokio::fs::read(&self.path).await {
             Ok(contents) => contents,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => return Err(self.io_err(e)),
         };
 
         let mut state = State::default();
-        for line in contents.lines() {
+        for (index, raw) in contents.split(|b| *b == b'\n').enumerate() {
+            // Lossy on purpose: invalid bytes become U+FFFD, the line then fails
+            // to parse as JSON, and it lands on the same skip-and-log path as
+            // any other unrecoverable line rather than aborting the replay.
+            let line = String::from_utf8_lossy(raw);
+            let line = line.as_ref();
             if line.trim().is_empty() {
                 continue;
             }
-            match serde_json::from_str::<JournalRecord>(line)? {
-                JournalRecord::EffectExecuted { key, effect } => {
-                    state.executed.insert(key);
-                    // Absent on a pre-#351 line: the key still replays, the
-                    // description simply does not exist to replay. Flag it, so
-                    // the console says "there is earlier activity I cannot
-                    // describe" rather than showing an all-clear.
-                    match effect {
-                        Some(effect) => state.index_executed(effect),
-                        None => state.undescribed_executed = true,
-                    }
-                }
-                JournalRecord::ApprovalParked {
-                    id,
-                    effect,
-                    at_millis,
-                    task,
-                } => {
-                    state.retain_approval_effect(&id, &effect);
-                    state.origins.insert(
-                        id.clone(),
-                        ApprovalOrigin {
-                            at_millis,
-                            kind: effect.kind.clone(),
-                            task: task.clone(),
-                            run_id: effect.run_id.clone(),
-                        },
+            let records = match replay_line(line) {
+                Ok(records) => records,
+                Err(message) => {
+                    let corrupt = CorruptLine {
+                        line: index + 1,
+                        bytes: line.len(),
+                        message,
+                    };
+                    tracing::error!(
+                        journal = %self.path.display(),
+                        line = corrupt.line,
+                        bytes = corrupt.bytes,
+                        error = %corrupt.message,
+                        "journal line could not be replayed; skipping it and continuing",
                     );
-                    state.parked.insert(
-                        id,
-                        ParkedApproval {
-                            effect,
-                            at_millis,
-                            task,
-                        },
-                    );
+                    state.corrupt.push(corrupt);
+                    continue;
                 }
-                JournalRecord::ApprovalResolved { id } => {
-                    state.parked.remove(&id);
-                }
-                JournalRecord::ApprovalExpired { id, .. } => {
-                    state.parked.remove(&id);
-                }
-                // Audit-only for the queue: the paired `ApprovalResolved`
-                // handles removal. The amended effect does supersede the parked
-                // one for description, because it is the amended arguments the
-                // grant was minted against.
-                JournalRecord::ApprovalAmended {
-                    id, amended_effect, ..
-                } => {
-                    state.retain_approval_effect(&id, &amended_effect);
-                }
-                JournalRecord::ApprovalGranted { grant } => {
-                    state.grants.insert(grant.approval_id.clone(), grant);
-                }
-                JournalRecord::GrantConsumed { id, effect } => {
-                    state.grants.remove(&id);
-                    // Absent only on a line written before the grant path was
-                    // described; same additive contract as `EffectExecuted`.
-                    if let Some(effect) = effect {
-                        state.index_executed(effect);
-                    }
-                }
-                JournalRecord::GrantExpired { id, .. } => {
-                    state.grants.remove(&id);
-                }
+            };
+            if records.len() > 1 {
+                // Recovered, not lost — so not a `CorruptLine`. Still worth
+                // saying out loud: the file carries damage from a host that
+                // predates the write fix, and a reader looking at it by hand
+                // should know why one line holds several records.
+                tracing::warn!(
+                    journal = %self.path.display(),
+                    line = index + 1,
+                    records = records.len(),
+                    "journal line holds several records with no separator; \
+                     replaying all of them",
+                );
+            }
+            for record in records {
+                Self::replay(&mut state, record);
             }
         }
         *self.state.lock().expect("journal state poisoned") = state;
         Ok(())
+    }
+
+    /// Lines the last [`load`](Self::load) could not replay, in file order.
+    ///
+    /// Empty is the only healthy answer. A non-empty one means the company is
+    /// running on an incomplete history and something above has to say so.
+    pub fn corruption(&self) -> Vec<CorruptLine> {
+        self.state
+            .lock()
+            .expect("journal state poisoned")
+            .corrupt
+            .clone()
+    }
+
+    /// Folds one replayed record into the rebuilt state.
+    fn replay(state: &mut State, record: JournalRecord) {
+        match record {
+            JournalRecord::EffectExecuted { key, effect } => {
+                state.executed.insert(key);
+                // Absent on a pre-#351 line: the key still replays, the
+                // description simply does not exist to replay. Flag it, so
+                // the console says "there is earlier activity I cannot
+                // describe" rather than showing an all-clear.
+                match effect {
+                    Some(effect) => state.index_executed(effect),
+                    None => state.undescribed_executed = true,
+                }
+            }
+            JournalRecord::ApprovalParked {
+                id,
+                effect,
+                at_millis,
+                task,
+            } => {
+                state.retain_approval_effect(&id, &effect);
+                state.origins.insert(
+                    id.clone(),
+                    ApprovalOrigin {
+                        at_millis,
+                        kind: effect.kind.clone(),
+                        task: task.clone(),
+                        run_id: effect.run_id.clone(),
+                    },
+                );
+                state.parked.insert(
+                    id,
+                    ParkedApproval {
+                        effect,
+                        at_millis,
+                        task,
+                    },
+                );
+            }
+            JournalRecord::ApprovalResolved { id } => {
+                state.parked.remove(&id);
+            }
+            JournalRecord::ApprovalExpired { id, .. } => {
+                state.parked.remove(&id);
+            }
+            // Audit-only for the queue: the paired `ApprovalResolved`
+            // handles removal. The amended effect does supersede the parked
+            // one for description, because it is the amended arguments the
+            // grant was minted against.
+            JournalRecord::ApprovalAmended {
+                id, amended_effect, ..
+            } => {
+                state.retain_approval_effect(&id, &amended_effect);
+            }
+            JournalRecord::ApprovalGranted { grant } => {
+                state.grants.insert(grant.approval_id.clone(), grant);
+            }
+            JournalRecord::GrantConsumed { id, effect } => {
+                state.grants.remove(&id);
+                // Absent only on a line written before the grant path was
+                // described; same additive contract as `EffectExecuted`.
+                if let Some(effect) = effect {
+                    state.index_executed(effect);
+                }
+            }
+            JournalRecord::GrantExpired { id, .. } => {
+                state.grants.remove(&id);
+            }
+        }
     }
 
     /// Whether an effect under `key` was already committed.
@@ -801,6 +922,39 @@ impl RuntimeJournal {
         out
     }
 
+    /// Appends one record, whole, and does not return until the write syscall
+    /// has completed.
+    ///
+    /// **The guarantee is process-crash durability, not host-crash durability.**
+    /// There is no `sync_data`/`sync_all` here, so the bytes are in the kernel's
+    /// page cache rather than on stable storage when this returns: killing the
+    /// process cannot lose them, but a host crash or power loss between the
+    /// append and the flush still can. The at-most-once contract therefore holds
+    /// against a process dying — the case this codebase actually handles, and
+    /// the one the boot reaper and the interrupted-run sweep are built around —
+    /// and not against losing the machine. Whether an `fsync` per append is
+    /// worth its cost on this path is a separate decision (see #392).
+    ///
+    /// Delegates to [`append_line`](crate::store::fs::append_line), which emits
+    /// the record **and** its newline in a single blocking `write_all` under
+    /// `O_APPEND`. This used to open a `tokio::fs::File` and write the two
+    /// halves separately, then drop the handle without flushing — and tokio's
+    /// async `File` returns from `write_all` once the write is *queued* on a
+    /// blocking task, not once it lands. Measured on this code, 199 of 200
+    /// appends returned with their bytes still in flight. Two consequences, both
+    /// live:
+    ///
+    /// * The queued newline could be overtaken by the next append's opening
+    ///   brace, putting two records on one physical line — the
+    ///   `serde_json` "trailing characters" failure this issue was filed for.
+    /// * `Ok(())` meant "queued", not "written". A commit that `record_executed`
+    ///   had already reported durable could still be lost to a crash, and an
+    ///   `ENOSPC` on the real write was never reported to anyone. The
+    ///   at-most-once guarantee rests on that record being on disk *before* the
+    ///   side effect runs, so this was the more serious half.
+    ///
+    /// Identical to the corruption PR #43 removed from `store::fs::append_line`
+    /// and the feedback store's copy of it; the journal was the last twin.
     async fn append(&self, record: &JournalRecord) -> Result<()> {
         let line = serde_json::to_string(record)?;
         let _guard = self.write_lock.lock().await;
@@ -809,17 +963,7 @@ impl RuntimeJournal {
                 .await
                 .map_err(|e| self.io_err_at(parent, e))?;
         }
-        let mut file = tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.path)
-            .await
-            .map_err(|e| self.io_err(e))?;
-        file.write_all(line.as_bytes())
-            .await
-            .map_err(|e| self.io_err(e))?;
-        file.write_all(b"\n").await.map_err(|e| self.io_err(e))?;
-        Ok(())
+        append_line(&self.path, &line).await
     }
 
     fn io_err(&self, source: std::io::Error) -> OpenCompanyError {
@@ -834,6 +978,38 @@ impl RuntimeJournal {
     }
 }
 
+/// Parses one journal line into the record or records it holds.
+///
+/// The healthy answer is one record. A line written by a pre-#386 host may hold
+/// **two or more** with nothing between them, because `append` used to emit a
+/// record and its newline as separate unflushed writes and the newline could
+/// lose the race. `serde_json`'s stream deserializer reads concatenated values
+/// natively, so such a line replays *in full* instead of being dropped — which
+/// matters because dropping one would silently un-commit an `EffectExecuted`
+/// key and let an at-most-once effect run a second time. Recovering the merge
+/// is not a nicety; it is the difference between a cosmetic repair and a
+/// duplicated payment.
+///
+/// A line that is truncated rather than merged — a crash partway through a
+/// write, a filesystem that lost a tail — has no valid parse and is reported.
+/// All-or-nothing per line: half a line applied is worse than none, because the
+/// caller would have no way to know which half it got.
+fn replay_line(line: &str) -> std::result::Result<Vec<JournalRecord>, String> {
+    let single = match serde_json::from_str::<JournalRecord>(line) {
+        Ok(record) => return Ok(vec![record]),
+        Err(e) => e,
+    };
+    match serde_json::Deserializer::from_str(line)
+        .into_iter::<JournalRecord>()
+        .collect::<std::result::Result<Vec<_>, _>>()
+    {
+        Ok(records) if !records.is_empty() => Ok(records),
+        // Report the single-value error, not the stream one: it is the error
+        // that describes the line as it was meant to be written.
+        _ => Err(single.to_string()),
+    }
+}
+
 impl std::fmt::Debug for RuntimeJournal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeJournal")
@@ -844,6 +1020,8 @@ impl std::fmt::Debug for RuntimeJournal {
 
 #[cfg(test)]
 mod test {
+    use std::sync::Arc;
+
     use super::*;
     use crate::ports::now_millis;
     use crate::ports::types::EffectGroup;
@@ -865,9 +1043,12 @@ mod test {
     ///
     /// The name comes from the OS, not from [`crate::ports::generate_id`] —
     /// minted ids are unique only within a process, so two test processes
-    /// sharing `/tmp` could otherwise land on the same journal path and
-    /// interleave their appends into an unparseable line. Dropping the
-    /// returned handle removes the directory, including after a failed assert.
+    /// sharing `/tmp` could otherwise land on the same journal path and mix
+    /// their records into one file. Since #386 that no longer produces an
+    /// unparseable line, but it still produces a journal holding another
+    /// test's history, which fails these assertions just as thoroughly.
+    /// Dropping the returned handle removes the directory, including after a
+    /// failed assert.
     fn tmp_dir() -> tempfile::TempDir {
         tempfile::Builder::new()
             .prefix("opencompany-journal-")
@@ -1547,6 +1728,302 @@ mod test {
             Some(500)
         );
         assert!(reloaded.replayed_grants().is_empty());
+    }
+
+    /// Every non-empty line of the journal at `path`, parsed. Panics with the
+    /// offending line's number and text when one does not parse, because a
+    /// torn line is exactly what these tests exist to catch and
+    /// `unwrap`-on-`Err` hides which line it was.
+    async fn parse_every_line(path: &Path) -> Vec<JournalRecord> {
+        let raw = tokio::fs::read_to_string(path).await.expect("journal file");
+        raw.lines()
+            .enumerate()
+            .filter(|(_, l)| !l.trim().is_empty())
+            .map(|(i, line)| {
+                serde_json::from_str::<JournalRecord>(line)
+                    .unwrap_or_else(|e| panic!("line {} did not parse: {e}\n  {line}", i + 1))
+            })
+            .collect()
+    }
+
+    /// **Issue #386**: rapid appends through a *single* journal must not tear a
+    /// line.
+    ///
+    /// This is the shape CI actually hit. `append` used to leave its trailing
+    /// newline in a `tokio::fs::File` whose background write nobody awaited,
+    /// then drop the handle and release the lock — so the next append's opening
+    /// bytes could reach the file before the previous record's terminator, and
+    /// two records landed on one line. One writer was enough; concurrency
+    /// across instances was never required.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn rapid_appends_through_one_journal_never_tear_a_line() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        const N: usize = 256;
+        for i in 0..N {
+            journal
+                .record_executed(&format!("cyc:{i}"), executed(i as u64))
+                .await
+                .unwrap();
+        }
+
+        let records = parse_every_line(&path).await;
+        assert_eq!(records.len(), N, "every append is its own line");
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        for i in 0..N {
+            assert!(
+                reloaded.is_executed(&format!("cyc:{i}")),
+                "cyc:{i} must survive the reload",
+            );
+        }
+    }
+
+    /// **Issue #386**: a line an old host merged replays in full.
+    ///
+    /// This is the shape already sitting in journals written before the write
+    /// fix, and the shape CI tripped over. It must not be *skipped*: dropping a
+    /// merged line would un-commit an `EffectExecuted` key and let an
+    /// at-most-once effect fire again, which is a worse outcome than the parse
+    /// error it replaces.
+    #[tokio::test]
+    async fn a_merged_line_replays_every_record_it_holds() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let merged = format!(
+            "{}{}",
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: "cyc:0".into(),
+                effect: Some(executed(0)),
+            })
+            .unwrap(),
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: "cyc:1".into(),
+                effect: Some(executed(1)),
+            })
+            .unwrap(),
+        );
+        let intact = serde_json::to_string(&JournalRecord::EffectExecuted {
+            key: "cyc:2".into(),
+            effect: Some(executed(2)),
+        })
+        .unwrap();
+        tokio::fs::write(&path, format!("{merged}\n{intact}\n"))
+            .await
+            .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("a merged line must not fail the load");
+        for key in ["cyc:0", "cyc:1", "cyc:2"] {
+            assert!(journal.is_executed(key), "{key} must replay");
+        }
+        assert!(
+            journal.corruption().is_empty(),
+            "a merged line is recovered, not lost, so it is not corruption",
+        );
+    }
+
+    /// **Issue #386**: a truncated line is reported, and the records around it
+    /// still replay.
+    ///
+    /// The old `load` returned `Err` here, which failed the company's boot: one
+    /// unreadable line cost every readable one after it, plus the console an
+    /// operator would need to repair the file.
+    #[tokio::test]
+    async fn a_truncated_line_is_reported_and_the_rest_still_replays() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let record = |key: &str, at| {
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: key.into(),
+                effect: Some(executed(at)),
+            })
+            .unwrap()
+        };
+        let whole = record("cyc:1", 1);
+        let truncated = &whole[..whole.len() / 2];
+        tokio::fs::write(
+            &path,
+            format!(
+                "{}\n{truncated}\n{}\n",
+                record("cyc:0", 0),
+                record("cyc:2", 2)
+            ),
+        )
+        .await
+        .unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("one bad line must not fail the boot");
+
+        assert!(journal.is_executed("cyc:0"), "the line before must replay");
+        assert!(
+            journal.is_executed("cyc:2"),
+            "the lines after the damage are the ones the old load lost",
+        );
+        assert!(
+            !journal.is_executed("cyc:1"),
+            "the truncated record is gone"
+        );
+
+        let corruption = journal.corruption();
+        assert_eq!(corruption.len(), 1, "exactly one line was unreadable");
+        assert_eq!(corruption[0].line, 2, "the report must locate the line");
+        assert_eq!(corruption[0].bytes, truncated.len());
+        assert!(
+            !corruption[0].message.contains("filing.submit"),
+            "a corruption report must not quote the line's contents",
+        );
+    }
+
+    /// **Issue #386**: a torn write can split a multi-byte codepoint, so the
+    /// damaged line is not merely bad JSON — it is not valid UTF-8 at all.
+    ///
+    /// `load` used to `read_to_string`, which fails on the first invalid byte
+    /// anywhere in the file. That turned exactly the damage this recovery path
+    /// exists for into the whole-boot failure it exists to prevent, and no
+    /// amount of per-line JSON handling downstream could have saved it. Raised
+    /// in review of PR #389.
+    #[tokio::test]
+    async fn a_line_that_is_not_valid_utf8_is_skipped_like_any_other_damage() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        let record = |key: &str, at| {
+            serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: key.into(),
+                effect: Some(executed(at)),
+            })
+            .unwrap()
+        };
+
+        // A lone continuation byte: never valid on its own, which is what the
+        // tail of a split codepoint looks like.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(record("cyc:0", 0).as_bytes());
+        bytes.push(b'\n');
+        bytes.extend_from_slice(&[0x7b, 0x9f, 0x8d]);
+        bytes.push(b'\n');
+        bytes.extend_from_slice(record("cyc:2", 2).as_bytes());
+        bytes.push(b'\n');
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        let journal = RuntimeJournal::new(&path);
+        journal
+            .load()
+            .await
+            .expect("invalid UTF-8 on one line must not fail the boot");
+
+        assert!(journal.is_executed("cyc:0"), "the line before must replay");
+        assert!(
+            journal.is_executed("cyc:2"),
+            "the lines after the damage must still replay",
+        );
+
+        let corruption = journal.corruption();
+        assert_eq!(corruption.len(), 1, "exactly one line was unreadable");
+        assert_eq!(corruption[0].line, 2, "the report must locate the line");
+    }
+
+    /// **Issue #386**: when `append` returns, the record is on the file.
+    ///
+    /// The deterministic half of the bug, and the more serious one. The
+    /// at-most-once guarantee is that an effect's key is durable *before* the
+    /// side effect runs; the old write path returned once the write was queued
+    /// on tokio's blocking pool, so `record_executed` reported a commit that a
+    /// crash could still lose and an `ENOSPC` on the real write reached nobody.
+    /// Measured against that path, 199 of 200 appends failed this assertion —
+    /// the torn line was the rare, visible symptom of a window that was open
+    /// almost always.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn an_append_has_reached_the_file_before_it_returns() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        let mut expected = 0usize;
+        for i in 0..64u64 {
+            let key = format!("cyc:{i}");
+            expected += serde_json::to_string(&JournalRecord::EffectExecuted {
+                key: key.clone(),
+                effect: Some(executed(i)),
+            })
+            .unwrap()
+            .len()
+                + 1;
+            journal.record_executed(&key, executed(i)).await.unwrap();
+            // A synchronous stat, so the assertion cannot be satisfied by the
+            // very blocking pool that would still be running a queued write.
+            let on_disk = std::fs::metadata(&path).expect("journal file").len() as usize;
+            assert_eq!(
+                on_disk,
+                expected,
+                "append #{} returned with {} of {expected} bytes on the file",
+                i + 1,
+                on_disk,
+            );
+        }
+    }
+
+    /// **Issue #386**: two journals over one path must not interleave.
+    ///
+    /// `write_lock` is per-instance, so it serialises nothing between two
+    /// `RuntimeJournal` values sharing a file. Nothing in the type stops a
+    /// caller building two, and the test suite builds them routinely. The
+    /// defence is the process-wide per-path lock plus the single whole-line
+    /// write.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_appends_from_two_journals_over_one_path_lose_nothing() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        const N: usize = 128;
+        let one = Arc::new(RuntimeJournal::new(&path));
+        let two = Arc::new(RuntimeJournal::new(&path));
+
+        let a = tokio::spawn({
+            let one = Arc::clone(&one);
+            async move {
+                for i in 0..N {
+                    one.record_executed(&format!("a:{i}"), executed(i as u64))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        let b = tokio::spawn({
+            let two = Arc::clone(&two);
+            async move {
+                for i in 0..N {
+                    two.record_executed(&format!("b:{i}"), executed(i as u64))
+                        .await
+                        .unwrap();
+                }
+            }
+        });
+        a.await.unwrap();
+        b.await.unwrap();
+
+        let records = parse_every_line(&path).await;
+        assert_eq!(records.len(), N * 2, "no record may be lost or merged");
+
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        for i in 0..N {
+            assert!(reloaded.is_executed(&format!("a:{i}")), "a:{i} lost");
+            assert!(reloaded.is_executed(&format!("b:{i}")), "b:{i} lost");
+        }
     }
 
     #[test]
