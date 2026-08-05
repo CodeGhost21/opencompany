@@ -10,14 +10,16 @@ import {
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useTheme } from "next-themes";
-import { History, Loader2, Pencil, Play, Plus, RotateCw, Trash2 } from "lucide-react";
+import { History, Loader2, Pencil, Play, Plus, RotateCw, Square, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import {
+  cancelWorkflowRun,
   deleteWorkflow,
   getWorkflow,
+  isDetached,
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
@@ -117,7 +119,6 @@ export function WorkflowsView({
   const [graph, setGraph] = useState<WorkflowGraph | null>(null);
   const [loadingList, setLoadingList] = useState(true);
   const [loadingGraph, setLoadingGraph] = useState(false);
-  const [running, setRunning] = useState(false);
   const [result, setResult] = useState<WorkflowRunResult | null>(null);
   // Issue #154: what the operator is asking this run to work on. `ranWith` is
   // pinned when the run is dispatched so the result panel echoes the request the
@@ -176,6 +177,30 @@ export function WorkflowsView({
   // journaled gets them the same per-node answer, just at the end instead of
   // during. Cleared as soon as it is used, or when live frames made it moot.
   const [awaitingRunId, setAwaitingRunId] = useState<string | null>(null);
+  // Issue #383: the detached run this view started and has not yet seen settle.
+  //
+  // The Run button's guard used to be "a promise is outstanding". With a
+  // detached run that promise resolves in milliseconds while the run keeps
+  // going, so the guard has to key on the run's *observed* state instead: this
+  // is set when the host accepts the run and cleared when the run settles —
+  // from the live frames when the stream is up, and from the history row when
+  // it is not. It is also what puts a Cancel button on screen, since it is
+  // exactly the id that route addresses.
+  const [activeRunId, setActiveRunId] = useState<string | null>(null);
+  // The POST itself is in flight. Separate from `activeRunId` because the
+  // button must be disabled during the request too, and a rejected request
+  // never produces a run id.
+  const [starting, setStarting] = useState(false);
+  // The run whose cancel came back 404, if any.
+  //
+  // Deliberately a run id rather than a boolean. A 404 is ambiguous — either
+  // the host has no cancel route, or the run settled a moment before we asked,
+  // which is perfectly normal — so a global flag would let one ordinary race
+  // hide the Stop button for every later run in the session. Scoping it to the
+  // run means the worst case is losing the affordance on the run that was
+  // already over.
+  const [cancelUnsupportedFor, setCancelUnsupportedFor] = useState<string | null>(null);
+  const [cancelling, setCancelling] = useState(false);
   // Run ids the live fold has actually seen frames for. The fallback above
   // consults it so a console WITH a working stream never double-paints a run it
   // already watched, and one without it still gets the journaled answer.
@@ -305,7 +330,7 @@ export function WorkflowsView({
 
   const run = useCallback(async () => {
     if (!selectedId) return;
-    setRunning(true);
+    setStarting(true);
     // Issue #371: clear the previous run's marks and paint the opening frontier
     // immediately, so the canvas responds to the click rather than waiting on
     // the first frame. The `workflow_run_started` frame re-sets the same thing
@@ -316,19 +341,32 @@ export function WorkflowsView({
     // can never disagree.
     const asked = request.trim();
     try {
+      // Issue #383: ask to detach. The host answers as soon as the run has an
+      // id, so the console stops holding a request open for the whole run — the
+      // thing a proxy's idle timeout severs.
       const res = await runWorkflow(
         client,
         company,
         selectedId,
         asked ? { request: asked } : {},
+        { detach: true },
       );
       setRanWith(asked);
-      setResult(res);
-      setAwaitingRunId(res.runId ?? null);
+      // Discriminate on the SHAPE, never on what we asked for. A host predating
+      // #383 ignores `detach` and answers with the settled run — a perfectly
+      // good answer, just a different one.
+      if (isDetached(res)) {
+        setActiveRunId(res.runId);
+        setAwaitingRunId(res.runId);
+        toast.success("Workflow started.");
+      } else {
+        setResult(res);
+        setAwaitingRunId(res.runId ?? null);
+        toast.success("Workflow ran.");
+      }
       // The run is journaled host-side (#228); pull the history forward so the
       // chip and the panel reflect it immediately.
       setRunsTick((n) => n + 1);
-      toast.success("Workflow ran.");
     } catch (e) {
       toast.error(e instanceof Error ? e.message : "could not run the workflow");
       // A run that failed is journaled too (#228), and is the outcome most
@@ -337,10 +375,46 @@ export function WorkflowsView({
       // Drop the optimistic frontier so a failed run does not leave a node
       // pulsing "running" forever. The fold owns anything actually reported.
       setOptimistic(null);
+      // Nothing was accepted, so nothing is in flight to guard against or to
+      // offer a Cancel for.
+      setActiveRunId(null);
     } finally {
-      setRunning(false);
+      setStarting(false);
     }
   }, [client, company, selectedId, request, graph]);
+
+  /**
+   * Issue #383: stop the run this view started.
+   *
+   * The button goes away when the run settles rather than when this resolves —
+   * the host has only *fired* the signal at that point, and the
+   * `workflow_run_finished` frame is what actually says it stopped.
+   *
+   * A `404` here is ambiguous by design (unknown run, or already settled), so
+   * the affordance is withdrawn only for **this** run, not for the session: the
+   * settled-a-moment-ago case is ordinary, and a global flag would let one such
+   * race hide Stop for every later run.
+   */
+  const cancel = useCallback(async () => {
+    if (!activeRunId) return;
+    setCancelling(true);
+    try {
+      await cancelWorkflowRun(client, company, activeRunId);
+      toast.info("Stopping the run…");
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) {
+        setCancelUnsupportedFor(activeRunId);
+        toast.error("This host can't stop runs", {
+          description:
+            "It's running a version without run cancellation, or the run already finished. It will still settle on its own.",
+        });
+      } else {
+        toast.error(e instanceof Error ? e.message : "could not stop the run");
+      }
+    } finally {
+      setCancelling(false);
+    }
+  }, [client, company, activeRunId]);
 
   // Issue #259: remove the selected workflow.
   //
@@ -436,12 +510,58 @@ export function WorkflowsView({
     setOptimistic(null);
   }, [liveRun]);
 
+  // Issue #383: release the Run guard when the run we started actually settles,
+  // as reported by the live frames. This is the fast path.
+  useEffect(() => {
+    if (!activeRunId || !liveRun) return;
+    if (liveRun.runId === activeRunId && !liveRun.active) setActiveRunId(null);
+  }, [liveRun, activeRunId]);
+
+  // …and the same from the history, for a console with no live stream. Without
+  // this the button would stay disabled forever on exactly the deployments the
+  // detached run was added to help. `running` on a row is the host's own
+  // in-flight marker, so a settled row is the release signal.
+  useEffect(() => {
+    if (!activeRunId) return;
+    const mine = runs.find((r) => r.runId === activeRunId);
+    if (mine && !mine.running) setActiveRunId(null);
+  }, [runs, activeRunId]);
+
+  // …but that release needs something to *re-read* the history, and without SSE
+  // nothing does.
+  //
+  // The fetch fired when the run was accepted usually returns the row already
+  // marked `running: true`, and the effect above only ever sees that one stale
+  // snapshot: `runsTick` is bumped by the run POST and `runEventTick` only by
+  // frames that are not arriving. So `activeRunId` stayed set, the Run controls
+  // stayed disabled, and the view was wedged for the rest of the session — on
+  // precisely the deployments detaching a run was meant to help.
+  //
+  // Polling stops on its own: the effect above clears `activeRunId` the moment
+  // a settled row lands, and that unmounts this interval. With a working stream
+  // the live fold clears it first, so at most one extra fetch is spent.
+  useEffect(() => {
+    if (!activeRunId || !historySupported) return;
+    const timer = window.setInterval(() => setRunsTick((n) => n + 1), 2_000);
+    return () => window.clearInterval(timer);
+  }, [activeRunId, historySupported]);
+
   // Switching workflow (or company) clears the canvas: another graph's node ids
   // are meaningless here, and a stale mark on a same-named node would be a lie.
+  //
+  // It also drops the in-flight guard: the run keeps going host-side and still
+  // journals, but this view is no longer the place watching it, and leaving a
+  // Cancel button pointed at another workflow's run would be worse than losing
+  // the affordance.
   useEffect(() => {
     setOptimistic(null);
     setOverlayRun(null);
+    setActiveRunId(null);
   }, [selectedId, company]);
+
+  // The Run guard, derived rather than held: the request is in flight, or a run
+  // we started has not settled yet.
+  const running = starting || activeRunId !== null;
 
   // What the canvas actually paints, in priority order: a past run the operator
   // explicitly asked to see, else the live fold, else the optimistic frontier.
@@ -558,6 +678,27 @@ export function WorkflowsView({
             )}
             Run
           </Button>
+          {/* Issue #383. Present only while a run this view started is actually
+              in flight — which is knowable at all because the host now hands
+              back the run id before the run ends. Hidden once the host has told
+              us it cannot stop runs, rather than left there to fail every time. */}
+          {activeRunId && cancelUnsupportedFor !== activeRunId && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void cancel()}
+              disabled={cancelling}
+              data-testid="workflow-cancel-run"
+              title="Stop this run. Steps that already finished stay in the run history; a step still executing is stopped where it is, not finished."
+            >
+              {cancelling ? (
+                <Loader2 className="mr-1.5 size-4 animate-spin" />
+              ) : (
+                <Square className="mr-1.5 size-4" />
+              )}
+              Stop
+            </Button>
+          )}
           {historySupported && (
             <Button
               size="sm"
@@ -688,7 +829,11 @@ export function WorkflowsView({
               <span className="text-xs">
                 Showing the {overlayRun.scheduled ? "scheduled" : "manual"} run from{" "}
                 {new Date(overlayRun.atMillis).toLocaleString()}
-                {overlayRun.error ? ` — ${failureLocation(overlayRun, graph)}` : "."}{" "}
+                {overlayRun.error
+                  ? ` — ${failureLocation(overlayRun, graph)}`
+                  : overlayRun.cancelled
+                    ? " — an operator stopped it."
+                    : "."}{" "}
                 Unmarked nodes were never reached.
               </span>
               <Button size="sm" variant="outline" onClick={() => setOverlayRun(null)}>
@@ -1026,6 +1171,11 @@ function relativeTime(atMillis: number): string {
  * when something is parked for approval, green when everything landed. */
 function runTone(run: WorkflowRunOutcome): { dot: string; label: string } {
   if (run.error) return { dot: "bg-red-500", label: "failed" };
+  // Issue #383: checked before the delivery reads, and deliberately NOT red. A
+  // stop somebody asked for is not a fault, and a cancelled run has no
+  // deliveries to weigh anyway — so without this arm it would fall through to
+  // the green "ok" and read as a clean success.
+  if (run.cancelled) return { dot: "bg-slate-400", label: "stopped" };
   if (undeliveredCount(run.deliveries) > 0) return { dot: "bg-red-500", label: "not delivered" };
   if (pendingCount(run.deliveries) > 0) return { dot: "bg-sky-500", label: "awaiting approval" };
   return { dot: "bg-emerald-500", label: "ok" };
@@ -1047,14 +1197,18 @@ function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
       title={
         run.error
           ? `Last run failed: ${run.error}`
-          : `Last ${run.scheduled ? "scheduled" : "manual"} run — ${tone.label}`
+          : run.cancelled
+            ? "An operator stopped this run before it finished."
+            : `Last ${run.scheduled ? "scheduled" : "manual"} run — ${tone.label}`
       }
     >
       <span className={`size-1.5 rounded-full ${tone.dot}`} />
       {run.scheduled ? "Scheduled" : "Manual"} run
       {run.error
         ? " failed"
-        : undelivered > 0
+        : run.cancelled
+          ? " stopped"
+          : undelivered > 0
           ? ` · ${undelivered} not delivered`
           : pending > 0
             ? ` · ${pending} awaiting approval`
@@ -1211,6 +1365,23 @@ function RunHistoryRow({
             {run.error}
           </AlertDescription>
         </Alert>
+      ) : run.cancelled ? (
+        // Issue #383, the third terminal reading. Deliberately not a
+        // destructive Alert: nothing went wrong, somebody decided they had seen
+        // enough. It says "stopped", not "finished", because the node that was
+        // executing was dropped where it was rather than allowed to complete —
+        // so a side effect it had started may be half-done.
+        <p
+          className="text-[11px] text-muted-foreground"
+          data-testid="workflow-run-cancelled"
+        >
+          An operator stopped this run
+          {nodes.length > 0
+            ? ` after ${nodes.length} step${nodes.length === 1 ? "" : "s"}`
+            : " before any step finished"}
+          . The steps above completed; the one still running was stopped where it
+          was. Any approvals it had already raised are still waiting for you.
+        </p>
       ) : run.deliveries.length > 0 ? (
         // Deliberately the SAME component the live run drawer uses, so a report
         // reads identically whether it's on screen now or a week old.
@@ -1521,6 +1692,10 @@ function elapsedFromRun(run: WorkflowRunOutcome): Record<string, number> {
 }
 
 /** Where a failed run stopped, in plain words (issue #371).
+ *
+ * Only ever called for a run with an `error`. A run an operator stopped
+ * (issue #383) carries no error and is worded by the caller, because "where did
+ * it stop" is not the interesting question about it — somebody chose the moment.
  *
  * Three genuinely different cases, and collapsing them fabricates precision:
  *

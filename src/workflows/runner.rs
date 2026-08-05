@@ -214,9 +214,20 @@ async fn run_workflow_inner(
     // Drive the engine with an observer when there is somewhere to put the
     // frames, and exactly as before when there is not.
     let outcome = match events.as_ref() {
-        None => tinyflows::engine::run(&compiled, input, &capabilities)
-            .await
-            .map_err(map_engine_error)?,
+        None => {
+            // Issue #383: even with nowhere to report progress, a run stays
+            // stoppable. `Box::pin` rather than `tokio::pin!` because the losing
+            // branch has to be **dropped**, and a `tokio::pin!`ed local lives to
+            // the end of its scope.
+            let mut engine = Box::pin(tinyflows::engine::run(&compiled, input, &capabilities));
+            tokio::select! {
+                outcome = &mut engine => outcome.map_err(map_engine_error)?,
+                () = ctx.cancel.cancelled() => {
+                    drop(engine);
+                    return Ok(cancelled_run());
+                }
+            }
+        }
         Some(events) => {
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NodeProgress>();
             let collector = tokio::spawn({
@@ -249,9 +260,56 @@ async fn run_workflow_inner(
 
             let observer: Arc<dyn tinyflows::observability::RunObserver> =
                 Arc::new(ProgressObserver { tx });
-            let outcome =
-                tinyflows::engine::run_with_observer(&compiled, input, &capabilities, &observer)
-                    .await;
+            // Issue #383: the engine call is raced against the run's stop signal
+            // instead of awaited outright.
+            //
+            // # Why a host-side select rather than the engine's own token
+            //
+            // tinyflows has a `CancellationToken`, and no public entry point
+            // takes one **with** an observer: `run_cancellable` hardcodes a
+            // `NoopObserver`, `run_with_observer` hardcodes a fresh token, and
+            // `build_and_run` — which takes both — is private. Using the token
+            // would therefore cost every cancellable run the per-node progress
+            // issue #371 just added, and fixing that properly means a change two
+            // submodules deep. Filed upstream instead; see `RunCancel`.
+            //
+            // # What this costs, stated honestly
+            //
+            // Dropping the future stops the run **mid-await** — it does not let
+            // the executing node finish. A node part way through an external
+            // side effect stays part way through it. That is the same class of
+            // outcome as the host being killed, which the boot sweep already
+            // settles; this is just operator-initiated and so more frequent.
+            // `Box::pin` because the losing branch must be droppable, which a
+            // `tokio::pin!`ed local is not.
+            let mut engine = Box::pin(tinyflows::engine::run_with_observer(
+                &compiled,
+                input,
+                &capabilities,
+                &observer,
+            ));
+            let outcome = tokio::select! {
+                outcome = &mut engine => Some(outcome),
+                () = ctx.cancel.cancelled() => None,
+            };
+            // **Drop the engine future before the observer, on both arms.** The
+            // engine holds observer `Arc` clones inside its per-node handlers;
+            // on the completion arm they are already gone (the graph died inside
+            // the call), but on the cancel arm the future still owns them, so
+            // dropping `observer` alone would NOT close the channel — the
+            // collector below would then block until the drain timeout on every
+            // single cancel, and the timeout would hide it.
+            //
+            // Today the **borrow checker enforces this ordering**: the engine
+            // future borrows `observer`, so removing this line does not compile.
+            // That is a happy accident of the current signature taking `&Arc`,
+            // not a guarantee — an engine that took the `Arc` by value would
+            // close the compile-time hole and re-open the runtime one, silently.
+            // `a_cancelled_run_settles_fast_keeping_only_its_completed_nodes`
+            // asserts a cancel-latency bound for exactly that case; it was
+            // verified to fail (at 10.004s, the full drain timeout) against a
+            // deliberately leaked observer clone.
+            drop(engine);
 
             // Drop the last sender, then join — in that order, and before
             // anything else. The drop closes the channel so the collector's
@@ -291,7 +349,15 @@ async fn run_workflow_inner(
                 ),
             }
 
-            outcome.map_err(map_engine_error)?
+            // Returned only AFTER the drain above, so a cancelled run's
+            // completed nodes are journaled exactly like a completed run's —
+            // the trail is the whole answer to "how far did it get before I
+            // stopped it?", and it must be durable before the caller writes the
+            // finish.
+            match outcome {
+                Some(outcome) => outcome.map_err(map_engine_error)?,
+                None => return Ok(cancelled_run()),
+            }
         }
     };
 
@@ -308,7 +374,31 @@ async fn run_workflow_inner(
         output: outcome.output,
         pending_approvals: outcome.pending_approvals,
         deliveries,
+        cancelled: false,
     })
+}
+
+/// What a run stopped by an operator settles with (issue #383).
+///
+/// Empty on every field but the flag, and each emptiness is a claim rather than
+/// a shrug:
+///
+/// * **no `output`** — the engine future was dropped, so there is no final state
+///   to report. A partial one would be a new shape nothing downstream parses;
+/// * **no `deliveries`** — `deliver_outputs` is deliberately not called. A
+///   cancelled run must not email anybody a report of work it did not finish,
+///   and an absent row already means "not reached" everywhere else;
+/// * **no `pending_approvals`** — approvals earlier nodes already parked are
+///   journal-backed and independent of the run, so they stay in the queue and
+///   an operator may still approve or deny them. Listing them here would imply
+///   this run is still waiting on them, which it is not.
+fn cancelled_run() -> WorkflowRun {
+    WorkflowRun {
+        output: Value::Null,
+        pending_approvals: Vec::new(),
+        deliveries: Vec::new(),
+        cancelled: true,
+    }
 }
 
 /// Maps a tinyflows [`EngineError`](tinyflows::error::EngineError) onto the crate
@@ -407,6 +497,7 @@ description = "Runs Acme."
 
     fn deps(dir: &std::path::Path) -> HarnessDeps {
         HarnessDeps {
+            run_supervisor: crate::runtime::RunSupervisor::default(),
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
             context: Arc::new(FsContextStore::new(dir)),
@@ -1827,5 +1918,251 @@ to = "done"
         .await
         .expect("workflow runs");
         assert!(run.pending_approvals.is_empty());
+    }
+
+    // --- #383: stopping a run in flight ------------------------------------
+
+    /// A model that parks forever on its first call, after announcing that it
+    /// got there.
+    ///
+    /// This is the lever the whole cancel test rests on, and it has to be an
+    /// **agent** node rather than an `http_request` one: a loopback stall server
+    /// is unreachable here by design, because the upstream `url_guard` refuses
+    /// private/loopback addresses regardless of the company's allowlist (see
+    /// `t5_http_request_to_loopback_is_ssrf_denied`). An agent node is the one
+    /// node kind whose executor this test can hold open deterministically —
+    /// which is also the realistic wedge: the run an operator actually wants to
+    /// stop is one sitting on a slow inference call.
+    struct StallingProvider {
+        entered: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for StallingProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            _request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.entered.notify_waiters();
+            // Never returns. The run is stopped by the future being dropped,
+            // which is the mechanism under test.
+            std::future::pending::<()>().await;
+            unreachable!("the stalling provider is never released")
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for StallingProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "stalling".to_string()
+        }
+    }
+
+    /// `start → shape → ceo → done`: a transform that finishes instantly, then
+    /// an agent node that never will. Cancelling between the two is what proves
+    /// the trail keeps the completed node and only the completed node.
+    const STALLS: &str = r#"
+id = "stalls"
+name = "Stalls"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "shape"
+kind = "transform"
+name = "Shape"
+[[node]]
+id = "ceo"
+kind = "agent"
+name = "CEO"
+agent = "ceo"
+prompt = "Think about it."
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "shape"
+[[edge]]
+from = "shape"
+to = "ceo"
+[[edge]]
+from = "ceo"
+to = "done"
+"#;
+
+    /// **The keystone cancel test.** An operator stops a run wedged on an agent
+    /// node, and three things have to be true at once:
+    ///
+    /// 1. the run settles as `cancelled`, not as an error — a deliberate stop is
+    ///    not a failure and must never land in the failure count;
+    /// 2. the journal keeps a node row for the node that **completed** and none
+    ///    for the one that was still executing — "how far did it get before I
+    ///    stopped it" is the question the trail exists to answer, and inventing
+    ///    a row for the wedged node would answer it wrongly;
+    /// 3. **it comes back fast.**
+    ///
+    /// The third is the one worth the stopwatch. If the engine future were not
+    /// dropped before the observer, its per-node handlers would still hold
+    /// observer `Arc` clones, the progress channel would stay open, and the
+    /// collector join would block for the full `PROGRESS_DRAIN_TIMEOUT` — ten
+    /// seconds, on every single cancel. And it would still *pass* the first two
+    /// assertions, because the timeout swallows it and the run settles
+    /// correctly in the end. Only the clock catches that bug, which is why this
+    /// asserts a bound rather than just an outcome.
+    #[tokio::test]
+    async fn a_cancelled_run_settles_fast_keeping_only_its_completed_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let (mut deps, events) = deps_with_events(dir.path());
+        deps.provider = Arc::new(StallingProvider {
+            entered: entered.clone(),
+        });
+        deps.provider_slug = "stalling".to_string();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(STALLS).expect("workflow parses");
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+
+        // Registered *before* the run starts, so the wedged node cannot slip
+        // past the notification and leave this test waiting forever.
+        let reached_the_agent = entered.notified();
+
+        let mut run = Box::pin(run_workflow(pool, deps, &rec, &file, Value::Null, &ctx));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished, so the agent node did not stall"),
+            () = reached_the_agent => {}
+        }
+
+        // The operator presses Cancel. From here the clock is the assertion.
+        let pressed = std::time::Instant::now();
+        cancel.cancel();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cancelled run never returned at all")
+            .expect("a cancelled run is Ok, not Err");
+        let elapsed = pressed.elapsed();
+
+        assert!(run.cancelled, "the run must report that it was stopped");
+        assert!(
+            run.deliveries.is_empty(),
+            "a cancelled run must not route reports for work it did not finish"
+        );
+
+        // **The drain-timeout guard.** `PROGRESS_DRAIN_TIMEOUT` is 10s; a
+        // correctly-dropped engine future settles in milliseconds. Two seconds
+        // is far below the timeout and far above a healthy cancel, so this
+        // fails loudly on a missing `drop(engine)` without being flaky on a
+        // loaded CI box.
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "cancelling took {elapsed:?} — the progress channel did not close, so the collector \
+             join stalled until the drain timeout. Check that the engine future is dropped BEFORE \
+             the observer in `run_workflow_inner`."
+        );
+        assert!(
+            elapsed < PROGRESS_DRAIN_TIMEOUT,
+            "cancel latency reached the drain timeout itself"
+        );
+
+        // The trail: `shape` completed, `ceo` was still executing. Neither the
+        // wedged node nor anything downstream may appear.
+        let journal = journaled(&events, &rec.id).await;
+        let nodes: Vec<String> = journal
+            .iter()
+            .filter_map(|e| match e {
+                CompanyEvent::WorkflowNodeFinished { node_id, .. } => Some(node_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            nodes,
+            vec!["shape".to_string()],
+            "only the node that actually finished belongs on the trail"
+        );
+        // The start is still there and still correlates, so the caller's
+        // `WorkflowRunFinished{cancelled}` groups with this trail rather than
+        // stranding it.
+        let CompanyEvent::WorkflowRunStarted { run_id, .. } = &journal[0] else {
+            panic!("expected the start first, got {:?}", journal[0]);
+        };
+        assert_eq!(run_id, &ctx.run_id);
+    }
+
+    /// The same stop works with **no journal wired** — the default-build shape,
+    /// where there is no observer and no collector at all.
+    ///
+    /// A separate test because it is a separate `select!`: the two arms of the
+    /// `events` match each drive the engine differently, and an early version of
+    /// this change made only the observed one cancellable. Nothing else would
+    /// have noticed.
+    #[tokio::test]
+    async fn a_run_with_no_journal_is_cancellable_too() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let mut deps = deps(dir.path());
+        assert!(deps.events.is_none(), "this is the default-build shape");
+        deps.provider = Arc::new(StallingProvider {
+            entered: entered.clone(),
+        });
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(STALLS).expect("workflow parses");
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+        let reached_the_agent = entered.notified();
+
+        let mut run = Box::pin(run_workflow(pool, deps, &rec, &file, Value::Null, &ctx));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished, so the agent node did not stall"),
+            () = reached_the_agent => {}
+        }
+
+        cancel.cancel();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cancelled run never returned")
+            .expect("a cancelled run is Ok, not Err");
+        assert!(run.cancelled);
+    }
+
+    /// A run whose signal is fired **before** it starts stops immediately rather
+    /// than walking the graph anyway.
+    ///
+    /// This is the watch-vs-`Notify` property, proven through the runner rather
+    /// than the primitive: with an edge-triggered signal the `select!` would
+    /// miss the already-fired cancel and the run would complete normally, which
+    /// is exactly the race a cancel arriving during graph compilation would hit.
+    #[tokio::test]
+    async fn a_run_cancelled_before_it_starts_does_not_walk_the_graph() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let (deps, events) = deps_with_events(dir.path());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(GREET).expect("workflow parses");
+        let ctx = WorkflowRunContext::new(false);
+        ctx.cancel.cancel();
+
+        let run = run_workflow(pool, deps, &rec, &file, Value::Null, &ctx)
+            .await
+            .expect("a cancelled run is Ok, not Err");
+        assert!(run.cancelled);
+
+        let journal = journaled(&events, &rec.id).await;
+        assert!(
+            !journal
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WorkflowNodeFinished { .. })),
+            "a run cancelled before it began must not report any node as finished"
+        );
     }
 }

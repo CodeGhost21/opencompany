@@ -608,6 +608,22 @@ pub enum CompanyEvent {
         /// currently the quietest**. `None` on a run that completed.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
+        /// Whether an operator stopped this run (issue #383) rather than it
+        /// finishing or failing.
+        ///
+        /// Deliberately **not** folded into [`error`](Self::WorkflowRunFinished):
+        /// a cancelled run carries no error at all, because nothing went wrong.
+        /// Three terminal readings now exist and each has to stay legible on its
+        /// own — a run that *failed* (an `error` naming a node), one
+        /// *interrupted by a host restart* (the boot sweep's synthetic error),
+        /// and one *stopped by an operator* (this flag, no error). Collapsing
+        /// any pair of them would put a deliberate stop in the failure count.
+        ///
+        /// Additive and replay-safe: `#[serde(default)]` decodes every row
+        /// written before #383 as `false`, and `skip_serializing_if` keeps a
+        /// non-cancelled run's line byte-identical to what it was.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
     },
     /// A workflow run began (issue #371) — the opening bracket of a run's
     /// per-node progress trail.
@@ -3087,6 +3103,7 @@ mod test {
             ],
             pending_approvals: vec!["review".to_string()],
             error: None,
+            cancelled: false,
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -3102,6 +3119,7 @@ mod test {
             deliveries: Vec::new(),
             pending_approvals: Vec::new(),
             error: Some("agent node `worker` had no inference source".to_string()),
+            cancelled: false,
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -3129,6 +3147,7 @@ mod test {
                 deliveries: Vec::new(),
                 pending_approvals: Vec::new(),
                 error: None,
+                cancelled: false,
             }
         );
         // …and serializing it back emits nothing extra.
@@ -3137,6 +3156,61 @@ mod test {
         assert!(!out.contains("deliveries"), "{out}");
         assert!(!out.contains("pending_approvals"), "{out}");
         assert!(!out.contains("error"), "{out}");
+        // Issue #383's field joins the same contract, which is what makes it
+        // replay-safe: absent decodes as `false`, and a non-cancelled run's line
+        // is byte-identical to what it was before the field existed.
+        assert!(!out.contains("cancelled"), "{out}");
+    }
+
+    /// Issue #383: a cancelled run round-trips, and is distinguishable from a
+    /// failed one by more than the absence of an error.
+    ///
+    /// The pairing is the assertion. A cancelled run carries `cancelled: true`
+    /// **and** `error: None` — so a reader that only ever looked at `error`
+    /// (every reader before #383) sees a clean finish, which is exactly why the
+    /// console needed a new field rather than a new error string.
+    #[test]
+    fn workflow_run_finished_round_trips_a_cancelled_run() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: false,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: true,
+        };
+        assert_eq!(round_trip(&event), event);
+
+        let out = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(
+            out,
+            r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":false,"run_id":"run-1","cancelled":true}"#,
+            "the cancelled line pins its exact wire shape"
+        );
+    }
+
+    /// A pre-#383 line — the overwhelming majority of every journal on disk —
+    /// loads as not cancelled rather than failing to decode.
+    #[test]
+    fn a_pre_383_finished_line_loads_as_not_cancelled() {
+        let line = r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":true,"run_id":"run-9","error":"it broke"}"#;
+        let event: CompanyEvent = serde_json::from_str(line).expect("pre-#383 line loads");
+        let CompanyEvent::WorkflowRunFinished {
+            cancelled, error, ..
+        } = &event
+        else {
+            panic!("expected a WorkflowRunFinished");
+        };
+        assert!(!cancelled, "an old failed run must not read as cancelled");
+        assert_eq!(error.as_deref(), Some("it broke"));
+        // And re-serializing it stays byte-identical — the field is absent
+        // going out as well as coming in.
+        assert_eq!(
+            serde_json::to_string(&event).expect("serialize"),
+            line,
+            "re-writing an old line must not add the new field"
+        );
     }
 
     /// Issue #371's opening bracket round-trips through the JSONL the journal
@@ -3216,6 +3290,7 @@ mod test {
                 deliveries: Vec::new(),
                 pending_approvals: vec!["review".to_string()],
                 error: None,
+                cancelled: false,
             }
         );
     }
