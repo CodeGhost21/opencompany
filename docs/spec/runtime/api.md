@@ -266,6 +266,45 @@ scope; SSE (`/chat` streaming, the `/events` work feed) is not yet wired.
 - **`/chat`** enqueues an `OperatorMessage` event and streams the resulting
   cycle's channel responses over SSE. One conversational surface, one voice:
   the operator talks to the company, not to individual teammates.
+- **`/chat` thread addressing is a load-bearing contract, not just routing.**
+  The body's `chat` field names a desk; three behaviours follow from it, and
+  the console's per-workflow copilot (issue #303) is built entirely on them,
+  with no route of its own:
+  1. An **unknown** thread id falls through to the orchestrator — the brain
+     tries desk-lead, then roster agent, then its own responder.
+  2. Replies are journaled against that thread, and the desk filter
+     (`server::chat_history::owns`) matches the id **exactly**; the General
+     catch-all applies only when General is the desk being *read*. So an
+     addressed thread is isolated from the team's chat in both directions.
+  3. `GET /chat/history?desk=<thread>` therefore replays exactly that thread.
+
+  The copilot addresses `workflow-copilot:<workflowId>` (a `:` cannot occur in
+  a manifest desk id, so it can never collide with a real desk, and it does not
+  appear in `GET …/desks`). Making unknown thread ids a `404`, or loosening
+  `owns` to match on prefix, would break that surface — see
+  [`frontend/src/api/workflow-copilot.ts`](../../../frontend/src/api/workflow-copilot.ts).
+
+  **Thread addressing isolates transcripts. It does not scope authority.**
+  These are two different things and only the first is enforced here. The
+  thread id decides who answers and where the exchange is journaled; it does
+  **not** narrow the orchestrator's context or its tool grants, which stay
+  company-wide for every `/chat` turn whatever thread it names. A caller that
+  needs the responder confined to one subject has to constrain it in the
+  prompt — which is advisory — or build a genuinely scoped agent, which this
+  seam is not.
+
+  That is a scoping property, not an authorization one: `/chat` is already
+  authenticated and company-scoped, so an operator addressing a workflow
+  thread gains nothing they could not get by opening the Chat tab or calling
+  the workflow routes directly. The copilot therefore adds no privilege; what
+  it adds is a transcript that stays out of the team's chat.
+
+  Two more consequences worth knowing before reusing the seam. A chat turn
+  runs the **whole** company cycle, so an actionable message also opens a
+  board card via `company::task_intent`. And an unconfigured company answers
+  `200` with the echo brain's `"You said: …"` rather than an error, so a caller
+  that needs a real answer must check `cognition` from `GET {scope}/inference`
+  — there is no status code to catch.
 - **`/events`** is the work feed's backend: each frame is a plain-language
   rendering of an event or executed effect plus the raw payload for
   programmatic consumers. Resumable via `since` (event sequence number).

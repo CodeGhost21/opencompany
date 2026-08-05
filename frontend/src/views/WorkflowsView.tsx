@@ -1,19 +1,27 @@
-import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,
   Controls,
-  type Edge,
   MiniMap,
   type Node,
   ReactFlow,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
 import { useTheme } from "next-themes";
-import { History, Loader2, Pencil, Play, Plus, RotateCw, Square, Trash2 } from "lucide-react";
+import {
+  Bot,
+  History,
+  LayoutGrid,
+  Loader2,
+  Pencil,
+  Play,
+  Plus,
+  RotateCw,
+  Square,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
-import ReactMarkdown from "react-markdown";
-import remarkGfm from "remark-gfm";
 
 import {
   cancelWorkflowRun,
@@ -23,11 +31,7 @@ import {
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
-  type DeliveryReport,
-  type DeliveryStatus,
   type WorkflowGraph,
-  type WorkflowNode as WorkflowNodeModel,
-  type WorkflowRunNode,
   type WorkflowRunOutcome,
   type WorkflowRunResult,
   type WorkflowSummary,
@@ -60,21 +64,29 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
+import type { NodeRunState } from "@/lib/workflow-sample";
+// Issue #303: the canvas arithmetic, the run-state folds and the three drawers
+// moved out when this file passed 1800 lines and was about to grow an index and
+// a copilot. See `workflows/graph.ts` for why the fold is pure.
 import {
-  nodeKindMeta,
-  type NodeRunState,
-  type WorkflowNodeData,
-} from "@/lib/workflow-sample";
+  elapsedFromRun,
+  failureLocation,
+  foldLiveRun,
+  initialRunState,
+  layout,
+  statesFromRun,
+} from "@/views/workflows/graph";
+import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
+import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
+import { CopilotPanel } from "@/views/workflows/CopilotPanel";
+import { RunResultPanel } from "@/views/workflows/RunResultPanel";
+import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 
 const NODE_TYPES = { oc: WorkflowNode };
 
 /** A stable empty default for `runEvents`, so an omitted prop does not hand the
  * fold a fresh array identity on every render. */
 const EMPTY_RUN_EVENTS: CompanyStreamEvent[] = [];
-
-/** Horizontal gap between layers and vertical gap between nodes in a layer. */
-const COL_GAP = 300;
-const ROW_GAP = 150;
 
 /**
  * The live Workflows canvas. Reads the company's saved graphs from the host's
@@ -137,6 +149,14 @@ export function WorkflowsView({
   // vanished when the drawer was dismissed and a scheduled run's never reached
   // the operator at all.
   const [runs, setRuns] = useState<WorkflowRunOutcome[]>([]);
+  // Which workflow the rows in `runs` were fetched for.
+  //
+  // `graph` and `runs` are two independent requests off the same selection, so
+  // a switch can land the new graph while the previous workflow's history is
+  // still in state. Anything that pairs the two — the copilot's grounding — has
+  // to be able to tell that the pair does not agree yet, and a bare "is it
+  // loading" flag cannot: the mismatch outlives the load when a fetch fails.
+  const [runsFor, setRunsFor] = useState<string | null>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   // A host predating the runs route answers 404. That is not an error worth
   // showing — the rest of the view works — so it just means "no history here".
@@ -201,6 +221,27 @@ export function WorkflowsView({
   // already over.
   const [cancelUnsupportedFor, setCancelUnsupportedFor] = useState<string | null>(null);
   const [cancelling, setCancelling] = useState(false);
+  // Issue #303: the browse index (cards or list) is up instead of the canvas.
+  //
+  // Closed by default, and that is deliberate rather than timid: the toolbar
+  // picker, the Run button and the Edit/Delete affordances are what this tab
+  // opens onto today, and moving the canvas behind a landing screen would
+  // change the first thing every operator sees for the sake of a browse
+  // surface most of them reach for occasionally.
+  const [indexOpen, setIndexOpen] = useState(false);
+  // Which rendering the index uses, remembered across sessions — an operator
+  // who prefers one has no reason to re-pick it every visit.
+  const [indexMode, setIndexMode] = useState<IndexMode>(readIndexMode);
+  // Issue #303: the company-wide run page behind the index's health readings.
+  //
+  // Deliberately SEPARATE from `runs`, which is the selected workflow's history
+  // and is scoped server-side by `?workflow=`. This one is unscoped on purpose —
+  // one request has to cover every card — and that is exactly why the cards say
+  // "No recent runs" rather than "never run": see `WorkflowIndex`.
+  const [indexRuns, setIndexRuns] = useState<WorkflowRunOutcome[]>([]);
+  const [indexRunsLoaded, setIndexRunsLoaded] = useState(false);
+  // Issue #303: the per-workflow copilot panel is open.
+  const [copilotOpen, setCopilotOpen] = useState(false);
   // Run ids the live fold has actually seen frames for. The fallback above
   // consults it so a console WITH a working stream never double-paints a run it
   // already watched, and one without it still gets the journaled answer.
@@ -285,6 +326,7 @@ export function WorkflowsView({
     // whether the host serves this route.
     if (!selectedId) {
       setRuns([]);
+      setRunsFor(null);
       return;
     }
     let live = true;
@@ -296,6 +338,7 @@ export function WorkflowsView({
         });
         if (!live) return;
         setRuns(rows);
+        setRunsFor(selectedId);
         setHistorySupported(true);
         // Issue #371, the no-live-stream fallback. If the run we just POSTed is
         // in this page and nothing was ever *reported* live (only the frontier
@@ -317,6 +360,10 @@ export function WorkflowsView({
         // Degrade quietly: an older host simply has no history to show.
         console.debug("[WorkflowsView] run history unavailable", e);
         setRuns([]);
+        // Still THIS workflow's answer — "the host has no history for it" — so
+        // the pair agrees and the copilot may proceed, told via `runsKnown`
+        // that nothing is known about runs rather than that there were none.
+        setRunsFor(selectedId);
         setHistorySupported(false);
       }
     })();
@@ -327,6 +374,64 @@ export function WorkflowsView({
     // inside, and listing it would re-run this fetch on that clear.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [client, company, selectedId, runsTick, runEventTick]);
+
+  // Issue #303: the run page the index's health readings are folded from.
+  //
+  // Fetched only while the index is open — every card reads from one request,
+  // and a company that never opens the browse panel should not pay for it. It
+  // refreshes on `runEventTick` so a run finishing with the index up updates
+  // the card that owns it, and on `runsTick` so a run started from here shows
+  // as running.
+  //
+  // UNSCOPED, unlike the selected workflow's history above: `?workflow=` covers
+  // exactly one graph, and the index needs every graph. The cost of that is a
+  // page cut by `limit` across all workflows, which is precisely why the cards
+  // are worded "No recent runs" — see `WorkflowIndex`'s `HealthLine`.
+  useEffect(() => {
+    if (!indexOpen) return;
+    let live = true;
+    (async () => {
+      try {
+        const rows = await listWorkflowRuns(client, company, { limit: 200 });
+        if (!live) return;
+        setIndexRuns(rows);
+        setIndexRunsLoaded(true);
+      } catch (e) {
+        if (!live) return;
+        // Same degradation as the scoped read: a host predating the runs route
+        // answers 404, and the index is still worth showing without health.
+        console.debug("[WorkflowsView] company-wide run page unavailable", e);
+        setIndexRuns([]);
+        setIndexRunsLoaded(true);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company, indexOpen, runsTick, runEventTick]);
+
+  // A company switch invalidates the whole page — another company's runs must
+  // never be folded onto this one's cards, and `indexRunsLoaded` has to go back
+  // to false so the cards say "Loading runs…" rather than "No recent runs"
+  // about a company we have not asked about yet.
+  useEffect(() => {
+    setIndexRuns([]);
+    setIndexRunsLoaded(false);
+  }, [company]);
+
+  // The run page grouped by workflow, newest first.
+  //
+  // The host already returns the page newest-first, so this preserves order
+  // rather than re-sorting — one ordering, decided server-side.
+  const runsByWorkflow = useMemo(() => {
+    const byId = new Map<string, WorkflowRunOutcome[]>();
+    for (const row of indexRuns) {
+      const list = byId.get(row.workflowId);
+      if (list) list.push(row);
+      else byId.set(row.workflowId, [row]);
+    }
+    return byId;
+  }, [indexRuns]);
 
   const run = useCallback(async () => {
     if (!selectedId) return;
@@ -699,6 +804,42 @@ export function WorkflowsView({
               Stop
             </Button>
           )}
+          {/* Issue #303. Deliberately placed AFTER the picker and Run: this
+              toggles what fills the body, and grouping it with the other
+              body-level toggle (History) reads better than sitting beside the
+              selection controls it does not change. */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => setIndexOpen((open) => !open)}
+            aria-pressed={indexOpen}
+            data-testid="workflow-browse-toggle"
+            title="Browse every workflow as cards or as a list."
+          >
+            <LayoutGrid className="mr-1.5 size-4" />
+            Browse
+          </Button>
+          {/* Issue #303. Needs a loaded graph, not just a selection: the
+              copilot's whole grounding IS the graph, and opening it against a
+              workflow that failed to load would give it nothing to answer
+              from. */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => {
+              setCopilotOpen((open) => !open);
+              // The inspector occupies the same corner. Two stacked panels on
+              // top of each other is worse than either alone.
+              setSelectedNodeId(null);
+            }}
+            disabled={!graph}
+            aria-pressed={copilotOpen}
+            data-testid="workflow-copilot-toggle"
+            title="Ask about this workflow — what it does, or why a run failed."
+          >
+            <Bot className="mr-1.5 size-4" />
+            Copilot
+          </Button>
           {historySupported && (
             <Button
               size="sm"
@@ -845,7 +986,28 @@ export function WorkflowsView({
       )}
 
       <div className="relative flex-1">
-        {loadingList || loadingGraph ? (
+        {/* Issue #303: browsing REPLACES the canvas rather than squeezing in
+            above it. A card grid needs the width, and the canvas is meaningless
+            while the operator is deciding which workflow they want. Picking one
+            drops straight back to that workflow's canvas. */}
+        {indexOpen ? (
+          <WorkflowIndex
+            workflows={workflows}
+            runsByWorkflow={runsByWorkflow}
+            selectedId={selectedId}
+            onSelect={(id) => {
+              setSelectedId(id);
+              setIndexOpen(false);
+            }}
+            mode={indexMode}
+            onModeChange={(mode) => {
+              setIndexMode(mode);
+              writeIndexMode(mode);
+            }}
+            loading={loadingList}
+            runsLoaded={indexRunsLoaded}
+          />
+        ) : loadingList || loadingGraph ? (
           <div className="absolute inset-0 p-4">
             <Skeleton className="h-full w-full rounded-xl" />
           </div>
@@ -877,8 +1039,31 @@ export function WorkflowsView({
               <Controls showInteractive={false} />
               <MiniMap pannable zoomable className="!hidden sm:!block" />
             </ReactFlow>
-            {selectedNode && (
-              <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+            {/* Issue #303: the copilot and the node inspector share the canvas's
+                right edge, and the copilot wins while it is open — it was
+                opened deliberately, whereas a node click is incidental and is
+                already cleared when the copilot opens. */}
+            {copilotOpen && graph ? (
+              <CopilotPanel
+                // Remount per workflow. The panel replays that workflow's own
+                // transcript on mount, and keying it means a workflow switch
+                // can never leave the previous conversation on screen — the
+                // "no cross-workflow leakage" criterion, on the client side.
+                key={graph.id}
+                client={client}
+                company={company}
+                graph={graph}
+                runs={runs}
+                runsKnown={historySupported}
+                // The graph on screen and the history in `runs` must be the
+                // same workflow's before anything is grounded on the pair.
+                runsReady={runsFor === graph.id}
+                onClose={() => setCopilotOpen(false)}
+              />
+            ) : (
+              selectedNode && (
+                <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+              )
             )}
           </>
         )}
@@ -937,936 +1122,27 @@ export function WorkflowsView({
   );
 }
 
-/** A read-only inspector for a single graph node, overlaid on the canvas when
- * the operator clicks a node. Surfaces the fields already on the wire from
- * `GET …/workflows/{wid}`: kind, name, summary, the assigned agent (agent
- * nodes), the trigger's cron schedule (trigger nodes, issue #169), and any
- * kind-specific config / error-handling policy. */
-function NodeDetailPanel({
-  node,
-  onClose,
-}: {
-  node: WorkflowNodeModel;
-  onClose: () => void;
-}) {
-  const meta = nodeKindMeta(node.kind);
-  const hasConfig =
-    node.config !== undefined && node.config !== null &&
-    !(typeof node.config === "object" && Object.keys(node.config as object).length === 0);
+/** Where the index's cards-or-list preference is remembered. */
+const INDEX_MODE_KEY = "oc.workflows.indexMode";
 
-  return (
-    <div className="absolute right-3 top-3 bottom-3 z-10 flex w-72 flex-col overflow-hidden rounded-xl border bg-card/95 shadow-lg backdrop-blur sm:w-80">
-      <div className="flex items-start justify-between gap-2 border-b px-3 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <span className="text-base leading-none" aria-hidden>
-            {meta.emoji}
-          </span>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">{node.name}</div>
-            <div className="truncate text-[11px] text-muted-foreground">{node.id}</div>
-          </div>
-        </div>
-        <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
-          Close
-        </Button>
-      </div>
-
-      <div className="min-h-0 flex-1 space-y-3 overflow-auto px-3 py-3 text-sm">
-        <div className="flex flex-wrap items-center gap-1.5">
-          <Badge variant="outline" className="font-normal">
-            {node.kind}
-          </Badge>
-          {node.requiresApproval && (
-            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 font-normal">
-              requires approval
-            </Badge>
-          )}
-          {node.schedule && (
-            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10 font-normal">
-              scheduled
-            </Badge>
-          )}
-        </div>
-
-        {/* A saved schedule must be visible, not write-only — otherwise an
-            operator cannot tell a self-running workflow from a manual one. */}
-        {node.schedule && (
-          <DetailField label="Schedule">
-            <p className="font-mono text-xs">{node.schedule}</p>
-            <p className="text-[10px] text-muted-foreground">5-field cron, UTC.</p>
-          </DetailField>
-        )}
-
-        {node.summary && (
-          <DetailField label="Summary">
-            <p className="text-sm leading-snug">{node.summary}</p>
-          </DetailField>
-        )}
-
-        {node.agent && (
-          <DetailField label="Assigned agent">
-            <p className="font-mono text-xs">{node.agent}</p>
-          </DetailField>
-        )}
-
-        {hasConfig && (
-          <DetailField label="Config">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
-              {JSON.stringify(node.config, null, 2)}
-            </pre>
-          </DetailField>
-        )}
-
-        {node.onError && (
-          <DetailField label="On error">
-            <p className="font-mono text-xs">{node.onError}</p>
-          </DetailField>
-        )}
-
-        {node.retry && (
-          <DetailField label="Retry">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
-              {JSON.stringify(node.retry, null, 2)}
-            </pre>
-          </DetailField>
-        )}
-
-        {node.destination && (
-          <DetailField label="Destination">
-            <p className="text-sm leading-snug">{describeDestination(node.destination)}</p>
-          </DetailField>
-        )}
-
-        {!node.summary &&
-          !node.agent &&
-          !hasConfig &&
-          !node.onError &&
-          !node.retry &&
-          !node.schedule &&
-          !node.destination &&
-          !node.requiresApproval && (
-            <p className="text-xs text-muted-foreground">
-              This node has no extra details beyond its kind and name.
-            </p>
-          )}
-      </div>
-    </div>
-  );
-}
-
-/** Where an output node's report goes, in a sentence. `owner` deliberately has
- * no target to show — it resolves to the company's admins server-side, which is
- * exactly why an author can't point it at an outsider. */
-function describeDestination(destination: NonNullable<WorkflowNodeModel["destination"]>): string {
-  switch (destination.kind) {
-    case "owner":
-      return "Reports to the company's admins.";
-    case "email":
-      return `Emails ${destination.target ?? "(no address)"}.`;
-    case "channel":
-      return `Posts to the ${destination.target ?? "(unnamed)"} channel.`;
-    default:
-      return `${destination.kind}${destination.target ? ` → ${destination.target}` : ""}`;
-  }
-}
-
-/** Badge styling per delivery outcome. A report that did NOT go out must not
- * look like one that did — `denied` and `failed` are the two an operator has to
- * act on, so they get the loud treatment. `pending` is neither: the report is
- * waiting in Approvals, so it reads as informational, not as a failure. */
-const DELIVERY_TONE: Record<DeliveryStatus, string> = {
-  sent: "border-emerald-500/40 bg-emerald-500/10",
-  pending: "border-sky-500/40 bg-sky-500/10",
-  skipped: "border-amber-500/40 bg-amber-500/10",
-  denied: "border-red-500/40 bg-red-500/10",
-  failed: "border-red-500/40 bg-red-500/10",
-};
-
-/** The delivery block of the run drawer: one line per attempt to route an
- * output node's report. This is the ONLY place an operator learns a report
- * didn't leave the building — a delivery failure never fails the run. */
-function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
-  // Two counters, not one. A parked report is waiting on the operator, not
-  // broken — badging it red alongside a transport failure would send them
-  // hunting for a bug when the fix is a click in Approvals.
-  const pending = deliveries.filter((d) => d.status === "pending").length;
-  const undelivered = deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== "pending",
-  ).length;
-  return (
-    <div className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2">
-      <div className="flex items-center gap-2">
-        <span className="text-xs font-medium">Report delivery</span>
-        {pending > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10">
-            {pending} awaiting approval
-          </Badge>
-        )}
-        {undelivered > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-red-500/40 bg-red-500/10">
-            {undelivered} not delivered
-          </Badge>
-        )}
-      </div>
-      {deliveries.map((d, i) => (
-        <div key={`${d.node}-${d.target ?? ""}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
-          <Badge
-            variant="outline"
-            className={`h-4 px-1.5 text-[10px] font-normal ${DELIVERY_TONE[d.status] ?? ""}`}
-          >
-            {d.status}
-          </Badge>
-          <span className="font-mono text-[11px]">{d.node}</span>
-          <span className="text-[11px] text-muted-foreground">
-            → {d.kind}
-            {d.target ? ` ${d.target}` : ""} — {d.detail}
-          </span>
-        </div>
-      ))}
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Run history (issue #228)
-// ---------------------------------------------------------------------------
-
-/**
- * The `pending` delivery status — a report parked for an operator's approval —
- * is added to `DeliveryStatus` by issue #227. It is typed `string` rather than
- * written as a literal so these comparisons compile both before and after that
- * lands: against today's union TypeScript would reject the literal as a
- * no-overlap comparison, and once the union widens this keeps behaving
- * identically. The runtime check is what matters — the host can already send a
- * status this console's type doesn't name yet.
+/** The remembered index rendering, defaulting to cards.
+ *
+ * Every access is guarded: `localStorage` throws outright in a browser with
+ * site data blocked, and a preference is never worth failing a render over.
  */
-const PENDING_STATUS: string = "pending";
-
-/** Reports that did NOT reach their destination **and will not without a
- * change** — the number worth acting on. `pending` is excluded on purpose: it
- * is a report parked for an operator's approval, so counting it here would
- * badge a working approvals queue as a failure. */
-function undeliveredCount(deliveries: DeliveryReport[]): number {
-  return deliveries.filter((d) => d.status !== "sent" && d.status !== PENDING_STATUS).length;
-}
-
-/** Reports waiting on an operator's verdict rather than on a fix. */
-function pendingCount(deliveries: DeliveryReport[]): number {
-  return deliveries.filter((d) => d.status === PENDING_STATUS).length;
-}
-
-/** A compact "N minutes ago" for a run timestamp — enough to tell last night's
- * scheduled run from the one just clicked, without a date library. */
-function relativeTime(atMillis: number): string {
-  const seconds = Math.max(0, Math.round((Date.now() - atMillis) / 1000));
-  if (seconds < 60) return "just now";
-  const minutes = Math.round(seconds / 60);
-  if (minutes < 60) return `${minutes}m ago`;
-  const hours = Math.round(minutes / 60);
-  if (hours < 24) return `${hours}h ago`;
-  return `${Math.round(hours / 24)}d ago`;
-}
-
-/** The status dot for a whole run: red when it failed or lost a report, sky
- * when something is parked for approval, green when everything landed. */
-function runTone(run: WorkflowRunOutcome): { dot: string; label: string } {
-  if (run.error) return { dot: "bg-red-500", label: "failed" };
-  // Issue #383: checked before the delivery reads, and deliberately NOT red. A
-  // stop somebody asked for is not a fault, and a cancelled run has no
-  // deliveries to weigh anyway — so without this arm it would fall through to
-  // the green "ok" and read as a clean success.
-  if (run.cancelled) return { dot: "bg-slate-400", label: "stopped" };
-  if (undeliveredCount(run.deliveries) > 0) return { dot: "bg-red-500", label: "not delivered" };
-  if (pendingCount(run.deliveries) > 0) return { dot: "bg-sky-500", label: "awaiting approval" };
-  return { dot: "bg-emerald-500", label: "ok" };
-}
-
-/** The last-run chip beside the workflow title: a status dot, the undelivered
- * count when there is one, and how long ago it ran. This is the at-a-glance
- * answer to "did last night's scheduled run actually deliver?" — the question
- * that had no answer at all before issue #228. */
-function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
-  const tone = runTone(run);
-  const undelivered = undeliveredCount(run.deliveries);
-  const pending = pendingCount(run.deliveries);
-  return (
-    <Badge
-      variant="outline"
-      className="h-5 gap-1.5 px-2 text-[10px] font-normal"
-      data-testid="workflow-last-run-chip"
-      title={
-        run.error
-          ? `Last run failed: ${run.error}`
-          : run.cancelled
-            ? "An operator stopped this run before it finished."
-            : `Last ${run.scheduled ? "scheduled" : "manual"} run — ${tone.label}`
-      }
-    >
-      <span className={`size-1.5 rounded-full ${tone.dot}`} />
-      {run.scheduled ? "Scheduled" : "Manual"} run
-      {run.error
-        ? " failed"
-        : run.cancelled
-          ? " stopped"
-          : undelivered > 0
-          ? ` · ${undelivered} not delivered`
-          : pending > 0
-            ? ` · ${pending} awaiting approval`
-            : ""}
-      <span className="text-muted-foreground">· {relativeTime(run.atMillis)}</span>
-    </Badge>
-  );
-}
-
-/** The run-history drawer: one row per finished run of the selected workflow,
- * newest first, each expanding to the very same {@link DeliveryRows} block the
- * live run drawer shows.
- *
- * This is the durable half of issue #228. A manual run's delivery rows used to
- * live only in the run drawer until it was dismissed, and a scheduled run's only
- * on the host's stdout — which on a hosted tenant is the platform team, not the
- * operator. These rows come back from the company's journal, so they survive a
- * console reload and a run nobody was watching. */
-function RunHistoryPanel({
-  runs,
-  workflowName,
-  onClose,
-  selectedRunSeq,
-  onSelectRun,
-}: {
-  runs: WorkflowRunOutcome[];
-  workflowName: string;
-  onClose: () => void;
-  /** The run currently overlaid on the canvas, if any (issue #371). */
-  selectedRunSeq: number | null;
-  /** Overlay this run's per-node states on the canvas (issue #371). */
-  onSelectRun: (run: WorkflowRunOutcome) => void;
-}) {
-  return (
-    <div className="border-t bg-card/60" data-testid="workflow-run-history">
-      <div className="flex items-center justify-between px-4 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">Run history</span>
-          {workflowName && (
-            <span className="truncate text-xs text-muted-foreground">{workflowName}</span>
-          )}
-          <Badge variant="secondary">{runs.length}</Badge>
-        </div>
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          Dismiss
-        </Button>
-      </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
-        {runs.length === 0 ? (
-          <p className="text-xs text-muted-foreground">
-            This workflow hasn't finished a run yet. Runs appear here once they
-            do — including scheduled ones that run while you're away.
-          </p>
-        ) : (
-          <div className="space-y-2">
-            {runs.map((run) => (
-              <RunHistoryRow
-                key={run.seq}
-                run={run}
-                selected={run.seq === selectedRunSeq}
-                onSelect={() => onSelectRun(run)}
-              />
-            ))}
-          </div>
-        )}
-      </div>
-    </div>
-  );
-}
-
-/** One finished run: a summary line, its per-node trail, and its delivery rows.
- *
- * Clicking it overlays that run's node states on the canvas (issue #371) —
- * which is what makes a scheduled run's failure point visible, the case the
- * live canvas by definition cannot cover because nobody was watching. */
-function RunHistoryRow({
-  run,
-  selected,
-  onSelect,
-}: {
-  run: WorkflowRunOutcome;
-  selected: boolean;
-  onSelect: () => void;
-}) {
-  const tone = runTone(run);
-  const nodes = run.nodes ?? [];
-  const failedNode = failedNodeOf(run);
-  return (
-    <div
-      className={`rounded-lg border bg-background/40 p-2 ${
-        selected ? "ring-2 ring-primary/40" : ""
-      }`}
-      data-testid="workflow-run-row"
-    >
-      <div className="mb-1 flex flex-wrap items-center gap-2">
-        <span className={`size-1.5 rounded-full ${tone.dot}`} />
-        <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
-          {run.scheduled ? "scheduled" : "manual"}
-        </Badge>
-        <span className="text-[11px] text-muted-foreground">
-          {new Date(run.atMillis).toLocaleString()} · {relativeTime(run.atMillis)}
-        </span>
-        {run.pendingApprovals.length > 0 && (
-          <Badge
-            variant="outline"
-            className="h-4 px-1.5 text-[10px] font-normal border-amber-500/40 bg-amber-500/10"
-          >
-            {run.pendingApprovals.length} pending approval
-            {run.pendingApprovals.length === 1 ? "" : "s"}
-          </Badge>
-        )}
-        {run.running && (
-          <Badge
-            variant="outline"
-            className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10"
-          >
-            running
-          </Badge>
-        )}
-        {nodes.length > 0 && (
-          <Button
-            size="sm"
-            variant="ghost"
-            className="ml-auto h-5 px-2 text-[10px]"
-            onClick={onSelect}
-            aria-pressed={selected}
-            data-testid="workflow-run-overlay-toggle"
-          >
-            {selected ? "Hide on canvas" : "Show on canvas"}
-          </Button>
-        )}
-      </div>
-
-      {/* Issue #371: the per-node trail, which is what turns "it failed" into
-          "it failed HERE". Absent for a run journaled before #371 — those rows
-          render exactly as they always did. */}
-      {nodes.length > 0 && (
-        <div className="mb-1 flex flex-wrap gap-1" data-testid="workflow-run-nodes">
-          {nodes.map((node) => (
-            <RunNodeChip key={`${node.nodeId}-${node.elapsedMs}`} node={node} />
-          ))}
-        </div>
-      )}
-      {run.error ? (
-        // The outcome that used to be quietest of all: a run that died left one
-        // host-stdout warning and nothing an operator could ever find.
-        <Alert variant="destructive" className="py-2">
-          <AlertDescription className="text-[11px]">
-            {/* Name the node when the trail names one — the engine reports a
-                failing node as an errored step, so this is exact. When it does
-                not (a graph that would not compile, a capability that could not
-                be built), say nothing about nodes rather than guessing. */}
-            {failedNode ? `This run failed at “${failedNode}”: ` : "This run failed: "}
-            {run.error}
-          </AlertDescription>
-        </Alert>
-      ) : run.cancelled ? (
-        // Issue #383, the third terminal reading. Deliberately not a
-        // destructive Alert: nothing went wrong, somebody decided they had seen
-        // enough. It says "stopped", not "finished", because the node that was
-        // executing was dropped where it was rather than allowed to complete —
-        // so a side effect it had started may be half-done.
-        <p
-          className="text-[11px] text-muted-foreground"
-          data-testid="workflow-run-cancelled"
-        >
-          An operator stopped this run
-          {nodes.length > 0
-            ? ` after ${nodes.length} step${nodes.length === 1 ? "" : "s"}`
-            : " before any step finished"}
-          . The steps above completed; the one still running was stopped where it
-          was. Any approvals it had already raised are still waiting for you.
-        </p>
-      ) : run.deliveries.length > 0 ? (
-        // Deliberately the SAME component the live run drawer uses, so a report
-        // reads identically whether it's on screen now or a week old.
-        <DeliveryRows deliveries={run.deliveries} />
-      ) : (
-        <p className="text-[11px] text-muted-foreground">
-          Finished — this run routed no reports.
-        </p>
-      )}
-    </div>
-  );
-}
-
-/** One node's outcome in a history row: its id, how it went, how long it took. */
-function RunNodeChip({ node }: { node: WorkflowRunNode }) {
-  const ok = node.status === "ok";
-  return (
-    <span
-      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${
-        ok
-          ? "border-emerald-500/40 bg-emerald-500/10"
-          : "border-red-500/50 bg-red-500/10"
-      }`}
-    >
-      <span className={`size-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
-      <span className="font-medium">{node.nodeId}</span>
-      <span className="font-mono opacity-70">
-        {node.elapsedMs < 1000 ? `${node.elapsedMs}ms` : `${(node.elapsedMs / 1000).toFixed(1)}s`}
-      </span>
-    </span>
-  );
-}
-
-/** A labelled block inside the node inspector. */
-function DetailField({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div className="space-y-1">
-      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
-      {children}
-    </div>
-  );
-}
-
-/** The run-output drawer: one readable card per executed node (the producing
- * agent and its reply, markdown-rendered) plus the branch each condition node
- * took, any nodes left pending approval, and the raw engine state collapsed
- * behind a toggle. Falls back to a raw JSON dump when the output doesn't match
- * the expected per-node shape. */
-function RunResultPanel({
-  result,
-  graph,
-  request,
-  onClose,
-}: {
-  result: WorkflowRunResult;
-  graph: WorkflowGraph | null;
-  /** What the operator asked this run for (issue #154); "" when they asked for
-   * nothing, in which case the line is omitted rather than showing a bare dash. */
-  request: string;
-  onClose: () => void;
-}) {
-  const nodeResults = useMemo(
-    () => parseRunNodes(result.output, graph),
-    [result.output, graph],
-  );
-  const deliveries = result.deliveries ?? [];
-  const pendingDeliveryCount = deliveries.filter((d) => d.status === "pending").length;
-  const undeliveredCount = deliveries.filter(
-    (d) => d.status !== "sent" && d.status !== "pending",
-  ).length;
-
-  return (
-    <div className="border-t bg-card/60">
-      <div className="flex items-center justify-between px-4 py-2">
-        <div className="flex items-center gap-2">
-          <span className="text-sm font-medium">Run result</span>
-          {pendingDeliveryCount > 0 && (
-            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10">
-              {pendingDeliveryCount} report{pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
-            </Badge>
-          )}
-          {undeliveredCount > 0 && (
-            <Badge variant="outline" className="border-red-500/40 bg-red-500/10">
-              {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not delivered
-            </Badge>
-          )}
-          {result.pendingApprovals.length > 0 && (
-            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10">
-              {result.pendingApprovals.length} pending approval
-              {result.pendingApprovals.length === 1 ? "" : "s"}
-            </Badge>
-          )}
-        </div>
-        <Button variant="ghost" size="sm" onClick={onClose}>
-          Dismiss
-        </Button>
-      </div>
-      <div className="max-h-72 overflow-auto px-4 pb-3">
-        {request && (
-          <p className="mb-2 text-xs text-muted-foreground">
-            <span className="font-medium text-foreground">Requested:</span> {request}
-          </p>
-        )}
-        {result.pendingApprovals.length > 0 && (
-          <p className="mb-2 text-xs text-muted-foreground">
-            Waiting on: {result.pendingApprovals.join(", ")}
-          </p>
-        )}
-
-        {deliveries.length > 0 && <DeliveryRows deliveries={deliveries} />}
-
-        {nodeResults && nodeResults.length > 0 ? (
-          <div className="mb-2 space-y-2">
-            {nodeResults.map((n) => (
-              <NodeResultCard key={n.id} node={n} />
-            ))}
-          </div>
-        ) : (
-          <p className="mb-2 text-xs text-muted-foreground">
-            The run finished, but its output didn't match the expected node
-            shape — see the raw output below.
-          </p>
-        )}
-
-        <details open={!nodeResults || nodeResults.length === 0}>
-          <summary className="cursor-pointer text-xs text-muted-foreground">
-            Show raw engine output
-          </summary>
-          <pre className="mt-1 rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
-            {JSON.stringify(result.output, null, 2)}
-          </pre>
-        </details>
-      </div>
-    </div>
-  );
-}
-
-/** One node's readable result: its name, the producing agent, and its reply
- * (markdown-rendered). Falls back to a subtle placeholder / the branch it took
- * when it produced no text (e.g. a trigger or a condition node). */
-function NodeResultCard({ node }: { node: NodeResult }) {
-  return (
-    <div className="rounded-lg border bg-background/40 p-2">
-      <div className="mb-1 flex items-center gap-2">
-        <span className="truncate text-xs font-medium">{node.name}</span>
-        {node.port !== null && (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
-            branch: {node.port}
-          </Badge>
-        )}
-      </div>
-      {node.messages.map((m, i) => (
-        <div key={i} className={i > 0 ? "mt-2 border-t pt-2" : undefined}>
-          {m.agentRef && (
-            <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
-              {m.agentRef}
-            </p>
-          )}
-          {m.text ? (
-            <div className="prose prose-sm max-w-none dark:prose-invert">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
-            </div>
-          ) : (
-            <p className="text-sm text-muted-foreground">—</p>
-          )}
-        </div>
-      ))}
-      {node.messages.length === 0 && (
-        <p className="text-sm text-muted-foreground">—</p>
-      )}
-    </div>
-  );
-}
-
-/** The result of folding the SSE frame window down to one run's canvas state. */
-interface LiveRun {
-  runId: string;
-  states: Record<string, NodeRunState>;
-  elapsed: Record<string, number>;
-  /** False once the run has settled — its ok/error marks stay, its running ones go. */
-  active: boolean;
-}
-
-/** Folds the run-progress frame window (issue #371) into the canvas state for
- * the workflow on screen.
- *
- * Pure, and recomputed from scratch on every window change. That is the point:
- * an accumulating reducer loses frames that arrive inside one React batch,
- * which for a graph with a sub-millisecond transform node is the normal case.
- *
- * Only the MOST RECENT run of the selected workflow is folded, and every frame
- * is matched on its run id. One SSE connection carries every run in the
- * company, so without that a cron fire would repaint a canvas an operator is
- * watching, and two concurrent runs of the same graph would interleave into one
- * incoherent picture. */
-function foldLiveRun(
-  events: CompanyStreamEvent[],
-  selectedId: string | null,
-  graph: WorkflowGraph | null,
-): LiveRun | null {
-  if (!selectedId || !graph) return null;
-
-  // The last start for this workflow wins — a rerun supersedes the run before.
-  let startIndex = -1;
-  for (let i = events.length - 1; i >= 0; i--) {
-    const e = events[i];
-    if (e.type === "workflow_run_started" && e.workflowId === selectedId) {
-      startIndex = i;
-      break;
-    }
+function readIndexMode(): IndexMode {
+  try {
+    return window.localStorage.getItem(INDEX_MODE_KEY) === "list" ? "list" : "cards";
+  } catch {
+    return "cards";
   }
-  if (startIndex === -1) return null;
-  const started = events[startIndex];
-  if (started.type !== "workflow_run_started") return null;
+}
 
-  const runId = started.runId;
-  // The trigger fired by definition, and the engine reports no step for it, so
-  // nothing else would ever mark it. Its successors are where execution is now.
-  const states = initialRunState(graph);
-  const elapsed: Record<string, number> = {};
-  let active = true;
-
-  for (let i = startIndex + 1; i < events.length; i++) {
-    const e = events[i];
-    if (e.type === "workflow_node_finished") {
-      if (e.runId !== runId) continue;
-      // Anything that is not "ok" is treated as a failure: an unknown status
-      // word from a newer host must never paint a node as succeeded.
-      const state: NodeRunState = e.status === "ok" ? "ok" : "error";
-      states[e.nodeId] = state;
-      elapsed[e.nodeId] = e.elapsedMs;
-      // Advance the frontier. Only a successful node hands execution on — a
-      // failed one under the default `stop` policy ends the run, and lighting
-      // up its successors would claim work that never happened.
-      if (state === "ok") {
-        for (const id of successorsOf(graph, e.nodeId)) {
-          if (!states[id]) states[id] = "running";
-        }
-      }
-      continue;
-    }
-    if (e.type === "workflow_run_finished" && e.workflowId === selectedId) {
-      // A pre-#371 host sends no runId; treat that as "the run on screen"
-      // rather than ignoring it, else the canvas would spin forever.
-      if (!e.runId || e.runId === runId) active = false;
-    }
+/** Remembers the index rendering. Best-effort, for the same reason. */
+function writeIndexMode(mode: IndexMode): void {
+  try {
+    window.localStorage.setItem(INDEX_MODE_KEY, mode);
+  } catch {
+    // A preference that cannot be saved is not an error worth surfacing.
   }
-
-  if (!active) {
-    // Nothing is executing any more, so the derived marks go. The REPORTED
-    // ok/error ones stay — they are the answer to "how far did it get?" — until
-    // a reselect or a rerun.
-    for (const [id, state] of Object.entries(states)) {
-      if (state === "running") delete states[id];
-    }
-  }
-
-  return { runId, states, elapsed, active };
-}
-
-/** A node's display name, falling back to its id when the graph is not loaded
- * (a company switch mid-overlay) — never a blank quote. */
-function nodeName(graph: WorkflowGraph | null, nodeId: string): string {
-  return graph?.nodes.find((n) => n.id === nodeId)?.name ?? nodeId;
-}
-
-/** The node ids `from` hands execution to. */
-function successorsOf(graph: WorkflowGraph, from: string): string[] {
-  return graph.edges.filter((e) => e.from === from).map((e) => e.to);
-}
-
-/** The canvas state a run starts in (issue #371): every trigger marked done,
- * its successors marked running.
- *
- * Both halves are derived rather than reported. The engine emits no step for a
- * trigger node — it is the thing that fired, not a thing that ran — and it has
- * no `on_step_start` hook at all, so "where is it now" has to come from the
- * graph. After a branch point this briefly marks more than one arm; that
- * corrects itself as the real finishes arrive. */
-function initialRunState(graph: WorkflowGraph): Record<string, NodeRunState> {
-  const state: Record<string, NodeRunState> = {};
-  for (const node of graph.nodes) {
-    if (node.kind !== "trigger") continue;
-    state[node.id] = "ok";
-    for (const id of successorsOf(graph, node.id)) state[id] = "running";
-  }
-  return state;
-}
-
-/** The per-node states of a PAST run, for overlaying it on the canvas.
- *
- * No `running` ever comes out of this: the run is over. A node the run never
- * reached simply has no entry, so it renders unmarked — "not reached" and not
- * "still to come", which for a failed run is the honest reading. */
-function statesFromRun(run: WorkflowRunOutcome): Record<string, NodeRunState> {
-  const state: Record<string, NodeRunState> = {};
-  for (const node of run.nodes ?? []) {
-    state[node.nodeId] = node.status === "ok" ? "ok" : "error";
-  }
-  return state;
-}
-
-/** Per-node durations of a past run, keyed for the canvas. */
-function elapsedFromRun(run: WorkflowRunOutcome): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const node of run.nodes ?? []) out[node.nodeId] = node.elapsedMs;
-  return out;
-}
-
-/** Where a failed run stopped, in plain words (issue #371).
- *
- * Only ever called for a run with an `error`. A run an operator stopped
- * (issue #383) carries no error and is worded by the caller, because "where did
- * it stop" is not the interesting question about it — somebody chose the moment.
- *
- * Three genuinely different cases, and collapsing them fabricates precision:
- *
- * * a node reported `error` — the engine names it, so say it exactly;
- * * nodes ran but none errored — an **interrupted** run, whose synthetic
- *   outcome was written by the boot sweep and belongs to no node. Saying "it
- *   failed at X" here would blame a node that succeeded, and saying "before any
- *   node ran" would contradict the marks on the canvas;
- * * nothing ran at all — a graph that would not compile, or a capability that
- *   could not be built.
- */
-function failureLocation(run: WorkflowRunOutcome, graph: WorkflowGraph | null): string {
-  const failed = failedNodeOf(run);
-  if (failed) return `it failed at “${nodeName(graph, failed)}”.`;
-  const ran = run.nodes?.length ?? 0;
-  if (ran > 0) {
-    return `it stopped after ${ran} node${ran === 1 ? "" : "s"}, without any of them reporting a failure.`;
-  }
-  return "it failed before any node ran.";
-}
-
-/** The node a run failed at, when its trail names one (issue #371).
- *
- * The engine reports a failing node as an `error` step before the run ends, so
- * this is exact rather than inferred. `null` when the run failed with no
- * errored node — a graph that would not compile, a capability that could not be
- * built — where naming a node would be a fabrication. */
-function failedNodeOf(run: WorkflowRunOutcome): string | null {
-  return (run.nodes ?? []).find((n) => n.status !== "ok")?.nodeId ?? null;
-}
-
-/** Lays a saved graph out left→right by longest-path depth, stacking siblings
- * vertically within each layer. Cycles are bounded by an iteration cap, so a
- * back edge never loops forever.
- *
- * `runStates` / `elapsed` (issue #371) tint each node with what the run on
- * screen did. Both default to empty, which is the resting canvas — identical to
- * how it rendered before #371. */
-function layout(
-  graph: WorkflowGraph,
-  runStates: Record<string, NodeRunState> = {},
-  elapsed: Record<string, number> = {},
-): { nodes: Node<WorkflowNodeData>[]; edges: Edge[] } {
-  const depth = new Map<string, number>(graph.nodes.map((n) => [n.id, 0]));
-  for (let i = 0; i < graph.nodes.length; i++) {
-    let changed = false;
-    for (const e of graph.edges) {
-      const d = (depth.get(e.from) ?? 0) + 1;
-      if (d > (depth.get(e.to) ?? 0)) {
-        depth.set(e.to, d);
-        changed = true;
-      }
-    }
-    if (!changed) break;
-  }
-
-  const rowInLayer = new Map<number, number>();
-  const nodes: Node<WorkflowNodeData>[] = graph.nodes.map((n) => {
-    const layer = depth.get(n.id) ?? 0;
-    const row = rowInLayer.get(layer) ?? 0;
-    rowInLayer.set(layer, row + 1);
-    const meta = nodeKindMeta(n.kind);
-    return {
-      id: n.id,
-      type: "oc",
-      position: { x: layer * COL_GAP, y: row * ROW_GAP },
-      data: {
-        kind: n.kind,
-        name: n.name,
-        // Agent nodes surface their roster id; otherwise the node's summary.
-        summary: n.summary ?? (n.agent ? `Agent: ${n.agent}` : ""),
-        emoji: meta.emoji,
-        color: meta.color,
-        runState: runStates[n.id],
-        elapsedMs: elapsed[n.id],
-      },
-    };
-  });
-
-  const edges: Edge[] = graph.edges.map((e, i) => ({
-    id: `${e.from}-${e.to}-${i}`,
-    source: e.from,
-    target: e.to,
-    label: e.label,
-    animated: true,
-  }));
-
-  return { nodes, edges };
-}
-
-/** A single agent reply extracted from a node's `items[].json`. */
-interface NodeMessage {
-  text: string | null;
-  agentRef: string | null;
-}
-
-/** One node's readable, shape-checked result, ready to render. */
-interface NodeResult {
-  id: string;
-  name: string;
-  /** The condition branch taken (`null` when the node isn't a branch point). */
-  port: string | null;
-  messages: NodeMessage[];
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-/** A non-empty trimmed string, else `null` (defensive against non-strings). */
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-/** Pull a field from an item's `json`, preferring the OUTERMOST value and
- * falling back to the NESTED `json.json.<key>` the engine sometimes emits.
- * Handles the observed shape where `json` carries both a top-level `text` and
- * a nested `json.json.text` — the outer one wins. */
-function readNested(json: unknown, key: string): string | null {
-  if (!isRecord(json)) return null;
-  const outer = nonEmptyString(json[key]);
-  if (outer) return outer;
-  const inner = json.json;
-  if (isRecord(inner)) return nonEmptyString(inner[key]);
-  return null;
-}
-
-/** Safely parse the engine's run output into per-node results, ordered by the
- * loaded graph when available (falling back to the map's insertion order).
- * Returns `null` when `output` doesn't match the expected `{ nodes: {…} }`
- * shape, signalling the caller to fall back to the raw JSON dump. Every access
- * is guarded — `output` is typed `unknown` and older/edge runs may be a plain
- * string, missing `nodes`, or carry malformed node values. */
-function parseRunNodes(
-  output: unknown,
-  graph: WorkflowGraph | null,
-): NodeResult[] | null {
-  if (!isRecord(output) || !isRecord(output.nodes)) {
-    console.debug(
-      "[WorkflowsView] run output missing a `nodes` map; showing raw JSON",
-      output,
-    );
-    return null;
-  }
-  const nodes = output.nodes;
-
-  // Order by the graph's node order when we have it, then append any node ids
-  // present in the output but not in the graph (in the map's insertion order).
-  const graphOrder = graph?.nodes.map((n) => n.id) ?? [];
-  const orderedIds = [
-    ...graphOrder.filter((id) => id in nodes),
-    ...Object.keys(nodes).filter((id) => !graphOrder.includes(id)),
-  ];
-
-  const nameById = new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []);
-
-  const results: NodeResult[] = orderedIds.map((id) => {
-    const raw = nodes[id];
-    const items = isRecord(raw) && Array.isArray(raw.items) ? raw.items : [];
-    const messages: NodeMessage[] = items
-      .map((item) => {
-        const json = isRecord(item) ? item.json : undefined;
-        return {
-          text: readNested(json, "text"),
-          agentRef: readNested(json, "agent_ref"),
-        };
-      })
-      .filter((m) => m.text || m.agentRef);
-    const port = isRecord(raw) ? nonEmptyString(raw.port) : null;
-    return { id, name: nameById.get(id) ?? id, port, messages };
-  });
-
-  return results;
 }
