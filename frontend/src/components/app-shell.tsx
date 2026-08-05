@@ -132,6 +132,11 @@ const HIDDEN_VIEWS: View[] = [
 
 const VIEWS: View[] = [...NAV.map((i) => i.view), ...HIDDEN_VIEWS];
 
+/** How many workflow run-progress frames (issue #371) the shell keeps for the
+ * Workflows canvas. A run emits roughly one per node, so this holds many runs'
+ * worth — it exists to bound a long-lived tab, not to ration frames. */
+const WORKFLOW_EVENT_WINDOW = 300;
+
 /**
  * Operator-facing copy for a `connect_error` code from the host's OAuth
  * callback (issue #300). The host sends a stable code rather than the
@@ -236,6 +241,20 @@ export function AppShell({
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
+  // Issue #371: a rolling WINDOW of run-progress frames, not just a nonce.
+  //
+  // The canvas paints per-node state, so unlike the tick above it needs the
+  // payload — a counter cannot say which node of which run just finished. It is
+  // a list rather than a "latest event" slot because two frames routinely land
+  // inside one React batch (a transform node finishes in under a millisecond),
+  // and a single slot silently drops the earlier one. Losing a
+  // `workflow_run_started` that way strands every node frame behind it, which
+  // is exactly the bug this shape removes rather than narrows.
+  //
+  // Bounded so a long-lived tab cannot grow it without limit. The cap is orders
+  // of magnitude above a run's ~N+2 frames; if it ever did cut a run's start,
+  // the view simply shows no live state and the run history still has it.
+  const [workflowRunEvents, setWorkflowRunEvents] = useState<CompanyStreamEvent[]>([]);
   // The live tool timeline, per thread, built from the transient `tool_call` /
   // `tool_result` SSE frames while a turn runs (mirrors OpenHuman's live tool
   // rows). Cleared when the turn's final reply — carrying the authoritative
@@ -667,7 +686,14 @@ export function AppShell({
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
     onTurnEvent,
-    onWorkflowRunEvent: useCallback(() => setWorkflowRunTick((n) => n + 1), []),
+    onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
+      // Both halves. The tick refreshes the durable history; the frames drive
+      // the live canvas. Progress frames are far more frequent than outcomes,
+      // so only an outcome bumps the tick — refetching history once per node
+      // would be N round trips per run for a list that has not changed yet.
+      setWorkflowRunEvents((prev) => [...prev, event].slice(-WORKFLOW_EVENT_WINDOW));
+      if (event.type === "workflow_run_finished") setWorkflowRunTick((n) => n + 1);
+    }, []),
   });
 
   return (
@@ -805,6 +831,7 @@ export function AppShell({
                 client={client}
                 company={company}
                 runEventTick={workflowRunTick}
+                runEvents={workflowRunEvents}
               />
             </Suspense>
           )}
