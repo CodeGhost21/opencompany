@@ -11,7 +11,13 @@ import {
 } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
-import type { CompanyStatus, TurnStep } from "@/api/types";
+import {
+  ApiError,
+  type ApprovalSummary,
+  type CompanyStatus,
+  type TurnStep,
+  type Verdict,
+} from "@/api/types";
 import {
   Sidebar,
   SidebarContent,
@@ -50,6 +56,7 @@ import {
   channelIdForThread,
   deskFromDto,
   dmChannelId,
+  type DecidedApproval,
   type Transcripts,
 } from "@/views/chat/model";
 import { Conversation } from "@/views/Conversation";
@@ -278,6 +285,23 @@ export function AppShell({
   const activeTurnThreadRef = useRef<string | null>(null);
   const pendingPostThreadsRef = useRef<Set<string>>(new Set());
   const feed = useCompany(client, company, initialStatus);
+  // Issue #379: the inline approval cards' console-local state, owned here
+  // rather than in `ChatView` for the same reason `transcripts` is — the shell
+  // mounts and unmounts that view per route, and an operator who approves in a
+  // channel then steps over to Approvals must not come back to a card that has
+  // forgotten what they did.
+  //
+  // `deciding` is the request in flight, per approval — a map, not a single
+  // slot, because deciding one card must not freeze the others (#373's bug, one
+  // surface over). `decided` is what has already been witnessed, from either
+  // surface, and it keeps the **whole summary** rather than just the verdict:
+  // the host drops a resolved approval from the feed at once, so a console
+  // holding only a verdict has nothing left to draw and the card blinks out of
+  // the thread the instant it is decided.
+  const [decidingApprovals, setDecidingApprovals] = useState<ReadonlyMap<string, Verdict>>(
+    () => new Map(),
+  );
+  const [decidedApprovals, setDecidedApprovals] = useState<Record<string, DecidedApproval>>({});
 
   const pending = feed.status.pending_approvals;
 
@@ -346,6 +370,10 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+    // Another company's approval ids are another namespace, and a settled card
+    // must not survive the switch as a ghost in the new company's channels.
+    setDecidedApprovals({});
+    setDecidingApprovals(new Map());
 
     const hydrate = (threadId: string) => {
       client
@@ -517,6 +545,28 @@ export function AppShell({
     setThreadMessages(activeThreadId, (m) => [...m, makeMessage("system", line)]);
   };
 
+  /**
+   * A system line into the channel that owns `threadId`, falling back to
+   * {@link noteSystem}'s "wherever the operator is" rule when the thread names
+   * no channel this company has (issue #379).
+   *
+   * The addressed form exists because an inline decision has a *known* home: the
+   * conversation the card was raised in. Filing it under "the last channel
+   * looked at" would put a decline into whatever the operator happened to open
+   * next — #368's bug, re-introduced one surface over.
+   */
+  const noteInChannel = (threadId: string | null | undefined, line: string) => {
+    const target = threadId ? chatChannelByThread[threadId] : undefined;
+    if (!target) {
+      noteSystem(line);
+      return;
+    }
+    setTranscripts((t) => ({
+      ...t,
+      [target]: [...(t[target] ?? []), makeMessage("system", line)],
+    }));
+  };
+
   // Inject an `AgentReply` pushed over the SSE feed (issue #66) into its desk
   // thread's transcript. Dedupe against our own optimistic echo: the backend
   // journals an `AgentReply` for the operator's own chat turn too, and
@@ -677,6 +727,64 @@ export function AppShell({
     });
   }, []);
 
+  const markDeciding = useCallback((id: string, verdict: Verdict | null) => {
+    setDecidingApprovals((prev) => {
+      const next = new Map(prev);
+      if (verdict) next.set(id, verdict);
+      else next.delete(id);
+      return next;
+    });
+  }, []);
+
+  /**
+   * Decide an approval from inside the conversation it was raised in (#379).
+   *
+   * **Detached** (`detach: true`), unlike the Approvals page. The default
+   * resolve answers with the follow-up turn's replies, and this card sits in a
+   * transcript that is *already* subscribed to the `agent_reply` frame — so
+   * rendering the body too would put one continuation into the channel twice.
+   * Detach has exactly one delivery path, so the race cannot arise. The page
+   * keeps the default shape, because it has no transcript and the body is its
+   * only sight of what happened next.
+   *
+   * The witnessed verdict is recorded before the refresh settles anything, so
+   * the card says what the operator chose rather than snapping back to two live
+   * buttons. The refresh in `finally` is the reconciliation: the host drops the
+   * approval from the queue in its first step, so the queue either loses this
+   * card — proving the verdict landed — or keeps it, showing a decision that
+   * still needs making.
+   *
+   * Not memoized: it closes over `feed` and `noteInChannel`, and it is only ever
+   * called from an event handler, so a `useCallback` here would buy a stale
+   * closure and nothing else.
+   */
+  const decideApproval = async (approval: ApprovalSummary, verdict: Verdict) => {
+    if (decidingApprovals.has(approval.id)) return;
+    markDeciding(approval.id, verdict);
+    try {
+      await client.resolveApproval(approval.id, verdict, undefined, company, { detach: true });
+      setDecidedApprovals((prev) => ({ ...prev, [approval.id]: { verdict, approval } }));
+      toast.success(
+        verdict === "approve"
+          ? "Approved — the agent is completing the action."
+          : "Declined — recorded.",
+      );
+      // A decline ends the thread's story, and silence would read as a stall.
+      // An approve needs no line: the continuation lands as a real reply, which
+      // is the whole point of deciding here.
+      if (verdict === "deny") {
+        noteInChannel(approval.thread, "Declined — the agent will not take that action.");
+      }
+    } catch (err) {
+      const msg = err instanceof ApiError ? err.message : "something went wrong";
+      toast.error(`Couldn't record your decision — ${msg}`);
+      noteInChannel(approval.thread, `Couldn't record your decision — ${msg}`);
+    } finally {
+      markDeciding(approval.id, null);
+      void feed.refresh();
+    }
+  };
+
   // The active push half of the attention surface: SSE-driven toasts + chat
   // injection, plus a rising-edge "needs a sign-off" toast off the poll's
   // pending count. Degrades silently to the `useCompany` poll when the host has
@@ -694,6 +802,33 @@ export function AppShell({
       setWorkflowRunEvents((prev) => [...prev, event].slice(-WORKFLOW_EVENT_WINDOW));
       if (event.type === "workflow_run_finished") setWorkflowRunTick((n) => n + 1);
     }, []),
+    // Issue #379. Both frames do the same one thing — re-read the approvals
+    // feed — and that is deliberate: the park frame is thin by design (no
+    // payload, no asker), so the redacted summary on the feed is the only place
+    // a card's content may come from. One round trip, in exchange for one
+    // redaction surface instead of two.
+    //
+    // The resolution half is what settles an inline card decided on the
+    // Approvals page, or in another tab, without a reload.
+    //
+    // Not memoized, for the same reason as `decideApproval`: `useEvents` keeps
+    // its callbacks in refs it refreshes every render, so a plain arrow costs no
+    // stream re-open and cannot go stale over the refresh it calls.
+    onApprovalEvent: (event: CompanyStreamEvent) => {
+      if (event.type === "approval_resolved") {
+        const verdict: Verdict = event.verdict === "approve" ? "approve" : "deny";
+        // Snapshot the summary from the feed as it stands *now* — before the
+        // refresh below drops it. An id this console never had a summary for
+        // records nothing, which is right: there is no card to settle.
+        const approval = feed.approvals.find((a) => a.id === event.approvalId);
+        if (approval) {
+          setDecidedApprovals((prev) =>
+            prev[event.approvalId] ? prev : { ...prev, [event.approvalId]: { verdict, approval } },
+          );
+        }
+      }
+      void feed.refresh();
+    },
   });
 
   return (
@@ -766,6 +901,12 @@ export function AppShell({
               liveStepsByThread={liveStepsByThread}
               unread={unread}
               onChannelViewed={onChannelViewed}
+              approvals={feed.approvals}
+              chatChannelByThread={chatChannelByThread}
+              now={feed.now}
+              onDecideApproval={(approval, verdict) => void decideApproval(approval, verdict)}
+              decidingApprovals={decidingApprovals}
+              decidedApprovals={decidedApprovals}
             />
           )}
           {view === "conversation" && (

@@ -14,13 +14,14 @@ import { toast } from "sonner";
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
-import { ApiError, type TeamMemberDto, type TurnStep } from "@/api/types";
+import { ApiError, type ApprovalSummary, type TeamMemberDto, type TurnStep, type Verdict } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { type ChatMessage, makeMessage } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { fromDto, newMember, starterTeam, type TeamMember } from "@/lib/team";
 import { cn } from "@/lib/utils";
+import { useAskerNames } from "@/components/approval-card";
 import { AddMemberDialog, type NewMemberFields } from "./chat/AddMemberDialog";
 import { BudgetDialog } from "./chat/BudgetDialog";
 import { ChannelRail } from "./chat/ChannelRail";
@@ -32,6 +33,7 @@ import { ThreadPanel } from "./chat/ThreadPanel";
 import {
   buildChannels,
   buildTimeline,
+  buildTimelineItems,
   channelMembers,
   channelTitle,
   deskFromDto,
@@ -39,6 +41,7 @@ import {
   findChannel,
   firstChannel,
   toggleReaction,
+  type DecidedApproval,
   type Transcripts,
 } from "./chat/model";
 
@@ -84,6 +87,30 @@ interface Props {
    * unaddressed line belongs after this view is gone (issue #368).
    */
   onChannelViewed?: (channelId: string) => void;
+  /**
+   * Every approval currently awaiting the operator, straight off the shell's
+   * feed, plus the host thread → channel map that places them (#379).
+   *
+   * Passed whole and filtered here rather than pre-filtered upstream, because
+   * the filter needs the channel actually on screen — which this view resolves,
+   * not the shell. An approval whose `thread` names no channel this company has
+   * (a workflow delivery, a scheduler tick, anything parked before #379) simply
+   * matches nothing and stays on the Approvals page, which is the whole
+   * additive contract.
+   */
+  approvals?: ApprovalSummary[];
+  chatChannelByThread?: Record<string, string>;
+  /** Now, for a card's "waiting N minutes" line. */
+  now?: number;
+  /**
+   * Decide an approval from inside the conversation. Owned by the shell so the
+   * witnessed verdict survives this view unmounting — the operator can walk to
+   * Approvals and back mid-turn.
+   */
+  onDecideApproval?: (approval: ApprovalSummary, verdict: Verdict) => void;
+  /** The verdict each card is waiting on, and the ones already witnessed. */
+  decidingApprovals?: ReadonlyMap<string, Verdict>;
+  decidedApprovals?: Record<string, DecidedApproval>;
 }
 
 /**
@@ -112,6 +139,12 @@ export function ChatView({
   liveStepsByThread,
   unread,
   onChannelViewed,
+  approvals,
+  chatChannelByThread,
+  now,
+  onDecideApproval,
+  decidingApprovals,
+  decidedApprovals,
 }: Props) {
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
@@ -328,6 +361,59 @@ export function ChatView({
   const entries = useMemo(
     () => (channel ? buildTimeline(messages, channel) : []),
     [messages, channel],
+  );
+
+  /**
+   * The approvals raised in the channel on screen (#379).
+   *
+   * **Derived, never appended.** The cards come from server state on every
+   * render, so a pending one survives a reload — better than the transcripts it
+   * sits among, which are still console-local (#364), and deliberately not
+   * dependent on that being fixed.
+   *
+   * An approval with no `thread`, or one naming a thread this company has no
+   * channel for, resolves to `null` and matches nothing. That is how a workflow
+   * delivery or a scheduler tick stays Approvals-page-only.
+   *
+   * `desks` gates the derivation for the same reason it gates the channel list
+   * (#393): before `/desks` answers, every thread id looks unknown, and placing
+   * cards against a half-built channel set is the first-paint swap #370
+   * describes one surface over.
+   */
+  const channelApprovals = useMemo(() => {
+    if (!desks || !channel || !approvals?.length) return [];
+    const byThread = chatChannelByThread ?? {};
+    return approvals.filter((a) => a.thread && byThread[a.thread] === channel.id);
+  }, [desks, channel, approvals, chatChannelByThread]);
+
+  /**
+   * Cards the operator has already decided, which the feed no longer carries.
+   *
+   * The host drops a resolved approval from `GET …/approvals` at once, so these
+   * cannot be re-derived from `approvals` — they come from the shell's witnessed
+   * map, which keeps the last-seen summary precisely so a decided card can
+   * settle in place rather than blinking out of the thread.
+   */
+  const settledApprovals = useMemo(() => {
+    if (!decidedApprovals || !channel || !desks) return [];
+    const live = new Set(channelApprovals.map((a) => a.id));
+    const byThread = chatChannelByThread ?? {};
+    return Object.values(decidedApprovals)
+      .map((d) => d.approval)
+      .filter((a) => !live.has(a.id))
+      .filter((a) => a.thread && byThread[a.thread] === channel.id);
+  }, [decidedApprovals, channel, desks, channelApprovals, chatChannelByThread]);
+
+  const askerNames = useAskerNames(client, company, channelApprovals);
+
+  const items = useMemo(
+    () =>
+      buildTimelineItems(
+        entries,
+        [...channelApprovals, ...settledApprovals],
+        decidedApprovals ?? {},
+      ),
+    [entries, channelApprovals, settledApprovals, decidedApprovals],
   );
 
   // An open thread only makes sense while its parent is on screen; switching
@@ -591,12 +677,16 @@ export function ChatView({
             )}
             <MessageTimeline
               channel={channel}
-              entries={entries}
+              items={items}
               openThreadId={openThreadId}
               typing={sending && !openThreadId}
               liveSteps={openThreadId ? undefined : liveSteps}
               onOpenThread={setOpenThreadId}
               onReact={react}
+              now={now}
+              askerNames={askerNames}
+              decidingApprovals={decidingApprovals}
+              onDecideApproval={onDecideApproval}
             />
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}

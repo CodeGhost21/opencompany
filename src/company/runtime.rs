@@ -1033,6 +1033,7 @@ impl CompanyRuntime {
                 task: p.task,
                 agent: p.effect.agent.clone(),
                 payload: crate::runtime::approval_display::display_payload(&p.effect),
+                thread: p.thread,
             })
             .collect()
     }
