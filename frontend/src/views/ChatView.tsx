@@ -25,6 +25,7 @@ import {
   deskFromDto,
   dmChannelId,
   findChannel,
+  firstChannel,
   toggleReaction,
   type Transcripts,
 } from "./chat/model";
@@ -203,7 +204,10 @@ export function ChatView({
   }, [client, company]);
 
   const sections = useMemo(() => buildChannels(members, desks), [members, desks]);
-  const channel = findChannel(sections, sub) ?? findChannel(sections, DEFAULT_CHANNEL);
+  const channel =
+    findChannel(sections, sub) ??
+    findChannel(sections, DEFAULT_CHANNEL) ??
+    firstChannel(sections);
 
   const messages = channel ? (transcripts[channel.id] ?? []) : [];
   const entries = useMemo(
