@@ -8,11 +8,20 @@ the desks the two shared without ever being connected.
 ## Routing
 
 `#/chat/<channelId>` — the channel id is the hash's second segment, so a
-channel is linkable and survives a refresh. An unknown id falls back to
-`general` rather than erroring.
+channel is linkable and survives a refresh.
 
-- Desks are `#general`, `#strategy`, `#creative`, `#front-desk` (`lib/desks.ts`).
+- A desk's channel id is the host's desk id, which is also its chat thread id.
 - A DM is `dm:<slug-of-name>` — e.g. `#/chat/dm:designer`.
+- A host with no `.../desks` route falls back to `#general`, `#strategy`,
+  `#creative`, `#front-desk` (`lib/desks.ts`).
+
+Nothing resolves until `/desks` has answered — the view holds a loading state
+rather than resolving against the fallback desks and swapping under you, which
+is what made every deep link flash `#general` (issue #370). An id that doesn't
+resolve *after* they land opens the first channel and says so in a notice above
+the timeline, so the URL and the content never disagree silently. A `/desks`
+failure that isn't "this host has none" (404 or an empty list) is a retryable
+error state, not invented channels.
 
 DM ids key on the teammate's **name**, not their roster id: the starter roster
 mints ids from a module counter (`lib/team.ts`), so those differ between two
@@ -34,6 +43,20 @@ Console-local, because the host has no surface for them yet:
 
 Transcripts are per-session memory. Closing the tab drops them.
 
+## Membership
+
+A desk's members come from the host (`GET {scope}/desks` → `members`, lead
+first). They scope the header's count and the member pane, so a two-person desk
+reads as two people rather than as the whole company (issue #369). A DM is a
+two-person line: the header states 2, and the pane shows the teammate on the
+other end.
+
+The fallback desks in `lib/desks.ts` carry no membership — there is none to
+carry — so a channel built from them falls back to the whole roster, and the
+pane renders one plain list. The rest of the company is always one section
+below, so adding a teammate or opening somebody's DM never needs a different
+surface.
+
 ## Files
 
 | | |
@@ -45,7 +68,7 @@ Transcripts are per-session memory. Closing the tab drops them.
 | `MessageRow.tsx` | One line — avatar gutter, author, body, reactions, hover action bar. |
 | `MessageComposer.tsx` | The composer dock; also used compact in the thread panel. |
 | `ThreadPanel.tsx` | Replies to one message, with their own composer. |
-| `MembersPane.tsx` | The roster — what the Team page used to be. |
+| `MembersPane.tsx` | Who is in this channel, then the rest of the roster. |
 | `AddMemberDialog.tsx` | Define a teammate. |
 
 `../ChatView.tsx` owns the state and composes them.

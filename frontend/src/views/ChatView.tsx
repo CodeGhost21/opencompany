@@ -1,10 +1,22 @@
-import { useCallback, useEffect, useMemo, useState, type Dispatch, type SetStateAction } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type ReactNode,
+  type SetStateAction,
+} from "react";
+import { TriangleAlert } from "lucide-react";
 import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
 import { setInboxEnabled } from "@/api/inbox";
 import { ApiError, type TeamMemberDto, type TurnStep } from "@/api/types";
+import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { type ChatMessage, makeMessage } from "@/lib/chat";
 import { defaultDesks, type Desk } from "@/lib/desks";
 import { fromDto, newMember, starterTeam, type TeamMember } from "@/lib/team";
@@ -20,6 +32,7 @@ import { ThreadPanel } from "./chat/ThreadPanel";
 import {
   buildChannels,
   buildTimeline,
+  channelMembers,
   channelTitle,
   deskFromDto,
   dmChannelId,
@@ -103,7 +116,18 @@ export function ChatView({
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
   const [fromHost, setFromHost] = useState(false);
-  const [desks, setDesks] = useState<Desk[]>(defaultDesks());
+  /**
+   * The company's channels — `null` until `/desks` has answered.
+   *
+   * Seeding this with `defaultDesks()` is what made every deep link flash
+   * `#general`: the first render of every mount resolved the hash against the
+   * fabricated `main`/`strategy`/`creative`/`frontdesk` set, then swapped under
+   * the operator once the real desks landed (issue #370). `null` means "not
+   * answered yet", so nothing resolves against a set the company doesn't have.
+   */
+  const [desks, setDesks] = useState<Desk[] | null>(null);
+  /** Set when `/desks` failed for a reason that isn't "this host has none". */
+  const [desksError, setDesksError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [openThreadId, setOpenThreadId] = useState<string | null>(null);
   const [membersOpen, setMembersOpen] = useState(false);
@@ -213,33 +237,92 @@ export function ChatView({
     }
   }
 
-  // The company's real desks, when the host exposes them — a company with its
-  // own desks gets its own channels instead of the generic strategy/creative/
-  // front-desk trio. Hosts without `.../desks` yet 404; the static defaults
-  // still work then (the existing Conversation path has the same fallback).
-  useEffect(() => {
-    let live = true;
-    void (async () => {
-      try {
-        const dtos = await client.listDesks(company);
-        if (live) setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
-      } catch {
-        if (live) setDesks(defaultDesks());
+  // Only the newest load may write. Two loads can be in flight at once — a
+  // company switch, or a Retry over a request that is merely slow rather than
+  // dead — and a stale answer landing last would replace the current company's
+  // channels with the previous one's.
+  const desksRun = useRef(0);
+
+  /**
+   * The company's real desks, when the host exposes them — a company with its
+   * own desks gets its own channels instead of the generic strategy/creative/
+   * front-desk trio.
+   *
+   * Two outcomes are *not* failures and fall back to the static defaults: a
+   * host with no `.../desks` route at all (404, the pre-#53 shape the
+   * Conversation path also tolerates) and a host that answers with no desks.
+   * Both mean "this company has no desks surface", which the defaults exist
+   * for. Anything else — a 500, a timeout, an offline tab — is a genuine
+   * failure, and pinning the fabricated desks on top of it is what made a
+   * broken `/desks` permanently show `#general` while the URL claimed a real
+   * desk (issue #370). Those surface as an error the operator can retry.
+   */
+  const loadDesks = useCallback(async () => {
+    const run = ++desksRun.current;
+    setDesks(null);
+    setDesksError(null);
+    try {
+      const dtos = await client.listDesks(company);
+      if (run !== desksRun.current) return;
+      setDesks(dtos.length ? dtos.map(deskFromDto) : defaultDesks());
+    } catch (error) {
+      if (run !== desksRun.current) return;
+      if (error instanceof ApiError && error.status === 404) {
+        setDesks(defaultDesks());
+        return;
       }
-    })();
-    return () => {
-      live = false;
-    };
+      setDesksError(
+        error instanceof Error ? error.message : "Couldn't load this company's channels.",
+      );
+    }
   }, [client, company]);
 
-  const sections = useMemo(() => buildChannels(members, desks), [members, desks]);
+  useEffect(() => {
+    void loadDesks();
+  }, [loadDesks]);
+
+  // No channels exist until the host has answered. Resolving against a
+  // half-built list is exactly the first-paint swap issue #370 describes.
+  const sections = useMemo(
+    () => (desks ? buildChannels(members, desks) : []),
+    [members, desks],
+  );
   // The hash's channel, else the first one that exists. There used to be a
   // literal "main" between the two — an id only the *fallback* desks carry, so
   // it matched nothing once a company's real desks loaded and matched the same
   // channel `firstChannel` returns when they hadn't. It never selected anything
   // the line below wouldn't; it only made "main" look like a real channel id
   // (issue #368).
-  const channel = findChannel(sections, sub) ?? firstChannel(sections);
+  const channel = desks ? (findChannel(sections, sub) ?? firstChannel(sections)) : null;
+  /**
+   * The hash named a channel this company doesn't have, and the first-channel
+   * fallback answered instead.
+   *
+   * Only meaningful once the desks are in: before that, *every* id looks
+   * unknown. Derived rather than stored, so it clears itself the moment the
+   * hash changes — there is no stale banner to dismiss.
+   */
+  const unknownChannel = desks && sub && !findChannel(sections, sub) ? sub : null;
+
+  /**
+   * Who is in the channel on screen — `null` when it names no membership, in
+   * which case the pane falls back to the whole roster (issue #369).
+   *
+   * A desk's membership comes from the host. A DM's is the one teammate on the
+   * other end: it has no `memberIds` (nothing in the model claims a DM has a
+   * roster), so the two-person case is stated here rather than faked upstream.
+   */
+  const inChannel = useMemo(() => {
+    if (!channel) return null;
+    if (channel.kind === "dm") return channel.member ? [channel.member] : null;
+    return channelMembers(channel, members);
+  }, [channel, members]);
+
+  const outsideChannel = useMemo(() => {
+    if (!inChannel) return members;
+    const inside = new Set(inChannel.map((m) => m.id));
+    return members.filter((m) => !inside.has(m.id));
+  }, [inChannel, members]);
 
   const messages = channel ? (transcripts[channel.id] ?? []) : [];
   const entries = useMemo(
@@ -261,7 +344,35 @@ export function ChatView({
     if (channel) onChannelViewed?.(channel.id);
   }, [channel?.id, messages.length, onChannelViewed]);
 
-  if (!channel) return null;
+  // Three ways to have no channel on screen, which used to be one blank pane.
+  // Which one it is, is the whole point: "still loading" and "this company has
+  // nothing" are different facts and only one of them is worth acting on.
+  if (desksError) {
+    return (
+      <EmptyPane
+        title="Couldn't load this company's channels"
+        body={desksError}
+        action={{ label: "Retry", onClick: () => void loadDesks() }}
+      />
+    );
+  }
+  if (!desks) return <LoadingPane />;
+  if (!channel) {
+    return (
+      <EmptyPane
+        title="No channels yet"
+        body="This company has no desks and nobody on its roster, so there is nothing to talk to. Add a teammate and their direct message shows up here."
+        action={{ label: "Add a teammate", onClick: () => setAddOpen(true) }}
+        after={
+          <AddMemberDialog
+            open={addOpen}
+            onOpenChange={setAddOpen}
+            onAdd={(fields) => void addMember(fields)}
+          />
+        }
+      />
+    );
+  }
   // A local the closures below can capture as non-null: TypeScript hoists
   // function declarations, so the guard above does not narrow inside them.
   const active = channel;
@@ -274,6 +385,16 @@ export function ChatView({
   // addresses its lead. It is also the id every live turn frame carries.
   const activeThreadId = active.kind === "channel" ? active.id : active.member?.id;
   const liveSteps = activeThreadId ? liveStepsByThread?.[activeThreadId] : undefined;
+  /**
+   * The count beside the channel title.
+   *
+   * A DM is stated as 2 rather than derived: it is a two-person conversation,
+   * but the operator has no roster row, so counting rows would say 1 and
+   * inventing a "You" row to make the arithmetic work would be worse. A desk
+   * counts its own members; a channel with no membership of its own still
+   * counts the company, which is all it can honestly claim.
+   */
+  const headerCount = active.kind === "dm" ? 2 : (inChannel?.length ?? members.length);
 
   const append = (channelId: string, ...added: ChatMessage[]) =>
     setTranscripts((t) => ({ ...t, [channelId]: [...(t[channelId] ?? []), ...added] }));
@@ -448,7 +569,7 @@ export function ChatView({
       >
         <ChatHeader
           channel={channel}
-          memberCount={members.length}
+          memberCount={headerCount}
           membersOpen={membersOpen}
           onToggleMembers={() => setMembersOpen((o) => !o)}
           onOpenRail={() => setMobilePane("rail")}
@@ -456,6 +577,18 @@ export function ChatView({
 
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col">
+            {unknownChannel && (
+              <p
+                role="status"
+                className="flex shrink-0 items-center gap-1.5 border-b bg-muted/50 px-3 py-1.5 text-xs text-muted-foreground"
+              >
+                <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+                <span className="min-w-0 truncate">
+                  <span className="font-medium text-foreground">#{unknownChannel}</span> isn&apos;t a
+                  channel here — showing {channelTitle(active)} instead.
+                </span>
+              </p>
+            )}
             <MessageTimeline
               channel={channel}
               entries={entries}
@@ -485,7 +618,9 @@ export function ChatView({
 
           {membersOpen && (
             <MembersPane
-              members={members}
+              channelMembers={inChannel}
+              others={outsideChannel}
+              leadId={active.kind === "channel" ? active.memberIds?.[0] : undefined}
               loading={loadingTeam}
               fromHost={fromHost}
               onToggleInbox={(m) => void toggleMemberInbox(m)}
@@ -517,6 +652,60 @@ export function ChatView({
           if (target) void applyBudget(target, cap);
         }}
       />
+    </div>
+  );
+}
+
+/**
+ * The pane while `/desks` is still out.
+ *
+ * Shaped like the workspace it is about to become — a header bar and message
+ * rows — so the real channel does not arrive as a jump. It exists to say "not
+ * yet", which is the one thing the old blank pane could not distinguish from
+ * "never".
+ */
+function LoadingPane() {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex h-13 shrink-0 items-center gap-2 border-b px-3">
+        <Skeleton className="size-4 rounded" />
+        <Skeleton className="h-4 w-32 rounded" />
+      </div>
+      <div className="flex-1 space-y-3 p-4">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <Skeleton key={i} className="h-12 rounded-lg" />
+        ))}
+      </div>
+      <span className="sr-only">Loading channels…</span>
+    </div>
+  );
+}
+
+/** A whole-pane state: a headline, a sentence, and at most one thing to do. */
+function EmptyPane({
+  title,
+  body,
+  action,
+  after,
+}: {
+  title: string;
+  body: string;
+  action?: { label: string; onClick: () => void };
+  /** Rendered alongside — a dialog the action opens, which needs to mount. */
+  after?: ReactNode;
+}) {
+  return (
+    <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
+      <div className="max-w-sm space-y-1.5">
+        <h2 className="text-base font-semibold tracking-tight">{title}</h2>
+        <p className="text-sm text-muted-foreground">{body}</p>
+      </div>
+      {action && (
+        <Button variant="outline" size="sm" onClick={action.onClick}>
+          {action.label}
+        </Button>
+      )}
+      {after}
     </div>
   );
 }
