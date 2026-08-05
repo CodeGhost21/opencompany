@@ -131,6 +131,21 @@ export function findChannel(sections: ChannelSection[], id: string | null): Chan
   return null;
 }
 
+/**
+ * The first channel across all sections, or `null` when there are none.
+ * Used as the last-resort selection so the chat never renders blank while any
+ * channel exists — the hard-coded {@link DEFAULT_CHANNEL} ("main") only exists
+ * in the fallback desks, so once a company's real desks load (ids drawn from
+ * the roster, never "main") it no longer matches and the view would otherwise
+ * bail to null.
+ */
+export function firstChannel(sections: ChannelSection[]): Channel | null {
+  for (const s of sections) {
+    if (s.channels.length > 0) return s.channels[0];
+  }
+  return null;
+}
+
 /** How a channel is titled in the header and the rail. */
 export function channelTitle(channel: Channel): string {
   return channel.kind === "dm" ? channel.name : `#${channel.name}`;
