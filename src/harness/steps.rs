@@ -517,7 +517,7 @@ const MAX_ARG_DEPTH: usize = 1;
 
 /// The needle that identifies OpenHuman's approval-gate refusal, taken from the
 /// `PolicyDenial::ApprovalRequired` render in
-/// `vendor/openhuman/src/openhuman/tinyagents/policy_denial.rs`.
+/// `vendor/openhuman/src/openhuman/agent/tinyagents/policy_denial.rs`.
 ///
 /// This is a string classifier, which is the anti-pattern — the mitigation is
 /// that `approval_needle_still_appears_in_the_vendored_denial_render` reads
@@ -877,10 +877,28 @@ mod tests {
 
     /// Reads a file out of the vendored OpenHuman checkout, for the tests that
     /// couple a string needle to the source that produces it.
+    ///
+    /// A missing file is reported as a **moved** file, because that is what it
+    /// almost always is. These paths point into a submodule that reorganises on
+    /// its own schedule — the #499 pin bump moved both of them in one step
+    /// (`openhuman/tinyagents/` → `openhuman/agent/tinyagents/`) — and a bare
+    /// "unreadable: No such file or directory" reads as a broken test rather
+    /// than as the vendored tree having been rearranged underneath it. The
+    /// needle these tests pin may well still exist; only its address changed.
     fn vendored(relative: &str) -> String {
         let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
-        std::fs::read_to_string(&path)
-            .unwrap_or_else(|err| panic!("vendored source {} is unreadable: {err}", path.display()))
+        std::fs::read_to_string(&path).unwrap_or_else(|err| {
+            let basename = relative.rsplit('/').next().unwrap_or(relative);
+            panic!(
+                "vendored source {} is unreadable: {err}\n\
+                 If the vendored openhuman pin moved, this file most likely moved with it \
+                 rather than being deleted — the basenames survive reorgs, the parents do not. \
+                 Find its new address and update this path:\n    \
+                 git -C vendor/openhuman ls-files '*{basename}'\n\
+                 Do NOT relax the assertion: the needle is what couples us to that source.",
+                path.display()
+            )
+        })
     }
 
     fn started(call_id: &str, tool: &str, label: Option<&str>) -> AgentProgress {
@@ -1110,7 +1128,7 @@ mod tests {
     /// returning every parked call to reading as a crash.
     #[test]
     fn approval_needle_still_appears_in_the_vendored_denial_render() {
-        let source = vendored("vendor/openhuman/src/openhuman/tinyagents/policy_denial.rs");
+        let source = vendored("vendor/openhuman/src/openhuman/agent/tinyagents/policy_denial.rs");
         assert!(
             source.contains(APPROVAL_REQUIRED_NEEDLE),
             "'{APPROVAL_REQUIRED_NEEDLE}' is gone from PolicyDenial::render — \
@@ -1458,7 +1476,7 @@ mod tests {
     #[test]
     fn truncation_markers_still_appear_in_the_vendored_tool_pipeline() {
         let sources = [
-            vendored("vendor/openhuman/src/openhuman/tinyagents/middleware.rs"),
+            vendored("vendor/openhuman/src/openhuman/agent/tinyagents/middleware.rs"),
             vendored("vendor/openhuman/src/openhuman/agent/harness/tool_result_artifacts/mod.rs"),
         ]
         .concat();
