@@ -2124,6 +2124,90 @@ async fn inbox_list_and_messages_project_store() {
     assert_eq!(msgs[1]["outbound"], true);
 }
 
+/// Issue #416, the half that holds in every build: a question asked on a
+/// workflow copilot thread must not leave work on the company's board.
+///
+/// The copilot is a conversation *about a graph*, and its questions are phrased
+/// at the graph — "add a node that emails the report". The chat route's
+/// deterministic intent detector reads that as a request to the company and
+/// opens a `todo` card, which is the same class of over-reach this issue is
+/// about, reached from the route rather than from the model. The control half
+/// matters as much as the confined half: the identical sentence on an ordinary
+/// thread still opens its card, so this narrows the copilot rather than
+/// disabling a feature.
+#[tokio::test]
+async fn a_copilot_thread_question_opens_no_board_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Deliberately the most actionable phrasing the copilot invites.
+    let ask = "build a node that emails the weekly report";
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": ask, "chat": "workflow-copilot:weekly_report"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    // Strict on the shape, like the control half below: `is_none_or` would pass
+    // on a body that is not a list at all, so a route that started answering an
+    // error object would go green here and panic there — reported as a failure
+    // of the control rather than of the thing under test.
+    let cards = board.as_array().expect("the board lists cards");
+    assert!(
+        cards.is_empty(),
+        "a copilot question left work on the board: {board}"
+    );
+
+    // The same rule reaches the other deterministic side effect a chat turn
+    // has: a complaint phrase on a copilot thread is the operator correcting a
+    // conversation about their graph, not feedback about the company's work.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({
+            "message": "no, that is wrong, this node keeps failing",
+            "chat": "workflow-copilot:weekly_report",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, filed) = send(&state, "GET", "/api/v1/company/feedback", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = filed.as_array().expect("the feedback list is an array");
+    assert!(
+        items.is_empty(),
+        "a copilot correction filed company feedback: {filed}"
+    );
+
+    // Control: the same sentence on the ordinary thread still opens a card, so
+    // the suppression is scoped to the copilot and not a regression of #246.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": ask})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = board.as_array().expect("the board lists cards");
+    assert_eq!(
+        cards.len(),
+        1,
+        "the ordinary thread must still open exactly one card: {board}"
+    );
+}
+
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
     let home_dir = home();
@@ -3453,6 +3537,266 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         output: None,
         plan: None,
     }
+}
+
+/// #358: a posted message can be withdrawn, and the text stops being served.
+///
+/// The shape the issue asks for, asserted end to end over the real HTTP stack:
+/// the row survives (position, author, time), the text does not, the withdrawal
+/// is attributed, the journal keeps both events, and nothing about a message
+/// nobody withdrew changes.
+#[tokio::test]
+async fn a_withdrawn_discussion_message_stops_being_served() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    const SECRET: &str = "sk-live-0000-DO-NOT-KEEP";
+    let (status, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": format!("blocked on the API key: {SECRET}") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let seq = posted["seq"].as_u64().expect("the post carries its seq");
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": "rotated it, we are unblocked" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, withdrawn) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(withdrawn["redacted"], true);
+    assert_eq!(
+        withdrawn["redactedBy"], "harness-admin",
+        "a withdrawal nobody's name is on is a message that can vanish quietly"
+    );
+    assert_eq!(
+        withdrawn["seq"], seq,
+        "the row keeps its place in the thread"
+    );
+
+    // The reload: what every reader of this card now gets.
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let thread = body["discussion"].as_array().expect("discussion array");
+    assert_eq!(thread.len(), 2, "the row is withdrawn, not deleted: {body}");
+    assert_eq!(thread[0]["seq"], seq);
+    assert_eq!(thread[0]["redacted"], true);
+    assert_eq!(thread[0]["redactedBy"], "harness-admin");
+    assert_eq!(
+        thread[0]["author"], "harness-admin",
+        "the poster is still named"
+    );
+    assert_eq!(
+        thread[1]["text"], "rotated it, we are unblocked",
+        "withdrawing one message must not touch another"
+    );
+    assert!(
+        thread[1].get("redacted").is_none(),
+        "an ordinary row must keep the shape a pre-#358 console renders: {thread:?}"
+    );
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains(SECRET),
+        "the withdrawn text is still being served on the detail read: {body}"
+    );
+
+    // The journal keeps both events: the post's existence is a fact, and the
+    // withdrawal is a second fact about it.
+    let events = runtime
+        .events()
+        .read_from(&company, crate::ports::types::EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.event,
+            CompanyEvent::TaskDiscussionRedacted { task_id, seq: s, .. }
+                if task_id == "t-1" && *s == seq
+        )),
+        "the withdrawal was not journaled"
+    );
+
+    // Idempotent: asking twice is not an error, and does not grow the journal.
+    let before = events.len();
+    let (status, again) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["redacted"], true);
+    let after = runtime
+        .events()
+        .read_from(&company, crate::ports::types::EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(
+        before, after,
+        "a repeated withdrawal appended a second tombstone"
+    );
+}
+
+/// #358: a `seq` that is not a discussion post on *this* card is a `404`, not a
+/// tombstone written into the journal against something else.
+#[tokio::test]
+async fn withdrawing_something_that_is_not_this_cards_post_is_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    for card in [
+        discussion_card("t-1", "Ship it"),
+        discussion_card("t-other", "Unrelated"),
+    ] {
+        runtime.tasks().upsert(&company, &card).await.unwrap();
+    }
+
+    let (_, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-other/discussion",
+        Some(json!({ "text": "another card's message" })),
+    )
+    .await;
+    let seq = posted["seq"].as_u64().unwrap();
+
+    // Another card's post, addressed through this card.
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A sequence position that holds no event at all.
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        "/api/v1/company/tasks/t-1/discussion/99999",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The other card's thread is untouched by either attempt.
+    let (_, other) = send(&state, "GET", "/api/v1/company/tasks/t-other", None).await;
+    let thread = other["discussion"].as_array().unwrap();
+    assert_eq!(thread.len(), 1);
+    assert_eq!(thread[0]["text"], "another card's message");
+    assert!(thread[0].get("redacted").is_none());
+}
+
+/// #358 + #335's paging: a withdrawal is applied even when the tombstone sits
+/// *newer* than the cursor the caller is paging back through.
+///
+/// The trap this pins: the discussion arm skips events at or after
+/// `discussionBefore`, and a tombstone is always newer than the post it
+/// withdraws. Applying the cursor to tombstones too would serve the original
+/// text to anybody who scrolled far enough back — the one reader most likely to
+/// be looking for it.
+#[tokio::test]
+async fn a_withdrawal_survives_paging_back_past_it() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    const SECRET: &str = "sk-live-PAGED-BACK";
+    let (_, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": SECRET })),
+    )
+    .await;
+    let seq = posted["seq"].as_u64().unwrap();
+
+    // Enough newer posts that the first one falls off the first page.
+    for n in 0..60 {
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t-1".into(),
+                    text: format!("message {n}"),
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Page back to the start of the thread, past the tombstone's own position.
+    let (_, first) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let oldest_on_page = first["discussion"].as_array().unwrap()[0]["seq"]
+        .as_u64()
+        .unwrap();
+    let (status, older) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/tasks/t-1?discussionBefore={oldest_on_page}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !serde_json::to_string(&older).unwrap().contains(SECRET),
+        "paging back served the withdrawn text: {older}"
+    );
+    let row = older["discussion"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["seq"] == seq)
+        .expect("the withdrawn row is on the older page");
+    assert_eq!(row["redacted"], true);
 }
 
 /// #335: the per-task Discussion tab's whole contract — a post persists, reads

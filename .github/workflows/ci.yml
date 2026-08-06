@@ -184,13 +184,47 @@ jobs:
       - name: Clippy (openhuman, tinycortex)
         run: cargo clippy --locked --no-deps --features openhuman,tinycortex --all-targets -- -D warnings
 
-      # `--lib` is LOAD-BEARING — do not widen it to a bare `cargo test`. There
-      # is no `tests/` directory, and the only other runnable target the feature
-      # set unlocks is the `live_company_turn` example, which dials a real
-      # inference backend and needs a credential. The build step above already
-      # proves it compiles; this step must never try to run it.
+      # `--tests` is LOAD-BEARING IN BOTH DIRECTIONS. Do not narrow it back to
+      # `--lib`, and do not widen it to a bare `cargo test`.
+      #
+      # Issue #475, why not `--lib`. `--lib` selects the library's unit tests and
+      # nothing else, so every integration target under `tests/` is excluded from
+      # this job — and this is the only job that has the features those targets
+      # need. The `Rust` job does select them (a bare `cargo test` includes
+      # `tests/`), but at DEFAULT features, where `one_card_per_message.rs`'s
+      # `#![cfg(feature = "openhuman")]` empties the file. One job had the
+      # feature and not the target, the other had the target and not the feature,
+      # so the 11-case suite that proves one operator message opens exactly one
+      # card (#463/#466) was built by nothing and ran nowhere: `cargo test
+      # --locked --test one_card_per_message` reported `0 passed`. A revert of
+      # the fix it guards would have been caught by no check in this file.
+      #
+      # This step's stated justification used to be "there is no `tests/`
+      # directory". That was a FACT ABOUT THE TREE, and #466 falsified it the day
+      # it merged, silently — nothing fails when a comment stops being true. The
+      # reason below is a property of the target selection instead, so it cannot
+      # expire the same way.
+      #
+      # Why not a bare `cargo test`: its default selection additionally runs the
+      # library's DOCTESTS, a distinct compile and link of the whole tree under
+      # this feature set for coverage the `rust` job's `cargo test` already
+      # provides, and it builds every example — including `live_company_turn`,
+      # whose `required-features = ["openhuman"]` this lane satisfies and which
+      # exists to dial a real inference backend with a real credential. `--tests`
+      # selects exactly the targets that assert: the lib and bin unit tests, plus
+      # every integration target under `tests/`, present and future.
       - name: Test (openhuman, tinycortex)
-        run: cargo test --locked --features openhuman,tinycortex --lib
+        run: cargo test --locked --features openhuman,tinycortex --tests
+
+      # The guard for the next one (issue #475). The step above runs whatever
+      # `tests/` holds, but "ran the target" and "the target ran anything" are
+      # different claims: a file whose crate-level `cfg` is not satisfied still
+      # builds, still links, and still exits 0 having executed nothing. That is
+      # exactly how a whole suite sat in the tree for weeks looking like
+      # coverage. This asserts a NUMBER per integration target, so the silent
+      # zero becomes a red check, and prints the counts into the run log.
+      - name: Assert every integration target actually runs
+        run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
 
       # Catches the combination traps no single feature set can: most often a
       # mandatory struct field constructed differently across feature arms.
@@ -231,6 +265,59 @@ jobs:
       - name: Test tool-belt contract (openhuman, mcp, telegram)
         run: cargo test --locked --features openhuman,mcp,telegram --lib harness::build::tests
 
+      # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
+      # EXECUTED by nothing. `Check (--all-features)` above builds every
+      # `tinyplace`-gated line and deliberately runs none of them, and no other
+      # `cargo test` line in this file names the feature — so the whole gate was
+      # covered for compilation and not at all for behaviour, and a logic defect
+      # behind it shipped green. Those are different claims, and only the second
+      # one is what a test suite is for: `src/economy/outbox.rs` carries a
+      # passing round-trip test for `Outbox::drain()` whose only caller in the
+      # entire tree is that test's own module (#454). Nothing ever ran the
+      # assertion, so nothing pointed out that the production drain it describes
+      # does not exist.
+      #
+      # FULL `--lib`, not a module filter — and this is the substance of the
+      # step, not a detail of it. `tinyplace` gates code across the tree, not
+      # just the economy adapter and its crypto primitives: company config, the
+      # runtime builder's economy wiring (in BOTH the `cfg` and the `cfg(not)`
+      # arm), the A2A server surface and the route that mounts it, and the
+      # platform-split key paths under `src/store/`. Narrowing to `economy::`
+      # would leave every one of those compiled and never run, which is the
+      # precise condition this step exists to end.
+      #
+      # The narrow shape of the belt-contract step above does NOT transfer here.
+      # That one is scoped because `mcp` changes what a tool belt *contains* and
+      # a single module pins that contract, so the rest of the run would be
+      # re-proving what an earlier lane already proved. `tinyplace` is the
+      # `openhuman,tinycortex` shape instead — a feature that changes behaviour
+      # at every site it gates — and that lane runs its whole suite for the same
+      # reason. The compile is what this costs; the compile is identical either
+      # way, so a filter would only discard results already paid for.
+      #
+      # `--lib` rather than `--tests` because no integration target under
+      # `tests/` carries a crate-level `cfg` on `tinyplace`; `--tests` would
+      # link an extra binary this feature set leaves empty. That does not
+      # reopen #475's hole. If such a target is ever added, `Assert every
+      # integration target actually runs` above fails it with `0 tests`, because
+      # that assertion sweeps EVERY target in the manifest whatever gates it —
+      # which is also why that script is not repeated here: on a lane without
+      # `openhuman` it would have to fail by design.
+      #
+      # A STEP on this job, not a fifth job: the vendored-submodule init and the
+      # system build dependencies this job already installs are exactly what
+      # this compile needs, and a separate job would repeat both plus a cold
+      # Rust cache to run a suite that finishes in seconds. Placed last so the
+      # cheaper cached steps still fail first. Split it out if this job's wall
+      # clock ever becomes the constraint — that is a pure CI-shape change with
+      # no argument riding on it.
+      #
+      # `--locked` per issue #251's rule for every graph-resolving invocation:
+      # this is a fifth distinct feature resolution, and without it this lane
+      # would be the one place CI silently re-resolves the dependency graph.
+      - name: Test (tinyplace)
+        run: cargo test --locked --features tinyplace --lib
+
       # Issue #467. The `Console E2E (live brain)` job below drives a host that
       # has an agent harness, so it needs a FEATURE-GATED binary — the default
       # one the `rust` job uploads answers a chat message with nothing, which is
@@ -243,10 +330,11 @@ jobs:
       # very nearly built.
       #
       # `mcp` on top of the job's own `openhuman,tinycortex`, because
-      # `mcp.spec.ts` needs the `mcp_call_tool` belt entry, which is gated on
-      # it. That is a fifth feature resolution, but a cheap one: the step above
-      # already compiled `openhuman_core` with `openhuman_core/mcp` enabled, so
-      # what recompiles here is this crate plus its bin, not the vendored tree.
+      # `mcp-agent.spec.ts` needs the `mcp_call_tool` belt entry, which is gated
+      # on it. That is another feature resolution, but a cheap one: the
+      # belt-contract step above already compiled `openhuman_core` with
+      # `openhuman_core/mcp` enabled, so what recompiles here is this crate plus
+      # its bin, not the vendored tree.
       #
       # `--bin`, not `--all-targets`: the lane needs a binary, and the tests and
       # examples under this feature set are already covered above.

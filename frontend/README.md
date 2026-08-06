@@ -200,7 +200,7 @@ statement about that host rather than a debt. Against a gated one they run:
 | `wiring.spec.ts` | a typed message reaches the backend and its reply renders | the harness + `mock-brain.mjs` |
 | `chat-to-card.spec.ts` (card chip) | an orchestrator opens a board card, and the chip survives a reload | a scripted tool choice (`SPAWNONE`) |
 | `workflow-run-history.spec.ts` (durable history) | a run is journaled and outlives the console | the workflow runner |
-| `mcp.spec.ts` | an operator installs a tool server and an agent calls it | `mcp-server.mjs` |
+| `mcp-agent.spec.ts` | an agent calls a tool on a registered MCP server | `mcp-server.mjs` |
 
 To run them:
 
@@ -224,11 +224,6 @@ host at them:
   tracks directive identity rather than trusting the transcript. Bind with
   `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
 
-Three tests in `chat-live-events.spec.ts` skip the other way, in the live lane
-only: they find the reply to their own turn by the offline brain's
-`You said: <text>`, which is precisely how they prove an SSE frame carried the
-answer to *that* message, and precisely why a different brain breaks them. The
-default lane runs them on every push.
 * [`test/e2e/mcp-server.mjs`](test/e2e/mcp-server.mjs) — an HTTP MCP server with
   two tools. HTTP, not stdio: this host rejects any MCP declaration carrying a
   `command`. Bind with `PW_MCP_FIXTURE_BIND` (default `127.0.0.1:8098`), or name
@@ -237,6 +232,14 @@ default lane runs them on every push.
 Against a host you brought up yourself (`PW_BASE_URL`), the flag still enables
 the four specs, but starting the fixtures and pointing the host at them is
 yours to do — this config will not reconfigure a host it did not launch.
+
+Some specs skip **the other way**, in the live lane only, and say so where they
+sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn
+by the offline brain's `You said: <text>` (precisely how they prove an SSE frame
+carried the answer to *that* message, and precisely why a different brain breaks
+them), and the Planning drag in `board-columns.spec.ts`, where a planner-attached
+host settles the card rather than leaving it parked. The default lane runs all of
+them on every push.
 
 The managed host starts from an **empty** environment and is handed only what it
 needs, so an inherited `OPENCOMPANY_PUBLIC_URL`, `OPENCOMPANY_MAIL_*`,

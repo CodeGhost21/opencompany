@@ -1039,10 +1039,22 @@ async fn run_chat(
     parent: Option<EventSeq>,
 ) -> Result<(CycleReport, Option<String>), ApiError> {
     runtime.ensure_running().await?;
+    // Whether this is a workflow copilot thread (issue #416): a conversation
+    // ABOUT one graph, not a request to the company. Read once, because both
+    // of the deterministic side effects below have to be suppressed for it.
+    let confined = crate::company::copilot::is_copilot_thread(message.chat.as_deref());
     // Operator-chat feedback intent: a complaint phrase ("that was wrong — flag
     // it") captures a feedback item alongside the normal cycle. Neutral chat
     // carries no intent, so ordinary messages are untouched.
-    let feedback_note = if let Some(category) = crate::feedback::detect_chat_intent(&message.text) {
+    //
+    // Suppressed on a copilot thread for the same reason the card below is: "no,
+    // that's wrong, this node keeps failing" is the operator correcting a
+    // conversation about their graph, and filing it as company feedback would
+    // record a complaint they did not make about work they were not discussing.
+    let feedback_note = if let Some(category) = (!confined)
+        .then(|| crate::feedback::detect_chat_intent(&message.text))
+        .flatten()
+    {
         runtime
             .capture_feedback(crate::feedback::FeedbackInput {
                 category,
@@ -1063,7 +1075,19 @@ async fn run_chat(
     // sub-tasks on top). Pure questions, greetings, and acknowledgements don't
     // fire, so the board fills with work, not small talk. Best-effort: a card
     // write failure must never sink the chat reply.
-    if let Some(title) = crate::company::task_intent::detect_task_intent(&message.text) {
+    //
+    // NOT on a workflow copilot thread (issue #416). A copilot question is
+    // phrased at the workflow — "add a node that emails the report", "why does
+    // this fail on Mondays" — and the intent detector reads the first of those
+    // as a request to the company, which would put a card on the board from a
+    // conversation the operator was having *about a graph*. The confinement in
+    // the harness stops the turn from acting; this stops the route from acting
+    // on its behalf, and it holds in every build because it is here rather than
+    // behind the `openhuman` feature.
+    if let Some(title) = (!confined)
+        .then(|| crate::company::task_intent::detect_task_intent(&message.text))
+        .flatten()
+    {
         // Keep the full message as the note only when the title was shortened
         // from it, so a one-line ask doesn't duplicate itself.
         let note =
@@ -1767,6 +1791,16 @@ struct StandingGrantDto {
     at_millis: u64,
     /// Epoch-millis it stops admitting calls.
     expires_at_millis: u64,
+    /// The slice of the tool it is confined to, when the tool's name is not the
+    /// whole of what it can do (issue #457) — a Composio toolkit, or absent.
+    ///
+    /// On the wire because a permission an operator cannot read is a permission
+    /// they cannot decide to revoke: a row saying only "act in one of its
+    /// connected accounts" does not tell them the grant reaches GitHub and not
+    /// their mailbox. Absent — not `null` — when there is nothing to narrow, so
+    /// the pre-#457 shape is byte-identical for every other tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
 }
 
 impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
@@ -1778,6 +1812,7 @@ impl From<crate::runtime::grants::StandingGrant> for StandingGrantDto {
             granted_by: g.granted_by,
             at_millis: g.at_millis,
             expires_at_millis: g.expires_at_millis,
+            scope: g.scope,
         }
     }
 }
@@ -5094,6 +5129,7 @@ mod test {
                 at_millis: 1_000,
                 expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                scope: None,
             });
 
         // Both addressing forms list it.

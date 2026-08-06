@@ -22,15 +22,22 @@
 //    "no cross-workflow leakage" criterion, enforced server-side rather than by
 //    this file remembering to filter.
 //
-//    **Read that precisely: it isolates TRANSCRIPTS, not authority.** The
-//    thread id picks the responder and the journal; it does not narrow the
-//    orchestrator's context or tools, which stay company-wide. Asking this
-//    copilot about another workflow is not prevented by the transport — only
-//    by the instruction in the composed prompt, which is advisory. That is a
-//    deliberate limit of reusing the chat seam rather than building a scoped
-//    agent, and it costs nothing in privilege: the operator is already
-//    authenticated to the company and can reach the same orchestrator from the
-//    Chat tab and every workflow route. See `docs/spec/runtime/api.md`.
+//    **It isolates TRANSCRIPTS.** One workflow's copilot never sees another's,
+//    and none of it appears in the team's chat.
+//
+//    Until issue #416 that was the *whole* of the scoping: the thread id picked
+//    the responder and the journal and narrowed nothing else, so the teammate
+//    answering was the company orchestrator with its full context and tools,
+//    and "answer only about this workflow" was an instruction in the prompt —
+//    advice, not a boundary. It cost nothing in privilege (the operator can
+//    reach the same orchestrator from the Chat tab), but it meant an answer
+//    about a workflow could be drawn from anywhere in the company.
+//
+//    The host now reads the thread itself. `workflow-copilot:<id>` runs a
+//    **confined turn**: an ephemeral agent with no tools, no company memory and
+//    no delegation, whose whole world is the message composed below. See
+//    `src/company/copilot.rs` (the convention) and `src/harness/confine.rs`
+//    (the boundary), plus `docs/spec/runtime/api.md`.
 // 3. **It rehydrates for free.** Because the exchange is journaled under that
 //    thread, `GET {scope}/chat/history?desk=<thread>` replays it after a reload,
 //    with no new storage and no new route.
@@ -57,6 +64,7 @@
 // ever fails.
 
 import type { OpenCompanyClient } from "./client";
+import { PROPOSAL_FENCE } from "./workflow-proposal";
 import type {
   WorkflowGraph,
   WorkflowRunOutcome,
@@ -126,17 +134,28 @@ export interface CopilotContext {
  */
 export function composeCopilotMessage(context: CopilotContext, question: string): string {
   const { graph, runs, runsKnown } = context;
-  const editable = graph.editable === false;
+  // `editable: false` means the graph is defined by a file in the company
+  // source tree. Named for what it IS rather than for the flag's polarity: this
+  // was `editable`, holding the negation of the field it was named after, and
+  // #415 adds two more branches keyed off it (whether to describe the proposal
+  // protocol at all, and what to tell the model it may do).
+  const sourceDefined = graph.editable === false;
 
   const lines: string[] = [
     `You are the workflow copilot for this company, answering about ONE saved workflow.`,
-    `Answer only about this workflow. If the question is about a different workflow, or about the company generally, say so instead of guessing.`,
+    // The host confines this turn (issue #416): it runs on an agent with no
+    // tools and no company memory, so this is a description of the turn's real
+    // boundary rather than an instruction it could step outside of. Kept in the
+    // message as well as in the host-side persona so the disclosure the panel
+    // shows the operator is built from the same text that was actually sent.
+    `Everything you know about it is below. You have no tools and no access to the rest of the company, so answer from this material only.`,
+    `If the question needs a different workflow or the wider company, say which part you cannot answer here and that it has to be asked in the company chat. Do not guess, and do not claim to have looked anything up.`,
     ``,
     `## Workflow`,
     `Name: ${graph.name}`,
     `Id: ${graph.id}`,
     graph.description ? `Description: ${graph.description}` : `Description: (none)`,
-    editable
+    sourceDefined
       ? `Editable from the console: NO — this workflow is defined by a file in the company source tree (workflows/${graph.id}.toml). You can explain it, but changes have to be made in the company repository, not here.`
       : `Editable from the console: yes, through the workflow editor.`,
     ``,
@@ -197,8 +216,34 @@ export function composeCopilotMessage(context: CopilotContext, question: string)
     ``,
     `## What you can and cannot do`,
     `You can explain this workflow, diagnose why its runs failed, and describe in words what should change.`,
-    `You CANNOT edit the workflow: this console does not apply copilot-authored changes. If a change is wanted, describe it precisely enough for a person to make it in the workflow editor. Do not claim to have made it.`,
+    `You CANNOT reach anything else in the company: no tools, no board, no teammates, no other workflow, no files. The host enforces this, so a call would be refused rather than answered.`,
+    // Issue #415. The proposal is DATA IN THE REPLY, not a capability: it is
+    // the operator's console that writes, through the same versioned
+    // `updateWorkflow` the editor uses, only after they have read the diff. So
+    // this instruction hands the model no reach it did not have — which is
+    // exactly why the confinement (#416) had to land first.
+    sourceDefined
+      ? `You CANNOT edit the workflow, and you must not propose an edit: this one is defined by a file in the company source tree, so the host refuses every write to it. Describe the change for someone to make in the company repository.`
+      : `You CANNOT apply a change yourself. What you CAN do is PROPOSE one: the operator reads it as a diff and applies it, or throws it away.`,
   );
+
+  if (!sourceDefined) {
+    lines.push(
+      ``,
+      `## Proposing a change`,
+      `When the operator asks for a change (and only then), end your reply with ONE fenced block of exactly this form, after your prose:`,
+      "```" + PROPOSAL_FENCE,
+      `{"summary": "one line saying what this does", "ops": [ … ]}`,
+      "```",
+      `Each op is one of:`,
+      `- {"op": "addNode", "node": {"id": "…", "kind": "…", "name": "…", …}} — a new step. Use the same fields the steps above show.`,
+      `- {"op": "updateNode", "id": "…", "set": {"field": value}} — change fields on an existing step. Only send the fields that change.`,
+      `- {"op": "removeNode", "id": "…"} — delete a step (its connections go with it).`,
+      `- {"op": "addEdge", "from": "…", "to": "…", "label": "optional"} — connect two steps.`,
+      `- {"op": "removeEdge", "from": "…", "to": "…"} — disconnect two steps.`,
+      `Rules: refer to steps by the ids listed above; never rename an id (that is a remove plus an add); propose the smallest change that answers the question; and say in your prose what the change does and why. If you are not confident enough to propose, say so and describe the change instead — a wrong proposal costs the operator more than no proposal.`,
+    );
+  }
 
   // Joined with the marker verbatim, so `questionOf` splits on exactly the
   // string this function used.

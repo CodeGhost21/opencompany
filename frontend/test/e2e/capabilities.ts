@@ -59,17 +59,19 @@ export const MOCK_BRAIN_BIND = process.env.PW_MOCK_BRAIN_BIND || "127.0.0.1:8099
 export const MCP_FIXTURE_BIND = process.env.PW_MCP_FIXTURE_BIND || "127.0.0.1:8098";
 
 /**
- * The **URL** of an MCP server the MCP spec may install and call.
+ * The **URL** of an MCP server an agent may be told to call.
  *
- * A URL, not a script path: this host has no stdio transport at all
- * (`src/company/mcp.rs` rejects any declaration carrying a `command`), so the
- * `node /path/to/server.mjs` form the variable used to carry could never have
- * been installed. Nothing noticed, because the spec that reads it had never
- * run.
+ * `PW_MCP_SERVER` was retired in #414, and rightly: it carried a path to a
+ * *stdio* server, which this host rejects outright (`src/company/mcp.rs` refuses
+ * any declaration with a `command`), so it gated a spec that could not have
+ * passed even had the fixture existed. `mcp.spec.ts` now drives the console
+ * surface against a default host and needs nothing.
  *
- * Defaulted only when this run manages the host, in which case it also started
- * `mcp-server.mjs` and the address is not the caller's to know. Against a host
- * you brought, name your own.
+ * It comes back here carrying a URL, for the half that page cannot reach: an
+ * *agent* calling a tool on a real server over the real transport
+ * (`mcp-agent.spec.ts`), which needs the harness and therefore the live-brain
+ * lane. That lane starts `mcp-server.mjs`, which is why this is defaulted only
+ * when the run manages the host. Against a host you brought, name your own.
  */
 export const MCP_SERVER =
   process.env.PW_MCP_SERVER ||

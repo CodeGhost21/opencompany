@@ -15,12 +15,12 @@
 
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::steer::{InflightEntry, SteerAction, SteerError, cap_redirect};
+use crate::company::steer::{InflightEntry, MAX_REDIRECT_CHARS, SteerAction, SteerError};
 use crate::error::OpenCompanyError;
 use crate::ports::tasks::{
     BOARD_COLUMNS, COLUMN_TODO, TaskRecord, cap_discussion, is_board_column,
@@ -54,6 +54,13 @@ pub fn router() -> Router<AppState> {
         ))
         .merge(scoped("/tasks/{task_id}/steer", post(steer_task)))
         .merge(scoped("/tasks/{task_id}/discussion", post(post_discussion)))
+        // Issue #358. `DELETE` on one message, under the same `ScopedCompany`
+        // guard as every other task write — see `redact_discussion` for why
+        // that is the right authority rather than an admin-only one.
+        .merge(scoped(
+            "/tasks/{task_id}/discussion/{seq}",
+            delete(redact_discussion),
+        ))
 }
 
 /// A task card as the console renders it.
@@ -177,6 +184,14 @@ struct PatchTask {
 #[derive(Debug, Deserialize)]
 struct TaskPath {
     task_id: String,
+}
+
+/// The sub-resource path for one discussion message (issue #358): the card and
+/// the journal sequence the post was written at.
+#[derive(Debug, Deserialize)]
+struct DiscussionPath {
+    task_id: String,
+    seq: u64,
 }
 
 /// `GET …/tasks` — the whole board, newest-updated first. The console reads
@@ -742,8 +757,29 @@ pub(crate) struct DiscussionMessage {
     /// an email address and never a user id — a thread is read by every member
     /// of the company.
     author: String,
-    /// The message text, exactly as posted (codepoint-capped on write).
+    /// The message text, exactly as posted (codepoint-capped on write) — or
+    /// [`REDACTED_DISCUSSION_TEXT`](crate::ports::tasks::REDACTED_DISCUSSION_TEXT)
+    /// once withdrawn (issue #358). The original text is never served after a
+    /// withdrawal, on this route or any other.
     text: String,
+    /// Whether this message was withdrawn (issue #358).
+    ///
+    /// Sent only when true, so every row a pre-#358 console ever rendered keeps
+    /// exactly the shape it had. A console that does not know the field still
+    /// shows the placeholder text rather than the withdrawn message, because
+    /// the substitution happens server-side — the flag only lets a console that
+    /// *does* know style the row as withdrawn instead of as something a person
+    /// typed.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    redacted: bool,
+    /// Who withdrew it, as the same kind of label as `author`. Present only on
+    /// a withdrawn row.
+    ///
+    /// A removal nobody's name is on is one a member can make quietly from a
+    /// thread other people were reading, which is a different product than
+    /// "anyone may tidy up a mistake in the open".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    redacted_by: Option<String>,
 }
 
 /// The post-a-message body (`{text}`).
@@ -1114,6 +1150,15 @@ struct DiscussionRow {
     at_millis: u64,
     text: String,
     by: Option<crate::ports::types::Actor>,
+    /// Set when a later [`CompanyEvent::TaskDiscussionRedacted`] supersedes this
+    /// post (issue #358): the withdrawer, or `None` for a machine credential.
+    ///
+    /// `Option<Option<Actor>>` reads awkwardly and means exactly what it says:
+    /// the outer layer is "was it withdrawn", the inner is "by a named person".
+    /// Collapsing them would make an anonymous withdrawal indistinguishable
+    /// from no withdrawal at all, which is the one confusion this row cannot
+    /// afford.
+    redacted_by: Option<Option<crate::ports::types::Actor>>,
 }
 
 impl DiscussionRow {
@@ -1136,12 +1181,45 @@ impl DiscussionRow {
             // transcript takes for an unattributed operator message.
             _ => "operator".to_string(),
         };
+        // Issue #358. The substitution happens HERE, on the way out, rather
+        // than being left to the caller: this is the one place a journalled
+        // post becomes a wire row, so a withdrawn message cannot reach a reader
+        // through a surface that forgot to check the flag.
+        let (text, redacted, redacted_by) = match self.redacted_by {
+            Some(by) => (
+                crate::ports::tasks::REDACTED_DISCUSSION_TEXT.to_string(),
+                true,
+                Some(label_for(&by, authors)),
+            ),
+            None => (self.text, false, None),
+        };
         DiscussionMessage {
             seq: self.seq,
             at_millis: self.at_millis,
             author,
-            text: self.text,
+            text,
+            redacted,
+            redacted_by,
         }
+    }
+}
+
+/// An [`Actor`](crate::ports::types::Actor) as a label a reader recognizes.
+///
+/// The same three-way resolution the author label above uses — a roster display
+/// name, `someone` for a user no longer on the roster, `operator` for a machine
+/// credential — factored out because #358 gave the row a second person to name.
+fn label_for(
+    actor: &Option<crate::ports::types::Actor>,
+    authors: &std::collections::HashMap<String, String>,
+) -> String {
+    use crate::ports::types::ActorKind;
+    match actor {
+        Some(actor) if actor.kind == ActorKind::User => authors
+            .get(&actor.id)
+            .cloned()
+            .unwrap_or_else(|| "someone".to_string()),
+        _ => "operator".to_string(),
     }
 }
 
@@ -1358,6 +1436,10 @@ fn fold_page(
                 at_millis: ev.at_millis,
                 text: text.clone(),
                 by: by.clone(),
+                // Filled in below if a later tombstone names this seq. The log
+                // is walked forward, so the post is always seen before the
+                // event that withdraws it.
+                redacted_by: None,
             });
             // Keep the newest `first`, dropping from the front as the traversal
             // moves forward. The thread is still read oldest-first (the window
@@ -1367,6 +1449,27 @@ fn fold_page(
                 fold.discussion.remove(0);
                 fold.discussion_has_more = true;
             }
+            continue;
+        }
+        // Issue #358: a withdrawal supersedes a post this fold may already be
+        // holding. Deliberately NOT subject to the `before_seq` cursor above:
+        // the cursor pages backwards through the thread, so a tombstone written
+        // after the cursor is exactly the one that withdraws a message the
+        // caller is about to read — skipping it would serve the original text
+        // to anybody who scrolled far enough back.
+        if let CompanyEvent::TaskDiscussionRedacted {
+            task_id: id,
+            seq,
+            by,
+        } = &ev.event
+            && id == task_id
+        {
+            if let Some(row) = fold.discussion.iter_mut().find(|row| row.seq == *seq) {
+                row.redacted_by = Some(by.clone());
+            }
+            // A tombstone naming a post already dropped from the window needs
+            // nothing done: the row it withdraws is not in this page, and the
+            // page that does hold it folds this same event on its own pass.
             continue;
         }
         let entry = match &ev.event {
@@ -1580,9 +1683,174 @@ async fn post_discussion(
         at_millis,
         text,
         by,
+        // A message cannot be withdrawn before it exists: the tombstone (#358)
+        // names this `seq`, and this is the request that mints it.
+        redacted_by: None,
     }
     .into_message(&authors);
     Ok((StatusCode::CREATED, Json(message)))
+}
+
+/// `DELETE …/tasks/{task_id}/discussion/{seq}` — withdraw a posted message
+/// (issue #358).
+///
+/// ## What it does, and what it deliberately does not
+///
+/// It appends [`CompanyEvent::TaskDiscussionRedacted`], which supersedes the
+/// post at `seq`. It does **not** rewrite or remove the original event: the log
+/// is append-only, sequence numbers are stable ids other events name, and
+/// import replays a bundle from zero to reproduce them — three properties a
+/// mutation here would break for the sake of one tab.
+///
+/// What the withdrawal buys is the two things that actually matter to somebody
+/// who has just pasted a credential into a card:
+///
+/// * **every read surface stops serving the text.** The substitution is in the
+///   fold, so the console thread and the task-detail export document (#352,
+///   which renders the same assembled value) change together and cannot drift;
+/// * **the bundle stops carrying it.** [`store::export`](crate::store::export)
+///   applies the same substitution to `events.jsonl`, so a round trip cannot
+///   resurrect the message — the half that turns a permanent record into a
+///   portable one.
+///
+/// It is not an at-rest erasure on the instance that already holds the bytes,
+/// and the route does not pretend to be: rotating a leaked secret is still the
+/// remedy. See `docs/modules/server/README.md`.
+///
+/// ## Who may
+///
+/// [`ScopedCompany`] — any member of the company, the same authority every
+/// other task write on this router carries. Not admin-only, and that is a
+/// deliberate match rather than an oversight: `DELETE …/tasks/{task_id}` lets
+/// the same member remove the entire card, thread and all, so gating one
+/// message above the card that contains it would be an incoherent boundary. The
+/// withdrawal is attributed instead — `by` names whoever did it, and the thread
+/// says so beside the row.
+///
+/// ## Answers
+///
+/// `200` with the withdrawn row as every reader now sees it. `404` when the
+/// card is unknown, or when `seq` names anything other than a discussion post
+/// on *this* card — a tombstone that pointed at another task's post, or at a
+/// dispatch, would be a way to write nonsense into the journal. Withdrawing an
+/// already-withdrawn message is a no-op success: a removal asked for twice has
+/// still happened, and a `409` there would only make a retry look like a
+/// failure.
+async fn redact_discussion(
+    company: ScopedCompany,
+    Path(DiscussionPath { task_id, seq }): Path<DiscussionPath>,
+) -> Result<Json<DiscussionMessage>, ApiError> {
+    use crate::ports::types::EventSeq;
+
+    let target = EventSeq::new(seq);
+    let stored = company
+        .runtime
+        .events()
+        .read_from(company.id(), target, 1)
+        .await?
+        .into_iter()
+        .next()
+        .filter(|stored| stored.seq == target)
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::NotFound(format!(
+                "no discussion message {seq} on task {task_id}"
+            )))
+        })?;
+
+    // The event at that position must be a post on THIS card. Anything else —
+    // another task's post, a dispatch, a chat reply — is a 404 rather than a
+    // silently written tombstone nothing will ever fold.
+    let (posted_at, text, posted_by) = match &stored.event {
+        CompanyEvent::TaskDiscussionPosted {
+            task_id: id,
+            text,
+            by,
+        } if *id == task_id => (stored.at_millis, text.clone(), by.clone()),
+        _ => {
+            return Err(ApiError(OpenCompanyError::NotFound(format!(
+                "no discussion message {seq} on task {task_id}"
+            ))));
+        }
+    };
+
+    // Already withdrawn: answer the row as it stands rather than appending a
+    // second tombstone. Two tombstones for one post would fold identically, so
+    // this is about not growing the journal on a retry.
+    let existing = find_redaction(&company, &task_id, seq).await?;
+    let redacted_by = match existing {
+        Some(by) => by,
+        None => {
+            let by = company.actor.clone();
+            company
+                .runtime
+                .events()
+                .append(
+                    company.id(),
+                    CompanyEvent::TaskDiscussionRedacted {
+                        task_id: task_id.clone(),
+                        seq,
+                        by: by.clone(),
+                    },
+                )
+                .await?;
+            by
+        }
+    };
+
+    let authors = crate::server::chat_history::author_labels(&company.runtime).await?;
+    let message = DiscussionRow {
+        seq,
+        at_millis: posted_at,
+        // Carried and then dropped by `into_message`, which substitutes the
+        // placeholder for a withdrawn row. Never sent.
+        text,
+        by: posted_by,
+        redacted_by: Some(redacted_by),
+    }
+    .into_message(&authors);
+    Ok(Json(message))
+}
+
+/// The existing withdrawal of `seq` on `task_id`, if the thread already carries
+/// one.
+///
+/// Walks the journal rather than the folded page because the fold is windowed:
+/// a post far enough back to have been dropped from the page is exactly the one
+/// a retry is most likely to name.
+async fn find_redaction(
+    company: &ScopedCompany,
+    task_id: &str,
+    seq: u64,
+) -> Result<Option<Option<crate::ports::types::Actor>>, ApiError> {
+    use crate::ports::types::EventSeq;
+
+    let mut next = seq + 1;
+    loop {
+        let page = company
+            .runtime
+            .events()
+            .read_from(company.id(), EventSeq::new(next), TIMELINE_PAGE)
+            .await?;
+        if page.is_empty() {
+            return Ok(None);
+        }
+        for stored in &page {
+            if let CompanyEvent::TaskDiscussionRedacted {
+                task_id: id,
+                seq: target,
+                by,
+            } = &stored.event
+                && id == task_id
+                && *target == seq
+            {
+                return Ok(Some(by.clone()));
+            }
+        }
+        next = page
+            .last()
+            .map(|stored| stored.seq.value() + 1)
+            .unwrap_or(next);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1656,8 +1924,9 @@ async fn list_inflight(company: ScopedCompany) -> Result<Json<Vec<InflightCard>>
 /// `POST …/tasks/{task_id}/steer` — apply an operator steer to an in-flight run.
 ///
 /// Validation (all `400`): unknown action; `cancel` without `confirm: true`;
-/// `redirect` without a non-empty `instruction`. An unknown key is `404`; a card
-/// that exists but is not in flight is `409`. On accept the run's control is set,
+/// `redirect` without a non-empty `instruction`; `redirect` with an instruction
+/// longer than [`MAX_REDIRECT_CHARS`]. An unknown key is `404`; a card that
+/// exists but is not in flight is `409`. On accept the run's control is set,
 /// a best-effort [`CompanyEvent::TaskSteered`] is journaled, and the route
 /// returns `202 Accepted` (the disposition lands on the card asynchronously).
 async fn steer_task(
@@ -1682,8 +1951,19 @@ async fn steer_task(
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
                 .ok_or_else(|| bad("redirect requires a non-empty instruction"))?;
+            // Refuse rather than silently cap. The operator is synchronously
+            // present and the console surfaces this 400, so telling them the
+            // instruction is too long beats handing the agent a halved one that
+            // reads — in the turn and in the audit trail — exactly like the
+            // whole of what they typed. Count characters, never bytes.
+            let chars = instruction.chars().count();
+            if chars > MAX_REDIRECT_CHARS {
+                return Err(bad(&format!(
+                    "redirect instruction is {chars} characters; the limit is {MAX_REDIRECT_CHARS}"
+                )));
+            }
             SteerAction::Redirect {
-                instruction: cap_redirect(instruction),
+                instruction: instruction.to_string(),
             }
         }
         other => return Err(bad(&format!("unknown steer action '{other}'"))),
@@ -1854,5 +2134,187 @@ mod durations_test {
     fn a_reader_clock_behind_the_host_does_not_go_backwards() {
         let d = TaskDurations::compute(&[entry(T0, "dispatched", None)], None, T0 + 300_000);
         assert_eq!(d.worked_at(T0), 300_000);
+    }
+}
+
+/// The redirect bound at the route boundary: an operator who typed too much is
+/// told so, and one who typed exactly the limit gets every character through.
+#[cfg(test)]
+mod steer_redirect_test {
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::company::steer::InflightKind;
+    use crate::ports::types::{CompanyId, CompanyRecord, EventSeq};
+    use crate::runtime::RuntimeBuilder;
+    use crate::server::router;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, AppState};
+
+    fn manifest() -> CompanyManifest {
+        toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .unwrap()
+    }
+
+    /// A company with one run already in flight under the key `active`, so the
+    /// steer route reaches its accept path. The caller must hold the returned
+    /// registration guard: dropping it deregisters the run.
+    async fn state_with_inflight_run(
+        home: &std::path::Path,
+    ) -> (AppState, crate::company::steer::RegistrationGuard) {
+        use crate::ports::CompanyStore;
+        let id = CompanyId::new("acme");
+        FsCompanyStore::new(home.to_path_buf())
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let guard = runtime.steer().register(
+            &id,
+            InflightEntry {
+                key: "active".into(),
+                task_id: Some("active".into()),
+                kind: InflightKind::Task,
+                title: "Active".into(),
+                agent_id: "ceo".into(),
+                started_at_millis: 1,
+                pending_action: None,
+            },
+        );
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        (state, guard)
+    }
+
+    async fn steer(state: &AppState, body: Value) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/company/tasks/active/steer")
+            .header("content-type", "application/json")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, value)
+    }
+
+    /// The instruction the run's audit event recorded, if any.
+    async fn journaled_redirect(state: &AppState) -> Option<String> {
+        let company = CompanyId::new("acme");
+        let runtime = state.registry().get(&company).unwrap();
+        runtime
+            .events()
+            .read_from(&company, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap()
+            .into_iter()
+            .find_map(|stored| match stored.event {
+                CompanyEvent::TaskSteered { instruction, .. } => instruction,
+                _ => None,
+            })
+    }
+
+    #[tokio::test]
+    async fn an_over_length_redirect_is_refused_naming_the_bound() {
+        let home = tempfile::Builder::new()
+            .prefix("opencompany-steer-")
+            .tempdir()
+            .unwrap();
+        let (state, _inflight) = state_with_inflight_run(home.path()).await;
+
+        let too_long = "a".repeat(MAX_REDIRECT_CHARS + 1);
+        let (status, body) = steer(
+            &state,
+            json!({"action": "redirect", "instruction": too_long}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        let message = body["error"].as_str().unwrap_or_default();
+        assert!(
+            message.contains(&MAX_REDIRECT_CHARS.to_string()),
+            "the refusal names the limit: {message}"
+        );
+        assert!(
+            message.contains(&(MAX_REDIRECT_CHARS + 1).to_string()),
+            "the refusal names the actual length: {message}"
+        );
+        assert!(
+            journaled_redirect(&state).await.is_none(),
+            "a refused redirect never reaches the run or the audit trail"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_over_length_multibyte_redirect_is_refused_not_split() {
+        let home = tempfile::Builder::new()
+            .prefix("opencompany-steer-")
+            .tempdir()
+            .unwrap();
+        let (state, _inflight) = state_with_inflight_run(home.path()).await;
+
+        // Every character is 2 bytes, so a byte-indexed bound would land
+        // mid-codepoint and panic. The route counts characters.
+        let too_long = "é".repeat(MAX_REDIRECT_CHARS + 1);
+        let (status, body) = steer(
+            &state,
+            json!({"action": "redirect", "instruction": too_long}),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            body["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(&(MAX_REDIRECT_CHARS + 1).to_string()),
+            "length is counted in characters, not bytes: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_at_limit_redirect_is_accepted_verbatim() {
+        let home = tempfile::Builder::new()
+            .prefix("opencompany-steer-")
+            .tempdir()
+            .unwrap();
+        let (state, _inflight) = state_with_inflight_run(home.path()).await;
+
+        let exact = "a".repeat(MAX_REDIRECT_CHARS);
+        let (status, _) = steer(&state, json!({"action": "redirect", "instruction": exact})).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(
+            journaled_redirect(&state).await.as_deref(),
+            Some(exact.as_str()),
+            "an at-limit instruction reaches the run whole — no cut, no marker"
+        );
     }
 }
