@@ -13,9 +13,15 @@ import { AGENT_FIELDS, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
  *
  * `readOnly` is a predicate rather than a boolean because editability is
  * per-field and decided by the **host**: the detail response carries an
- * `editable` list, and a manifest teammate's fields are not in it. A read-only
- * field is still rendered, disabled, because "you cannot change this here" is
- * information an operator needs; hiding it would just recreate the dead end.
+ * `editable` list, and a manifest teammate's fields are not in it. A locked
+ * field is still rendered, because "you cannot change this here" is information
+ * an operator needs; hiding it would just recreate the dead end.
+ *
+ * Locked means the native `readOnly`, NOT `disabled`. A disabled input is
+ * removed from the tab order and from the accessibility tree's interactive
+ * surface, so the very values this screen exists to show would be unreachable
+ * by keyboard and awkward to select or copy. `readOnly` refuses the edit and
+ * keeps the value reachable, which is the behaviour a read-only field wants.
  */
 export function AgentFields({
   idPrefix,
@@ -43,7 +49,7 @@ export function AgentFields({
                 id={id}
                 rows={4}
                 value={draft[field.key]}
-                disabled={locked}
+                readOnly={locked}
                 onChange={(e) => onChange(field.key, e.target.value)}
                 placeholder={field.placeholder}
                 data-testid={`agent-field-${field.key}`}
@@ -52,7 +58,7 @@ export function AgentFields({
               <Input
                 id={id}
                 value={draft[field.key]}
-                disabled={locked}
+                readOnly={locked}
                 onChange={(e) => onChange(field.key, e.target.value)}
                 placeholder={field.placeholder}
                 data-testid={`agent-field-${field.key}`}

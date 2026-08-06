@@ -69,10 +69,10 @@ use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner, generate_id};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
 ///
-/// Re-exported from `crate::company::types` rather than declared here (issue
-/// #264): the console's agent detail route has to name the same tier in the
-/// default build, where this module does not compile.
-pub use crate::company::types::ORCHESTRATOR_TIER;
+/// Re-exported from [`crate::company`] rather than declared here (issue #264):
+/// the console's agent detail route has to name the same tier in the default
+/// build, where this module does not compile.
+pub use crate::company::ORCHESTRATOR_TIER;
 
 /// Max delegations one orchestrator turn may make (v1 cap) — delegation is
 /// bounded so a runaway turn can't fan out unboundedly.
@@ -113,13 +113,13 @@ pub const REVIEW_TASK_TOOL: &str = "review_task";
 /// roster). The fallback is what keeps a company with no tagged orchestrator
 /// answering exactly as it did before this cell.
 ///
-/// Delegates to [`crate::company::types::orchestrator_id`] (issue #264) so the
+/// Delegates to [`crate::company::orchestrator_id`] (issue #264) so the
 /// harness and the console's agent detail route answer "who is the
 /// orchestrator?" from one rule. A second copy of the fallback here would let
 /// the console label a teammate a worker while the harness handed it the
 /// orchestrator's tools.
 pub fn orchestrator_id(agents: &[ManifestAgent]) -> Option<String> {
-    crate::company::types::orchestrator_id(agents).map(str::to_string)
+    crate::company::orchestrator_id(agents).map(str::to_string)
 }
 
 /// Whether `tool` is one of the orchestrator's in-cycle delegation / roster-write

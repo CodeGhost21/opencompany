@@ -22,7 +22,43 @@ import { initials, TEAM_TONES, toneFor } from "@/lib/team";
 import { cn } from "@/lib/utils";
 import { AgentFields } from "@/views/team/AgentFields";
 
-type Load = "loading" | "ready" | "missing" | "unsupported";
+type Load = "loading" | "ready" | "missing" | "unsupported" | "error";
+
+/**
+ * Why a detail read failed, in the operator's terms rather than the wire's.
+ *
+ * A `404` from `GET …/team/{agentId}` is **two different facts**, and the status
+ * cannot tell them apart: a host that predates this route 404s the path it does
+ * not serve, and a host that serves it 404s a teammate that is gone. Saying "no
+ * such teammate" to the first sends an operator looking for a deletion that
+ * never happened; saying "this host is too old" to the second hides a real
+ * removal behind a version complaint.
+ *
+ * The roster settles it, but only if the right question is asked. "Did `GET
+ * …/team` answer?" is not enough — the roster route is the *older* one, so an
+ * out-of-date host answers it perfectly. The question that separates the two is
+ * whether the roster still **contains this agent**:
+ *
+ * | `GET …/team` | outcome |
+ * |---|---|
+ * | lists this agent | the host has the roster but not the detail route → `unsupported` |
+ * | omits this agent | the host serves both and the teammate is gone → `missing` |
+ * | fails too | nothing is reachable; do not guess → `error` |
+ *
+ * Anything that is not a `404` — a transport failure, a `500` — is `error`. It
+ * used to fall into `unsupported`, which told an operator their host was too old
+ * when their network had simply dropped.
+ */
+async function classifyFailure(
+  error: unknown,
+  roster: () => Promise<{ id: string }[]>,
+  agentId: string,
+): Promise<Exclude<Load, "loading" | "ready">> {
+  if (!(error instanceof ApiError) || error.status !== 404) return "error";
+  const members = await roster().catch(() => null);
+  if (members === null) return "error";
+  return members.some((member) => member.id === agentId) ? "unsupported" : "missing";
+}
 
 /**
  * One agent, opened (issue #264).
@@ -37,14 +73,15 @@ type Load = "loading" | "ready" | "missing" | "unsupported";
  * ## Read-only is a fact about the agent, not a state of this screen
  *
  * A **manifest** teammate is declared in the company's version-controlled
- * `company.toml`. Its fields are shown, disabled, with the reason next to them:
+ * `company.toml`. Its fields are shown read-only, with the reason next to them:
  * the console does not rewrite the blueprint, so the edit belongs in the file.
  * An **overlay** teammate was added here and is edited here.
  *
  * Which is which comes from the host's own `editable` list rather than from a
  * rule this file re-implements. A console that decided for itself would
  * eventually offer a field the host refuses, and the operator would meet the
- * disagreement as a failed save instead of as a disabled input.
+ * disagreement as a failed save instead of as a field that will not take an
+ * edit.
  */
 export function AgentDetailView({
   client,
@@ -71,12 +108,8 @@ export function AgentDetailView({
       setDraft(draftFrom(detail));
       setLoad("ready");
     } catch (error) {
-      // A 404 is two different facts and they need different words: this host
-      // has no per-agent route at all, or it has one and this teammate is gone.
-      // Telling an operator "no such teammate" about a host that simply predates
-      // the surface would send them looking for a deletion that never happened.
-      setLoad(error instanceof ApiError && error.status === 404 ? "missing" : "unsupported");
       setAgent(null);
+      setLoad(await classifyFailure(error, () => client.listTeam(company), agentId));
     }
   }, [client, company, agentId]);
 
@@ -131,6 +164,13 @@ export function AgentDetailView({
           <EmptyState
             title="This host can't open an agent yet."
             body="Opening an agent needs a newer host. The roster still works."
+          />
+        )}
+
+        {load === "error" && (
+          <EmptyState
+            title="Couldn't load this agent."
+            body="The company host didn't answer. Try again in a moment."
           />
         )}
 
@@ -280,7 +320,12 @@ function Tools({ agent }: { agent: AgentDetailDto }) {
     >
       {summary.effective.length === 0 ? (
         <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
-          This agent has no tools. Nothing it asked for is covered by the company tool list.
+          {/* Both ways of holding nothing land here, and they are not the same
+              fact. An agent that asked for nothing under a company that allows
+              nothing has been refused nothing. */}
+          {summary.standardGrant
+            ? "This agent has no tools, because the company allows none."
+            : "This agent has no tools. Nothing it asked for is covered by the company tool list."}
         </p>
       ) : (
         <div className="flex flex-wrap gap-2" data-testid="agent-tools">

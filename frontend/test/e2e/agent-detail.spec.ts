@@ -110,16 +110,21 @@ test("desk membership is on the agent, and an agent is reachable by link", async
 test("an agent defined in the console can be read back and edited", async ({ page }) => {
   const role = "Spec Runner";
 
-  // Define one through the dialog the issue calls create-only.
-  await page.getByRole("button", { name: "Add member" }).first().click();
-  const dialog = page.getByRole("dialog");
-  await dialog.getByTestId("agent-field-name").fill("Detail Spec");
-  await dialog.getByTestId("agent-field-role").fill(role);
-  await dialog.getByTestId("agent-field-description").fill("Original instructions.");
-  await dialog.getByRole("button", { name: "Add member" }).click();
-  await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
-
+  // The `try` opens BEFORE the teammate is created, not after. The POST lands
+  // as soon as the dialog is submitted, so a failure in the assertion that
+  // follows it would otherwise skip the cleanup and leave the teammate on the
+  // host — which breaks the next run of a spec that is meant to be repeatable,
+  // and leaves a second card for `card(page, role)` to match.
   try {
+    // Define one through the dialog the issue calls create-only.
+    await page.getByRole("button", { name: "Add member" }).first().click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByTestId("agent-field-name").fill("Detail Spec");
+    await dialog.getByTestId("agent-field-role").fill(role);
+    await dialog.getByTestId("agent-field-description").fill("Original instructions.");
+    await dialog.getByRole("button", { name: "Add member" }).click();
+    await expect(card(page, role)).toBeVisible({ timeout: 30_000 });
+
     // Open it. This is the half that was impossible: the roster was write-once
     // per member, so iterating on an agent meant deleting it and starting over.
     await card(page, role).getByTestId("team-card-open").click();

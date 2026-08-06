@@ -253,14 +253,8 @@ async fn edit_agent(
         .into_response());
     }
 
-    let name = match trimmed_field(body.name.as_deref(), "name") {
-        Err(refusal) => return Err(refusal),
-        Ok(value) => value,
-    };
-    let role = match trimmed_field(body.role.as_deref(), "role") {
-        Err(refusal) => return Err(refusal),
-        Ok(value) => value,
-    };
+    let name = trimmed_field(body.name.as_deref(), "name")?;
+    let role = trimmed_field(body.role.as_deref(), "role")?;
 
     {
         let agent = record
@@ -384,8 +378,7 @@ async fn detail(
             AgentSource::Manifest => Vec::new(),
         },
         tier,
-        is_orchestrator: crate::company::types::orchestrator_id(&record.manifest.agents)
-            == Some(agent_id),
+        is_orchestrator: crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id),
         tools: AgentToolsDto {
             requested,
             company_allow,
