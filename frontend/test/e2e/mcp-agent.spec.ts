@@ -150,14 +150,26 @@ test("an agent calls a tool on a registered MCP server and shows the result", as
     // The host persists runtime servers in its secret store, so a spec that
     // failed half way would otherwise leave this one registered for every later
     // run against the same data root.
-    const removed = await page.request.delete(`/api/v1/company/mcp/servers/${server}`);
-    // Checked, but only when the body got that far: an assertion that throws
-    // out of a `finally` replaces the real failure with a complaint about
-    // cleanup, which is the harder one to debug of the two.
+    //
+    // NOTHING here may throw past a failing body. An exception raised in a
+    // `finally` replaces the error already travelling out of the `try`, so a
+    // cleanup complaint would erase the real failure — the harder of the two to
+    // debug, and the one worth keeping. That covers both ways this can go
+    // wrong: `page.request.delete` REJECTS on a transport failure (it does not
+    // return a response to inspect), and the status check is an assertion.
+    // Both are therefore reported only when the body itself passed.
+    let removed: Awaited<ReturnType<typeof page.request.delete>> | undefined;
+    let transportError: unknown;
+    try {
+      removed = await page.request.delete(`/api/v1/company/mcp/servers/${server}`);
+    } catch (error) {
+      transportError = error;
+    }
     if (bodyPassed) {
+      if (transportError) throw transportError;
       expect(
-        removed.ok(),
-        `removing ${server} failed: ${removed.status()} ${await removed.text()}`,
+        removed!.ok(),
+        `removing ${server} failed: ${removed!.status()} ${await removed!.text()}`,
       ).toBeTruthy();
     }
   }
