@@ -71,6 +71,20 @@ function bubbles(page: Page): Locator {
 }
 
 /**
+ * The bubble carrying the reply to `marker`, in the open transcript.
+ *
+ * Scoped to a bubble, not matched across the page: the rail renders a one-line
+ * preview of each channel's last message, so a bare
+ * `getByText("You said: <marker>")` resolves to two elements the moment the
+ * preview catches up — the assertion then fails on strict mode rather than on
+ * anything it was written to check, and only sometimes, depending on which
+ * arrives first. Found while standing up the live-brain lane (#467).
+ */
+function reply(page: Page, marker: string): Locator {
+  return bubbles(page).filter({ hasText: `You said: ${marker}` });
+}
+
+/**
  * The bubble count, once the channel's rehydration has stopped adding to it.
  *
  * A channel opens empty and fills from `chat/history` a moment later, so a
@@ -123,7 +137,7 @@ test("a reply the console never asked for lands in the open channel, with no rel
   // The offline brain answers "You said: <text>", so the marker rides back in
   // the reply. Only the company's half arrives here — the operator line of a
   // turn this console did not send is not ours to draw.
-  await expect(page.getByText(`You said: ${marker}`)).toBeVisible({ timeout: 60_000 });
+  await expect(reply(page, marker)).toBeVisible({ timeout: 60_000 });
   await expect(bubbles(page)).toHaveCount(before + 1);
 });
 
@@ -143,7 +157,7 @@ test("a reply to a channel you are not on leaves an unread badge, and opening it
   // Opening the channel both shows the line and settles the badge — an unread
   // count that never clears is the same failure as one that never appears.
   await railRow(page, ENGINEERING.channel).click();
-  await expect(page.getByText(`You said: ${marker}`)).toBeVisible({ timeout: 30_000 });
+  await expect(reply(page, marker)).toBeVisible({ timeout: 30_000 });
   await expect(badge).toHaveCount(0);
 });
 
@@ -162,13 +176,13 @@ test("a turn sent from the composer renders exactly one company bubble", async (
 
   // Your line plus one reply — never three rows.
   await expect(bubbles(page)).toHaveCount(before + 2, { timeout: 60_000 });
-  await expect(page.getByText(`You said: ${marker}`)).toHaveCount(1);
+  await expect(reply(page, marker)).toHaveCount(1);
 
   // A late echo would land after the POST resolved, so settle before believing
   // the count above.
   await page.waitForTimeout(3_000);
   await expect(bubbles(page)).toHaveCount(before + 2);
-  await expect(page.getByText(`You said: ${marker}`)).toHaveCount(1);
+  await expect(reply(page, marker)).toHaveCount(1);
 });
 
 test("a running turn shows its tool rows in the channel", async ({ page }) => {

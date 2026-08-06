@@ -87,10 +87,24 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ You said: composer-1234");
   });
 
-  it("calls spawn_task once for a SPAWNONE prompt, with a title off the message", async () => {
+  it("quotes what the operator typed, not the memory preamble around it", async () => {
+    // The harness's retrieve-then-inject step prepends prior work, so the last
+    // user message is not the operator's message. Quoting the whole thing would
+    // still carry their words, but not as `You said: <their text>` — and that
+    // exact string is what the specs match.
     const reply = await chat([
-      { role: "user", content: "please track this SPAWNONE 456" },
+      {
+        role: "user",
+        content:
+          "## Relevant prior work\n- an outcome from an earlier turn\n\n## Task\ncomposer-5678",
+      },
     ]);
+
+    expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ You said: composer-5678");
+  });
+
+  it("calls spawn_task once for a SPAWNONE prompt, with a title off the message", async () => {
+    const reply = await chat([{ role: "user", content: "please track this SPAWNONE 456" }]);
 
     const call = reply.choices[0].message.tool_calls[0];
     expect(call.function.name).toBe("spawn_task");
@@ -121,7 +135,7 @@ describe("the mock inference backend", () => {
     // The transcript the harness resends after the tool ran. The directive is
     // still in it; firing again would open a second card per message forever.
     const reply = await chat([
-      { role: "user", content: "please track this SPAWNONE 456" },
+      { role: "user", content: "please track this SPAWNONE 601" },
       { role: "assistant", content: null, tool_calls: [{ id: "c1" }] },
       { role: "tool", tool_call_id: "c1", content: "echo: marker-789" },
     ]);
@@ -131,13 +145,28 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].message.content).toContain("echo: marker-789");
   });
 
+  it("serves a directive once even when the tool result never comes back", async () => {
+    // `spawn_task` is serviced by the runtime's delegation seam rather than the
+    // agent's own tool loop, so its result never enters the model-visible
+    // transcript: the history looks untouched on the next call of the same
+    // turn. Without an identity check the directive fires again, and again,
+    // until the loop caps — four cards for one message, which is what the
+    // lane's first runs did.
+    const history = [{ role: "user", content: "please track this SPAWNONE 800" }];
+    const first = await chat(history);
+    const second = await chat(history);
+
+    expect(first.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
+    expect(second.choices[0].message.tool_calls).toBeUndefined();
+  });
+
   it("recognises the dispatcher's tool results, which are a user message", async () => {
     // The shape this host actually produces: OpenHuman's `to_provider_messages`
     // renders a tool result as a *user* turn. Reading only the native `tool`
     // role is what made the lane's first run call `spawn_task` four times for
     // one message, looping until the turn gave up.
     const reply = await chat([
-      { role: "user", content: "please track this SPAWNONE 456" },
+      { role: "user", content: "please track this SPAWNONE 602" },
       { role: "assistant", content: "" },
       {
         role: "user",
@@ -153,11 +182,11 @@ describe("the mock inference backend", () => {
 
   it("fires a fresh directive even after an earlier one was served", async () => {
     const reply = await chat([
-      { role: "user", content: "please track this SPAWNONE 1" },
+      { role: "user", content: "please track this SPAWNONE 701" },
       { role: "assistant", content: null, tool_calls: [{ id: "c1" }] },
       { role: "tool", tool_call_id: "c1", content: "opened" },
       { role: "assistant", content: "__MOCK_LLM__ opened" },
-      { role: "user", content: "and this one SPAWNONE 2" },
+      { role: "user", content: "and this one SPAWNONE 702" },
     ]);
 
     expect(reply.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");

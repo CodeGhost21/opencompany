@@ -119,6 +119,13 @@ const EMBEDDING_DIM = 1024;
 const TOOL_ECHO_LIMIT = 2000;
 
 /**
+ * The heading the harness's retrieve-then-inject step puts before the
+ * operator's own message when it has prior work to prepend. See
+ * `operatorText`.
+ */
+const TASK_HEADING = "## Task\n";
+
+/**
  * The text of one wire message, tolerating both shapes OpenAI allows: a plain
  * string, and the content-part array. The host only ever sends the former;
  * the latter costs two lines and removes a way for this to go quietly wrong.
@@ -201,11 +208,12 @@ function titleFrom(text, needle) {
 }
 
 /**
- * The last directive in the thread, or null. Returns its position too, because
- * "has this already been served" is a question about what follows it.
+ * The last directive in the thread, or null. Returns its position and an
+ * identity: position answers "has a tool run since", identity answers "have I
+ * already served this exact one".
  *
  * @param {any[]} messages
- * @returns {{index: number, name: string, arguments: any} | null}
+ * @returns {{index: number, id: string, name: string, arguments: any} | null}
  */
 function findDirective(messages) {
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -216,6 +224,7 @@ function findDirective(messages) {
       if (payload && typeof payload.name === "string") {
         return {
           index: i,
+          id: JSON.stringify(payload),
           name: payload.name,
           arguments: payload.arguments ?? {},
         };
@@ -228,15 +237,29 @@ function findDirective(messages) {
       return null;
     }
     if (text.includes(SPAWN_DIRECTIVE)) {
-      return {
-        index: i,
-        name: "spawn_task",
-        arguments: { title: titleFrom(text, SPAWN_DIRECTIVE) },
-      };
+      const title = titleFrom(text, SPAWN_DIRECTIVE);
+      return { index: i, id: `spawn:${title}`, name: "spawn_task", arguments: { title } };
     }
   }
   return null;
 }
+
+/**
+ * Directive identities already acted on, for the life of this process.
+ *
+ * The history check below is the honest one and covers the common case, but it
+ * cannot cover every one: a tool whose result never reaches the model-visible
+ * transcript — `spawn_task` is serviced by the runtime's delegation seam, not
+ * by the agent's own tool loop — leaves a history that looks untouched, so the
+ * directive fires again on the next call of the same turn, and again, until the
+ * loop hits its cap. The lane's first two runs opened four cards for one
+ * message that way. Identity is what makes "once" hold regardless: every
+ * directive a spec writes carries a `Date.now()` marker, so a genuinely new one
+ * is always a new key.
+ *
+ * @type {Set<string>}
+ */
+const servedDirectives = new Set();
 
 /**
  * Whether a message carries the output of a tool that ran.
@@ -291,17 +314,35 @@ function alreadyServed(messages, index) {
 }
 
 /**
- * The text of the last thing the operator (or the harness, on their behalf)
- * said, which the plain reply quotes back.
+ * What the operator actually typed, which the plain reply quotes back.
+ *
+ * The last user message is not the operator's message: the harness's
+ * retrieve-then-inject step (`src/harness/memory_loop.rs`) prepends relevant
+ * prior work, so what arrives is
+ *
+ *     ## Relevant prior work
+ *     - …
+ *
+ *     ## Task
+ *     <what the operator typed>
+ *
+ * Quoting the whole thing back would still carry the operator's words, but not
+ * as `You said: <their text>`, and that exact string is how three specs find
+ * the reply to their own turn. So take the task section when there is one.
  *
  * @param {any[]} messages
  * @returns {string}
  */
-function lastUserText(messages) {
+function operatorText(messages) {
+  let text = "";
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i]?.role === "user") return textOf(messages[i]);
+    if (messages[i]?.role === "user") {
+      text = textOf(messages[i]);
+      break;
+    }
   }
-  return "";
+  const at = text.lastIndexOf(TASK_HEADING);
+  return (at >= 0 ? text.slice(at + TASK_HEADING.length) : text).trim();
 }
 
 /**
@@ -315,7 +356,12 @@ function chatCompletion(body) {
   const model = typeof body?.model === "string" ? body.model : "mock-brain";
   const directive = findDirective(messages);
 
-  if (directive && !alreadyServed(messages, directive.index)) {
+  if (
+    directive &&
+    !servedDirectives.has(directive.id) &&
+    !alreadyServed(messages, directive.index)
+  ) {
+    servedDirectives.add(directive.id);
     process.stderr.write(`[mock brain] tool call: ${directive.name}\n`);
     return completion(model, {
       role: "assistant",
@@ -336,7 +382,7 @@ function chatCompletion(body) {
   const last = messages[messages.length - 1];
   const content = isToolOutput(last)
     ? `${MARKER} ${toolOutputText(last).slice(0, TOOL_ECHO_LIMIT)}`
-    : `${MARKER} You said: ${lastUserText(messages)}`;
+    : `${MARKER} You said: ${operatorText(messages)}`;
   process.stderr.write(`[mock brain] text reply (${content.length} chars)\n`);
   return completion(model, { role: "assistant", content }, "stop");
 }

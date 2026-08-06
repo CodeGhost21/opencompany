@@ -106,6 +106,11 @@ test("an agent calls a tool on the installed server and shows the result", async
   // needs an agent that runs, and an inference backend to run it.
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
+  // Select the thread rather than landing on the view and typing. A composer
+  // is present either way, so `fill` succeeds — but the reply then lands in a
+  // transcript this page is not showing, and the only trace of it on screen is
+  // the rail's one-line preview. Scoped to the chat list because the sidebar's
+  // company switcher is also a button carrying the company name.
   await page.goto("/#/conversation");
   const skip = page.getByRole("button", { name: "Skip for now" });
   await skip
@@ -114,6 +119,11 @@ test("an agent calls a tool on the installed server and shows the result", async
     .catch(() => {
       /* already dismissed */
     });
+  await page
+    .getByRole("complementary")
+    .getByRole("button", { name: /Your company/ })
+    .first()
+    .click();
 
   const marker = `agent-mcp-${Date.now()}`;
   const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
