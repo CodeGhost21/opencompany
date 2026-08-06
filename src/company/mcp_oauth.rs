@@ -8,12 +8,12 @@
 //! `/oauth/mcp/callback` route, which exchanges the code for a token and stores
 //! it write-only under the company's per-server credential key.
 //!
-//! **Why a bespoke module and not `oh::mcp_registry::oauth`.** OpenHuman's full
+//! **Why a bespoke module and not `oh::mcp::registry::oauth`.** OpenHuman's full
 //! flow (`vendor/openhuman/src/openhuman/mcp_registry/oauth.rs`) is coupled to
 //! its SQLite `mcp_registry` store and its desktop loopback callback
 //! (`http://127.0.0.1:<core_port>/…`). Our console path is multi-tenant and
 //! stores credentials in a per-tenant [`SecretStore`](crate::ports::SecretStore),
-//! so only the **discovery primitive** ([`oh::mcp_client::McpHttpClient`]) is
+//! so only the **discovery primitive** ([`oh::mcp::http_client::McpHttpClient`]) is
 //! reused; the small private helpers (PKCE, dynamic client registration, the
 //! authorize-URL builder, the token exchange + parse, and refresh) are **ported**
 //! here so they stay decoupled from OpenHuman's store and single-user callback.
@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 
 use openhuman_core::openhuman as oh;
 
-use oh::mcp_client::{AuthorizationServerMetadata, McpAuthorizationContext, McpHttpClient};
+use oh::mcp::http_client::{AuthorizationServerMetadata, McpAuthorizationContext, McpHttpClient};
 
 use crate::Result;
 use crate::company::mcp::AuthMaterial;

@@ -299,7 +299,7 @@ fn under_temp_dir(dir: &Path, temp_dir: &Path) -> bool {
 #[cfg(feature = "openhuman")]
 pub fn pin_keyring(root: &JournalRoot) -> KeyringPin {
     let dir = root.root().to_path_buf();
-    openhuman_core::openhuman::keyring::init_workspace(&dir);
+    openhuman_core::openhuman::security::keyring::init_workspace(&dir);
 
     let temporary = under_temp_dir(&dir, &std::env::temp_dir());
     if temporary {
@@ -767,7 +767,8 @@ mod test {
         let pin = pin_keyring(&expected);
         assert_eq!(pin.dir(), expected.root());
 
-        let resolved = openhuman_core::openhuman::keyring::store::workspace_dir_for_file_backend();
+        let resolved =
+            openhuman_core::openhuman::security::keyring::store::workspace_dir_for_file_backend();
         assert_eq!(
             resolved,
             expected.root(),

@@ -373,7 +373,7 @@ impl std::fmt::Debug for MediaBackend {
 #[cfg(feature = "media")]
 pub fn media_tools(backend: &MediaBackend, workspace: &Path) -> Vec<Box<dyn Tool>> {
     use oh::integrations::IntegrationClient;
-    use oh::media_generation::{
+    use oh::media::generation::{
         MediaGenerateImageTool, MediaGenerateVideoTool, MediaListModelsTool,
     };
 

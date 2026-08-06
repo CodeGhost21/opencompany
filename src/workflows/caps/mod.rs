@@ -160,6 +160,16 @@ pub async fn build_capabilities(
             run_id.to_string(),
             run_request,
         ))),
+        // New in tinyflows 0.6, which arrived with the #499 pin bump. Left
+        // unwired deliberately rather than pointed at the company's context
+        // store: a `memory` node would then read and WRITE agent memory on
+        // behalf of a workflow, and which scopes a workflow may touch is a
+        // policy question this repo has not answered — `remember`/`forget`
+        // especially. `None` fails such a node at run time with a capability
+        // error, which is the honest answer until that decision is made, and
+        // no company manifest can currently produce one (`NodeKind` has no
+        // `memory` variant on our side).
+        memory: None,
     }
 }
 

@@ -63,7 +63,7 @@
 //!   OpenCompany-authored operator copy, so it is surfaced bounded, exactly as
 //!   its failure message already was.
 //! * **Result on failure** is the classifier's plain-language
-//!   [`cause_plain`](oh::tool_status::ClassifiedFailure::cause_plain), or an
+//!   [`cause_plain`](oh::tools::status::ClassifiedFailure::cause_plain), or an
 //!   intrinsic tool's own message — never the remote error text.
 //!
 //! The unit test `planted_secret_never_reaches_serialized_steps` proves it end
@@ -78,7 +78,7 @@ use openhuman_core::openhuman as oh;
 use serde_json::Value;
 
 use oh::agent::progress::AgentProgress;
-use oh::tool_status::{ClassifiedFailure, ToolFailureClass};
+use oh::tools::status::{ClassifiedFailure, ToolFailureClass};
 
 use crate::harness::policy::POLICY_NAME;
 use crate::ports::types::{TurnStep, TurnStepFailure, TurnStepKind, TurnStepStatus};
@@ -614,7 +614,7 @@ fn complete(
     // "failed (error)".
     let classified = match failure {
         Some(f) => f.clone(),
-        None => oh::tool_status::classify(output, false),
+        None => oh::tools::status::classify(output, false),
     };
 
     Completed {
@@ -820,7 +820,7 @@ fn truncate(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use oh::tool_status::FailureCategory;
+    use oh::tools::status::FailureCategory;
 
     /// An obvious fake, in the same shape `approval_display`'s tests use. Never
     /// a credential pattern that could be mistaken for a real one in a diff.
@@ -1079,7 +1079,7 @@ mod tests {
     fn the_classifier_alone_still_cannot_recognise_a_parked_call() {
         let refusal = approval_refusal("send_email");
         assert_eq!(
-            oh::tool_status::classify(&refusal, false).class,
+            oh::tools::status::classify(&refusal, false).class,
             ToolFailureClass::Unknown,
             "if this now classifies, replace the bespoke arm in `complete` with it"
         );
