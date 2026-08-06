@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Mail, MoreHorizontal, Plus, Sparkles, UserPlus, Wallet } from "lucide-react";
 import { toast } from "sonner";
 
@@ -152,6 +152,34 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
     void boot();
     void loadViewer();
   }, [boot, loadViewer]);
+
+  /**
+   * Re-read the roster on the way back from the agent sub-page (issue #264).
+   *
+   * This view renders the detail as an early return, so opening an agent never
+   * unmounts the roster and never re-runs `boot`. An edit saved in the panel
+   * therefore landed on the host while these cards went on showing what they
+   * held before it: press Back after renaming an agent and the old role is
+   * still on the card, until a hard reload. The panel and the roster disagreed
+   * about the same company, and the roster was the wrong one.
+   *
+   * Keyed on `sub` rather than on the Back button's callback, so the browser's
+   * own Back — and a hand-edited hash — refresh too. The ref is what keeps the
+   * first mount from fetching twice: the effect above already did.
+   */
+  const leftAgentPage = useRef(false);
+  useEffect(() => {
+    if (sub) {
+      leftAgentPage.current = true;
+      return;
+    }
+    if (!leftAgentPage.current) return;
+    leftAgentPage.current = false;
+    // Deliberately without `setLoad("loading")`: the cards on screen are the
+    // right cards, only possibly stale, so they stay put until the new ones
+    // land rather than blanking to a skeleton on every Back.
+    void boot();
+  }, [sub, boot]);
 
   /** A human label for whoever set a cap — never a raw user id. */
   function whoSet(userId: string): string {

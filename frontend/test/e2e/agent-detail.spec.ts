@@ -171,12 +171,18 @@ test("an agent defined in the console can be read back and edited", async ({ pag
     // Host-backed, not local state: it survives a storage-cleared reload. This
     // is the assertion that separates "the console remembers" from "the company
     // was actually changed".
-    const agentUrl = page.url();
+    //
+    // `reload`, not `goto(page.url())`. Navigating to the URL the page is
+    // already on is a same-document navigation — the app keeps every piece of
+    // in-memory state, so the two assertions below would pass off the panel's
+    // own state and prove nothing about the host. That is not hypothetical: it
+    // is why this spec went green on the panel while the roster underneath it
+    // was stale.
     await page.evaluate(() => {
       localStorage.clear();
       sessionStorage.clear();
     });
-    await page.goto(agentUrl);
+    await page.reload();
     await dismissOnboarding(page);
     await expect(page.getByTestId("agent-description")).toContainText("Rewritten instructions.", {
       timeout: 30_000,
