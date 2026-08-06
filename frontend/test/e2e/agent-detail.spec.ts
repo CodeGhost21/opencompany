@@ -34,15 +34,30 @@ function card(page: Page, role: string) {
 
 /**
  * A fresh host greets the first visit with a welcome tour rendered over the
- * console, which swallows clicks on the view beneath it. Dismiss it if present.
+ * console, which swallows clicks on the view beneath it.
+ *
+ * Two halves, and the first is what matters. The tour is suppressed **before
+ * the app boots** by seeding its own localStorage markers through an init
+ * script, so it never renders and there is nothing to wait for. This is the
+ * pattern `board-columns.spec.ts` uses, and it is here for a measured reason:
+ * the earlier version of this helper blocked on `waitFor({ timeout: 15_000 })`
+ * and swallowed the timeout, which costs the FULL fifteen seconds every time
+ * the tour is absent — the common case. This spec navigates three times (the
+ * `beforeEach`, the storage-cleared reload, and the cleanup), so it paid that
+ * toll three times and blew the 60s test budget without a single assertion
+ * failing.
+ *
+ * The click half stays as a belt-and-braces fallback for a host whose marker
+ * key this list does not name, but it polls briefly rather than blocking.
  */
 async function dismissOnboarding(page: Page) {
   const skip = page.getByRole("button", { name: "Skip for now" });
-  await skip.waitFor({ state: "visible", timeout: 15_000 }).catch(() => {});
-  if (await skip.isVisible()) {
-    await skip.click();
-    await expect(skip).toBeHidden();
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    if (!(await skip.isVisible().catch(() => false))) return;
+    await skip.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(300);
   }
+  await expect(skip).toHaveCount(0);
 }
 
 async function goToTeam(page: Page) {
@@ -52,6 +67,15 @@ async function goToTeam(page: Page) {
 }
 
 test.beforeEach(async ({ page }) => {
+  // Registered before any navigation, so it also re-seeds after the
+  // storage-clearing reload below — which wipes the tour markers along with
+  // everything else and would otherwise bring the tour back mid-test.
+  await page.addInitScript(() => {
+    const seen = JSON.stringify({ skipped: true, seenAt: Date.now() });
+    for (const key of ["oc-tour:single", "oc-tour:e2e-harness-co", "oc-tour:null"]) {
+      window.localStorage.setItem(key, seen);
+    }
+  });
   await goToTeam(page);
 });
 
