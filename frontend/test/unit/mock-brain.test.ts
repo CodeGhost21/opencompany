@@ -78,12 +78,13 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].finish_reason).toBe("stop");
   });
 
-  it("does not quote the operator's prompt back", async () => {
-    // A spec that finds the operator's own bubble by its exact text would match
-    // twice if the reply repeated it.
-    const reply = await chat([{ role: "user", content: "ship the launch checklist" }]);
+  it("quotes the prompt back in the offline brain's shape", async () => {
+    // `chat-live-events.spec.ts` finds the reply to *its* turn by
+    // `You said: <marker>`, which is how it proves an SSE frame carried the
+    // answer to the message just sent rather than some other.
+    const reply = await chat([{ role: "user", content: "composer-1234" }]);
 
-    expect(reply.choices[0].message.content).not.toContain("launch checklist");
+    expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ You said: composer-1234");
   });
 
   it("calls spawn_task once for a SPAWNONE prompt, with a title off the message", async () => {
@@ -128,6 +129,26 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].message.tool_calls).toBeUndefined();
     expect(reply.choices[0].message.content).toContain("__MOCK_LLM__");
     expect(reply.choices[0].message.content).toContain("echo: marker-789");
+  });
+
+  it("recognises the dispatcher's tool results, which are a user message", async () => {
+    // The shape this host actually produces: OpenHuman's `to_provider_messages`
+    // renders a tool result as a *user* turn. Reading only the native `tool`
+    // role is what made the lane's first run call `spawn_task` four times for
+    // one message, looping until the turn gave up.
+    const reply = await chat([
+      { role: "user", content: "please track this SPAWNONE 456" },
+      { role: "assistant", content: "" },
+      {
+        role: "user",
+        content:
+          '[Tool results]\n<tool_result id="mock-call-0">\necho: marker-789\n</tool_result>\n',
+      },
+    ]);
+
+    expect(reply.choices[0].message.tool_calls).toBeUndefined();
+    // Quoted without its wrapper, so the operator's bubble is readable.
+    expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ echo: marker-789");
   });
 
   it("fires a fresh directive even after an earlier one was served", async () => {

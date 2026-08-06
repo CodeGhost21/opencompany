@@ -41,21 +41,38 @@
 //      agent call a named MCP tool without a model that might decide not to.
 //   2. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
 //      `chat-to-card.spec.ts` needs an orchestrator to do.
-//   3. anything else — a plain text reply carrying the `__MOCK_LLM__` marker.
+//   3. anything else — `__MOCK_LLM__ You said: <the last thing you said>`.
 //
-// "Once" is load-bearing and is why arms 1 and 2 look at position rather than
-// mere presence. The harness sends the whole thread history on every turn, so a
-// directive an earlier turn already served is still in the transcript on the
-// next one; re-firing it would open a second card per message forever. A
-// directive counts as served when a tool result — or an assistant turn carrying
-// tool calls — appears *after* it. A fresh directive is always the last one, so
-// it always fires.
+// # Why the plain reply is shaped like the offline echo brain's
 //
-// The plain reply deliberately does NOT echo the operator's prompt back. A spec
-// that locates the operator's own bubble by its text (`chat-to-card.spec.ts`
-// does) would find two matches if the reply quoted it. The one thing that is
-// echoed is a tool *result*, because `mcp.spec.ts` asserts the remote tool's
-// output reached the agent, and the agent's bubble is where it can see it.
+// `EchoBrain` answers `You said: <text>`, and three specs in `chat-live-events`
+// find the reply to *their* turn by that string — which is the only way to
+// assert that an SSE frame carried the answer to the message you just sent
+// rather than some other. Mirroring the shape, and adding the marker rather
+// than replacing it, is what lets one spec hold against both brains. It is
+// safe against the specs that locate the operator's own bubble by its text:
+// they match exactly (`chat-to-card.spec.ts`), and the reply is never exactly
+// the prompt.
+//
+// # Why "once" is load-bearing, and what counts as served
+//
+// The harness sends the whole thread history on every turn, so a directive an
+// earlier turn already served is still in the transcript on the next one.
+// Re-firing it opens a second card per message forever — and worse, it loops
+// *within* one turn: the model is called again as soon as the tool returns, and
+// the directive is still right there in the history.
+//
+// So a directive counts as served when a tool result, or an assistant turn
+// carrying tool calls, appears after it. A tool result is not always a `tool`
+// message: this host drives the harness through OpenHuman's dispatcher, whose
+// `to_provider_messages` renders one as a **user** message reading
+// `[Tool results]\n<tool_result id="…">…</tool_result>`. Both shapes count
+// (`isToolOutput`). Recognising only the native one is what made the first run
+// of this lane call `spawn_task` four times for one message.
+//
+// When the last message is a tool result, the reply quotes it, because
+// `mcp.spec.ts` asserts the remote tool's output reached the agent and the
+// agent's bubble is where an operator can see it.
 //
 // # Running it
 //
@@ -222,6 +239,39 @@ function findDirective(messages) {
 }
 
 /**
+ * Whether a message carries the output of a tool that ran.
+ *
+ * Two shapes, because two are produced. A provider-native transcript puts it in
+ * a `tool` message; OpenHuman's dispatcher — which is what this host drives —
+ * renders the same thing as a **user** message reading `[Tool results]` with
+ * `<tool_result id="…">` blocks inside. Missing the second shape means the mock
+ * never sees its own tool call come back.
+ *
+ * @param {any} message
+ * @returns {boolean}
+ */
+function isToolOutput(message) {
+  if (message?.role === "tool") return true;
+  const text = textOf(message);
+  return text.includes("[Tool results]") || text.includes("<tool_result");
+}
+
+/**
+ * The readable part of a tool result: the text inside the `<tool_result>`
+ * wrappers, or the whole message when it carries none.
+ *
+ * @param {any} message
+ * @returns {string}
+ */
+function toolOutputText(message) {
+  const text = textOf(message);
+  const inner = [...text.matchAll(/<tool_result[^>]*>([\s\S]*?)<\/tool_result>/g)]
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+  return (inner.length ? inner.join("\n") : text.replace("[Tool results]", "")).trim();
+}
+
+/**
  * Whether the directive at `index` has already been acted on in this thread:
  * a tool result, or an assistant turn carrying tool calls, after it.
  *
@@ -231,13 +281,27 @@ function findDirective(messages) {
  */
 function alreadyServed(messages, index) {
   return messages.slice(index + 1).some((message) => {
-    if (message?.role === "tool") return true;
+    if (isToolOutput(message)) return true;
     return (
       message?.role === "assistant" &&
       Array.isArray(message?.tool_calls) &&
       message.tool_calls.length > 0
     );
   });
+}
+
+/**
+ * The text of the last thing the operator (or the harness, on their behalf)
+ * said, which the plain reply quotes back.
+ *
+ * @param {any[]} messages
+ * @returns {string}
+ */
+function lastUserText(messages) {
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    if (messages[i]?.role === "user") return textOf(messages[i]);
+  }
+  return "";
 }
 
 /**
@@ -270,10 +334,9 @@ function chatCompletion(body) {
   }
 
   const last = messages[messages.length - 1];
-  const content =
-    last?.role === "tool"
-      ? `${MARKER} ${textOf(last).slice(0, TOOL_ECHO_LIMIT)}`
-      : `${MARKER} mock inference backend reply.`;
+  const content = isToolOutput(last)
+    ? `${MARKER} ${toolOutputText(last).slice(0, TOOL_ECHO_LIMIT)}`
+    : `${MARKER} You said: ${lastUserText(messages)}`;
   process.stderr.write(`[mock brain] text reply (${content.length} chars)\n`);
   return completion(model, { role: "assistant", content }, "stop");
 }

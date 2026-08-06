@@ -127,11 +127,14 @@ test("an agent calls a tool on the installed server and shows the result", async
   await page.getByPlaceholder(/^Message /).fill(directive);
   await page.getByRole("button", { name: "Send" }).click();
 
-  // The reply carries both halves of the round trip: the marker that says the
-  // mocked backend answered, and the remote tool's own output, which can only
-  // have come from the fixture over HTTP.
-  const reply = page.getByText(/__MOCK_LLM__/).last();
+  // Scoped to a transcript row, not `getByText` over the page: the chat rail
+  // renders a one-line preview of each thread's last message, so an unscoped
+  // `.last()` resolves to the sidebar and asserts against a truncated copy.
+  const reply = page.locator("div.group\\/msg").filter({ hasText: /__MOCK_LLM__/ }).last();
   await expect(reply).toBeVisible({ timeout: 60_000 });
-  await expect(reply).toContainText(`echo: ${marker}`);
+  // Both halves of the round trip: the marker that says the mocked backend
+  // answered, and the remote tool's own output, which can only have come from
+  // the fixture over HTTP.
+  await expect(reply).toContainText(`echo: ${marker}`, { timeout: 30_000 });
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
 });
