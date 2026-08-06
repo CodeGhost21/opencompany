@@ -54,9 +54,9 @@ use async_trait::async_trait;
 use openhuman_core::openhuman as oh;
 
 use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
+use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 use oh::agent::{Agent, AgentBuilder};
-use oh::context::prompt::SystemPromptBuilder;
 use oh::memory::traits::Memory;
 use oh::tools::Tool;
 

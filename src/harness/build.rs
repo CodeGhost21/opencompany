@@ -61,8 +61,8 @@ use std::sync::Arc;
 
 use openhuman_core::openhuman as oh;
 
+use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::{Agent, AgentBuilder};
-use oh::context::prompt::SystemPromptBuilder;
 use oh::memory::tools::{MemoryRecallTool, MemoryStoreTool};
 use oh::memory::traits::Memory;
 use oh::security::SecurityPolicy;
@@ -197,8 +197,8 @@ pub fn build_agent(
     {
         // These config-free tools read OpenHuman's live process registry, so
         // installs and lifecycle changes are visible without rebuilding agents.
-        tools.push(Box::new(oh::mcp_registry::tools::McpRegistryListToolsTool));
-        tools.push(Box::new(oh::mcp_registry::tools::McpRegistryToolCallTool));
+        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool));
+        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool));
     }
 
     // Granted file tools, sandboxed to this agent's own workspace directory. An
