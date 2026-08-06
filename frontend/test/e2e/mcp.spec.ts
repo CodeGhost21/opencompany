@@ -158,20 +158,28 @@ test("an agent calls a tool on the installed server and shows the result", async
       arguments: { text: marker },
     },
   })}`;
+  // The POST is awaited EXPLICITLY, and the reload below is why. A turn runs
+  // inside the request that started it, and the host drops the work when the
+  // client goes away — so reloading while the send is in flight cancels the
+  // turn before it ever reaches the model. That is not a hypothesis: on the
+  // run that first reloaded here, the mock backend logged no call at all for
+  // this message, where the run before it had logged the whole round trip.
+  const posted = page.waitForResponse(
+    (response) => response.url().endsWith("/chat") && response.request().method() === "POST",
+    { timeout: 90_000 },
+  );
   await page.getByPlaceholder(/^Message /).fill(directive);
   await page.getByRole("button", { name: "Send" }).click();
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+  expect((await posted).ok(), "the chat POST did not succeed").toBeTruthy();
 
-  // Wait for the turn to land anywhere on the page — the rail's one-line
-  // preview of this thread's last message is enough — then read the answer
-  // from a RELOADED transcript rather than the live one.
+  // Now read the answer from a RELOADED transcript rather than the live one.
   //
   // Deliberate, and the same move `chat-to-card.spec.ts` makes for the same
   // reason: after a reload the transcript is rehydrated from `chat/history`,
   // so what is asserted is the durable record of the turn rather than whatever
   // the open view chose to draw. It is also the stronger claim — a result that
-  // survives the round trip through the journal.
-  await expect(page.getByText(/__MOCK_LLM__/).first()).toBeVisible({ timeout: 60_000 });
+  // survived the round trip through the journal.
   await page.reload();
   await openThread(page);
 

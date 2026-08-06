@@ -93,7 +93,13 @@ describe("the mock inference backend", () => {
     const call = reply.choices[0].message.tool_calls[0];
     expect(call.function.name).toBe("spawn_task");
     // Arguments ride the wire as a JSON string, which is what the host parses.
-    expect(JSON.parse(call.function.arguments).title).toContain("SPAWNONE");
+    const { title } = JSON.parse(call.function.arguments);
+    expect(title).toContain("please track this");
+    // …and NOT the directive. The runtime reports the card it opened back into
+    // the next prompt (`A card titled "<title>"…`), so a title carrying the
+    // directive hands it to the model again, re-wrapped and unrecognisable as
+    // the one already served.
+    expect(title).not.toContain("SPAWNONE");
     expect(reply.choices[0].finish_reason).toBe("tool_calls");
   });
 
@@ -142,6 +148,20 @@ describe("the mock inference backend", () => {
 
     expect(first.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
     expect(second.choices[0].message.tool_calls).toBeUndefined();
+  });
+
+  it("never writes a directive into anything the model reads back", async () => {
+    // The runtime echoes a spawned card's title into the next prompt. If the
+    // title carries the directive, the fixture has handed itself a fresh one.
+    const reply = await chat([{ role: "user", content: "please track this SPAWNONE 950" }]);
+    const { title } = JSON.parse(reply.choices[0].message.tool_calls[0].function.arguments);
+
+    const echoedBack = await chat([
+      { role: "user", content: "please track this SPAWNONE 950" },
+      { role: "assistant", content: `A card titled "${title}". It will be opened this turn.` },
+    ]);
+
+    expect(echoedBack.choices[0].message.tool_calls).toBeUndefined();
   });
 
   it("keeps that identity when the same message reaches a second agent", async () => {

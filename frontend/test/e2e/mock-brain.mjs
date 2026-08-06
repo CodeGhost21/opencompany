@@ -199,7 +199,20 @@ function titleFrom(text, needle) {
   const lineStart = text.lastIndexOf("\n", at) + 1;
   const lineEnd = text.indexOf("\n", at);
   const line = text.slice(lineStart, lineEnd < 0 ? text.length : lineEnd);
-  const collapsed = line.replace(/\s+/g, " ").trim();
+  // The directive itself is REMOVED from the title, and that is load-bearing.
+  // The runtime reports a spawned card back into the next prompt as
+  // `A card titled "<title>". It will be opened on the board this turn.` — so a
+  // title carrying `SPAWNONE` puts the directive back in front of the model,
+  // inside a sentence that is re-wrapped and re-truncated each round. That is
+  // what produced four cards for one message across the lane's first four runs,
+  // with a different key every time:
+  //
+  //   spawn:SPAWNONE 1786015999106
+  //   spawn:SPAWNONE 1786015999106". It will be opened on the board this turn.
+  //   spawn:SPAWNONE 1786015999106". It will be op...". It will be opened …
+  //
+  // Nothing the fixture writes may contain a directive.
+  const collapsed = line.split(needle).join("").replace(/\s+/g, " ").trim();
   if (!collapsed) return "Mock spawned task";
   return collapsed.length > 80 ? `${collapsed.slice(0, 77)}...` : collapsed;
 }
