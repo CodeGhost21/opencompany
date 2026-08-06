@@ -253,8 +253,8 @@ async fn edit_agent(
         .into_response());
     }
 
-    let name = trimmed_field(body.name.as_deref(), "name")?;
-    let role = trimmed_field(body.role.as_deref(), "role")?;
+    let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
+    let role = trimmed_field(body.role.as_deref(), "role").map_err(|e| e.into_response())?;
 
     {
         let agent = record
@@ -294,7 +294,15 @@ async fn edit_agent(
 ///
 /// A teammate whose name is whitespace renders as an empty card with no way
 /// back to it, so the refusal is a `400` rather than a stored blank.
-fn trimmed_field(value: Option<&str>, field: &str) -> Result<Option<String>, Response> {
+///
+/// The error is an [`ApiError`], **not** the `Response` its caller returns.
+/// `clippy::result_large_err` fires on the second shape here and is right to:
+/// an `axum` `Response` is 128+ bytes, so a `Result<Option<String>, Response>`
+/// makes every successful call carry the footprint of the refusal it did not
+/// make. The handler is exempt only because its own `Ok` variant is larger
+/// still. The caller converts at the boundary, which is also what the sibling
+/// refusal helpers in `team.rs` do by returning `Option<Response>`.
+fn trimmed_field(value: Option<&str>, field: &str) -> Result<Option<String>, ApiError> {
     let Some(value) = value else {
         return Ok(None);
     };
@@ -302,8 +310,7 @@ fn trimmed_field(value: Option<&str>, field: &str) -> Result<Option<String>, Res
     if trimmed.is_empty() {
         return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
             "a teammate's {field} can't be empty."
-        )))
-        .into_response());
+        ))));
     }
     Ok(Some(trimmed.to_string()))
 }
