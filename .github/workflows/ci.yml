@@ -231,6 +231,36 @@ jobs:
       - name: Test tool-belt contract (openhuman, mcp, telegram)
         run: cargo test --locked --features openhuman,mcp,telegram --lib harness::build::tests
 
+      # Issue #467. The `Console E2E (live brain)` job below drives a host that
+      # has an agent harness, so it needs a FEATURE-GATED binary — the default
+      # one the `rust` job uploads answers a chat message with nothing, which is
+      # why four of the suite's best specs were skipped rather than run.
+      #
+      # Here rather than in that job, for the same reason #428 put the default
+      # binary in `rust`: building it over there would mean a second submodule
+      # checkout, a second apt install and a second cold compile of the vendored
+      # openhuman tree, minutes of wall clock for a thing this job has already
+      # very nearly built.
+      #
+      # `mcp` on top of the job's own `openhuman,tinycortex`, because
+      # `mcp.spec.ts` needs the `mcp_call_tool` belt entry, which is gated on
+      # it. That is a fifth feature resolution, but a cheap one: the step above
+      # already compiled `openhuman_core` with `openhuman_core/mcp` enabled, so
+      # what recompiles here is this crate plus its bin, not the vendored tree.
+      #
+      # `--bin`, not `--all-targets`: the lane needs a binary, and the tests and
+      # examples under this feature set are already covered above.
+      - name: Build the gated host binary for the live-brain e2e lane
+        run: cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+
+      - name: Upload the gated host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencompany-gated-binary
+          path: target/debug/opencompany
+          # Consumed minutes later by one job in the same run and never again.
+          retention-days: 1
+
   # Issue #281. Both jobs above are Rust-only, so before this job existed NOTHING
   # in CI installed Node: `frontend/` was invisible to the entire build, and a
   # TypeScript error there passed every required check and merged. The first
@@ -411,5 +441,93 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-failures
+          path: frontend/test-results/
+          retention-days: 7
+
+  # Issue #467. The lane above is the DEFAULT feature set, and four of the
+  # suite's specs cannot pass against it — not because they are wrong, but
+  # because the thing they test is not compiled in. They skip themselves through
+  # `frontend/test/e2e/capabilities.ts`, which made that lane meaningfully green
+  # and left the most valuable coverage in the suite unrun: `wiring.spec.ts`
+  # proves the whole chain from a typed message to a rendered reply,
+  # `chat-to-card.spec.ts` proves an orchestrator can open a board card,
+  # `workflow-run-history.spec.ts` proves a run is journaled durably, and
+  # `mcp.spec.ts` proves an agent can call a remote tool. Without them CI proves
+  # the console renders, not that the company works.
+  #
+  # This job runs those four. Three things make that possible, and none of them
+  # existed before:
+  #
+  #   * a host with the harness in it — the gated binary `rust-gated` now
+  #     uploads (`--features openhuman,tinycortex,mcp`);
+  #   * something for the harness to think with — `test/e2e/mock-brain.mjs`, an
+  #     OpenAI-compatible endpoint whose answers are a pure function of the
+  #     prompt, which `playwright.config.ts` starts and points the host at;
+  #   * a tool server to call — `test/e2e/mcp-server.mjs`, started the same way.
+  #
+  # A SEPARATE JOB from `Console E2E` rather than a matrix leg of it, on
+  # purpose. The default lane is the one that gates a change to the console
+  # itself and it stays fast and independent; this one waits on the slowest job
+  # in the run (`rust-gated`) and runs a live agent turn per message, so folding
+  # them together would put the whole suite behind the gated compile. Keeping
+  # both also keeps the default host honestly covered: the product ships with
+  # and without these features.
+  #
+  # NOT `continue-on-error`. A lane that is allowed to be red is the state #428
+  # was filed about, at more expense.
+  console-e2e-live-brain:
+    name: Console E2E (live brain)
+    runs-on: ubuntu-latest
+    needs: rust-gated
+    # Longer than the default lane's half hour: every operator message here runs
+    # a real agent turn rather than being answered by the offline echo brain.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # No `submodules`, for the same reason as the lane above: the binary
+          # arrives prebuilt and nothing here resolves a cargo manifest.
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Download the gated host binary
+        uses: actions/download-artifact@v4
+        with:
+          name: opencompany-gated-binary
+          path: target/debug
+
+      # `upload-artifact` does not preserve the executable bit, so the binary
+      # arrives as a plain file and `test/e2e/host.sh` would answer with a
+      # build instruction, which is a confusing way to learn this.
+      - name: Restore the executable bit
+        run: chmod +x target/debug/opencompany
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      # `PW_LIVE_BRAIN=1` is a DECLARATION, not a probe: it says the caller
+      # brought a feature-gated host and an inference backend. It is what
+      # un-skips the four specs, and — because this run also manages the host —
+      # what makes `playwright.config.ts` start the two fixtures and hand the
+      # host their addresses. See `frontend/test/e2e/capabilities.ts` for why
+      # this cannot be detected from the host instead.
+      - name: Run the end-to-end suite against a live brain
+        run: npm run e2e:live
+        working-directory: frontend
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-live-brain-failures
           path: frontend/test-results/
           retention-days: 7
