@@ -3,6 +3,10 @@
 // company blueprint is never rewritten — and start with any roster teammates the
 // operator picks (the first selected becomes the desk lead). Mirrors the
 // `WorkflowCreateDialog` create-flow shape.
+//
+// Reached from the org chart (issue #311). It used to be reached from the flat
+// Desks page, which #302 unmounted; between then and now nothing rendered this
+// dialog at all, so creating a desk was impossible outside the manifest.
 
 import { useEffect, useId, useState } from "react";
 import { Crown } from "lucide-react";
@@ -163,7 +167,7 @@ export function DeskCreateDialog({
                   >
                     <span className="flex min-w-0 items-center gap-1.5">
                       {order === 0 && (
-                        <Crown className="size-3.5 shrink-0 text-amber-500" aria-label="Desk lead" />
+                        <Crown role="img" aria-label="Desk lead" className="size-3.5 shrink-0 text-amber-500" />
                       )}
                       <span className="truncate">{member.name ?? member.role}</span>
                     </span>
