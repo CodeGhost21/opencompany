@@ -78,29 +78,13 @@ describe("the mock inference backend", () => {
     expect(reply.choices[0].finish_reason).toBe("stop");
   });
 
-  it("quotes the prompt back in the offline brain's shape", async () => {
-    // `chat-live-events.spec.ts` finds the reply to *its* turn by
-    // `You said: <marker>`, which is how it proves an SSE frame carried the
-    // answer to the message just sent rather than some other.
-    const reply = await chat([{ role: "user", content: "composer-1234" }]);
+  it("does not quote the prompt back", async () => {
+    // A spec that locates the operator's own bubble by its text must not match
+    // the reply as well. The reply is fixed for that reason, and because the
+    // harness's wrapping of a prompt is not this server's to predict.
+    const reply = await chat([{ role: "user", content: "ship the launch checklist" }]);
 
-    expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ You said: composer-1234");
-  });
-
-  it("quotes what the operator typed, not the memory preamble around it", async () => {
-    // The harness's retrieve-then-inject step prepends prior work, so the last
-    // user message is not the operator's message. Quoting the whole thing would
-    // still carry their words, but not as `You said: <their text>` — and that
-    // exact string is what the specs match.
-    const reply = await chat([
-      {
-        role: "user",
-        content:
-          "## Relevant prior work\n- an outcome from an earlier turn\n\n## Task\ncomposer-5678",
-      },
-    ]);
-
-    expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ You said: composer-5678");
+    expect(reply.choices[0].message.content).toBe("__MOCK_LLM__ mock inference backend reply.");
   });
 
   it("calls spawn_task once for a SPAWNONE prompt, with a title off the message", async () => {
@@ -155,6 +139,21 @@ describe("the mock inference backend", () => {
     const history = [{ role: "user", content: "please track this SPAWNONE 800" }];
     const first = await chat(history);
     const second = await chat(history);
+
+    expect(first.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
+    expect(second.choices[0].message.tool_calls).toBeUndefined();
+  });
+
+  it("keeps that identity when the same message reaches a second agent", async () => {
+    // One operator message reaches the orchestrator and then each desk the turn
+    // delegates to, each inside its own wrapper. Keying on anything that
+    // includes the wrapper gives every agent a fresh key, and every one of them
+    // honours the directive — four cards for one message, which is what the
+    // lane's first three runs did.
+    const first = await chat([{ role: "user", content: "please track this SPAWNONE 900" }]);
+    const second = await chat([
+      { role: "user", content: "The operator asked: please track this SPAWNONE 900" },
+    ]);
 
     expect(first.choices[0].message.tool_calls[0].function.name).toBe("spawn_task");
     expect(second.choices[0].message.tool_calls).toBeUndefined();

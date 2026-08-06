@@ -71,6 +71,47 @@ function serverRow(page: Page) {
   return page.locator("li").filter({ hasText: MCP_SERVER! }).first();
 }
 
+/**
+ * Opens the conversation view on the company thread.
+ *
+ * The thread is SELECTED, not just navigated to. A composer is present either
+ * way, so a `fill` succeeds — but the reply then lands in a transcript this
+ * page is not showing, and the only trace of it on screen is the rail's
+ * one-line preview, which is what the assertion resolved to for three runs of
+ * this lane. Scoped to the chat list because the sidebar's company switcher is
+ * also a button carrying the company name.
+ */
+async function openThread(page: Page) {
+  await page.goto("/#/conversation");
+  const skip = page.getByRole("button", { name: "Skip for now" });
+  await skip
+    .waitFor({ state: "visible", timeout: 5_000 })
+    .then(() => skip.click())
+    .catch(() => {
+      /* already dismissed in this context */
+    });
+  await page
+    .getByRole("complementary")
+    .getByRole("button", { name: /Your company/ })
+    .first()
+    .click();
+}
+
+/**
+ * A row of the open transcript carrying `text`.
+ *
+ * Both selectors, because the two chat surfaces draw a message differently —
+ * the parked Conversation view wraps each in `div.group/msg`, the Chat tab in
+ * an `article[data-message-id]` — and this spec should not fail merely because
+ * it was pointed at the other one.
+ */
+function transcriptRow(page: Page, text: string) {
+  return page
+    .locator("div.group\\/msg, article[data-message-id]")
+    .filter({ hasText: text })
+    .last();
+}
+
 test("an operator installs an HTTP MCP server and the console reports its tools", async ({
   page,
 }) => {
@@ -106,24 +147,7 @@ test("an agent calls a tool on the installed server and shows the result", async
   // needs an agent that runs, and an inference backend to run it.
   test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
 
-  // Select the thread rather than landing on the view and typing. A composer
-  // is present either way, so `fill` succeeds — but the reply then lands in a
-  // transcript this page is not showing, and the only trace of it on screen is
-  // the rail's one-line preview. Scoped to the chat list because the sidebar's
-  // company switcher is also a button carrying the company name.
-  await page.goto("/#/conversation");
-  const skip = page.getByRole("button", { name: "Skip for now" });
-  await skip
-    .waitFor({ state: "visible", timeout: 5_000 })
-    .then(() => skip.click())
-    .catch(() => {
-      /* already dismissed */
-    });
-  await page
-    .getByRole("complementary")
-    .getByRole("button", { name: /Your company/ })
-    .first()
-    .click();
+  await openThread(page);
 
   const marker = `agent-mcp-${Date.now()}`;
   const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
@@ -136,15 +160,25 @@ test("an agent calls a tool on the installed server and shows the result", async
   })}`;
   await page.getByPlaceholder(/^Message /).fill(directive);
   await page.getByRole("button", { name: "Send" }).click();
-
-  // Scoped to a transcript row, not `getByText` over the page: the chat rail
-  // renders a one-line preview of each thread's last message, so an unscoped
-  // `.last()` resolves to the sidebar and asserts against a truncated copy.
-  const reply = page.locator("div.group\\/msg").filter({ hasText: /__MOCK_LLM__/ }).last();
-  await expect(reply).toBeVisible({ timeout: 60_000 });
-  // Both halves of the round trip: the marker that says the mocked backend
-  // answered, and the remote tool's own output, which can only have come from
-  // the fixture over HTTP.
-  await expect(reply).toContainText(`echo: ${marker}`, { timeout: 30_000 });
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
+
+  // Wait for the turn to land anywhere on the page — the rail's one-line
+  // preview of this thread's last message is enough — then read the answer
+  // from a RELOADED transcript rather than the live one.
+  //
+  // Deliberate, and the same move `chat-to-card.spec.ts` makes for the same
+  // reason: after a reload the transcript is rehydrated from `chat/history`,
+  // so what is asserted is the durable record of the turn rather than whatever
+  // the open view chose to draw. It is also the stronger claim — a result that
+  // survives the round trip through the journal.
+  await expect(page.getByText(/__MOCK_LLM__/).first()).toBeVisible({ timeout: 60_000 });
+  await page.reload();
+  await openThread(page);
+
+  // Both halves of the round trip, on one row: the marker that says the mocked
+  // backend answered, and the remote tool's own output, which can only have
+  // come from the fixture over HTTP.
+  const reply = transcriptRow(page, `echo: ${marker}`);
+  await expect(reply).toBeVisible({ timeout: 30_000 });
+  await expect(reply).toContainText("__MOCK_LLM__");
 });

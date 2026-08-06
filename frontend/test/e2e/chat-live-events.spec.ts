@@ -1,5 +1,7 @@
 import { expect, test, type APIRequestContext, type Locator, type Page } from "@playwright/test";
 
+import { LIVE_BRAIN } from "./capabilities";
+
 /**
  * End-to-end proof for issue #367 — the Chat tab receives what the company
  * says, not only what this browser tab typed.
@@ -85,6 +87,25 @@ function reply(page: Page, marker: string): Locator {
 }
 
 /**
+ * The three tests below find the reply to their own turn by the offline echo
+ * brain's `You said: <text>` — which is exactly the right way to prove an SSE
+ * frame carried the answer to *this* message rather than some other one, and
+ * exactly why they cannot run against a brain that answers differently.
+ *
+ * So they skip in the live-brain lane (#467) rather than being loosened into
+ * counting bubbles, which would no longer distinguish the reply from anything
+ * else that arrived. The default-feature lane runs them on every push and is a
+ * required check, so nothing here goes uncovered.
+ *
+ * Making them brain-agnostic needs a reply the console can attribute to a turn
+ * without reading its text — a message id on the bubble the send bracket
+ * already knows. Worth doing; not this change.
+ */
+const ECHO_BRAIN_ONLY =
+  "asserts the offline echo brain's `You said: <text>` reply, which a live " +
+  "brain replaces. Covered by the default-feature `Console E2E` lane (#467).";
+
+/**
  * The bubble count, once the channel's rehydration has stopped adding to it.
  *
  * A channel opens empty and fills from `chat/history` a moment later, so a
@@ -128,6 +149,8 @@ test("a reply the console never asked for lands in the open channel, with no rel
   page,
   request,
 }) => {
+  test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
+
   await openChannel(page, ENGINEERING.id);
   const before = await settledBubbleCount(page);
 
@@ -145,6 +168,8 @@ test("a reply to a channel you are not on leaves an unread badge, and opening it
   page,
   request,
 }) => {
+  test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
+
   // Sit on the Content desk; the reply below is addressed to Engineering.
   await openChannel(page, CONTENT.id);
 
@@ -167,6 +192,8 @@ test("a turn sent from the composer renders exactly one company bubble", async (
   // journals an `AgentReply` for the console's own turn too and pushes it over
   // SSE *while the POST is still in flight*. Without the bracket the injected
   // echo and the awaited reply both render and one turn answers twice.
+  test.skip(LIVE_BRAIN, ECHO_BRAIN_ONLY);
+
   await openChannel(page, ENGINEERING.id);
   const before = await settledBubbleCount(page);
 

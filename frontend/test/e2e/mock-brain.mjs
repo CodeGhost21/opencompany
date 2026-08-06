@@ -41,18 +41,22 @@
 //      agent call a named MCP tool without a model that might decide not to.
 //   2. a message carrying `SPAWNONE` — call `spawn_task` once, which is what
 //      `chat-to-card.spec.ts` needs an orchestrator to do.
-//   3. anything else — `__MOCK_LLM__ You said: <the last thing you said>`.
+//   3. anything else — a fixed line carrying the `__MOCK_LLM__` marker.
 //
-// # Why the plain reply is shaped like the offline echo brain's
+// # Why the plain reply quotes nothing
 //
-// `EchoBrain` answers `You said: <text>`, and three specs in `chat-live-events`
-// find the reply to *their* turn by that string — which is the only way to
-// assert that an SSE frame carried the answer to the message you just sent
-// rather than some other. Mirroring the shape, and adding the marker rather
-// than replacing it, is what lets one spec hold against both brains. It is
-// safe against the specs that locate the operator's own bubble by its text:
-// they match exactly (`chat-to-card.spec.ts`), and the reply is never exactly
-// the prompt.
+// It was worth trying: `EchoBrain` answers `You said: <text>`, and three specs
+// in `chat-live-events` find the reply to *their* turn by that string, so a
+// mock that mirrored the shape would let one spec hold against both brains.
+// It does not work, and the reason is worth writing down. What arrives as the
+// last user message is not what the operator typed — the harness wraps it, and
+// not only with the `## Task` preamble `memory_loop::inject` adds — so
+// `You said: <that>` never contains `You said: <marker>`. Quoting a prompt this
+// server does not define the shape of is guesswork, so it quotes nothing, and
+// those three specs skip in this lane instead (they say why).
+//
+// A fixed reply is also the safer neighbour: a spec that locates the operator's
+// own bubble by its text cannot match the reply as well.
 //
 // # Why "once" is load-bearing, and what counts as served
 //
@@ -117,13 +121,6 @@ const EMBEDDING_DIM = 1024;
 
 /** How much of a tool result is quoted back in the reply that follows it. */
 const TOOL_ECHO_LIMIT = 2000;
-
-/**
- * The heading the harness's retrieve-then-inject step puts before the
- * operator's own message when it has prior work to prepend. See
- * `operatorText`.
- */
-const TASK_HEADING = "## Task\n";
 
 /**
  * The text of one wire message, tolerating both shapes OpenAI allows: a plain
@@ -236,9 +233,22 @@ function findDirective(messages) {
       );
       return null;
     }
-    if (text.includes(SPAWN_DIRECTIVE)) {
-      const title = titleFrom(text, SPAWN_DIRECTIVE);
-      return { index: i, id: `spawn:${title}`, name: "spawn_task", arguments: { title } };
+    const spawnAt = text.indexOf(SPAWN_DIRECTIVE);
+    if (spawnAt >= 0) {
+      // Identity is the directive and what follows it on its line — NOT the
+      // whole line, and not the message. One operator message reaches several
+      // agents (the orchestrator, then each desk the turn delegates to), each
+      // inside its own wrapper, so a key that includes the prefix differs per
+      // agent and every one of them honours the directive again. That is the
+      // second cause of the four cards for one message, and the one the history
+      // check and the whole-line key both missed.
+      const id = `spawn:${text.slice(spawnAt).split("\n")[0].trim()}`;
+      return {
+        index: i,
+        id,
+        name: "spawn_task",
+        arguments: { title: titleFrom(text, SPAWN_DIRECTIVE) },
+      };
     }
   }
   return null;
@@ -314,38 +324,6 @@ function alreadyServed(messages, index) {
 }
 
 /**
- * What the operator actually typed, which the plain reply quotes back.
- *
- * The last user message is not the operator's message: the harness's
- * retrieve-then-inject step (`src/harness/memory_loop.rs`) prepends relevant
- * prior work, so what arrives is
- *
- *     ## Relevant prior work
- *     - …
- *
- *     ## Task
- *     <what the operator typed>
- *
- * Quoting the whole thing back would still carry the operator's words, but not
- * as `You said: <their text>`, and that exact string is how three specs find
- * the reply to their own turn. So take the task section when there is one.
- *
- * @param {any[]} messages
- * @returns {string}
- */
-function operatorText(messages) {
-  let text = "";
-  for (let i = messages.length - 1; i >= 0; i -= 1) {
-    if (messages[i]?.role === "user") {
-      text = textOf(messages[i]);
-      break;
-    }
-  }
-  const at = text.lastIndexOf(TASK_HEADING);
-  return (at >= 0 ? text.slice(at + TASK_HEADING.length) : text).trim();
-}
-
-/**
  * The reply body for one chat-completions request.
  *
  * @param {any} body the parsed request
@@ -362,7 +340,10 @@ function chatCompletion(body) {
     !alreadyServed(messages, directive.index)
   ) {
     servedDirectives.add(directive.id);
-    process.stderr.write(`[mock brain] tool call: ${directive.name}\n`);
+    // The id, not just the name: when a directive fires more than once the
+    // question is always "which key differed", and this is the line that
+    // answers it from a CI log alone.
+    process.stderr.write(`[mock brain] tool call: ${directive.name} <${directive.id}>\n`);
     return completion(model, {
       role: "assistant",
       content: null,
@@ -382,7 +363,7 @@ function chatCompletion(body) {
   const last = messages[messages.length - 1];
   const content = isToolOutput(last)
     ? `${MARKER} ${toolOutputText(last).slice(0, TOOL_ECHO_LIMIT)}`
-    : `${MARKER} You said: ${operatorText(messages)}`;
+    : `${MARKER} mock inference backend reply.`;
   process.stderr.write(`[mock brain] text reply (${content.length} chars)\n`);
   return completion(model, { role: "assistant", content }, "stop");
 }

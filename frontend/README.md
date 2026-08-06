@@ -217,11 +217,18 @@ host at them:
 
 * [`test/e2e/mock-brain.mjs`](test/e2e/mock-brain.mjs) — an OpenAI-compatible
   chat-completions and embeddings endpoint with no model behind it. Ordinary
-  turns get `__MOCK_LLM__ You said: <your text>` — the offline echo brain's
-  shape plus the marker, so a spec that finds its own reply by that string holds
-  against either brain. A prompt carrying `SPAWNONE` makes it call `spawn_task`
-  once, and one carrying `__MOCK_TOOL_CALL__ {…}` makes it call exactly the
-  named tool, once. Bind with `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
+  turns get a fixed line carrying `__MOCK_LLM__`; a prompt carrying `SPAWNONE`
+  makes it call `spawn_task` **once**, and one carrying `__MOCK_TOOL_CALL__ {…}`
+  makes it call exactly the named tool, once. "Once" is the part with teeth: one
+  operator message reaches several agents and several model calls, so the server
+  tracks directive identity rather than trusting the transcript. Bind with
+  `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
+
+Three tests in `chat-live-events.spec.ts` skip the other way, in the live lane
+only: they find the reply to their own turn by the offline brain's
+`You said: <text>`, which is precisely how they prove an SSE frame carried the
+answer to *that* message, and precisely why a different brain breaks them. The
+default lane runs them on every push.
 * [`test/e2e/mcp-server.mjs`](test/e2e/mcp-server.mjs) — an HTTP MCP server with
   two tools. HTTP, not stdio: this host rejects any MCP declaration carrying a
   `command`. Bind with `PW_MCP_FIXTURE_BIND` (default `127.0.0.1:8098`), or name
