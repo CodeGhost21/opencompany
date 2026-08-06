@@ -133,6 +133,8 @@ POST   …/skills/{slug}/install              install a registry/company skill
 POST   …/skills/{slug}/uninstall            uninstall a skill
 PUT    …/skills/{slug}                       enable / disable a skill
 POST   …/team                               add an operator-overlay teammate
+GET    …/team/{agentId}                      one agent in full (tier, tools, desks)
+PATCH  …/team/{agentId}                      edit an overlay teammate
 DELETE …/team/{agentId}                      remove an overlay teammate
 PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
 PUT    …/team/{agentId}/budget               set / change / remove a daily cap
@@ -168,8 +170,44 @@ note.
 
 Team writes are an **operator overlay** persisted through the store, merged
 into the manifest roster at read time — the version-controlled `company.toml`
-is never rewritten. In v1 overlay teammates are **roster-only**: they appear in
-the roster and get an inbox, but no harness `Agent` is built for them yet.
+is never rewritten. Overlay teammates are addressable: since issue #71 the
+harness builds a real agent for each one, with the company-wide tool grant, no
+cognition tier, and never the orchestrator.
+
+`GET …/team/{agentId}` is the **agent detail** read (issue #264). `GET …/team`
+answers "who is on the roster"; this answers "what is this agent", and before it
+existed neither the console nor any other client could reach an agent's tier,
+its tool grants or its desk membership — the roster row carried none of them, so
+checking what a company actually grants an agent was not possible from outside
+the process.
+
+The `tools` object is the reason the route earns its keep. It carries three
+lists, because only the third is the answer:
+
+| field | meaning |
+|---|---|
+| `requested` | the agent's own `[[agent]].tools` globs. **Empty means the company's standard grant**, not "no tools" |
+| `companyAllow` | the `[tools].allow` ceiling the request is intersected with |
+| `effective` | what the agent actually holds |
+
+`effective` is computed by the same `agent_effective_grants` the harness calls
+when it builds the agent, so the readout cannot drift from what is enforced.
+`isOrchestrator` is likewise resolved by the roster rule (a `tier =
+"orchestrator"` agent, else the first declared) rather than read off `tier`, so
+a company that tags nobody still names its orchestrator.
+
+`PATCH …/team/{agentId}` edits an **overlay** teammate's `name`, `role` and
+`description`. It is a patch: an omitted key is left alone, and `"description":
+null` clears it — the two must stay apart or every partial save would erase an
+agent's instructions. A blank `name`/`role` is `400`, an unknown teammate `404`,
+and a **manifest** teammate is `409`: its fields live in the version-controlled
+`company.toml`, and the console does not rewrite the blueprint. The one thing
+that *is* changeable on such a teammate is its daily budget, and that works
+because #343 modelled it as an override rather than as a rewrite. Every detail
+response carries an `editable` list naming the fields this route will accept, so
+a client renders read-only from the host's answer instead of re-deriving the
+rule. `tier` and `tools` are read-only for both kinds: there is no override
+layer for either, and adding one is a policy decision rather than a form field.
 
 The two **budget** routes (issue #343) are how a teammate's `budget_usd_daily`
 becomes changeable without a redeploy. Both are **admin-only** — a member gets

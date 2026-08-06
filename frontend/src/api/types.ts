@@ -504,6 +504,97 @@ export interface TeamMemberDto {
 }
 
 /**
+ * One agent in full, from `GET .../team/{agentId}` (issue #264).
+ *
+ * `GET .../team` answers "who is on the roster"; this answers "what is this
+ * agent". Everything below the identity block was unreachable from the console
+ * before this route existed, and the tool grants were unreachable from
+ * *anywhere* — which is why a change to what a company grants its agents could
+ * not be checked from outside the process.
+ */
+export interface AgentDetailDto {
+  id: string;
+  /** Absent for a manifest teammate, which is named by its role. */
+  name?: string;
+  role: string;
+  /**
+   * What the agent was defined with. This text frames the agent's persona on
+   * every turn, so it is the closest thing the company has to an `AGENT.md`.
+   */
+  description?: string;
+  /**
+   * Which half of the roster this teammate comes from, and therefore what may
+   * be done to it. `manifest` teammates are declared in the version-controlled
+   * `company.toml`; `overlay` teammates were added at runtime and live on the
+   * company record this host writes.
+   */
+  source: "manifest" | "overlay";
+  /**
+   * The field names the host will accept in a `PATCH`. **The console renders a
+   * field read-only exactly when this list omits it** rather than deciding for
+   * itself — a client-side copy of the rule would eventually disagree with the
+   * host, and the operator would meet the disagreement as a failed save.
+   */
+  editable: string[];
+  /** The declared cognition-tier hint, when the manifest sets one. */
+  tier?: string;
+  /**
+   * Whether this teammate is the company's orchestrator. Resolved by the roster
+   * rule (a tagged tier first, else the first declared agent), so it is NOT the
+   * same question as `tier === "orchestrator"`: a company that tags nobody still
+   * has one.
+   */
+  isOrchestrator: boolean;
+  tools: AgentToolsDto;
+  desks: AgentDeskDto[];
+  inboxEnabled: boolean;
+  /** The cap in force and its attribution; same absent-means-uncapped contract as `TeamMemberDto`. */
+  budgetUsdDaily?: number;
+  spentTodayUsd?: number;
+  budgetSetBy?: string;
+  budgetSetAtMillis?: number;
+}
+
+/**
+ * An agent's tool grants at all three levels.
+ *
+ * The distinction is the point: `requested` is what the agent's own `tools`
+ * line asks for, `companyAllow` is the ceiling it is intersected with, and
+ * `effective` is what the agent actually holds. An **empty `requested` means
+ * the company's standard grant**, not "no tools", so a surface that renders the
+ * request alone reports the opposite of the truth for exactly those agents.
+ */
+export interface AgentToolsDto {
+  requested: string[];
+  companyAllow: string[];
+  effective: string[];
+}
+
+/** A desk this agent sits on, and whether it leads it. */
+export interface AgentDeskDto {
+  id: string;
+  name: string;
+  /** The desk's first effective member, who receives a `delegate_to_desk` hand-off. */
+  lead: boolean;
+}
+
+/**
+ * The body of `PATCH .../team/{agentId}` (issue #264).
+ *
+ * A patch, not a replacement: an omitted key leaves that field alone. That is
+ * why `description` is `string | null | undefined` and the three are all
+ * different — `undefined` leaves the instructions be, `null` clears them, and a
+ * string sets them. Building this object with a spread that drops `undefined`
+ * is correct; one that turns `undefined` into `null` would erase an agent's
+ * instructions on every partial save.
+ */
+export interface EditAgentInput {
+  name?: string;
+  role?: string;
+  description?: string | null;
+}
+
+/**
  * The body of `PUT .../team/{id}/budget`.
  *
  * `budgetUsdDaily` must always be present — `null` to remove the cap, a number

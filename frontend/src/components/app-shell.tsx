@@ -974,7 +974,18 @@ export function AppShell({
               }}
             />
           )}
-          {view === "team" && <TeamView client={client} company={company} />}
+          {view === "team" && (
+            <TeamView
+              client={client}
+              company={company}
+              // `#/team/<agentId>` opens that agent (issue #264). The sub-page
+              // comes back unvalidated, as `useHashView` documents: only this
+              // view knows which ids exist, and the detail screen resolves an
+              // unknown one against the host rather than guessing here.
+              sub={sub}
+              onOpenAgent={(agentId) => navigate("team", agentId ?? undefined)}
+            />
+          )}
           {view === "memory" && <MemoryView client={client} company={company} />}
           {view === "workspace" && (
             <Suspense

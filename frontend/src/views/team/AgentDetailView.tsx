@@ -1,0 +1,376 @@
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { ArrowLeft, Mail, Pencil, Sparkles, Users, Wrench } from "lucide-react";
+import { toast } from "sonner";
+
+import type { OpenCompanyClient } from "@/api/client";
+import { ApiError, type AgentDetailDto } from "@/api/types";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  agentEdits,
+  draftFrom,
+  draftIsValid,
+  isEditable,
+  summarizeGrants,
+  tierLabel,
+  type AgentDraft,
+  type AgentFieldKey,
+} from "@/lib/agent";
+import { initials, TEAM_TONES, toneFor } from "@/lib/team";
+import { cn } from "@/lib/utils";
+import { AgentFields } from "@/views/team/AgentFields";
+
+type Load = "loading" | "ready" | "missing" | "unsupported";
+
+/**
+ * One agent, opened (issue #264).
+ *
+ * Before this the Team card was a dead end: a name, a role, and a destructive
+ * Remove. None of what an agent *is* was reachable once it existed, so an
+ * operator could not read the instructions it was defined with, could not see
+ * which tools it may use or which desks it belongs to, and could not change any
+ * of it. This is the screen that answers those questions, and edits the ones
+ * the host says are editable.
+ *
+ * ## Read-only is a fact about the agent, not a state of this screen
+ *
+ * A **manifest** teammate is declared in the company's version-controlled
+ * `company.toml`. Its fields are shown, disabled, with the reason next to them:
+ * the console does not rewrite the blueprint, so the edit belongs in the file.
+ * An **overlay** teammate was added here and is edited here.
+ *
+ * Which is which comes from the host's own `editable` list rather than from a
+ * rule this file re-implements. A console that decided for itself would
+ * eventually offer a field the host refuses, and the operator would meet the
+ * disagreement as a failed save instead of as a disabled input.
+ */
+export function AgentDetailView({
+  client,
+  company,
+  agentId,
+  onBack,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  agentId: string;
+  onBack: () => void;
+}) {
+  const [load, setLoad] = useState<Load>("loading");
+  const [agent, setAgent] = useState<AgentDetailDto | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<AgentDraft>({ name: "", role: "", description: "" });
+  const [saving, setSaving] = useState(false);
+
+  const boot = useCallback(async () => {
+    setLoad("loading");
+    try {
+      const detail = await client.getAgent(agentId, company);
+      setAgent(detail);
+      setDraft(draftFrom(detail));
+      setLoad("ready");
+    } catch (error) {
+      // A 404 is two different facts and they need different words: this host
+      // has no per-agent route at all, or it has one and this teammate is gone.
+      // Telling an operator "no such teammate" about a host that simply predates
+      // the surface would send them looking for a deletion that never happened.
+      setLoad(error instanceof ApiError && error.status === 404 ? "missing" : "unsupported");
+      setAgent(null);
+    }
+  }, [client, company, agentId]);
+
+  useEffect(() => {
+    void boot();
+  }, [boot]);
+
+  async function save() {
+    if (!agent) return;
+    const edits = agentEdits(agent, draft);
+    if (!edits) {
+      setEditing(false);
+      return;
+    }
+    setSaving(true);
+    try {
+      const updated = await client.updateAgent(agentId, edits, company);
+      setAgent(updated);
+      setDraft(draftFrom(updated));
+      setEditing(false);
+      toast.success("Agent updated.");
+    } catch (error) {
+      toast.error(
+        error instanceof ApiError && error.status === 409
+          ? error.message
+          : error instanceof Error
+            ? error.message
+            : "Couldn't save this agent.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+        <Button variant="ghost" size="sm" className="-ml-2" onClick={onBack}>
+          <ArrowLeft className="size-4" /> Back to team
+        </Button>
+
+        {load === "loading" && <Skeleton className="h-64 rounded-xl" />}
+
+        {load === "missing" && (
+          <EmptyState
+            title="This agent is no longer on the roster."
+            body="It may have been removed. Go back to the team to see who is here now."
+          />
+        )}
+
+        {load === "unsupported" && (
+          <EmptyState
+            title="This host can't open an agent yet."
+            body="Opening an agent needs a newer host. The roster still works."
+          />
+        )}
+
+        {load === "ready" && agent && (
+          <>
+            <Identity agent={agent} />
+
+            <Section
+              title="Instructions"
+              subtitle="What this agent was defined to do. It frames every turn the agent takes."
+              action={
+                agent.editable.length > 0 &&
+                !editing && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setEditing(true)}
+                    data-testid="agent-edit"
+                  >
+                    <Pencil className="size-4" /> Edit
+                  </Button>
+                )
+              }
+            >
+              {editing ? (
+                <div className="grid gap-4">
+                  <AgentFields
+                    idPrefix="agent-edit"
+                    draft={draft}
+                    onChange={(key: AgentFieldKey, value) =>
+                      setDraft((d) => ({ ...d, [key]: value }))
+                    }
+                    readOnly={(key) => !isEditable(agent, key)}
+                  />
+                  <div className="flex justify-end gap-2">
+                    <Button
+                      variant="ghost"
+                      onClick={() => {
+                        setDraft(draftFrom(agent));
+                        setEditing(false);
+                      }}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      onClick={() => void save()}
+                      disabled={saving || !draftIsValid(agent, draft)}
+                      data-testid="agent-save"
+                    >
+                      Save
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <>
+                  <p
+                    className="whitespace-pre-wrap text-sm text-muted-foreground"
+                    data-testid="agent-description"
+                  >
+                    {agent.description?.trim() ||
+                      "No instructions were written for this agent."}
+                  </p>
+                  {agent.editable.length === 0 && (
+                    <p className="text-xs text-muted-foreground" data-testid="agent-readonly-note">
+                      This agent is part of your company blueprint, so its name, role and
+                      instructions are set in company.toml. Its daily budget can still be changed
+                      from the team page.
+                    </p>
+                  )}
+                </>
+              )}
+            </Section>
+
+            <Tools agent={agent} />
+            <Desks agent={agent} />
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** Name, role, id, and the two facts that classify an agent. */
+function Identity({ agent }: { agent: AgentDetailDto }) {
+  const display = agent.name?.trim() || agent.role;
+  const tone = toneFor(agent.id || display);
+  return (
+    <div className="flex items-start gap-4">
+      <div
+        className={cn(
+          "flex size-14 shrink-0 items-center justify-center rounded-xl text-base font-semibold",
+          TEAM_TONES[tone] ?? "bg-muted text-muted-foreground",
+        )}
+        aria-hidden
+      >
+        {initials(display)}
+      </div>
+      <div className="min-w-0 flex-1 space-y-2">
+        <div>
+          <h2 className="truncate text-2xl font-semibold tracking-tight" data-testid="agent-name">
+            {display}
+          </h2>
+          <p className="truncate text-sm text-muted-foreground" data-testid="agent-role">
+            {agent.role}
+          </p>
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge variant="secondary" className="gap-1" data-testid="agent-tier">
+            <Sparkles className="size-3" /> {tierLabel(agent)}
+          </Badge>
+          <Badge variant="outline" data-testid="agent-source">
+            {agent.source === "manifest" ? "Company blueprint" : "Added here"}
+          </Badge>
+          {agent.inboxEnabled && (
+            <Badge variant="outline" className="gap-1">
+              <Mail className="size-3" /> Inbox
+            </Badge>
+          )}
+          <span className="font-mono text-xs text-muted-foreground" data-testid="agent-id">
+            {agent.id}
+          </span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/**
+ * The tool grants, resolved.
+ *
+ * Three facts, because the difference between them is the whole reason this
+ * section exists. What the agent holds. Whether it holds it because it asked or
+ * because it asked for nothing and inherited the company's grant. And what it
+ * asked for and did not get, which is the line an operator checking a tool
+ * change is actually looking for and which no surface showed before.
+ */
+function Tools({ agent }: { agent: AgentDetailDto }) {
+  const summary = summarizeGrants(agent.tools);
+  return (
+    <Section
+      title="Tools"
+      subtitle={
+        summary.standardGrant
+          ? "This agent lists no tools of its own, so it holds everything the company allows."
+          : "What this agent asked for, narrowed by what the company allows."
+      }
+    >
+      {summary.effective.length === 0 ? (
+        <p className="text-sm text-muted-foreground" data-testid="agent-tools-empty">
+          This agent has no tools. Nothing it asked for is covered by the company tool list.
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-2" data-testid="agent-tools">
+          {summary.effective.map((glob) => (
+            <Badge key={glob} variant="secondary" className="gap-1 font-mono text-xs">
+              <Wrench className="size-3" /> {glob}
+            </Badge>
+          ))}
+        </div>
+      )}
+      {summary.dropped.length > 0 && (
+        <div className="space-y-1" data-testid="agent-tools-dropped">
+          <p className="text-xs text-muted-foreground">
+            Asked for but not granted, because the company tool list does not cover it:
+          </p>
+          <div className="flex flex-wrap gap-2">
+            {summary.dropped.map((glob) => (
+              <Badge key={glob} variant="outline" className="font-mono text-xs line-through">
+                {glob}
+              </Badge>
+            ))}
+          </div>
+        </div>
+      )}
+      <p className="text-xs text-muted-foreground">
+        Company tool list: {agent.tools.companyAllow.join(", ") || "nothing allowed"}
+      </p>
+    </Section>
+  );
+}
+
+/** Desk membership, with the lead named. */
+function Desks({ agent }: { agent: AgentDetailDto }) {
+  return (
+    <Section
+      title="Desks"
+      subtitle="The desks this agent works on. A desk hands its work to its lead first."
+    >
+      {agent.desks.length === 0 ? (
+        <p className="text-sm text-muted-foreground" data-testid="agent-desks-empty">
+          This agent is not on any desk.
+        </p>
+      ) : (
+        <div className="flex flex-wrap gap-2" data-testid="agent-desks">
+          {agent.desks.map((desk) => (
+            <Badge key={desk.id} variant="secondary" className="gap-1">
+              <Users className="size-3" /> {desk.name}
+              {desk.lead && <span className="text-xs opacity-70">(lead)</span>}
+            </Badge>
+          ))}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+function Section({
+  title,
+  subtitle,
+  action,
+  children,
+}: {
+  title: string;
+  subtitle: string;
+  action?: ReactNode;
+  children: ReactNode;
+}) {
+  return (
+    <Card>
+      <CardContent className="space-y-3 py-4">
+        <div className="flex items-start justify-between gap-3">
+          <div className="space-y-1">
+            <h3 className="font-medium">{title}</h3>
+            <p className="text-xs text-muted-foreground">{subtitle}</p>
+          </div>
+          {action}
+        </div>
+        {children}
+      </CardContent>
+    </Card>
+  );
+}
+
+function EmptyState({ title, body }: { title: string; body: string }) {
+  return (
+    <Card>
+      <CardContent className="space-y-1 py-8 text-center">
+        <p className="font-medium">{title}</p>
+        <p className="text-sm text-muted-foreground">{body}</p>
+      </CardContent>
+    </Card>
+  );
+}

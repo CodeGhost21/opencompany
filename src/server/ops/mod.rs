@@ -37,6 +37,11 @@ pub mod smtp;
 pub mod task_export;
 pub mod tasks;
 pub mod team;
+/// Issue #264: one agent, opened — `GET`/`PATCH {scope}/team/{agent_id}`. The
+/// detail read (identity, tier, **resolved** tool grants, desks) and the edit
+/// for the fields the console owns. Attached to [`team`]'s existing
+/// `/team/{agent_id}` route rather than merged as its own. See [`team_agent`].
+mod team_agent;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;

@@ -14,6 +14,7 @@ import type {
   McpTool,
 } from "../lib/mcp";
 import {
+  type AgentDetailDto,
   ApiError,
   type ApiErrorBody,
   type AppSpec,
@@ -26,6 +27,7 @@ import {
   type ConnectionState,
   type CreateDeskInput,
   type DeskDto,
+  type EditAgentInput,
   type FeedbackInput,
   type FeedbackResponse,
   type FeedbackSummary,
@@ -463,6 +465,50 @@ export class OpenCompanyClient {
     company?: string | null,
   ): Promise<TeamMemberDto> {
     return this.request<TeamMemberDto>("POST", `${this.scope(company)}/team`, input);
+  }
+
+  /**
+   * One agent in full (issue #264): identity, tier, **resolved** tool grants and
+   * desk membership.
+   *
+   * Not derivable from `listTeam`, and that is the point — the roster row
+   * carries none of it, and the tool grants had no read surface anywhere before
+   * this route, so what a company actually grants an agent could not be checked
+   * from outside the process.
+   *
+   * Hosts predating the route 404; callers should treat that as "this host
+   * can't open an agent yet" rather than as a missing teammate.
+   */
+  getAgent(agentId: string, company?: string | null): Promise<AgentDetailDto> {
+    return this.request<AgentDetailDto>(
+      "GET",
+      `${this.scope(company)}/team/${encodeURIComponent(agentId)}`,
+    );
+  }
+
+  /**
+   * Edit an agent, and get the whole agent back (issue #264).
+   *
+   * A patch: keys absent from `input` are left alone, so a caller that renders
+   * some of an agent's fields cannot blank the rest by omission. `description:
+   * null` clears the instructions and `description: undefined` leaves them,
+   * which is why the two must not be collapsed on the way in.
+   *
+   * The host refuses a manifest teammate with a 409 — its fields live in the
+   * version-controlled `company.toml`, and the console does not rewrite that.
+   * Ask `getAgent` first: its `editable` list is the host's own statement of
+   * which fields this call will accept.
+   */
+  updateAgent(
+    agentId: string,
+    input: EditAgentInput,
+    company?: string | null,
+  ): Promise<AgentDetailDto> {
+    return this.request<AgentDetailDto>(
+      "PATCH",
+      `${this.scope(company)}/team/${encodeURIComponent(agentId)}`,
+      input,
+    );
   }
 
   /**

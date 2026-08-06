@@ -28,7 +28,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Switch } from "@/components/ui/switch";
-import { Textarea } from "@/components/ui/textarea";
+import { emptyDraft, type AgentDraft, type AgentFieldKey } from "@/lib/agent";
 import {
   fromDto,
   initials,
@@ -38,16 +38,26 @@ import {
   type TeamMember,
 } from "@/lib/team";
 import { cn } from "@/lib/utils";
+import { AgentDetailView } from "@/views/team/AgentDetailView";
+import { AgentFields } from "@/views/team/AgentFields";
 
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * The agent id in the hash (`#/team/<agentId>`), when one is addressed. The
+   * detail view is a sub-page rather than a modal so an operator can link to an
+   * agent, refresh onto it, and use Back (issue #264).
+   */
+  sub: string | null;
+  /** Open an agent, or return to the roster with `null`. */
+  onOpenAgent: (agentId: string | null) => void;
 }
 
 type Load = "loading" | "ready";
 
 /** The company's agents — showcased and operator-definable. */
-export function TeamView({ client, company }: Props) {
+export function TeamView({ client, company, sub, onOpenAgent }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
@@ -238,6 +248,20 @@ export function TeamView({ client, company }: Props) {
     }
   }
 
+  // `#/team/<agentId>` is the agent detail sub-page. Every hook above has
+  // already run, so this early return keeps hook order stable across both
+  // shapes of the view.
+  if (sub) {
+    return (
+      <AgentDetailView
+        client={client}
+        company={company}
+        agentId={sub}
+        onBack={() => onOpenAgent(null)}
+      />
+    );
+  }
+
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
@@ -268,6 +292,11 @@ export function TeamView({ client, company }: Props) {
                 inboxOn={m.inboxEnabled}
                 onToggleInbox={() => void toggleMemberInbox(m)}
                 onRemove={() => void removeMember(m)}
+                // Only a host-backed teammate can be opened: a starter-team
+                // card is a local placeholder with no record behind it, so its
+                // id would 404 and the detail view would report a teammate that
+                // was never removed.
+                onOpen={fromHost ? () => onOpenAgent(m.id) : undefined}
                 // Budget edits need a teammate the host actually knows about;
                 // starter-team cards are local placeholders with no record.
                 canEditBudget={isAdmin && fromHost}
@@ -339,6 +368,7 @@ function MemberCard({
   inboxOn,
   onToggleInbox,
   onRemove,
+  onOpen,
   canEditBudget,
   onEditBudget,
   onRemoveCap,
@@ -349,6 +379,8 @@ function MemberCard({
   inboxOn: boolean;
   onToggleInbox: () => void;
   onRemove: () => void;
+  /** Open this agent's detail page. Undefined when the card has no host record. */
+  onOpen?: () => void;
   /** Whether to offer the budget controls at all (admins, host-backed cards). */
   canEditBudget: boolean;
   onEditBudget: () => void;
@@ -374,10 +406,25 @@ function MemberCard({
           >
             {initials(member.name)}
           </div>
-          <div className="min-w-0 flex-1">
-            <p className="truncate font-medium">{member.name}</p>
-            <p className="truncate text-xs text-muted-foreground">{member.role}</p>
-          </div>
+          {onOpen ? (
+            // The card's own name is the way in (issue #264). A whole-card
+            // click would swallow the inbox switch and the actions menu, both
+            // of which live inside it, so the target is deliberately this
+            // block rather than the card.
+            <button
+              onClick={onOpen}
+              className="min-w-0 flex-1 rounded-md text-left transition-colors hover:text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+              data-testid="team-card-open"
+            >
+              <p className="truncate font-medium">{member.name}</p>
+              <p className="truncate text-xs text-muted-foreground">{member.role}</p>
+            </button>
+          ) : (
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-medium">{member.name}</p>
+              <p className="truncate text-xs text-muted-foreground">{member.role}</p>
+            </div>
+          )}
           <DropdownMenu>
             <DropdownMenuTrigger
               render={<Button variant="ghost" size="icon" className="-mr-1 -mt-1 size-7" aria-label="Member actions" />}
@@ -385,6 +432,14 @@ function MemberCard({
               <MoreHorizontal className="size-4" />
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
+              {onOpen && (
+                <>
+                  <DropdownMenuItem onClick={onOpen} data-testid="team-open-agent">
+                    View agent
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                </>
+              )}
               {canEditBudget && (
                 <>
                   <DropdownMenuItem onClick={onEditBudget} data-testid="team-budget-edit">
@@ -563,16 +618,15 @@ function AddMemberDialog({
   /** Whether to offer the cap field — setting one is admin-only on the host. */
   canSetBudget: boolean;
 }) {
-  const [name, setName] = useState("");
-  const [role, setRole] = useState("");
-  const [description, setDescription] = useState("");
+  // The same three authored fields the detail view edits, held in the same
+  // shape (issue #264) so "Define an agent" and "Edit agent" cannot drift into
+  // two different sets of labels for one set of values.
+  const [draft, setDraft] = useState<AgentDraft>(emptyDraft);
   const [inbox, setInbox] = useState(false);
   const [budget, setBudget] = useState("");
 
   function reset() {
-    setName("");
-    setRole("");
-    setDescription("");
+    setDraft(emptyDraft());
     setInbox(false);
     setBudget("");
   }
@@ -587,8 +641,14 @@ function AddMemberDialog({
   const budgetInvalid = budget.trim() !== "" && budgetUsdDaily === undefined;
 
   function submit() {
-    if (!name.trim() || !role.trim() || budgetInvalid) return;
-    onAdd({ name, role, description, inbox, budgetUsdDaily });
+    if (!draft.name.trim() || !draft.role.trim() || budgetInvalid) return;
+    onAdd({
+      name: draft.name,
+      role: draft.role,
+      description: draft.description,
+      inbox,
+      budgetUsdDaily,
+    });
     reset();
   }
 
@@ -605,34 +665,11 @@ function AddMemberDialog({
           <DialogTitle>Define an agent</DialogTitle>
           <DialogDescription>Add a teammate to your company&apos;s roster.</DialogDescription>
         </DialogHeader>
-        <div className="grid gap-2">
-          <Label htmlFor="member-name">Name</Label>
-          <Input
-            id="member-name"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Nova"
-          />
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor="member-role">Role</Label>
-          <Input
-            id="member-role"
-            value={role}
-            onChange={(e) => setRole(e.target.value)}
-            placeholder="e.g. Growth Marketer"
-          />
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor="member-desc">What they do</Label>
-          <Textarea
-            id="member-desc"
-            rows={3}
-            value={description}
-            onChange={(e) => setDescription(e.target.value)}
-            placeholder="e.g. Runs paid acquisition and reports on ROAS."
-          />
-        </div>
+        <AgentFields
+          idPrefix="member"
+          draft={draft}
+          onChange={(key: AgentFieldKey, value) => setDraft((d) => ({ ...d, [key]: value }))}
+        />
         {canSetBudget && (
           <div className="grid gap-2">
             <Label htmlFor="member-budget-new">Daily budget (optional)</Label>
@@ -659,7 +696,10 @@ function AddMemberDialog({
           <Button variant="ghost" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button onClick={submit} disabled={!name.trim() || !role.trim() || budgetInvalid}>
+          <Button
+            onClick={submit}
+            disabled={!draft.name.trim() || !draft.role.trim() || budgetInvalid}
+          >
             Add member
           </Button>
         </DialogFooter>
