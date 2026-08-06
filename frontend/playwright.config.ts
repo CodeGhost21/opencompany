@@ -3,6 +3,8 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { LIVE_BRAIN, MCP_FIXTURE_BIND, MOCK_BRAIN_BIND } from "./test/e2e/capabilities";
+
 // `package.json` is `"type": "module"`, so this file is ESM and `__dirname`
 // does not exist here — it type-checks against `@types/node` and then throws at
 // load. Which is the whole lesson of #406 in one line.
@@ -32,9 +34,26 @@ const here = dirname(fileURLToPath(import.meta.url));
  * but only if you already knew which four environment variables to set, and a
  * suite that is hard to start is a suite nobody starts.
  *
- * CI still does not run it. That needs the vendored submodules, a Rust
- * toolchain and a built binary, none of which the Node-only `Console` job has,
- * so it is a lane of its own rather than something smuggled in here.
+ * CI runs it in two lanes (#428, #467): `Console E2E` against a default-feature
+ * host, and `Console E2E (live brain)` against a feature-gated one with the
+ * fixtures below standing behind it.
+ *
+ * # `PW_LIVE_BRAIN=1` — the second lane
+ *
+ * Four specs need an agent that actually executes, which needs a host built
+ * with `--features openhuman,tinycortex,mcp` **and** something for that harness
+ * to think with. When we manage the host, this config supplies the second half:
+ * it starts `test/e2e/mock-brain.mjs` and `test/e2e/mcp-server.mjs` alongside
+ * the host, and hands the host the inference endpoint through
+ * `PW_HOST_PASSTHROUGH` — the escape hatch `host.sh`'s allowlist keeps for
+ * exactly this. The binary is still yours to supply (`PW_HOST_BINARY`, or
+ * `target/debug/opencompany` built with those features); nothing here can tell
+ * a feature-gated host from a default one, which is why the flag is a
+ * declaration rather than a probe. See `test/e2e/capabilities.ts`.
+ *
+ * Against a host you brought yourself (`PW_BASE_URL`), the flag still enables
+ * the four specs but the fixtures are yours to start too — this config will not
+ * reconfigure a host it did not launch.
  */
 
 const providedBaseURL = process.env.PW_BASE_URL;
@@ -60,6 +79,59 @@ if (storageState) {
   mkdirSync(dirname(storageState), { recursive: true });
 }
 
+/** Whether this run also brings up the live-brain fixtures (issue #467). */
+const managesFixtures = managesHost && LIVE_BRAIN;
+
+/**
+ * What the host is told about inference, and which of those names `host.sh` is
+ * allowed to forward.
+ *
+ * The bearer is a placeholder and nothing checks it: the host needs *a*
+ * credential only because a configured credential is what makes it choose a
+ * live harness over the offline echo brain (`harness_inference_from_env`).
+ *
+ * `PW_HOST_PASSTHROUGH` is the load-bearing line. `host.sh` starts the host
+ * from an empty environment and copies in an allowlist, so a variable set here
+ * and not named there reaches nothing.
+ */
+const inferenceEnv: Record<string, string> = managesFixtures
+  ? {
+      OPENCOMPANY_INFERENCE_KEY: "mock-brain",
+      OPENCOMPANY_INFERENCE_URL: `http://${MOCK_BRAIN_BIND}/v1`,
+      PW_HOST_PASSTHROUGH: "OPENCOMPANY_INFERENCE_KEY OPENCOMPANY_INFERENCE_URL",
+    }
+  : {};
+
+/**
+ * One `webServer` entry per fixture, ahead of the host.
+ *
+ * Both are plain Node scripts with no dependencies, and both answer `/healthz`,
+ * which is what lets Playwright wait for them rather than leaving the first
+ * agent turn to discover a backend that is not up yet. Ordering is a courtesy
+ * only — the host reads its inference URL at boot but does not dial it until a
+ * turn runs, well after every server here is ready.
+ */
+const fixtureServers = managesFixtures
+  ? [
+      {
+        command: `node ./test/e2e/mock-brain.mjs --bind ${MOCK_BRAIN_BIND}`,
+        url: `http://${MOCK_BRAIN_BIND}/healthz`,
+        reuseExistingServer: !process.env.CI,
+        timeout: 30_000,
+        stdout: "pipe" as const,
+        stderr: "pipe" as const,
+      },
+      {
+        command: `node ./test/e2e/mcp-server.mjs --bind ${MCP_FIXTURE_BIND}`,
+        url: `http://${MCP_FIXTURE_BIND}/healthz`,
+        reuseExistingServer: !process.env.CI,
+        timeout: 30_000,
+        stdout: "pipe" as const,
+        stderr: "pipe" as const,
+      },
+    ]
+  : [];
+
 export default defineConfig({
   testDir: "./test/e2e",
   globalSetup: storageState ? "./test/e2e/global-setup.ts" : undefined,
@@ -74,21 +146,26 @@ export default defineConfig({
     screenshot: "only-on-failure",
   },
   webServer: managesHost
-    ? {
-        command: "./test/e2e/host.sh",
-        url: `${baseURL}/healthz`,
-        // A host already listening on the default bind is almost always the one
-        // you are developing against, so drive it rather than fight it for the
-        // port. In CI that would mean silently testing something unknown.
-        reuseExistingServer: !process.env.CI,
-        // Covers a cold `npm run build` for the console bundle plus the host's
-        // own boot, with room to spare.
-        timeout: 180_000,
-        stdout: "pipe",
-        stderr: "pipe",
-        env: {
-          PW_HOST_BIND: new URL(baseURL).host,
+    ? [
+        ...fixtureServers,
+        {
+          command: "./test/e2e/host.sh",
+          url: `${baseURL}/healthz`,
+          // A host already listening on the default bind is almost always the
+          // one you are developing against, so drive it rather than fight it
+          // for the port. In CI that would mean silently testing something
+          // unknown.
+          reuseExistingServer: !process.env.CI,
+          // Covers a cold `npm run build` for the console bundle plus the
+          // host's own boot, with room to spare.
+          timeout: 180_000,
+          stdout: "pipe" as const,
+          stderr: "pipe" as const,
+          env: {
+            PW_HOST_BIND: new URL(baseURL).host,
+            ...inferenceEnv,
+          },
         },
-      }
+      ]
     : undefined,
 });
