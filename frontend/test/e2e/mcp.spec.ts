@@ -186,7 +186,13 @@ test("an agent calls a tool on the installed server and shows the result", async
   // Both halves of the round trip, on one row: the marker that says the mocked
   // backend answered, and the remote tool's own output, which can only have
   // come from the fixture over HTTP.
+  //
+  // `MOCK_LLM`, not `__MOCK_LLM__`: a bubble renders its text as markdown, and
+  // the marker's own underscores are emphasis syntax — so what reaches the DOM
+  // is `MOCK_LLM` inside a `<strong>`. Only the plain-text surfaces (the rail's
+  // thread preview, an API response) carry it verbatim, which is a good way to
+  // assert against the sidebar by accident.
   const reply = transcriptRow(page, `echo: ${marker}`);
   await expect(reply).toBeVisible({ timeout: 30_000 });
-  await expect(reply).toContainText("__MOCK_LLM__");
+  await expect(reply).toContainText("MOCK_LLM");
 });
