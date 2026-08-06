@@ -181,7 +181,7 @@ tier = "orchestrator"
 /// Deps with the production approvals wiring: a real gate over the manifest's
 /// `[policy]` and a real on-disk journal, both reachable through the same
 /// `delivery.parking` bundle the runtime builder wires.
-fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<RuntimeJournal>) {
+pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<RuntimeJournal>) {
     let policy = toml::from_str("mode = \"full\"\n").expect("valid [policy] block");
     let gate = Arc::new(crate::policy::ManifestApprovalGate::new(policy));
     let journal = Arc::new(RuntimeJournal::new(dir.join("journal.jsonl")));
@@ -236,7 +236,7 @@ fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc<RuntimeJou
     (deps, journal)
 }
 
-fn record() -> CompanyRecord {
+pub(super) fn record() -> CompanyRecord {
     CompanyRecord {
         id: CompanyId::new("acme"),
         manifest: manifest(),

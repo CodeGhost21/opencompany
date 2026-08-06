@@ -36,6 +36,14 @@
 //! nodes. They are explicit stubs that return a clear capability error rather
 //! than a silent no-op, so a workflow that reaches one fails loudly; a workflow
 //! that never reaches one is unaffected.
+//!
+//! Also not wired, and for a different reason: **memory**, which tinyflows 0.6
+//! added with the #499 pin bump. The other two are unbuilt; this one is
+//! *undecided*. A `MemoryProvider` would give a workflow read and **write**
+//! access to agent memory, and which scopes a workflow may touch has not been
+//! settled — so it is left `None` until it is, and
+//! [`the_memory_capability_is_left_unwired_on_purpose`](tests) pins that so the
+//! answer has to be given rather than defaulted into.
 
 mod http;
 mod resolver;
@@ -639,6 +647,55 @@ mod tests {
         assert_eq!(
             first.file_name().and_then(|part| part.to_str()),
             Some("workspace")
+        );
+    }
+
+    /// Issue #499. tinyflows 0.6 added `Capabilities::memory`, and this pins the
+    /// answer we gave it.
+    ///
+    /// `None` is a decision, not an omission — see the comment at the field. A
+    /// `MemoryProvider` here would let a workflow read and *write* agent memory
+    /// (`remember`/`forget` are on the trait), and which scopes a workflow may
+    /// touch is a policy question this repo has not answered. Until it is,
+    /// unwired is the honest state: a `memory` node fails with a capability
+    /// error rather than quietly writing somewhere nobody authorised.
+    ///
+    /// So this test is here to make wiring it a *deliberate* act. Whoever
+    /// changes it has to change this line too, which is where they will find the
+    /// question they need to answer first.
+    #[tokio::test]
+    async fn the_memory_capability_is_left_unwired_on_purpose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No endpoint is spawned: `build_capabilities` assembles a struct of
+        // handles and never calls the provider, so a base URL that answers
+        // nothing is sufficient and keeps this off the network.
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        let caps = build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            "wf",
+            "run:1",
+            None,
+        )
+        .await;
+
+        assert!(
+            caps.memory.is_none(),
+            "wiring `Capabilities::memory` gives workflows read AND write access \
+             to agent memory — settle which scopes a workflow may touch before \
+             changing this, and say so at the field"
+        );
+        // The neighbouring optional capability IS wired, so this is a statement
+        // about `memory` specifically rather than about the bundle being empty.
+        assert!(
+            caps.agent.is_some(),
+            "agent capability should still be wired"
         );
     }
 }
