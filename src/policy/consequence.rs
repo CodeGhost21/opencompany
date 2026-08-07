@@ -446,7 +446,7 @@ pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String>
 /// catalogue has never heard of it.
 #[cfg(feature = "openhuman")]
 fn composio_toolkit_of(slug: &str) -> Option<String> {
-    use openhuman_core::openhuman::memory_sync::composio::providers::{
+    use openhuman_core::openhuman::memory::sync::composio::providers::{
         catalog_for_toolkit, toolkit_from_slug,
     };
     let toolkit = toolkit_from_slug(slug)?;
@@ -466,7 +466,7 @@ fn composio_toolkit_of(_slug: &str) -> Option<String> {
 /// curated catalogue? Unknown is **not** a read.
 #[cfg(feature = "openhuman")]
 fn composio_action_is_read(slug: &str) -> bool {
-    use openhuman_core::openhuman::memory_sync::composio::providers::{
+    use openhuman_core::openhuman::memory::sync::composio::providers::{
         ToolScope, catalog_for_toolkit, find_curated, toolkit_from_slug,
     };
     let Some(toolkit) = toolkit_from_slug(slug) else {
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn we_do_not_fall_back_to_the_upstream_read_default() {
-        use openhuman_core::openhuman::memory_sync::composio::providers::{
+        use openhuman_core::openhuman::memory::sync::composio::providers::{
             ToolScope, classify_unknown,
         };
         assert_eq!(
