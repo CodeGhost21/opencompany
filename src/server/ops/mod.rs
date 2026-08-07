@@ -19,6 +19,7 @@ pub mod artifacts;
 pub mod capabilities;
 pub mod channels;
 pub mod composio;
+pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
 pub mod finances;
