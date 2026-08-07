@@ -102,13 +102,22 @@
 //! are then the same gate by construction, and a const assertion fails the
 //! build if a later edit separates them again.
 //!
-//! One consequence worth stating plainly: a note larger than
-//! [`MAX_CONTENT_BYTES`] is agent-read-only — the existing
-//! `current_len > MAX_CONTENT_BYTES` refusal, now reached by far more notes than
-//! before. That window is precisely the window in which the old code destroyed
-//! data. Operator edits are untouched: the console and the REST handlers in
-//! [`server::ops::workspace`](crate::server::ops::workspace) call the
-//! [`WorkspaceStore`] port directly and never enter this module.
+//! Two consequences worth stating plainly:
+//!
+//! * A note larger than [`MAX_CONTENT_BYTES`] is agent-read-only — the existing
+//!   `current_len > MAX_CONTENT_BYTES` refusal, now reached by far more notes
+//!   than before. That window is precisely the window in which the old code
+//!   destroyed data. Operator edits are untouched: the console and the REST
+//!   handlers in [`server::ops::workspace`](crate::server::ops::workspace) call
+//!   the [`WorkspaceStore`] port directly and never enter this module.
+//! * Anything the model must *act* on goes in the header, not a trailer. An
+//!   outer cut removes the end of a result first, so guidance parked at the
+//!   bottom disappears exactly when the condition it describes is true.
+//!   [`WorkspaceListTool`] had the same bug in its milder form: its "narrow the
+//!   listing with `prefix`" marker and its `unaddressable` notice both sat below
+//!   up to 300 entries, and the budget bit at roughly 176 — so the advice was
+//!   cut away on precisely the listings long enough to need it. Both now sit
+//!   above the entries, and the entries stop on bytes rather than on a count.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -130,11 +139,28 @@ pub const WORKSPACE_READ_TOOL: &str = "workspace_read";
 /// Tool name: overwrite one workspace note.
 pub const WORKSPACE_WRITE_TOOL: &str = "workspace_write";
 
-/// Max entries one [`WORKSPACE_LIST_TOOL`] call renders before truncating.
+/// Absolute cap on entries one [`WORKSPACE_LIST_TOOL`] call renders.
 ///
 /// A tree this size is already several thousand tokens; past it the agent
-/// should narrow with `prefix` rather than read the whole index.
+/// should narrow with `prefix` rather than read the whole index. This is the
+/// *upper* bound only — the listing usually stops earlier, when the rendered
+/// entries reach [`MAX_LIST_BYTES`]. It was the only bound until issue #417,
+/// and on its own it is the wrong shape: 300 entries at ~90-105 bytes each is
+/// roughly twice what the harness will pass through, so the count never bit
+/// before the byte budget did.
 const MAX_LIST_ENTRIES: usize = 300;
+
+/// Bytes a [`WORKSPACE_LIST_TOOL`] result reserves for everything that is not
+/// an entry line: the header (including the narrowing guidance) and the
+/// `unaddressable` notice.
+const LIST_OVERHEAD_BYTES: usize = 2048;
+
+/// Max bytes of entry lines one [`WORKSPACE_LIST_TOOL`] call renders.
+const MAX_LIST_BYTES: usize = TOOL_RESULT_BUDGET_BYTES - LIST_OVERHEAD_BYTES;
+
+/// The listing's counterpart to the read invariant: a full listing, plus the
+/// header and notice reserved around it, fits under the harness budget.
+const _: () = assert!(MAX_LIST_BYTES + LIST_OVERHEAD_BYTES <= TOOL_RESULT_BUDGET_BYTES);
 
 /// Bytes a [`WORKSPACE_READ_TOOL`] result reserves for everything that is not
 /// the note body: the header, the write-eligibility line, the untrusted-content
@@ -633,7 +659,36 @@ impl Tool for WorkspaceListTool {
         }
 
         let total = entries.len();
-        let shown = total.min(MAX_LIST_ENTRIES);
+
+        // Render entries first, stopping on whichever bound bites: the entry
+        // count, or the byte budget. Counting bytes is the load-bearing half —
+        // an entry line is only ~90-105 bytes, so 300 of them run well past
+        // what the harness will pass through, and the overflow used to be taken
+        // off the end silently (issue #417). Rendering here rather than into
+        // `out` is what lets the header below state a truthful `shown`.
+        let mut rendered = String::new();
+        let mut shown = 0usize;
+        for entry in entries.into_iter().take(MAX_LIST_ENTRIES) {
+            let line = format!(
+                "{kind}\t{path}\tid={id}\trev={rev}\n",
+                kind = kind_label(entry.node.kind),
+                path = entry.path,
+                id = entry.node.id,
+                rev = entry.node.updated_at_millis,
+            );
+            if rendered.len() + line.len() > MAX_LIST_BYTES {
+                break;
+            }
+            rendered.push_str(&line);
+            shown += 1;
+        }
+
+        // Header, then the `unaddressable` notice, then the entries. The first
+        // two are things the model has to act on; the entries are the part it
+        // is safe to lose the tail of, so they go last. The reverse order (the
+        // original) put the "narrow with `prefix`" advice *after* the entries,
+        // where an outer cut removed it precisely when a listing was long
+        // enough to need it.
         let mut out = String::new();
         match &prefix {
             Some(prefix) => out.push_str(&format!(
@@ -646,18 +701,11 @@ impl Tool for WorkspaceListTool {
             " — {shown} of {total} entries. Read one with `{WORKSPACE_READ_TOOL}` using its path \
              or id.\n"
         ));
-        for entry in entries.into_iter().take(shown) {
-            out.push_str(&format!(
-                "{kind}\t{path}\tid={id}\trev={rev}\n",
-                kind = kind_label(entry.node.kind),
-                path = entry.path,
-                id = entry.node.id,
-                rev = entry.node.updated_at_millis,
-            ));
-        }
         if total > shown {
             out.push_str(&format!(
-                "[… {} more entries not shown. Narrow the listing with the `prefix` parameter.]\n",
+                "The other {} entries are NOT listed below — this result is size-capped. Narrow \
+                 the listing with the `prefix` parameter to reach them; re-running this same call \
+                 returns the same entries.\n",
                 total - shown
             ));
         }
@@ -669,6 +717,7 @@ impl Tool for WorkspaceListTool {
                 index.unaddressable
             ));
         }
+        out.push_str(&rendered);
         Ok(ToolResult::success(out))
     }
 }
@@ -1703,6 +1752,128 @@ mod tests {
 
         let (_, body) = store.read(&id, "n-big").await.unwrap().unwrap();
         assert_eq!(body.len(), big.len(), "the oversized note was clobbered");
+    }
+
+    /// A store that answers `tree()` from a fixed node list and nothing else.
+    ///
+    /// The listing bounds have to be exercised against a tree big enough to hit
+    /// them and containing nodes no real backend will create for us — a
+    /// dangling parent, to raise `unaddressable`. `FsOps` refuses both, so the
+    /// only way to reach that rendering is to hand the index the tree directly.
+    struct FixedTree(Vec<WorkspaceNode>);
+
+    #[async_trait]
+    impl WorkspaceStore for FixedTree {
+        async fn tree(&self, _company: &CompanyId) -> crate::Result<Vec<WorkspaceNode>> {
+            Ok(self.0.clone())
+        }
+        async fn read(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, String)>> {
+            unreachable!("the listing never reads a body")
+        }
+        async fn write(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _content: &str,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the listing never writes")
+        }
+        async fn create(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _content: Option<&str>,
+        ) -> crate::Result<()> {
+            unreachable!("the listing never creates")
+        }
+        async fn rename_move(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _name: Option<&str>,
+            _parent_id: Option<Option<&str>>,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the listing never renames")
+        }
+        async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
+            unreachable!("the listing never deletes")
+        }
+        async fn is_empty(&self, _company: &CompanyId) -> crate::Result<bool> {
+            Ok(self.0.is_empty())
+        }
+    }
+
+    /// Issue #417's second head: the listing's own guidance was unreachable.
+    ///
+    /// `MAX_LIST_ENTRIES` is 300 but an entry renders at ~90-105 bytes, so the
+    /// harness budget bit at roughly 176 — below the count bound, which means
+    /// the "… more entries not shown, narrow with `prefix`" marker was never
+    /// even generated, and the `unaddressable` notice below it was cut away
+    /// too. Both sat at the end of the body, which is the end an outer cut
+    /// takes first.
+    ///
+    /// So the listing must stop on bytes, and both trailers must move above the
+    /// entries where no cut can reach them.
+    #[tokio::test]
+    async fn a_long_listing_fits_the_budget_and_carries_its_guidance_in_the_header() {
+        let mut nodes = vec![folder("f-standards", "Standards", None)];
+        for n in 0..MAX_LIST_ENTRIES {
+            nodes.push(file(
+                &format!("node-{n:04}-0000000000"),
+                &format!("Engineering standards v{n:03}.md"),
+                Some("f-standards"),
+            ));
+        }
+        // Two nodes whose ancestor chain dangles, so `unaddressable` is set.
+        nodes.push(file("n-orphan-a", "orphan-a.md", Some("gone")));
+        nodes.push(file("n-orphan-b", "orphan-b.md", Some("gone")));
+
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree(nodes));
+        let list = WorkspaceListTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let out = text(&list.execute(json!({})).await.unwrap());
+
+        // The whole listing reaches the model, so nothing below is cut off.
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "the listing rendered {} bytes, over the {TOOL_RESULT_BUDGET_BYTES}-byte harness \
+             budget — the outer cut would fire and take the last entries with it",
+            out.len(),
+        );
+
+        // The byte bound is what stopped it, not the count bound: this tree has
+        // 301 addressable entries and fewer are shown. If only the count bound
+        // existed the marker below would never be generated at all.
+        let shown: usize = out.matches("\tid=").count();
+        assert!(
+            shown > 0 && shown < MAX_LIST_ENTRIES,
+            "expected a partial listing, got {shown} of {MAX_LIST_ENTRIES}"
+        );
+        assert!(
+            out.contains(&format!("{shown} of {} entries", MAX_LIST_ENTRIES + 1)),
+            "the header must count honestly: {}",
+            &out[..out.len().min(400)]
+        );
+
+        // Everything the model has to act on precedes the first entry line, so
+        // truncating the tail can never remove it.
+        let first_entry = out.find("\tid=").expect("entries were rendered");
+        let head = &out[..first_entry];
+        assert!(
+            head.contains("Narrow the listing with the `prefix` parameter"),
+            "the narrowing guidance is not in the header: {head}"
+        );
+        assert!(
+            head.contains("node(s) have no valid path and were omitted entirely"),
+            "the unaddressable notice is not in the header: {head}"
+        );
+        assert!(
+            head.contains("2 node(s)"),
+            "the unaddressable count is wrong: {head}"
+        );
     }
 
     /// The nonce off a read's BEGIN fence, so a test can demand the *matching*
