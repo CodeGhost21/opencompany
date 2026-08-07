@@ -551,7 +551,7 @@ jobs:
         working-directory: frontend
 
       - name: Download the host binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: opencompany-debug-binary
           path: target/debug
@@ -643,7 +643,7 @@ jobs:
         working-directory: frontend
 
       - name: Download the gated host binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: opencompany-gated-binary
           path: target/debug
