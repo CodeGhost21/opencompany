@@ -43,9 +43,14 @@ repository root:
 
     cargo build --locked --bin opencompany
 
-That is the default feature set, which is all this suite needs — the harness
-company boots on the offline echo brain. Point PW_HOST_BINARY elsewhere to use
-a release build or a feature-gated one.
+That is the default feature set, which is all most of this suite needs — the
+harness company boots on the offline echo brain. Four specs need an agent that
+actually runs (issue #467); for those, build
+
+    cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+
+and run the suite with 'npm run e2e:live'. Point PW_HOST_BINARY elsewhere to
+use a release build or a binary you keep somewhere else.
 EOF
   exit 1
 fi

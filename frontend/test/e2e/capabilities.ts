@@ -16,17 +16,19 @@
  * knowledge lives: whoever built the binary and started the inference backend
  * is the only party that knows.
  *
- * # These skips are not permission to leave the specs unrun
+ * # The skips now have a lane behind them (issue #467)
  *
  * Four of the suite's best specs sit behind `LIVE_BRAIN`, and they are the ones
- * that exercise the product rather than the console's own rendering. Skipping
- * them buys a default-feature lane that is meaningfully green — a real gate,
- * today — and nothing more. Issue #467 tracks standing the feature-gated lane
- * up so they run for real; every skip below names it.
+ * that exercise the product rather than the console's own rendering. CI runs
+ * them: `Console E2E (live brain)` builds `--features openhuman,tinycortex,mcp`
+ * and `playwright.config.ts` stands up `mock-brain.mjs` and `mcp-server.mjs`
+ * behind it. The default-feature `Console E2E` lane still skips them, because
+ * on a host without the harness the thing they test is not compiled in — that
+ * skip is a true statement about that host, not a debt.
  */
 
 /**
- * A host built with `--features openhuman,tinycortex` **and** an inference
+ * A host built with `--features openhuman,tinycortex,mcp` **and** an inference
  * backend behind it — either the mock that echoes `__MOCK_LLM__` or one whose
  * tool choices are scripted (`SPAWNONE`).
  *
@@ -37,14 +39,46 @@
  */
 export const LIVE_BRAIN = process.env.PW_LIVE_BRAIN === "1";
 
-// `PW_MCP_SERVER` used to live here: a path to a local stdio MCP server the MCP
-// spec installed and called. Both are gone. The console's MCP page installed it
-// through routes no host serves (issue #414), and the host rejects stdio servers
-// outright in hosted v1 — so the capability gated a spec that could not have
-// passed had the fixture been supplied. The MCP spec now drives the real
-// surface against the default-feature host and needs nothing extra.
+/**
+ * Whether the run brings up its own host, as opposed to driving one you started
+ * and named with `PW_BASE_URL`. Mirrors `playwright.config.ts`'s `managesHost`,
+ * and settles the same question for the fixtures: a host this run launched was
+ * pointed at fixtures this run also launched, so their addresses are known here
+ * without being restated.
+ */
+const MANAGES_HOST = !process.env.PW_BASE_URL;
+
+/**
+ * Where `mock-brain.mjs` listens when this run starts it. The host is handed
+ * `http://…/v1` as its `OPENCOMPANY_INFERENCE_URL`; override with
+ * `PW_MOCK_BRAIN_BIND` if 8099 is taken.
+ */
+export const MOCK_BRAIN_BIND = process.env.PW_MOCK_BRAIN_BIND || "127.0.0.1:8099";
+
+/** Where `mcp-server.mjs` listens when this run starts it. */
+export const MCP_FIXTURE_BIND = process.env.PW_MCP_FIXTURE_BIND || "127.0.0.1:8098";
+
+/**
+ * The **URL** of an MCP server an agent may be told to call.
+ *
+ * `PW_MCP_SERVER` was retired in #414, and rightly: it carried a path to a
+ * *stdio* server, which this host rejects outright (`src/company/mcp.rs` refuses
+ * any declaration with a `command`), so it gated a spec that could not have
+ * passed even had the fixture existed. `mcp.spec.ts` now drives the console
+ * surface against a default host and needs nothing.
+ *
+ * It comes back here carrying a URL, for the half that page cannot reach: an
+ * *agent* calling a tool on a real server over the real transport
+ * (`mcp-agent.spec.ts`), which needs the harness and therefore the live-brain
+ * lane. That lane starts `mcp-server.mjs`, which is why this is defaulted only
+ * when the run manages the host. Against a host you brought, name your own.
+ */
+export const MCP_SERVER =
+  process.env.PW_MCP_SERVER ||
+  (LIVE_BRAIN && MANAGES_HOST ? `http://${MCP_FIXTURE_BIND}/mcp` : undefined);
 
 /** The reason string a `LIVE_BRAIN` skip carries, so no skip is ever bare. */
 export const LIVE_BRAIN_REASON =
-  "needs a --features openhuman,tinycortex host plus an inference backend; " +
-  "set PW_LIVE_BRAIN=1 to run. Tracked by issue #467.";
+  "needs a --features openhuman,tinycortex,mcp host plus an inference backend; " +
+  "set PW_LIVE_BRAIN=1 to run. The `Console E2E (live brain)` CI lane does " +
+  "(issue #467).";

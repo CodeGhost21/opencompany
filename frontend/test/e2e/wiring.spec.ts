@@ -14,10 +14,12 @@ test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
  *   magic-link auth → session cookie → console → POST /api/v1/company/chat
  *     → (mocked) LLM backend → reply rendered as a company bubble
  *
- * It runs against a live host that the harness brings up separately with a
- * mocked inference backend that echoes a `__MOCK_LLM__` marker. The spec only
- * asserts on that marker (never exact echo text): the agent harness transforms
- * the prompt before it reaches the backend, so only the marker is stable.
+ * It runs against a feature-gated host with a mocked inference backend behind
+ * it — `mock-brain.mjs`, which `playwright.config.ts` starts and points the
+ * host at when `PW_LIVE_BRAIN=1` (issue #467). The spec only asserts on that
+ * backend's `__MOCK_LLM__` marker (never exact echo text): the agent harness
+ * transforms the prompt before it reaches the backend, so only the marker is
+ * stable.
  *
  * The admin address must match `companies/e2e_harness/company.toml`'s
  * `[users] admins`, which is what makes the login flow succeed.

@@ -211,7 +211,7 @@ fn classify_kind(err: &anyhow::Error, auth_configured: bool, in_call_context: bo
     //    `resource_metadata` (not the message) to decide OAuth vs static auth.
     if let Some(unauthorized) = err
         .chain()
-        .find_map(|cause| cause.downcast_ref::<oh::mcp_client::McpUnauthorizedError>())
+        .find_map(|cause| cause.downcast_ref::<oh::mcp::http_client::McpUnauthorizedError>())
     {
         return if unauthorized.resource_metadata.is_some() {
             FailureKind::OauthRequired
@@ -682,7 +682,7 @@ mod tests {
     fn classify_typed_401_dominates_string() {
         // A typed McpUnauthorizedError with OAuth metadata → oauth_required,
         // even though the message string would otherwise be generic.
-        let err = anyhow::Error::new(oh::mcp_client::McpUnauthorizedError {
+        let err = anyhow::Error::new(oh::mcp::http_client::McpUnauthorizedError {
             endpoint: "host".into(),
             resource_metadata: Some("https://host/.well-known/oauth".into()),
         });
@@ -693,7 +693,7 @@ mod tests {
 
     #[test]
     fn classify_typed_401_without_metadata_respects_credential_state() {
-        let err = anyhow::Error::new(oh::mcp_client::McpUnauthorizedError {
+        let err = anyhow::Error::new(oh::mcp::http_client::McpUnauthorizedError {
             endpoint: "host".into(),
             resource_metadata: None,
         });

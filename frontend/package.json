@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "e2e": "playwright test",
-    "e2e:headed": "playwright test --headed"
+    "e2e:headed": "playwright test --headed",
+    "e2e:live": "PW_LIVE_BRAIN=1 playwright test"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

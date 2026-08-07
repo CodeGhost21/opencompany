@@ -48,7 +48,7 @@ use oh::agent::dispatcher::{
     ParsedToolCall, ToolDispatcher, ToolExecutionResult, XmlToolDispatcher,
 };
 use oh::agent::messages::{ChatMessage, ConversationMessage};
-use oh::context::prompt::ToolCallFormat;
+use oh::agent::prompts::ToolCallFormat;
 use oh::inference::provider::ChatResponse;
 use oh::tools::{Tool, ToolSpec};
 
