@@ -669,10 +669,17 @@ impl Tool for WorkspaceListTool {
         let mut rendered = String::new();
         let mut shown = 0usize;
         for entry in entries.into_iter().take(MAX_LIST_ENTRIES) {
+            // Bound the echoed path for the same reason the header does: a node
+            // name is operator-supplied and no backend length-caps it, so one
+            // deep path could otherwise render a line larger than the whole
+            // byte budget and `break` the loop on its first iteration — hiding
+            // every subsequent entry behind a single pathological name. The
+            // clamp announces its own drop, and `id=` (never truncated) stays
+            // the addressable handle, so a bounded entry is still usable.
             let line = format!(
                 "{kind}\t{path}\tid={id}\trev={rev}\n",
                 kind = kind_label(entry.node.kind),
-                path = entry.path,
+                path = echo_path(&entry.path),
                 id = entry.node.id,
                 rev = entry.node.updated_at_millis,
             );
@@ -1818,6 +1825,62 @@ mod tests {
     ///
     /// So the listing must stop on bytes, and both trailers must move above the
     /// entries where no cut can reach them.
+    /// One pathological name must not hide the entries behind it.
+    ///
+    /// A node name is operator-supplied and no backend length-caps it, so a
+    /// single deep path can render a line larger than the whole byte budget.
+    /// Unbounded, that line fails the budget check on the loop's first
+    /// iteration and `break`s — reporting `0 of N` for a workspace that is
+    /// almost entirely listable. Bounding the echoed path keeps every line
+    /// small enough that only the genuine tail is ever lost.
+    #[tokio::test]
+    async fn one_oversized_path_does_not_hide_the_entries_behind_it() {
+        let deep = "d".repeat(MAX_ECHOED_PATH_BYTES * 4);
+        let mut nodes = vec![file("n-deep", &deep, None)];
+        for n in 0..12 {
+            nodes.push(file(
+                &format!("n-after-{n:02}"),
+                &format!("after-{n:02}.md"),
+                None,
+            ));
+        }
+
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree(nodes));
+        let list = WorkspaceListTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let out = text(&list.execute(json!({})).await.unwrap());
+
+        // Every entry survives — the oversized one is clamped, not fatal.
+        let shown: usize = out.matches("\tid=").count();
+        assert_eq!(
+            shown,
+            13,
+            "one long name truncated the listing to {shown} of 13 entries: {}",
+            &out[..out.len().min(400)]
+        );
+
+        // The clamp announces itself rather than presenting a shortened path
+        // as if it were the whole thing.
+        assert!(
+            out.contains("… (+"),
+            "the oversized path was shortened without saying so: {}",
+            &out[..out.len().min(400)]
+        );
+
+        // The id is the addressable handle and is never clamped, so a bounded
+        // entry is still usable.
+        assert!(
+            out.contains("id=n-deep"),
+            "the clamped entry lost its id, so nothing can address it: {}",
+            &out[..out.len().min(400)]
+        );
+
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "the listing rendered {} bytes, over the {TOOL_RESULT_BUDGET_BYTES}-byte budget",
+            out.len(),
+        );
+    }
+
     #[tokio::test]
     async fn a_long_listing_fits_the_budget_and_carries_its_guidance_in_the_header() {
         let mut nodes = vec![folder("f-standards", "Standards", None)];
