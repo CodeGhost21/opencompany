@@ -82,6 +82,33 @@
 //!   [`MAX_CONTENT_BYTES`]: if the note is bigger than a read can return, the
 //!   agent cannot have seen all of it, so it must not overwrite it. Stateless,
 //!   and it closes the silent-truncation data-loss path.
+//!
+//! # Why the caps are derived, not chosen (issue #417)
+//!
+//! That last invariant was stated against the wrong number for as long as this
+//! module existed. The harness cuts **every** tool result to
+//! [`TOOL_RESULT_BUDGET_BYTES`] on its way into the model's context;
+//! `MAX_CONTENT_BYTES` was a flat 64 KiB, four times larger. Between the two a
+//! read reported `dropped == 0`, took the write-eligible branch, and told the
+//! model to send back "the complete new body" — of a note the model had only
+//! been handed the first ~16 KiB of. The write gate agreed (64 KiB), the write
+//! landed, and the remainder of an operator's note was gone with nothing in the
+//! loop reporting a loss.
+//!
+//! The fix is not a smaller literal. It is that the module no longer picks a
+//! bound at all: [`MAX_CONTENT_BYTES`] is [`TOOL_RESULT_BUDGET_BYTES`] minus the
+//! framing this module wraps a body in, so a full read *always* fits and the
+//! outer cut never fires on these tools. The module's gate and the model's view
+//! are then the same gate by construction, and a const assertion fails the
+//! build if a later edit separates them again.
+//!
+//! One consequence worth stating plainly: a note larger than
+//! [`MAX_CONTENT_BYTES`] is agent-read-only — the existing
+//! `current_len > MAX_CONTENT_BYTES` refusal, now reached by far more notes than
+//! before. That window is precisely the window in which the old code destroyed
+//! data. Operator edits are untouched: the console and the REST handlers in
+//! [`server::ops::workspace`](crate::server::ops::workspace) call the
+//! [`WorkspaceStore`] port directly and never enter this module.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -92,6 +119,7 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
+use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
 
@@ -108,11 +136,40 @@ pub const WORKSPACE_WRITE_TOOL: &str = "workspace_write";
 /// should narrow with `prefix` rather than read the whole index.
 const MAX_LIST_ENTRIES: usize = 300;
 
+/// Bytes a [`WORKSPACE_READ_TOOL`] result reserves for everything that is not
+/// the note body: the header, the write-eligibility line, the untrusted-content
+/// preamble, both fence markers with their nonce, and the truncation notice.
+///
+/// Generous on purpose. The cost of over-reserving is a slightly smaller
+/// readable note; the cost of under-reserving is the whole bug this module was
+/// re-cut for — the outer budget shaving the closing fence off the end.
+const READ_OVERHEAD_BYTES: usize = 4096;
+
 /// Max body bytes one [`WORKSPACE_READ_TOOL`] call returns.
 ///
 /// Also the write eligibility threshold — see the module docs on why a note
 /// larger than this is read-only from an agent's point of view.
-const MAX_CONTENT_BYTES: usize = 64 * 1024;
+///
+/// Derived from [`TOOL_RESULT_BUDGET_BYTES`] rather than picked (issue #417).
+/// It used to be a flat 64 KiB, four times the budget the harness then applied
+/// to the finished result, so between the two numbers the module believed it
+/// had returned a whole note while the model received a fraction of one — and
+/// the write-eligible branch invited an overwrite from that fraction. Sizing
+/// the read so a *full* result fits under the harness budget is what makes the
+/// module's gate and the model's view the same gate.
+const MAX_CONTENT_BYTES: usize = TOOL_RESULT_BUDGET_BYTES - READ_OVERHEAD_BYTES;
+
+/// The invariant the two constants above exist to hold: a read returning the
+/// largest body it will ever return, plus every byte of framing around it,
+/// still fits under the harness's per-tool-result budget.
+///
+/// Written as a const assertion because it is the load-bearing property. If a
+/// later edit raises [`MAX_CONTENT_BYTES`], shrinks
+/// [`TOOL_RESULT_BUDGET_BYTES`], or grows the framing past
+/// [`READ_OVERHEAD_BYTES`]'s reservation, the outer cut starts firing on this
+/// tool again — silently, and with data loss at the end of it. This fails the
+/// build instead.
+const _: () = assert!(MAX_CONTENT_BYTES + READ_OVERHEAD_BYTES <= TOOL_RESULT_BUDGET_BYTES);
 
 /// Max bytes of new content [`WORKSPACE_WRITE_TOOL`] accepts in one call.
 ///
@@ -120,6 +177,16 @@ const MAX_CONTENT_BYTES: usize = 64 * 1024;
 /// must stay a note the agent can read back in full, or the next write would be
 /// refused as oversized.
 const MAX_WRITE_BYTES: usize = MAX_CONTENT_BYTES;
+
+/// Max bytes of a caller- or operator-supplied name echoed back inside a
+/// header this module promises to keep small.
+///
+/// The `prefix` argument is agent-supplied and otherwise unbounded, so echoing
+/// it verbatim would let one tool call blow past
+/// [`LIST_OVERHEAD_BYTES`]'s reservation and push the very guidance the header
+/// exists to protect back out of reach. Node paths are operator-supplied and no
+/// backend caps a node name, so the read header takes the same bound.
+const MAX_ECHOED_PATH_BYTES: usize = 512;
 
 /// Depth guard when walking a node's ancestor chain to render its path.
 ///
@@ -413,6 +480,22 @@ fn clamp_body(body: &str, max_bytes: usize) -> (&str, usize) {
     (kept, body.len() - kept.len())
 }
 
+/// A path or prefix, bounded for echoing back inside a header.
+///
+/// Headers in this module carry the instructions the model has to act on, and
+/// they are sized against a fixed reservation. A path is either agent-supplied
+/// (`prefix`) or operator-supplied (a node name, which no backend length-caps),
+/// so neither can be pasted in unbounded without putting the rest of the header
+/// past the reservation — and past the harness budget, which cuts from the end.
+fn echo_path(path: &str) -> String {
+    let (kept, dropped) = clamp_body(path, MAX_ECHOED_PATH_BYTES);
+    if dropped == 0 {
+        kept.to_string()
+    } else {
+        format!("{kept}… (+{dropped} bytes)")
+    }
+}
+
 /// A fresh random token for one read's content fence.
 ///
 /// The fence delimits operator/agent-authored prose that the model must treat
@@ -538,7 +621,8 @@ impl Tool for WorkspaceListTool {
             let message = match &prefix {
                 Some(prefix) => format!(
                     "No workspace notes exist under `{prefix}`. Call `{WORKSPACE_LIST_TOOL}` with \
-                     no prefix to see the whole tree."
+                     no prefix to see the whole tree.",
+                    prefix = echo_path(prefix)
                 ),
                 None => "This company's workspace is empty — no folders or notes have been \
                          created yet. There is no company documentation to consult; say so \
@@ -552,7 +636,10 @@ impl Tool for WorkspaceListTool {
         let shown = total.min(MAX_LIST_ENTRIES);
         let mut out = String::new();
         match &prefix {
-            Some(prefix) => out.push_str(&format!("Company workspace under `{prefix}`")),
+            Some(prefix) => out.push_str(&format!(
+                "Company workspace under `{prefix}`",
+                prefix = echo_path(prefix)
+            )),
             None => out.push_str("Company workspace"),
         }
         out.push_str(&format!(
@@ -692,12 +779,24 @@ impl Tool for WorkspaceReadTool {
         let (kept, dropped) = clamp_body(&body, MAX_CONTENT_BYTES);
         let nonce = fence_nonce();
 
+        // The size line states what was *returned* as well as what exists, so a
+        // partial read is legible from the first line rather than only from a
+        // marker at the very end — which is exactly the position an outer cut
+        // takes away first.
+        let sizes = if dropped == 0 {
+            format!("{} bytes", body.len())
+        } else {
+            format!(
+                "returned {kept_len} of {total} bytes",
+                kept_len = kept.len(),
+                total = body.len(),
+            )
+        };
         let mut out = format!(
-            "Workspace note `{path}` (id={id}, rev={rev}, {bytes} bytes).\n",
-            path = entry.path,
+            "Workspace note `{path}` (id={id}, rev={rev}, {sizes}).\n",
+            path = echo_path(&entry.path),
             id = entry.node.id,
             rev = entry.node.updated_at_millis,
-            bytes = body.len(),
         );
         if dropped == 0 {
             out.push_str(&format!(
@@ -1604,6 +1703,204 @@ mod tests {
 
         let (_, body) = store.read(&id, "n-big").await.unwrap().unwrap();
         assert_eq!(body.len(), big.len(), "the oversized note was clobbered");
+    }
+
+    /// The nonce off a read's BEGIN fence, so a test can demand the *matching*
+    /// END fence rather than any occurrence of the words.
+    fn fence_of(out: &str) -> String {
+        let at = out
+            .find("--- BEGIN WORKSPACE NOTE ")
+            .expect("the read is fenced");
+        out[at + "--- BEGIN WORKSPACE NOTE ".len()..]
+            .split_whitespace()
+            .next()
+            .expect("the fence carries a nonce")
+            .to_string()
+    }
+
+    /// Issue #417, the data-loss window itself.
+    ///
+    /// A 20 KiB note sat between the module's old 64 KiB read cap and the
+    /// harness's 16 KiB budget. The module saw `dropped == 0`, emitted the
+    /// write-eligible branch — "call `workspace_write` … with the complete new
+    /// body" — and the harness then handed the model ~16 KiB of the note. An
+    /// agent doing exactly as instructed wrote back what it had seen, the
+    /// 64 KiB write gate accepted it, and the rest of the operator's note was
+    /// destroyed with nothing reporting a loss.
+    ///
+    /// Two things have to hold for that to be closed, and neither implies the
+    /// other: the invitation must be absent (so a compliant agent is never told
+    /// to send a whole body it does not have), and the result must fit under
+    /// the harness budget (so the module's view and the model's view are the
+    /// same bytes, closing fence included).
+    #[tokio::test]
+    async fn a_note_the_harness_would_have_cut_is_read_only_and_never_invites_a_rewrite() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let id = CompanyId::new("acme");
+        let body = "x".repeat(20 * 1024);
+        store
+            .create(&id, &file("n-big", "big.md", None), Some(&body))
+            .await
+            .unwrap();
+
+        let read = WorkspaceReadTool::new(CompanyWorkspace::new(store, id));
+        let out = text(&read.execute(json!({"path": "big.md"})).await.unwrap());
+
+        // The agent is told it may not write, and is never handed the sentence
+        // that caused the overwrite.
+        assert!(out.contains("CANNOT be overwritten"), "{out}");
+        assert!(
+            !out.contains("complete new body"),
+            "a partial read still invited a full-body overwrite: {out}"
+        );
+
+        // The whole result survives the harness, so the model sees the same
+        // bytes this module believes it returned — terminator included.
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "a read of a {} byte note rendered {} bytes, over the {TOOL_RESULT_BUDGET_BYTES}-byte \
+             harness budget — the outer cut would fire and take the end with it",
+            body.len(),
+            out.len(),
+        );
+        let nonce = fence_of(&out);
+        assert!(
+            out.trim_end()
+                .ends_with(&format!("--- END WORKSPACE NOTE {nonce} ---")),
+            "the closing fence is not the last thing in the result: {out}"
+        );
+
+        // And the first line says how much of it arrived, rather than leaving
+        // that to a marker at the very end.
+        assert!(
+            out.contains(&format!(
+                "returned {MAX_CONTENT_BYTES} of {} bytes",
+                body.len()
+            )),
+            "the header does not state what was returned: {out}"
+        );
+    }
+
+    /// The worst case the reservation has to cover: a body at exactly the cap,
+    /// so nothing is dropped and the *whole* framing is emitted — write-
+    /// eligibility line, fence preamble, both markers — around a path long
+    /// enough to need clamping.
+    ///
+    /// This is the case [`READ_OVERHEAD_BYTES`] exists for. If the reservation
+    /// were removed (or the cap raised to the budget), a full read would land
+    /// over the budget and the harness would shave the closing fence off the
+    /// end of the very reads the module says nothing was dropped from.
+    #[tokio::test]
+    async fn a_full_read_at_the_cap_still_fits_under_the_harness_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let id = CompanyId::new("acme");
+        // A path far longer than anything the console produces, to prove the
+        // reservation covers the header and not just the body.
+        let outer = "L".repeat(200);
+        let inner = "M".repeat(200);
+        let leaf = format!("{}.md", "N".repeat(200));
+        store
+            .create(&id, &folder("f-outer", &outer, None), None)
+            .await
+            .unwrap();
+        store
+            .create(&id, &folder("f-inner", &inner, Some("f-outer")), None)
+            .await
+            .unwrap();
+        let body = "z".repeat(MAX_CONTENT_BYTES);
+        store
+            .create(&id, &file("n-max", &leaf, Some("f-inner")), Some(&body))
+            .await
+            .unwrap();
+
+        let read = WorkspaceReadTool::new(CompanyWorkspace::new(store, id));
+        let out = text(&read.execute(json!({"id": "n-max"})).await.unwrap());
+
+        // Nothing was dropped, so this is the write-eligible branch — the one
+        // whose promise has to be true.
+        assert!(out.contains("complete new body"), "{out}");
+        assert!(
+            out.contains(&format!("{MAX_CONTENT_BYTES} bytes")),
+            "the header should report the note's full size: {out}"
+        );
+        assert!(
+            out.len() <= TOOL_RESULT_BUDGET_BYTES,
+            "a full read at the cap rendered {} bytes, over the \
+             {TOOL_RESULT_BUDGET_BYTES}-byte harness budget: the framing needs more than the \
+             {READ_OVERHEAD_BYTES} bytes reserved for it",
+            out.len(),
+        );
+        let nonce = fence_of(&out);
+        assert!(
+            out.trim_end()
+                .ends_with(&format!("--- END WORKSPACE NOTE {nonce} ---")),
+            "the closing fence is not the last thing in the result: {out}"
+        );
+    }
+
+    /// The write gate at its boundary: one byte over the read cap is refused.
+    ///
+    /// The existing oversized test uses cap + 4 KiB, which passes even if the
+    /// gate is off by kilobytes. This pins the gate to the same number the read
+    /// clamps at, which is the whole point of deriving both from one constant.
+    #[tokio::test]
+    async fn a_write_is_refused_on_a_note_one_byte_over_the_read_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let id = CompanyId::new("acme");
+        let body = "x".repeat(MAX_CONTENT_BYTES + 1);
+        store
+            .create(&id, &file("n-edge", "edge.md", None), Some(&body))
+            .await
+            .unwrap();
+        let rev = store
+            .read(&id, "n-edge")
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .updated_at_millis;
+
+        let write = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let result = write
+            .execute(json!({
+                "path": "edge.md",
+                "content": "what the agent saw",
+                "expected_updated_at": rev,
+            }))
+            .await
+            .unwrap();
+        assert!(result.is_error, "{}", text(&result));
+        assert!(text(&result).contains("larger than"), "{}", text(&result));
+
+        let (_, after) = store.read(&id, "n-edge").await.unwrap().unwrap();
+        assert_eq!(after.len(), body.len(), "the note was clobbered");
+
+        // Not vacuous in the other direction: at exactly the cap the same write
+        // is allowed, so the refusal above is the boundary and not a blanket.
+        let ok_body = "x".repeat(MAX_CONTENT_BYTES);
+        store
+            .create(&id, &file("n-ok", "ok.md", None), Some(&ok_body))
+            .await
+            .unwrap();
+        let rev = store
+            .read(&id, "n-ok")
+            .await
+            .unwrap()
+            .unwrap()
+            .0
+            .updated_at_millis;
+        let result = write
+            .execute(json!({
+                "path": "ok.md",
+                "content": "a complete rewrite",
+                "expected_updated_at": rev,
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", text(&result));
     }
 
     #[tokio::test]
