@@ -89,6 +89,37 @@ use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
 use crate::runtime::tools::extends_on_boundary;
 
+/// The per-tool-result byte budget every OpenCompany agent runs under.
+///
+/// The harness cuts **every** tool result to this many bytes on its way into
+/// the model's context — `ToolOutputMiddleware`, fed from
+/// `ContextManager::tool_result_budget_bytes`, which [`build_agent`] threads in
+/// below via [`AgentBuilder::context_config`]. It is the real ceiling on what a
+/// model ever sees from a tool, and it is *smaller* than the caps individual
+/// tools tend to write for themselves.
+///
+/// It is stated here rather than inherited on purpose (issue #417). Before this
+/// constant existed `build_agent` never called `context_config`, so the builder
+/// fell back to `ContextConfig::default()` and the 16 KiB became OpenCompany's
+/// effective bound by accident — invisible from this crate, and out of step
+/// with a tool that had capped itself at 64 KiB. `workspace_read` consequently
+/// told the model "nothing was dropped, you may write the complete body back"
+/// about a note the model had only seen the first 16 KiB of, and the resulting
+/// `workspace_write` silently destroyed the rest.
+///
+/// So any tool whose result carries a *contract* — "this is the whole thing",
+/// "act on the trailer below" — must size itself against this number, not
+/// against a cap of its own choosing. [`workspace_tools`] derives its read and
+/// write caps from it directly.
+///
+/// The value still tracks the vendored default: keeping the number identical
+/// makes adopting it a no-op today, so the behaviour change belongs to the
+/// consumers that now respect it, not to this line.
+///
+/// [`workspace_tools`]: crate::harness::workspace_tools
+pub(crate) const TOOL_RESULT_BUDGET_BYTES: usize =
+    oh::agent::context::DEFAULT_TOOL_RESULT_BUDGET_BYTES;
+
 /// Map a manifest cognition-tier hint to a hosted model/tier name.
 ///
 /// The manifest tier "never selects a model" (that is the TinyHumans backend's
@@ -591,6 +622,16 @@ pub fn build_agent(
         .tool_dispatcher(tool_dispatcher)
         .tool_policy(Arc::new(policy))
         .prompt_builder(prompt_builder)
+        // Stated, not inherited (issue #417). Omitting this call leaves the
+        // builder on `ContextConfig::default()`, which lands on the same number
+        // — so this is behaviour-identical today. What changes is that the
+        // number is now *chosen here*, where tools that must size their results
+        // against it can read it as [`TOOL_RESULT_BUDGET_BYTES`], instead of
+        // being a vendored default no OpenCompany source mentioned.
+        .context_config(oh::config::ContextConfig {
+            tool_result_budget_bytes: TOOL_RESULT_BUDGET_BYTES,
+            ..Default::default()
+        })
         .model_name(model)
         .workspace_dir(workspace)
         .agent_definition_name(manifest_agent.id.clone())
