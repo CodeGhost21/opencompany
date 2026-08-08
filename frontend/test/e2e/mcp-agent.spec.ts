@@ -107,7 +107,7 @@ test("an agent calls a tool on a registered MCP server and shows the result", as
   try {
     await openThread(page);
 
-    const marker = `agent-mcp-${Date.now()}`;
+    const marker = `agent-mcp-${randomUUID()}`;
     const directive = `__MOCK_TOOL_CALL__ ${JSON.stringify({
       name: "mcp_call_tool",
       arguments: { server, tool: "echo", arguments: { text: marker } },
