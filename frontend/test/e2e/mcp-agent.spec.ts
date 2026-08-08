@@ -90,7 +90,7 @@ test("an agent calls a tool on a registered MCP server and shows the result", as
   // "already exists" would let this spec adopt a leftover registration from an
   // earlier run — pointing anywhere at all — pass against it, and then delete a
   // server it never created.
-  const server = `pw-agent-mcp-${Date.now()}`;
+  const server = `pw-agent-mcp-${randomUUID()}`;
 
   // Registered through the API rather than the console: the console's add form
   // is `mcp.spec.ts`'s subject, and repeating it here would make this spec fail
