@@ -147,7 +147,20 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
 
 /// Serves the Axum application.
 pub async fn serve(state: AppState) -> Result<()> {
-    let listener = TcpListener::bind(&state.config().bind).await?;
+    // Cloned, not borrowed: `router(state)` below takes the state by value.
+    let bind = state.config().bind.clone();
+    // Name the address in the error. A bare `?` surfaces the bind failure as
+    // `openhuman process error: Address already in use` — the io::Error `#[from]`
+    // arm — which says nothing about *which* address, and points at the wrong
+    // subsystem entirely. The configured address may have come from a flag, a
+    // variable, or `config.toml` (issue #425), so the value actually honoured is
+    // the one piece of context worth carrying.
+    //
+    // Deliberately not pre-parsed to a `SocketAddr`: `ToSocketAddrs` resolves
+    // hostnames, so `localhost:8080` binds today and must keep binding.
+    let listener = TcpListener::bind(&bind).await.map_err(|e| {
+        crate::error::OpenCompanyError::Config(format!("could not bind `{bind}`: {e}"))
+    })?;
     axum::serve(listener, router(state)).await?;
     Ok(())
 }

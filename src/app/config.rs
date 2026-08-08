@@ -507,6 +507,42 @@ pub fn resolve(
     Ok((config, prov))
 }
 
+/// Resolves the address `serve` binds its HTTP listener to, with the layer
+/// that supplied it.
+///
+/// Precedence: `--bind` flag ⟵ `OPENCOMPANY_BIND` ⟵ `config.toml` `bind` ⟵
+/// [`DEFAULT_BIND`]. This mirrors the [`resolve`] chain for every other field,
+/// but stands apart because it takes a CLI flag as its top layer and no company
+/// manifest: `serve` hosts N companies, so there is no single manifest to feed
+/// the full [`resolve`] pass.
+///
+/// The returned label is operator-facing (`"--bind"` / `"OPENCOMPANY_BIND"` /
+/// `"config.toml"` / `"default"`), so startup can print *which* layer chose the
+/// address and a mismatch is visible rather than silent.
+///
+/// An empty `OPENCOMPANY_BIND` counts as unset — the [`EnvSource`] contract —
+/// and falls through to the next layer. An empty flag or `config.toml` value is
+/// taken verbatim (as in [`resolve_str`]) and fails loudly at bind time rather
+/// than silently reverting to the default.
+///
+/// The default stays loopback. A wildcard bind is only ever reached by an
+/// explicit flag, variable, or config entry — i.e. by operator intent.
+pub fn resolve_serve_bind(
+    flag: Option<String>,
+    env: &dyn EnvSource,
+    config_bind: Option<String>,
+) -> (String, &'static str) {
+    if let Some(value) = flag {
+        (value, "--bind")
+    } else if let Some(value) = env.get("OPENCOMPANY_BIND") {
+        (value, "OPENCOMPANY_BIND")
+    } else if let Some(value) = config_bind {
+        (value, "config.toml")
+    } else {
+        (DEFAULT_BIND.to_string(), "default")
+    }
+}
+
 /// Resolves a required string field, recording its winning layer.
 fn resolve_str(
     prov: &mut ConfigProvenance,
@@ -921,6 +957,83 @@ mod test {
         let (cfg, prov) = resolve(&env, None, &default_manifest()).unwrap();
         assert_eq!(cfg.bind, DEFAULT_BIND);
         assert_eq!(prov.layer("bind"), Some(ConfigLayer::Default));
+    }
+
+    // -----------------------------------------------------------------
+    // resolve_serve_bind: the layers `serve` actually honours.
+    //
+    // Before issue #425 `serve` read only its `--bind` flag, so
+    // `OPENCOMPANY_BIND` moved `doctor`'s report but never the listener.
+    // `serve_bind_env_beats_config_toml` is the regression test for exactly
+    // that: it is red against the flag-only behaviour.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn serve_bind_flag_beats_env_and_config_toml() {
+        let env = MapEnv::new([("OPENCOMPANY_BIND", "127.0.0.1:2222")]);
+        let (bind, source) = resolve_serve_bind(
+            Some("127.0.0.1:1111".into()),
+            &env,
+            Some("127.0.0.1:3333".into()),
+        );
+        assert_eq!(bind, "127.0.0.1:1111");
+        assert_eq!(source, "--bind");
+    }
+
+    #[test]
+    fn serve_bind_env_beats_config_toml() {
+        let env = MapEnv::new([("OPENCOMPANY_BIND", "127.0.0.1:2222")]);
+        let (bind, source) = resolve_serve_bind(None, &env, Some("127.0.0.1:3333".into()));
+        assert_eq!(bind, "127.0.0.1:2222");
+        assert_eq!(source, "OPENCOMPANY_BIND");
+    }
+
+    #[test]
+    fn serve_bind_empty_env_falls_through() {
+        // Same empty-is-unset convention `empty_env_value_is_ignored` pins for
+        // the `resolve` chain: an exported-but-blank variable must not shadow
+        // the layer beneath it.
+        let env = MapEnv::new([("OPENCOMPANY_BIND", "")]);
+        let (bind, source) = resolve_serve_bind(None, &env, Some("127.0.0.1:3333".into()));
+        assert_eq!(bind, "127.0.0.1:3333");
+        assert_eq!(source, "config.toml");
+
+        // With nothing under it either, an empty variable reaches the default.
+        let (bind, source) = resolve_serve_bind(None, &env, None);
+        assert_eq!(bind, DEFAULT_BIND);
+        assert_eq!(source, "default");
+    }
+
+    #[test]
+    fn serve_bind_config_toml_used_when_no_flag_or_env() {
+        let env = MapEnv::default();
+        let (bind, source) = resolve_serve_bind(None, &env, Some("127.0.0.1:3333".into()));
+        assert_eq!(bind, "127.0.0.1:3333");
+        assert_eq!(source, "config.toml");
+    }
+
+    #[test]
+    fn serve_bind_defaults_to_loopback_when_nothing_set() {
+        let env = MapEnv::default();
+        let (bind, source) = resolve_serve_bind(None, &env, None);
+        assert_eq!(bind, DEFAULT_BIND);
+        assert_eq!(source, "default");
+        // The default must stay loopback: a wildcard bind is only ever reached
+        // by explicit operator intent (flag, variable, or config entry).
+        assert!(
+            bind.starts_with("127.0.0.1:"),
+            "default bind must be loopback"
+        );
+    }
+
+    #[test]
+    fn serve_bind_honours_a_wildcard_only_from_an_explicit_layer() {
+        // The hosted manager injects `OPENCOMPANY_BIND=0.0.0.0:8080`; that must
+        // reach the listener, and be attributed to the variable.
+        let env = MapEnv::new([("OPENCOMPANY_BIND", "0.0.0.0:8080")]);
+        let (bind, source) = resolve_serve_bind(None, &env, None);
+        assert_eq!(bind, "0.0.0.0:8080");
+        assert_eq!(source, "OPENCOMPANY_BIND");
     }
 
     #[test]
