@@ -71,66 +71,116 @@ use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
 use crate::server::error::ApiError;
+use crate::server::ops::composio_toolkits::{self, CatalogSource, OpenModeToolkits};
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The reminder attached to every mutating response.
 const SWITCH_NOTE: &str =
     "Agents pick up the new Composio token on their next turn — no restart needed.";
 
-/// The providers the console offers when a company is in **open mode** (issue
-/// #397).
+/// The toolkits the console should offer for a company, whether that answer
+/// came from open mode, and where the list came from.
 ///
-/// An empty `[tools.composio].toolkits` means "defer to the backend's
-/// server-enforced allowlist" — i.e. *every* toolkit is permitted, roughly a
-/// hundred slugs. The console previously read that same empty list as "offer
-/// nothing", so the one value meaning *allow everything* rendered zero provider
-/// rows on 19 of 20 shipped templates.
+/// A non-empty manifest allowlist is authoritative and is offered **verbatim**:
+/// a company that deliberately narrowed its belt sees exactly what it chose, the
+/// backend catalog is not consulted, and nothing can widen it. That is not a
+/// performance shortcut — it is the boundary. Widening a restrictive manifest
+/// from a catalog fetch would silently hand a company providers it decided
+/// against.
 ///
-/// Two things are wrong with simply listing all hundred: the console does not
-/// know the backend's allowlist without a network round-trip on a page-load
-/// path, and a hundred rows is its own usability problem. So open mode offers
-/// this curated set — the toolkits a company actually reaches for first, each of
-/// which is in the backend's default allowlist — and the console pairs it with a
-/// free-text field that can authorize **any** slug the backend permits. The
-/// curated list is a starting point, never a ceiling: nothing here narrows what
-/// the backend or the agent-side allowlist admits.
+/// Empty means **open mode**, where the manifest is deferring to the backend's
+/// own server-enforced allowlist. The honest answer there is the backend's live
+/// catalog ([`composio_toolkits`]), fetched once per
+/// [`CATALOG_TTL`](composio_toolkits::CATALOG_TTL) and marked
+/// [`CatalogSource::Fallback`] with a reason if it cannot be had.
+///
+/// Returning the triple (rather than letting the console infer any of it) is the
+/// whole point of the fix: the console must never have to guess which of two
+/// opposite meanings an empty list carries, nor whether the list it is rendering
+/// is the real catalog.
 ///
 /// This is a **console affordance only**. Agent-side toolkit admission is
 /// [`toolkit_allowed`](crate::harness::composio), which still treats an empty
-/// manifest list as "allow every toolkit" — unchanged by this constant.
-pub(crate) const OPEN_MODE_TOOLKITS: &[&str] = &[
-    "gmail",
-    "googlecalendar",
-    "googledrive",
-    "github",
-    "slack",
-    "notion",
-    "linear",
-    "discord",
-];
-
-/// The toolkits the console should offer for a company, and whether that answer
-/// came from open mode.
-///
-/// A non-empty manifest allowlist is authoritative and is offered verbatim — a
-/// company that deliberately narrowed its belt sees exactly what it chose.
-/// Empty means open mode, which offers [`OPEN_MODE_TOOLKITS`].
-///
-/// Returning the pair (rather than letting the console infer open mode from an
-/// empty list) is the whole point of the fix: the console must never again have
-/// to guess which of the two opposite meanings an empty list carries.
-fn effective_toolkits(manifest: &[String]) -> (bool, Vec<String>) {
+/// manifest list as "allow every toolkit" — unchanged by any of this.
+async fn effective_toolkits(
+    runtime: &CompanyRuntime,
+    manifest: &[String],
+) -> (bool, OpenModeToolkits) {
     if manifest.is_empty() {
-        (
-            true,
-            OPEN_MODE_TOOLKITS
-                .iter()
-                .map(|s| (*s).to_string())
-                .collect(),
-        )
+        (true, open_mode_toolkits(runtime).await)
     } else {
-        (false, manifest.to_vec())
+        (
+            false,
+            OpenModeToolkits {
+                toolkits: manifest.to_vec(),
+                source: CatalogSource::Manifest,
+                notice: None,
+            },
+        )
     }
+}
+
+/// Open mode's provider list: the backend's live catalog, cached, or an
+/// honestly-marked fallback.
+///
+/// The cache is consulted before the (cfg-split) fetch and records the outcome
+/// either way, so a status poll during an outage costs a map lookup rather than
+/// another fetch timeout of waiting.
+async fn open_mode_toolkits(runtime: &CompanyRuntime) -> OpenModeToolkits {
+    let key = catalog_cache_key(runtime);
+    if let Some(cached) = composio_toolkits::cache().lookup(&key, std::time::Instant::now()) {
+        return OpenModeToolkits::from_outcome(cached);
+    }
+    let outcome = fetch_catalog(runtime).await;
+    composio_toolkits::cache().store(&key, outcome.clone(), std::time::Instant::now());
+    OpenModeToolkits::from_outcome(outcome)
+}
+
+/// This company's catalog cache key. The backend URL is resolved the same way
+/// the status DTO resolves it, so a company repointed at a different backend
+/// does not read the old backend's catalog.
+fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
+    use crate::app::config::EnvSource;
+    let env = crate::app::config::ProcessEnv;
+    let backend_url = backend_url_or_default(
+        env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV),
+        env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
+    );
+    composio_toolkits::cache_key(runtime.id(), &backend_url)
+}
+
+/// Fetch the backend's toolkit catalog for this company, bounded by
+/// `composio_toolkits::FETCH_TIMEOUT`.
+///
+/// `Err` is a plain-language reason the console can show — never a bare
+/// fall-through to a short list that would look authoritative.
+#[cfg(feature = "composio")]
+async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<String>, String> {
+    // No credential of any tier means there is nothing to dial the backend
+    // with. Say that, rather than spending the timeout to discover it.
+    let config = resolve_tenant(runtime).await.map_err(|_| {
+        "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+    })?;
+    let fetch = crate::harness::composio::list_catalog_toolkits(&config);
+    match tokio::time::timeout(composio_toolkits::FETCH_TIMEOUT, fetch).await {
+        Err(_) => Err(format!(
+            "the Composio backend did not answer within {}s",
+            composio_toolkits::FETCH_TIMEOUT.as_secs()
+        )),
+        Ok(Err(err)) => Err(err.to_string()),
+        Ok(Ok(toolkits)) if toolkits.is_empty() => {
+            Err("the Composio backend returned an empty catalog".to_string())
+        }
+        Ok(Ok(toolkits)) => Ok(toolkits),
+    }
+}
+
+/// Without the `composio` feature there is no client to fetch a catalog with.
+/// The status route still answers (reporting `inBuild:false`), and it says so
+/// rather than presenting the fallback as the backend's list.
+#[cfg(not(feature = "composio"))]
+async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<String>, String> {
+    Err("Composio is not compiled into this build".to_string())
 }
 
 /// Builds the Composio management route fragment.
@@ -185,10 +235,23 @@ struct ComposioStatusDto {
     /// empty list reads as.
     open_mode: bool,
     /// The toolkits the console offers as provider rows — the manifest list when
-    /// it is non-empty, else the curated [`OPEN_MODE_TOOLKITS`] starting set. In
-    /// open mode this is a suggestion, not a limit: any slug the backend permits
-    /// can still be authorized.
+    /// it is non-empty, else the backend's live catalog (or, when that cannot be
+    /// fetched, a built-in fallback flagged by [`Self::catalog_source`]). In open
+    /// mode this is still not a hard limit: any slug the backend permits can be
+    /// authorized by typing it.
     effective_toolkits: Vec<String>,
+    /// Where [`Self::effective_toolkits`] came from — `manifest`, `backend`, or
+    /// `fallback` (issue #397).
+    ///
+    /// The console must be able to distinguish "these are the hundred providers
+    /// the backend permits" from "the catalog could not be read, here are eight
+    /// we know of". Both render as a list of slugs; only one of them is
+    /// authoritative, and a console that could not tell them apart would present
+    /// the second as though it were the first.
+    catalog_source: CatalogSource,
+    /// Why the list is a fallback, in plain language for the operator. `None`
+    /// unless [`Self::catalog_source`] is `fallback`.
+    catalog_notice: Option<String>,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -278,7 +341,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         )
     };
     let credential_source = credential_source_for(stored, &env);
-    let (open_mode, effective) = effective_toolkits(&toolkits);
+    let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
         granted,
@@ -286,7 +349,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         backend_url: backend_url_or_default(env_url, api_url),
         toolkits,
         open_mode,
-        effective_toolkits: effective,
+        effective_toolkits: effective.toolkits,
+        catalog_source: effective.source,
+        catalog_notice: effective.notice,
     })
 }
 
@@ -312,6 +377,12 @@ async fn set_token(
     store_token(runtime.id(), runtime.secrets().as_ref(), &body.token)
         .await
         .map_err(ApiError)?;
+    // The credential decides which Composio entity the backend resolves, so a
+    // set / rotate / clear can change which catalog this company gets. Drop the
+    // cached one rather than serving the previous account's answer for up to
+    // `CATALOG_TTL` — the response below re-reads the status, so the operator
+    // sees the new list immediately.
+    composio_toolkits::cache().evict(&catalog_cache_key(runtime));
     // After the store, so the journal records a completed change. An empty
     // value is a clear, not a set — the two are worth telling apart in an
     // audit trail, since one grants access and the other withdraws it.
@@ -495,7 +566,8 @@ async fn connections_impl(_runtime: &CompanyRuntime) -> Result<Json<Vec<Connecti
 
 #[cfg(test)]
 mod tests {
-    use super::{ComposioStatusDto, CredentialSource, credential_source_for};
+    use super::{CatalogSource, ComposioStatusDto, CredentialSource, credential_source_for};
+    use crate::server::ops::composio_toolkits;
 
     use axum::body::{Body, to_bytes};
     use axum::http::{Request, StatusCode};
@@ -519,10 +591,23 @@ mod tests {
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
+        state_with_manifest_id(home, "acme", manifest_toml).await
+    }
+
+    /// The same, under an explicit company id.
+    ///
+    /// The catalog cache is process-wide and keyed by company, so the tests that
+    /// seed it need ids of their own — two tests sharing `acme` would share an
+    /// entry and race.
+    async fn state_with_manifest_id(
+        home: &std::path::Path,
+        company: &str,
+        manifest_toml: &str,
+    ) -> AppState {
         use crate::ports::CompanyStore;
         let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
         let store = FsCompanyStore::new(home.to_path_buf());
-        let id = CompanyId::new("acme");
+        let id = CompanyId::new(company);
         store
             .save(&CompanyRecord {
                 id: id.clone(),
@@ -546,7 +631,7 @@ mod tests {
             .unwrap();
         let state = AppState::new(AppConfig::default());
         state.registry().insert(id, std::sync::Arc::new(runtime));
-        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        crate::server::test_support::seed_fixed_admin(&state, company).await;
         state
     }
 
@@ -556,12 +641,23 @@ mod tests {
         uri: &str,
         body: Option<Value>,
     ) -> (StatusCode, Value, String) {
+        send_for(state, "acme", method, uri, body).await
+    }
+
+    /// [`send`] against a named company's session.
+    async fn send_for(
+        state: &AppState,
+        company: &str,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+    ) -> (StatusCode, Value, String) {
         send_as(
             state,
             method,
             uri,
             body,
-            Auth::Cookie(crate::server::test_support::fixed_cookie("acme")),
+            Auth::Cookie(crate::server::test_support::fixed_cookie(company)),
         )
         .await
     }
@@ -634,7 +730,198 @@ mod tests {
         );
         assert!(
             offered.iter().any(|t| t == "github"),
-            "the curated set covers the common providers: {offered:?}"
+            "the fallback set covers the common providers: {offered:?}"
+        );
+        // No credential and (in the default build) no client, so the catalog
+        // cannot be read. The list is still offered — but it says so.
+        assert_eq!(
+            dto["catalogSource"], "fallback",
+            "an unfetchable catalog must never be reported as the backend's: {dto}"
+        );
+        assert!(
+            dto["catalogNotice"]
+                .as_str()
+                .is_some_and(|n| n.contains("incomplete")),
+            "a fallback tells the operator it may be incomplete: {dto}"
+        );
+    }
+
+    /// The company registered under `company` in `state`.
+    fn runtime_of(state: &AppState, company: &str) -> std::sync::Arc<super::CompanyRuntime> {
+        state
+            .registry()
+            .get(&CompanyId::new(company))
+            .expect("company is registered")
+    }
+
+    /// A hundred-slug catalog, the shape the backend actually returns.
+    fn hundred_slugs() -> Vec<String> {
+        (0..100).map(|i| format!("provider{i:03}")).collect()
+    }
+
+    /// The heart of the reopened issue: in open mode the console is offered the
+    /// **backend's** catalog, not a list maintained by hand in this repo.
+    ///
+    /// The cache is seeded rather than a backend stood up, because what is under
+    /// test is the decision — "open mode serves the fetched catalog" — and not
+    /// the HTTP call, which has its own test beside
+    /// `list_catalog_toolkits`. Seeding proves the thing that regressed: that a
+    /// fetched answer actually reaches the response instead of being discarded
+    /// in favour of the constant.
+    #[tokio::test]
+    async fn open_mode_serves_the_fetched_catalog_rather_than_a_hardcoded_list() {
+        let home_dir = home();
+        let state = state_with_manifest_id(
+            home_dir.path(),
+            "catalogco",
+            "[company]\nname = \"Catalog Co\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
+        )
+        .await;
+        let catalog = hundred_slugs();
+        composio_toolkits::cache().store(
+            &super::catalog_cache_key(runtime_of(&state, "catalogco").as_ref()),
+            Ok(catalog.clone()),
+            std::time::Instant::now(),
+        );
+
+        let (status, dto, raw) =
+            send_for(&state, "catalogco", "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(dto["openMode"], true);
+        assert_eq!(
+            dto["catalogSource"], "backend",
+            "a real catalog is reported as the backend's answer: {dto}"
+        );
+        assert_eq!(
+            dto["catalogNotice"],
+            Value::Null,
+            "nothing to apologise for"
+        );
+        assert_eq!(
+            dto["effectiveToolkits"],
+            json!(catalog),
+            "open mode must serve what the backend permits, verbatim"
+        );
+        assert!(
+            dto["effectiveToolkits"].as_array().unwrap().len()
+                > composio_toolkits::FALLBACK_TOOLKITS.len(),
+            "the fetched catalog is far longer than the built-in list — serving the \
+             constant here is the exact regression this test exists to catch: {dto}"
+        );
+    }
+
+    /// The important one. A company that deliberately narrowed its belt must
+    /// **not** be silently widened by the catalog.
+    ///
+    /// The same hundred-slug catalog is in the cache; this company asked for
+    /// `gmail` and gets `gmail`. Anything that unioned, defaulted-to, or fell
+    /// back to the catalog for an explicit manifest would hand the company
+    /// ninety-nine providers it decided against.
+    #[tokio::test]
+    async fn an_explicit_allowlist_is_never_widened_by_the_catalog() {
+        let home_dir = home();
+        let state = state_with_manifest_id(
+            home_dir.path(),
+            "narrowco",
+            "[company]\nname = \"Narrow Co\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n[tools.composio]\ntoolkits = [\"gmail\"]\n",
+        )
+        .await;
+        composio_toolkits::cache().store(
+            &super::catalog_cache_key(runtime_of(&state, "narrowco").as_ref()),
+            Ok(hundred_slugs()),
+            std::time::Instant::now(),
+        );
+
+        let (status, dto, raw) =
+            send_for(&state, "narrowco", "GET", "/api/v1/company/composio", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(dto["openMode"], false);
+        assert_eq!(dto["effectiveToolkits"], json!(["gmail"]));
+        assert_eq!(dto["toolkits"], json!(["gmail"]));
+        assert_eq!(
+            dto["catalogSource"], "manifest",
+            "the company's own list is the source, and the catalog is not consulted: {dto}"
+        );
+    }
+
+    /// A catalog that cannot be fetched degrades to the built-in list — and the
+    /// response says so, both in `catalogSource` and in words the console can
+    /// show the operator. Silently serving eight slugs that look like the whole
+    /// catalog is the failure this pins shut.
+    #[tokio::test]
+    async fn an_unfetchable_catalog_is_marked_degraded_not_passed_off_as_real() {
+        let home_dir = home();
+        let state = state_with_manifest_id(
+            home_dir.path(),
+            "degradedco",
+            "[company]\nname = \"Degraded Co\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
+        )
+        .await;
+        composio_toolkits::cache().store(
+            &super::catalog_cache_key(runtime_of(&state, "degradedco").as_ref()),
+            Err("connection refused".to_string()),
+            std::time::Instant::now(),
+        );
+
+        let (status, dto, raw) = send_for(
+            &state,
+            "degradedco",
+            "GET",
+            "/api/v1/company/composio",
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(dto["openMode"], true);
+        assert_eq!(
+            dto["catalogSource"], "fallback",
+            "the built-in list must never claim to be the backend's: {dto}"
+        );
+        let notice = dto["catalogNotice"]
+            .as_str()
+            .expect("a degraded list must explain itself");
+        assert!(notice.contains("connection refused"), "{notice}");
+        assert!(notice.contains("may be incomplete"), "{notice}");
+        // Still usable: the operator gets something to click, just not a claim.
+        assert_eq!(
+            dto["effectiveToolkits"],
+            json!(composio_toolkits::FALLBACK_TOOLKITS)
+        );
+    }
+
+    /// A credential change drops the cached catalog: a rotated BYO token can
+    /// resolve to a different Composio account, and serving the previous
+    /// account's list for the rest of the TTL is the stale-by-construction
+    /// answer this issue is about.
+    ///
+    /// Driven through a *clear* rather than a set so the status re-read at the
+    /// end of the write has no credential to dial with — the assertion is about
+    /// the eviction, and a test that reached the network to make it would be a
+    /// different test.
+    #[tokio::test]
+    async fn a_credential_change_evicts_the_cached_catalog() {
+        let home_dir = home();
+        let state = state_with_manifest_id(
+            home_dir.path(),
+            "rotateco",
+            "[company]\nname = \"Rotate Co\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
+        )
+        .await;
+        let key = super::catalog_cache_key(runtime_of(&state, "rotateco").as_ref());
+        composio_toolkits::cache().store(&key, Ok(hundred_slugs()), std::time::Instant::now());
+
+        let (status, resp, raw) = send_for(
+            &state,
+            "rotateco",
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_ne!(
+            resp["status"]["catalogSource"], "backend",
+            "the pre-change catalog must not survive the change: {resp}"
         );
     }
 
@@ -775,9 +1062,12 @@ mod tests {
             toolkits: vec!["gmail".to_string()],
             open_mode: false,
             effective_toolkits: vec!["gmail".to_string()],
+            catalog_source: CatalogSource::Manifest,
+            catalog_notice: None,
         };
         let json = serde_json::to_value(&dto).unwrap();
         assert_eq!(json["credentialSource"], "attested");
+        assert_eq!(json["catalogSource"], "manifest");
         let keys: Vec<&String> = json.as_object().unwrap().keys().collect();
         assert_eq!(
             keys,
@@ -788,7 +1078,9 @@ mod tests {
                 "backendUrl",
                 "toolkits",
                 "openMode",
-                "effectiveToolkits"
+                "effectiveToolkits",
+                "catalogSource",
+                "catalogNotice"
             ],
             "the read shape must stay exactly this: {keys:?}"
         );
