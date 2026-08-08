@@ -231,8 +231,8 @@ mod live {
     use crate::ports::UsageMeter;
     use crate::ports::now_millis;
 
-    use oh::composio::ComposioClient;
     use oh::integrations::IntegrationClient;
+    use oh::integrations::composio::ComposioClient;
     use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
     use openhuman_core::openhuman as oh;
 

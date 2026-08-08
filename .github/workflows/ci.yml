@@ -37,17 +37,72 @@ jobs:
       # `openhuman_core` is an optional path dependency, so Cargo must resolve
       # its vendored-crate manifests even for the default (offline) build where
       # the `openhuman` feature is off. `submodules: true` is not recursive, so
-      # init just the nested crates those `[patch]` entries point at.
+      # init the nested crates its manifest names.
+      #
+      # `tinyhumans-sdk` is NOT one of the `[patch]` targets — openhuman consumes
+      # it as a plain unconditional path dependency because it is unpublished
+      # (issue #499). It still has to be on disk: Cargo reads every path
+      # dependency's manifest during resolution, so a missing checkout fails the
+      # DEFAULT build too, not just `--features openhuman`.
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
             vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace
+            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           # tinycortex declares its own `tinyagents` path dependency, so its
           # manifest must resolve too. Harmless for the default build; required
           # for any `--features openhuman` build.
           git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
             vendor/tinyagents
+
+      # Issue #499: say out loud how far the vendored pin has drifted.
+      #
+      # The pin reached 102 commits behind `openhuman` main with nothing
+      # reporting it, because a submodule pointer is invisible to every other
+      # check here: nothing fails until some symbol the pinned copy does not
+      # have is finally needed, and by then the catch-up is a migration rather
+      # than a pointer move. This step is the missing report.
+      #
+      # DELIBERATELY NON-FATAL. The distance is a function of how fast a
+      # different repository moves, so failing on it would block PRs that have
+      # nothing to do with the vendored tree — the drift is a thing to schedule,
+      # not a thing to stop the line for. It is an annotation, which is what a
+      # number nobody was tracking needs first. Turning it into a hard failure
+      # past a ceiling is `exit 1` on the last branch, if this proves too quiet.
+      #
+      # `unknown` rather than a wrong number is the whole discipline here. A
+      # network blip, a shallow submodule checkout with no reachable merge base,
+      # or a renamed default branch must not fail a Rust job over a report — but
+      # nor may any of them be reported as "up to date", which is the one answer
+      # that would put this back to being invisible.
+      #
+      # Hence the ancestry gate before the count. `rev-list --count HEAD..main`
+      # is 0 when the pin EQUALS main and also when the pin is AHEAD of it — a
+      # pin bumped to an unmerged commit, or to a local branch, reads as "at
+      # main" without ever being compared to it. Only a pin that is an ancestor
+      # of the fetched ref can have its distance measured, so anything else is
+      # `unknown`. The fetch is likewise gated: a failed fetch can leave a stale
+      # FETCH_HEAD from an earlier step, and counting against that is worse than
+      # not counting.
+      - name: Report vendored openhuman drift
+        run: |
+          set -u
+          pin="$(git -C vendor/openhuman rev-parse --short HEAD)"
+          if git -C vendor/openhuman fetch --quiet --no-tags --depth 500 origin main \
+            && git -C vendor/openhuman merge-base --is-ancestor HEAD FETCH_HEAD 2>/dev/null; then
+            behind="$(git -C vendor/openhuman rev-list --count HEAD..FETCH_HEAD 2>/dev/null || echo unknown)"
+          else
+            behind=unknown
+          fi
+          if [ "$behind" = unknown ]; then
+            echo "::notice title=Vendored openhuman drift::pin $pin — distance from openhuman main could not be computed: the fetch failed, or the pin is not an ancestor of main (ahead of it, or on a branch of its own)."
+          elif [ "$behind" -eq 0 ]; then
+            echo "vendor/openhuman is at openhuman main ($pin)."
+          elif [ "$behind" -le 25 ]; then
+            echo "::notice title=Vendored openhuman drift::pin $pin is $behind commit(s) behind openhuman main."
+          else
+            echo "::warning title=Vendored openhuman drift::pin $pin is $behind commits behind openhuman main. Past ~25 the catch-up stops being a pointer move — see issue #499, where it reached 102 and the reorg in between turned the bump into a migration."
+          fi
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -135,12 +190,13 @@ jobs:
       # Identical to the `rust` job's init, and for the same reason: `submodules:
       # true` is not recursive. Keep it targeted — a plain `--recursive` over
       # `vendor/openhuman` additionally drags in the desktop-only `tauri-cef`
-      # tree, which nothing in this build touches.
+      # tree, which nothing in this build touches. See that job for why
+      # `tinyhumans-sdk` is in the list despite having no `[patch]` entry.
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
             vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace
+            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           # tinycortex declares its own `tinyagents` path dependency, so its
           # manifest must resolve too. Harmless for the default build; required
           # for any `--features openhuman` build.
@@ -264,6 +320,90 @@ jobs:
       # would be the one place CI silently re-resolves the dependency graph.
       - name: Test tool-belt contract (openhuman, mcp, telegram)
         run: cargo test --locked --features openhuman,mcp,telegram --lib harness::build::tests
+
+      # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
+      # EXECUTED by nothing. `Check (--all-features)` above builds every
+      # `tinyplace`-gated line and deliberately runs none of them, and no other
+      # `cargo test` line in this file names the feature — so the whole gate was
+      # covered for compilation and not at all for behaviour, and a logic defect
+      # behind it shipped green. Those are different claims, and only the second
+      # one is what a test suite is for: `src/economy/outbox.rs` carries a
+      # passing round-trip test for `Outbox::drain()` whose only caller in the
+      # entire tree is that test's own module (#454). Nothing ever ran the
+      # assertion, so nothing pointed out that the production drain it describes
+      # does not exist.
+      #
+      # FULL `--lib`, not a module filter — and this is the substance of the
+      # step, not a detail of it. `tinyplace` gates code across the tree, not
+      # just the economy adapter and its crypto primitives: company config, the
+      # runtime builder's economy wiring (in BOTH the `cfg` and the `cfg(not)`
+      # arm), the A2A server surface and the route that mounts it, and the
+      # platform-split key paths under `src/store/`. Narrowing to `economy::`
+      # would leave every one of those compiled and never run, which is the
+      # precise condition this step exists to end.
+      #
+      # The narrow shape of the belt-contract step above does NOT transfer here.
+      # That one is scoped because `mcp` changes what a tool belt *contains* and
+      # a single module pins that contract, so the rest of the run would be
+      # re-proving what an earlier lane already proved. `tinyplace` is the
+      # `openhuman,tinycortex` shape instead — a feature that changes behaviour
+      # at every site it gates — and that lane runs its whole suite for the same
+      # reason. The compile is what this costs; the compile is identical either
+      # way, so a filter would only discard results already paid for.
+      #
+      # `--lib` rather than `--tests` because no integration target under
+      # `tests/` carries a crate-level `cfg` on `tinyplace`; `--tests` would
+      # link an extra binary this feature set leaves empty. That does not
+      # reopen #475's hole. If such a target is ever added, `Assert every
+      # integration target actually runs` above fails it with `0 tests`, because
+      # that assertion sweeps EVERY target in the manifest whatever gates it —
+      # which is also why that script is not repeated here: on a lane without
+      # `openhuman` it would have to fail by design.
+      #
+      # A STEP on this job, not a fifth job: the vendored-submodule init and the
+      # system build dependencies this job already installs are exactly what
+      # this compile needs, and a separate job would repeat both plus a cold
+      # Rust cache to run a suite that finishes in seconds. Placed last so the
+      # cheaper cached steps still fail first. Split it out if this job's wall
+      # clock ever becomes the constraint — that is a pure CI-shape change with
+      # no argument riding on it.
+      #
+      # `--locked` per issue #251's rule for every graph-resolving invocation:
+      # this is a fifth distinct feature resolution, and without it this lane
+      # would be the one place CI silently re-resolves the dependency graph.
+      - name: Test (tinyplace)
+        run: cargo test --locked --features tinyplace --lib
+
+      # Issue #467. The `Console E2E (live brain)` job below drives a host that
+      # has an agent harness, so it needs a FEATURE-GATED binary — the default
+      # one the `rust` job uploads answers a chat message with nothing, which is
+      # why four of the suite's best specs were skipped rather than run.
+      #
+      # Here rather than in that job, for the same reason #428 put the default
+      # binary in `rust`: building it over there would mean a second submodule
+      # checkout, a second apt install and a second cold compile of the vendored
+      # openhuman tree, minutes of wall clock for a thing this job has already
+      # very nearly built.
+      #
+      # `mcp` on top of the job's own `openhuman,tinycortex`, because
+      # `mcp-agent.spec.ts` needs the `mcp_call_tool` belt entry, which is gated
+      # on it. That is another feature resolution, but a cheap one: the
+      # belt-contract step above already compiled `openhuman_core` with
+      # `openhuman_core/mcp` enabled, so what recompiles here is this crate plus
+      # its bin, not the vendored tree.
+      #
+      # `--bin`, not `--all-targets`: the lane needs a binary, and the tests and
+      # examples under this feature set are already covered above.
+      - name: Build the gated host binary for the live-brain e2e lane
+        run: cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+
+      - name: Upload the gated host binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: opencompany-gated-binary
+          path: target/debug/opencompany
+          # Consumed minutes later by one job in the same run and never again.
+          retention-days: 1
 
   # Issue #281. Both jobs above are Rust-only, so before this job existed NOTHING
   # in CI installed Node: `frontend/` was invisible to the entire build, and a
@@ -445,5 +585,93 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-failures
+          path: frontend/test-results/
+          retention-days: 7
+
+  # Issue #467. The lane above is the DEFAULT feature set, and four of the
+  # suite's specs cannot pass against it — not because they are wrong, but
+  # because the thing they test is not compiled in. They skip themselves through
+  # `frontend/test/e2e/capabilities.ts`, which made that lane meaningfully green
+  # and left the most valuable coverage in the suite unrun: `wiring.spec.ts`
+  # proves the whole chain from a typed message to a rendered reply,
+  # `chat-to-card.spec.ts` proves an orchestrator can open a board card,
+  # `workflow-run-history.spec.ts` proves a run is journaled durably, and
+  # `mcp.spec.ts` proves an agent can call a remote tool. Without them CI proves
+  # the console renders, not that the company works.
+  #
+  # This job runs those four. Three things make that possible, and none of them
+  # existed before:
+  #
+  #   * a host with the harness in it — the gated binary `rust-gated` now
+  #     uploads (`--features openhuman,tinycortex,mcp`);
+  #   * something for the harness to think with — `test/e2e/mock-brain.mjs`, an
+  #     OpenAI-compatible endpoint whose answers are a pure function of the
+  #     prompt, which `playwright.config.ts` starts and points the host at;
+  #   * a tool server to call — `test/e2e/mcp-server.mjs`, started the same way.
+  #
+  # A SEPARATE JOB from `Console E2E` rather than a matrix leg of it, on
+  # purpose. The default lane is the one that gates a change to the console
+  # itself and it stays fast and independent; this one waits on the slowest job
+  # in the run (`rust-gated`) and runs a live agent turn per message, so folding
+  # them together would put the whole suite behind the gated compile. Keeping
+  # both also keeps the default host honestly covered: the product ships with
+  # and without these features.
+  #
+  # NOT `continue-on-error`. A lane that is allowed to be red is the state #428
+  # was filed about, at more expense.
+  console-e2e-live-brain:
+    name: Console E2E (live brain)
+    runs-on: ubuntu-latest
+    needs: rust-gated
+    # Longer than the default lane's half hour: every operator message here runs
+    # a real agent turn rather than being answered by the offline echo brain.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          # No `submodules`, for the same reason as the lane above: the binary
+          # arrives prebuilt and nothing here resolves a cargo manifest.
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+        working-directory: frontend
+
+      - name: Download the gated host binary
+        uses: actions/download-artifact@v4
+        with:
+          name: opencompany-gated-binary
+          path: target/debug
+
+      # `upload-artifact` does not preserve the executable bit, so the binary
+      # arrives as a plain file and `test/e2e/host.sh` would answer with a
+      # build instruction, which is a confusing way to learn this.
+      - name: Restore the executable bit
+        run: chmod +x target/debug/opencompany
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+        working-directory: frontend
+
+      # `PW_LIVE_BRAIN=1` is a DECLARATION, not a probe: it says the caller
+      # brought a feature-gated host and an inference backend. It is what
+      # un-skips the four specs, and — because this run also manages the host —
+      # what makes `playwright.config.ts` start the two fixtures and hand the
+      # host their addresses. See `frontend/test/e2e/capabilities.ts` for why
+      # this cannot be detected from the host instead.
+      - name: Run the end-to-end suite against a live brain
+        run: npm run e2e:live
+        working-directory: frontend
+
+      - name: Upload failure artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-live-brain-failures
           path: frontend/test-results/
           retention-days: 7

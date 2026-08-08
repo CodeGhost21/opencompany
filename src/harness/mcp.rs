@@ -2,7 +2,7 @@
 //! (issue #50).
 //!
 //! [`registry_for_agent`] folds a company's effective [`McpServerDecl`]s into an
-//! OpenHuman [`McpServerRegistry`](oh::mcp_client::McpServerRegistry) scoped to
+//! OpenHuman [`McpServerRegistry`](oh::mcp::config_servers::McpServerRegistry) scoped to
 //! one agent's `mcp:*` tool grants. The registry reuses upstream's HTTP
 //! transport and its input-validation safety filter (`apply_safety_filter`),
 //! so remote tool metadata is scanned for prompt-injection before an agent ever
@@ -25,8 +25,8 @@ use serde_json::{Value, json};
 use openhuman_core::openhuman as oh;
 
 use oh::config::{Config, McpAuthConfig, McpServerConfig};
-use oh::mcp_client::{McpRegistrySource, McpServerRegistry};
-use oh::mcp_registry::types::{ConnStatus, InstalledServer, McpTool};
+use oh::mcp::config_servers::{McpRegistrySource, McpServerRegistry};
+use oh::mcp::registry::types::{ConnStatus, InstalledServer, McpTool};
 use oh::security::{SecurityPolicy, ToolOperation};
 use oh::tools::traits::{PermissionLevel, Tool, ToolCallOptions, ToolResult};
 
@@ -495,12 +495,12 @@ impl McpRuntime {
     /// Reconnects enabled installed servers. Failures are logged by OpenHuman
     /// per server and never prevent the company runtime from booting.
     pub async fn boot(&self) {
-        oh::mcp_registry::boot::spawn_installed_servers(&self.config).await;
+        oh::mcp::registry::boot::spawn_installed_servers(&self.config).await;
     }
 
     /// Returns every persisted install without loading secret environment values.
     pub fn list(&self) -> crate::Result<Vec<InstalledServer>> {
-        oh::mcp_registry::store::list_servers(&self.config).map_err(store_error)
+        oh::mcp::registry::store::list_servers(&self.config).map_err(store_error)
     }
 
     /// Persists an install and its write-only environment values.
@@ -509,11 +509,11 @@ impl McpRuntime {
         server: &InstalledServer,
         env: &HashMap<String, String>,
     ) -> crate::Result<()> {
-        oh::mcp_registry::store::insert_server(&self.config, server).map_err(store_error)?;
+        oh::mcp::registry::store::insert_server(&self.config, server).map_err(store_error)?;
         if let Err(error) =
-            oh::mcp_registry::store::set_env_values(&self.config, &server.server_id, env)
+            oh::mcp::registry::store::set_env_values(&self.config, &server.server_id, env)
         {
-            let _ = oh::mcp_registry::store::delete_server(&self.config, &server.server_id);
+            let _ = oh::mcp::registry::store::delete_server(&self.config, &server.server_id);
             return Err(store_error(error));
         }
         Ok(())
@@ -522,14 +522,14 @@ impl McpRuntime {
     /// Loads an installed server, establishing the company-store membership
     /// check before touching OpenHuman's process-global connection registry.
     pub fn get(&self, server_id: &str) -> crate::Result<InstalledServer> {
-        oh::mcp_registry::store::get_server(&self.config, server_id)
+        oh::mcp::registry::store::get_server(&self.config, server_id)
             .map_err(|_| OpenCompanyError::McpServerNotFound(server_id.to_string()))
     }
 
     /// Connects an installed server and returns its advertised tools.
     pub async fn connect(&self, server_id: &str) -> crate::Result<Vec<McpTool>> {
         let server = self.get(server_id)?;
-        oh::mcp_registry::connections::connect(&self.config, &server)
+        oh::mcp::registry::connections::connect(&self.config, &server)
             .await
             .map_err(harness_error)
     }
@@ -537,25 +537,25 @@ impl McpRuntime {
     /// Disconnects an installed server after verifying it belongs to this store.
     pub async fn disconnect(&self, server_id: &str) -> crate::Result<bool> {
         self.get(server_id)?;
-        Ok(oh::mcp_registry::connections::disconnect(server_id).await)
+        Ok(oh::mcp::registry::connections::disconnect(server_id).await)
     }
 
     /// Disconnects and deletes an installed server and its environment values.
     pub async fn uninstall(&self, server_id: &str) -> crate::Result<bool> {
         self.get(server_id)?;
-        oh::mcp_registry::connections::disconnect(server_id).await;
-        oh::mcp_registry::store::delete_server(&self.config, server_id).map_err(store_error)
+        oh::mcp::registry::connections::disconnect(server_id).await;
+        oh::mcp::registry::store::delete_server(&self.config, server_id).map_err(store_error)
     }
 
     /// Returns connection state joined by OpenHuman against this runtime's store.
     pub async fn status(&self) -> Vec<ConnStatus> {
-        oh::mcp_registry::connections::all_status(&self.config).await
+        oh::mcp::registry::connections::all_status(&self.config).await
     }
 
     /// Returns the cached tool list for a connected installed server.
     pub async fn tools(&self, server_id: &str) -> crate::Result<Vec<McpTool>> {
         self.get(server_id)?;
-        oh::mcp_registry::connections::tools_for(server_id)
+        oh::mcp::registry::connections::tools_for(server_id)
             .await
             .ok_or_else(|| {
                 OpenCompanyError::InvalidRequest(format!(
@@ -572,7 +572,7 @@ impl McpRuntime {
         arguments: Value,
     ) -> crate::Result<Value> {
         self.get(server_id)?;
-        oh::mcp_registry::connections::call_tool(server_id, tool_name, arguments)
+        oh::mcp::registry::connections::call_tool(server_id, tool_name, arguments)
             .await
             .map_err(harness_error)
     }
@@ -996,7 +996,7 @@ mod tests {
 
     use std::process::Command;
 
-    use oh::mcp_registry::types::{CommandKind, Transport};
+    use oh::mcp::registry::types::{CommandKind, Transport};
 
     const NODE_STUB: &str = r#"
 const readline = require('node:readline');

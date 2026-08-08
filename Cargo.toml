@@ -76,8 +76,9 @@ tinyagents = { path = "vendor/tinyagents", optional = true, features = ["sqlite"
 # set — `tokenjuice-treesitter`, `voice`, `web3`, `media`, `meet`,
 # `flows` — none of which a company agent needs; it wants the agent
 # loop, memory, and an inference provider. `mcp` is re-enabled (issue #50):
-# per-tenant MCP tool servers reuse OpenHuman's `mcp_client` registry + HTTP
-# transport + injection-safety filter and the `mcp_list_servers` /
+# per-tenant MCP tool servers reuse OpenHuman's `mcp::config_servers` registry +
+# `mcp::http_client` transport + injection-safety filter (all three were
+# `mcp_client` before the #499 kernelization split it) and the `mcp_list_servers` /
 # `mcp_list_tools` / `mcp_call_tool` bridge tools. Upstream `mcp = []` carries
 # no extra crates — it only recompiles the MCP client/registry modules.
 # `skills` is re-enabled: cell #28
@@ -107,12 +108,15 @@ url = { version = "2", optional = true }
 # objects — so a company's workflows run on it without booting any OpenHuman
 # global `Config`/registry. Only links under the `openhuman` feature; the
 # `[patch.crates-io]` entry below already redirects it at the vendored copy
-# (`vendor/openhuman/vendor/tinyflows`, 0.5.x). Its `tinyagents ^1.2` requirement
-# resolves to the already-vendored `vendor/tinyagents`, so this adds no new
-# lockstep.
+# (`vendor/openhuman/vendor/tinyflows`, 0.6.x — 0.5.x before the #499 pin bump).
+# The requirement below tracks that major-for-0.x move because a `[patch]`
+# replaces the crate's SOURCE, not the version requirement it has to satisfy, so
+# a stale `0.5` fails resolution outright rather than quietly building the old
+# copy. Its `tinyagents` requirement resolves to the already-vendored
+# `vendor/tinyagents`, so this adds no new lockstep.
 # We deliberately do NOT enable openhuman's own `flows` feature: that drags in
 # rhai + the builder tools, defeating the point of running tinyflows directly.
-tinyflows = { version = "0.5", optional = true }
+tinyflows = { version = "0.6", optional = true }
 
 # Issue #105: attribute-tolerant `<tool_call>` tag normalization in the harness
 # tool dispatcher. The staging model emits `<tool_call id="…">…</tool_call>`
@@ -345,7 +349,9 @@ telegram = ["dep:reqwest"]
 oauth = ["dep:reqwest"]
 
 [patch.crates-io]
-# opencompany's own vendored tinyagents (1.8.0). Satisfies openhuman's `^1.7`.
+# opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.
+# Kept on the exact commit openhuman's own `vendor/tinyagents` pins — see the
+# lockstep note on `openhuman_core` above.
 tinyagents = { path = "vendor/tinyagents" }
 # WS4: openhuman's own Cargo.toml `[patch.crates-io]` is ignored when it is a
 # path dependency, so its vendored-submodule patches must be replicated here
@@ -357,6 +363,14 @@ tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
 tinyjuice = { path = "vendor/openhuman/vendor/tinyjuice" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
 tinyplace = { path = "vendor/openhuman/vendor/tinyplace/sdk/rust" }
+# Arrived with the #499 pin bump, and is NOT a submodule — openhuman vendors it
+# as a plain in-tree directory. Replicated for the same reason as the entries
+# above, but the reason it matters here is specific: without it Cargo resolves
+# `motosan-ai-oauth 0.2` from crates.io, whose manifest turns on reqwest's
+# default native-tls backend, and the openhuman build would inherit OpenSSL on
+# Linux. Openhuman patches it precisely to avoid that; the sole source delta in
+# the vendored copy is `default-features = false` on reqwest.
+motosan-ai-oauth = { path = "vendor/openhuman/vendor/motosan-ai-oauth" }
 whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", branch = "main" }
 
 [dev-dependencies]

@@ -168,9 +168,13 @@ Set `PW_BASE_URL` to drive a host you brought up yourself and the config stays
 out of the way entirely: no `webServer`, and `PW_STORAGE_STATE` decides whether
 the suite signs in.
 
-**CI runs this suite** in the `Console E2E` job, against a default-feature host
-built by the `Rust` job and passed across as an artifact (issue #428). It did
-not always: for a long time `typecheck:e2e` was the only automated coverage
+**CI runs this suite** in two jobs. `Console E2E` drives a default-feature host
+built by the `Rust` job and passed across as an artifact (issue #428).
+`Console E2E (live brain)` drives a feature-gated one from `Rust (openhuman,
+tinycortex)`, with the fixtures below behind it, and is the only thing that runs
+the four specs described next (issue #467).
+
+Neither existed for a long time: `typecheck:e2e` was the only automated coverage
 `test/e2e/` had, and type-checking proves a spec compiles, not that it holds.
 `workflow-edit-delete.spec.ts` spent months red against a fixture that was never
 committed; two further specs were found red against product changes that had
@@ -180,31 +184,62 @@ Nothing reported any of it, because nothing ran it.
 Run the suite before touching a view it covers — CI is a backstop, not a
 substitute for seeing your own change work.
 
-### What a default-feature host cannot cover
+### The four specs a default-feature host cannot run
 
 The host `test/e2e/host.sh` starts is the default feature set, which boots the
 offline echo brain. That is enough for the great majority of the suite, but four
 specs need an agent that actually executes — a build with the `openhuman`
-harness and a mocked inference backend — and one needs an external MCP server.
+harness and something for it to think with.
 
-These **skip themselves** rather than failing, through
-[`test/e2e/capabilities.ts`](test/e2e/capabilities.ts), so the CI lane is
-meaningfully green instead of permanently red. Every skip names issue #467,
-which tracks standing up the feature-gated lane that runs them for real:
+Against a default host they **skip themselves** rather than failing, through
+[`test/e2e/capabilities.ts`](test/e2e/capabilities.ts), which is a true
+statement about that host rather than a debt. Against a gated one they run:
 
-| Spec | Needs | Gate |
-|------|-------|------|
-| `wiring.spec.ts` | the harness + a mock LLM backend echoing `__MOCK_LLM__` | `PW_LIVE_BRAIN=1` |
-| `chat-to-card.spec.ts` (card chip) | an orchestrator that opens a card | `PW_LIVE_BRAIN=1` |
-| `workflow-run-history.spec.ts` (durable history) | a workflow run that executes | `PW_LIVE_BRAIN=1` |
-| `mcp.spec.ts` | `PW_MCP_SERVER` pointing at a live MCP server | `PW_MCP_SERVER` |
+| Spec | What it proves | Needs |
+|------|----------------|-------|
+| `wiring.spec.ts` | a typed message reaches the backend and its reply renders | the harness + `mock-brain.mjs` |
+| `chat-to-card.spec.ts` (card chip) | an orchestrator opens a board card, and the chip survives a reload | a scripted tool choice (`SPAWNONE`) |
+| `workflow-run-history.spec.ts` (durable history) | a run is journaled and outlives the console | the workflow runner |
+| `mcp-agent.spec.ts` | an agent calls a tool on a registered MCP server | `mcp-server.mjs` |
 
-A skip is a debt, not a resolution. Four of the suite's most valuable specs sit
-behind that flag, and while they do, the lane proves the console renders rather
-than that the company works.
+To run them:
 
-Point `PW_HOST_BINARY` at a feature-gated build, or `PW_BASE_URL` at a host you
-brought up yourself, to cover those.
+```sh
+cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
+npm run e2e:live                         # PW_LIVE_BRAIN=1 npm run e2e
+```
+
+`PW_LIVE_BRAIN=1` is a **declaration**, not a probe — nothing in a host's
+answers distinguishes a gated build from a default one, which
+[`capabilities.ts`](test/e2e/capabilities.ts) explains at length. When the run
+also manages the host, that flag additionally starts two fixtures and points the
+host at them:
+
+* [`test/e2e/mock-brain.mjs`](test/e2e/mock-brain.mjs) — an OpenAI-compatible
+  chat-completions and embeddings endpoint with no model behind it. Ordinary
+  turns get a fixed line carrying `__MOCK_LLM__`; a prompt carrying `SPAWNONE`
+  makes it call `spawn_task` **once**, and one carrying `__MOCK_TOOL_CALL__ {…}`
+  makes it call exactly the named tool, once. "Once" is the part with teeth: one
+  operator message reaches several agents and several model calls, so the server
+  tracks directive identity rather than trusting the transcript. Bind with
+  `PW_MOCK_BRAIN_BIND` (default `127.0.0.1:8099`).
+
+* [`test/e2e/mcp-server.mjs`](test/e2e/mcp-server.mjs) — an HTTP MCP server with
+  two tools. HTTP, not stdio: this host rejects any MCP declaration carrying a
+  `command`. Bind with `PW_MCP_FIXTURE_BIND` (default `127.0.0.1:8098`), or name
+  a server of your own in `PW_MCP_SERVER` (a URL).
+
+Against a host you brought up yourself (`PW_BASE_URL`), the flag still enables
+the four specs, but starting the fixtures and pointing the host at them is
+yours to do — this config will not reconfigure a host it did not launch.
+
+Some specs skip **the other way**, in the live lane only, and say so where they
+sit: three in `chat-live-events.spec.ts`, which find the reply to their own turn
+by the offline brain's `You said: <text>` (precisely how they prove an SSE frame
+carried the answer to *that* message, and precisely why a different brain breaks
+them), and the Planning drag in `board-columns.spec.ts`, where a planner-attached
+host settles the card rather than leaving it parked. The default lane runs all of
+them on every push.
 
 The managed host starts from an **empty** environment and is handed only what it
 needs, so an inherited `OPENCOMPANY_PUBLIC_URL`, `OPENCOMPANY_MAIL_*`,
