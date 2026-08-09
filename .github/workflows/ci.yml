@@ -150,7 +150,7 @@ jobs:
         run: cargo build --locked --bin opencompany
 
       - name: Upload the host binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opencompany-debug-binary
           path: target/debug/opencompany
@@ -398,7 +398,7 @@ jobs:
         run: cargo build --locked --features openhuman,tinycortex,mcp --bin opencompany
 
       - name: Upload the gated host binary
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: opencompany-gated-binary
           path: target/debug/opencompany
@@ -551,7 +551,7 @@ jobs:
         working-directory: frontend
 
       - name: Download the host binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: opencompany-debug-binary
           path: target/debug
@@ -582,7 +582,7 @@ jobs:
       # this is what makes them reachable from the run summary.
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-failures
           path: frontend/test-results/
@@ -643,7 +643,7 @@ jobs:
         working-directory: frontend
 
       - name: Download the gated host binary
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: opencompany-gated-binary
           path: target/debug
@@ -670,7 +670,7 @@ jobs:
 
       - name: Upload failure artifacts
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: playwright-live-brain-failures
           path: frontend/test-results/

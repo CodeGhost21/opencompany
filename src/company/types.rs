@@ -249,6 +249,32 @@ pub struct Agent {
     pub budget_usd_daily: Option<f64>,
 }
 
+/// The `[[agent]].tier` value that marks a roster's orchestrator.
+pub const ORCHESTRATOR_TIER: &str = "orchestrator";
+
+/// Which teammate acts as the company's orchestrator: the first agent tagged
+/// `tier = "orchestrator"`, else the first agent declared, else `None` for an
+/// empty roster.
+///
+/// Lives here, ungated, because two very different readers need the same
+/// answer. The harness reads it to decide who gets the delegating-orchestrator
+/// persona and tools (`crate::harness::orchestrator::orchestrator_id`, which
+/// delegates here). The console's agent detail route reads it to tell an
+/// operator whether the agent they opened is the orchestrator or a worker
+/// (issue #264) — and that route ships in the default build, where the harness
+/// does not compile at all.
+///
+/// The fallback to the first agent is not a nicety: a company that tags nobody
+/// still has an orchestrator, so a console that reported "worker" for every
+/// teammate on such a roster would be wrong about all of them.
+pub fn orchestrator_id(agents: &[Agent]) -> Option<&str> {
+    agents
+        .iter()
+        .find(|agent| agent.tier.as_deref() == Some(ORCHESTRATOR_TIER))
+        .or_else(|| agents.first())
+        .map(|agent| agent.id.as_str())
+}
+
 /// A `[[group_chat]]` entry — a named conversation with a desk of agents.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GroupChat {
