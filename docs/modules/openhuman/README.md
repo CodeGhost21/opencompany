@@ -98,8 +98,11 @@ offline provider that reports no usage yields a zero turn, which writes nothing.
 ## `src/openhuman/` — legacy JSON-RPC path (behind `openhuman-rpc`)
 
 The former out-of-process seam is retained for one release and then removed.
-`src/openhuman/` still hosts the launcher (`opencompany open-human --dry-run`
-shells out through Cargo to the vendored checkout) and the JSON-RPC adapters —
+`src/openhuman/` still hosts the launcher (`opencompany open-human
+[--mode core|desktop] [--release] [--dry-run]` — Core shells out through Cargo
+to `openhuman-core`, Desktop drives OpenHuman's own `pnpm` scripts
+`dev:app`/`dev:wry`/`macos:build:release`/`tauri:build:ui`) and the JSON-RPC
+adapters —
 `rpc.rs` (the `OpenHumanRpc` transport trait + `MockOpenHumanRpc`),
 `http_client.rs` (the `reqwest` client behind `openhuman-rpc`), `tools.rs`
 (`OpenHumanToolProvider`, catalog filtered by manifest grants, ungranted calls
