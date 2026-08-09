@@ -246,11 +246,12 @@ test("a card dropped into Planning is planned and settled, never left parked", a
 
   const read = async () => (await (await request.get(`${API}/tasks/${id}`)).json()).task;
 
-  // First the drop must land: the card was seeded in `todo`, so polling the
-  // negative before the move reaches the host passes on the seed column and
-  // the settle read below catches the card back in `planning` mid-pass. Wait
-  // for the transition into Planning first — the same first step the mock-lane
-  // test above takes — then wait for the pass to settle it.
+  // The drop lands through the host, which is an async round-trip. Without this
+  // first wait the "leaves planning" poll below can short-circuit on the card's
+  // pre-drop `todo` state (that is what it was created in), pass instantly, and
+  // then observe it still parked in `planning` before the pass settles it. So
+  // prove the drop landed first — the card must be seen IN `planning` — before
+  // waiting for it to leave.
   await expect
     .poll(async () => (await read()).column, { timeout: 15_000 })
     .toBe("planning");
