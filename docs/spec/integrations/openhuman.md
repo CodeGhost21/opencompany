@@ -62,9 +62,12 @@ lives in the WS3 chat handler, not inline in the harness.
 The former out-of-process seam is retained for one release behind
 `feature = "openhuman-rpc"` and is then removed:
 
-- **Process**: the launcher (`opencompany open-human [--dry-run]`) shells out
-  through Cargo to `openhuman-core` (Core) or the Tauri app (Desktop);
-  `OPENCOMPANY_OPENHUMAN_URL` attaches to a running `openhuman-core serve`.
+- **Process**: the launcher (`opencompany open-human [--mode core|desktop]
+  [--release] [--dry-run]`) drives `cargo run --bin openhuman-core` (Core) or
+  OpenHuman's own `pnpm` scripts (Desktop — `dev:app`/`dev:wry` for dev,
+  `macos:build:release`/`tauri:build:ui` for `--release`); it seeds
+  `<root>/.env` from `.env.example` when absent. `OPENCOMPANY_OPENHUMAN_URL`
+  attaches to a running `openhuman-core serve`.
 - **Wire**: JSON-RPC at `http://127.0.0.1:<port>/rpc` (methods
   `openhuman.<namespace>_<function>`, per-launch bearer) plus REST
   `GET /health`, `GET /schema`, `GET /events`; `OpenHumanToolProvider` /
