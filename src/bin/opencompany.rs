@@ -1167,14 +1167,18 @@ async fn main() -> Result<()> {
         Some(Command::OpenHuman {
             root,
             mode,
+            release,
             dry_run,
             args,
         }) => {
-            let launch = match LaunchMode::from(mode) {
+            let mut launch = match LaunchMode::from(mode) {
                 LaunchMode::Core => OpenHumanLaunch::core(root),
                 LaunchMode::Desktop => OpenHumanLaunch::desktop(root),
             }
             .with_args(args);
+            if release {
+                launch = launch.release();
+            }
 
             if dry_run {
                 println!("{}", launch.command_preview().join(" "));
