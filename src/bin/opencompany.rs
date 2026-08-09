@@ -98,7 +98,11 @@ enum Command {
         #[arg(long)]
         home: Option<PathBuf>,
     },
-    /// Launch a sibling OpenHuman checkout through cargo.
+    /// Launch a sibling OpenHuman checkout: the core binary (`--mode core`)
+    /// or the Tauri desktop host (`--mode desktop`). Desktop drives OpenHuman's
+    /// own `pnpm` scripts (`dev:app`/`dev:wry`/`macos:build:release`/
+    /// `tauri:build:ui`), which set up the CEF runtime, the Vite dev server,
+    /// the macOS signing identity, and `.env` — pass `--dry-run` to preview.
     OpenHuman {
         /// OpenHuman checkout path.
         #[arg(long, default_value = "vendor/openhuman")]
@@ -106,10 +110,16 @@ enum Command {
         /// Launch target.
         #[arg(long, value_enum, default_value_t = ModeArg::Core)]
         mode: ModeArg,
-        /// Print the cargo command without executing it.
+        /// Build a release bundle instead of launching a dev session
+        /// (`cargo run --release` for core; OpenHuman's `*build*` script for
+        /// desktop — a signed `.app`/dmg on macOS, a deb/AppImage elsewhere).
+        #[arg(long)]
+        release: bool,
+        /// Print the command without executing it.
         #[arg(long)]
         dry_run: bool,
-        /// Arguments passed after `--` to the OpenHuman binary.
+        /// Arguments passed after `--` to the OpenHuman core binary. Ignored
+        /// (and rejected) in desktop mode, which drives fixed pnpm scripts.
         #[arg(last = true)]
         args: Vec<String>,
     },
