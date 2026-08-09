@@ -604,6 +604,112 @@ async fn an_edit_between_turns_changes_what_the_next_turn_reads() {
     );
 }
 
+/// Issue #417, through the one path that can actually prove it: the harness's
+/// own tool-result budget, applied by the real middleware.
+///
+/// The unit tests in [`workspace_tools`](crate::harness::workspace_tools) can
+/// only assert that a read *renders* under some number. They cannot see the
+/// second bound — `ToolOutputMiddleware`, fed from
+/// [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES)
+/// via `AgentBuilder::context_config` — which cuts every tool result on its way
+/// into the model's context. That bound is what made the old 64 KiB read cap a
+/// data-loss bug: the module reported nothing dropped, and the model got the
+/// first ~16 KiB and an anonymous byte marker.
+///
+/// So this reads a 20 KiB note through the whole pipeline and asserts on the
+/// bytes the *model* received. Two properties, and the second is the one no
+/// unit test can reach:
+///
+/// 1. The read never invites a rewrite of a note it only partly returned.
+/// 2. The result arrives whole — closing fence last, and no
+///    `tool_result_budget` marker, meaning the outer cut never fired at all.
+///
+/// (2) failing is the exact shape of the original bug: an unterminated fence
+/// means the untrusted-content region was left open, and it means the module's
+/// idea of what it returned and the model's idea of what it received have come
+/// apart again.
+#[tokio::test]
+async fn an_oversized_note_reaches_the_model_whole_and_read_only() {
+    let (base_url, script) = spawn_script(vec![
+        Turn::Call {
+            tool: "workspace_read",
+            args: json!({ "path": "Standards/Big standard.md" }),
+        },
+        Turn::Say("I read what I could of it."),
+    ])
+    .await;
+
+    let dir = tempfile::tempdir().unwrap();
+    let (pool, deps, record, store) = harness(base_url, "\"workspace\"", dir.path()).await;
+
+    // Larger than the read cap, smaller than the old 64 KiB one — the window
+    // in which a note used to be silently shortened and then overwritten.
+    let body = "The operator wrote this and expects to keep it. ".repeat(440);
+    assert!(
+        body.len() > 16 * 1024 && body.len() < 64 * 1024,
+        "{}",
+        body.len()
+    );
+    store
+        .create(
+            &record.id,
+            &note("n-big", "Big standard.md", "f-std"),
+            Some(&body),
+        )
+        .await
+        .unwrap();
+
+    pool.run(
+        &record.id,
+        "ceo",
+        "What does the big standard say?",
+        &deps,
+        None,
+    )
+    .await
+    .expect("turn runs");
+
+    let results = tool_results(&script);
+    let read = results
+        .iter()
+        .find(|r| r.contains("BEGIN WORKSPACE NOTE"))
+        .unwrap_or_else(|| panic!("the read result never reached the model: {results:?}"));
+
+    // (1) The model is told it may not write, and is never handed the sentence
+    // that drove the overwrite.
+    assert!(read.contains("CANNOT be overwritten"), "{read}");
+    assert!(
+        !read.contains("complete new body"),
+        "the model was invited to rewrite a note it only partly received: {read}"
+    );
+
+    // (2) The result the model got is the result the module rendered.
+    assert!(
+        !read.contains("truncated by tool_result_budget"),
+        "the harness cut the read result — the two bounds still disagree: {read}"
+    );
+    let at = read
+        .find("--- BEGIN WORKSPACE NOTE ")
+        .expect("the read is fenced");
+    let nonce = read[at + "--- BEGIN WORKSPACE NOTE ".len()..]
+        .split_whitespace()
+        .next()
+        .expect("the fence carries a nonce");
+    assert!(
+        read.trim_end()
+            .ends_with(&format!("--- END WORKSPACE NOTE {nonce} ---")),
+        "the model never received the closing fence, so the untrusted-content region it was \
+         warned about was left open: {read}"
+    );
+
+    // Not vacuous: the body really did travel, and really was shortened.
+    assert!(read.contains("The operator wrote this and expects to keep it."));
+    assert!(
+        read.contains(&format!("of {} bytes", body.len())),
+        "the header should say how much of the note exists: {read}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // The approval boundary, driven by a model (issues #443, #444)
 // ---------------------------------------------------------------------------

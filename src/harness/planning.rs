@@ -1168,7 +1168,7 @@ fn evidence_prompt(e: &Evidence) -> String {
 ///
 /// | Kind | Checked against | `missing` reads as |
 /// | --- | --- | --- |
-/// | `connection` | the `GET …/connections` projection | "GitHub is not connected — connect it from the Connections tab" |
+/// | `connection` | the `GET …/connections` projection **including its `via`** | "GitHub is not connected", or "connected, but only in this host's catalog — no agent tool can use that credential" |
 /// | `composio` | the same projection's `via`, plus token presence | "no Composio account is connected for this" |
 /// | `mcp` | manifest `[[mcp_server]]` ∪ the runtime index — **both** halves | the named server is in neither |
 /// | `credential` | presence only: the mail handle, or a secret key that exists | "no outbound email is configured" |
@@ -1181,6 +1181,16 @@ fn evidence_prompt(e: &Evidence) -> String {
 /// every card unplannable. The cost is that a genuinely-absent connection can
 /// slip through during an outage and the run then fails with a real error —
 /// which is today's behaviour for every card, just rarer.
+///
+/// **`connection` and `composio` differ only in wording, not in what they
+/// require.** Both are satisfied by `"composio" ∈ via` and by nothing else,
+/// because Composio is the only connection path a tool actually resolves a
+/// credential from. A provider connected *natively* — stored under the host's
+/// own `oauth/{provider}` namespace by the Connections tab — is reported
+/// `missing` with a note that says so, rather than `satisfied`: the credential
+/// is real, but no agent can reach it, so a card planned against it would
+/// dispatch into work it cannot do. See `verify_connection` for the arm and
+/// issues #319/#396 for when that stops being true.
 ///
 /// Permissions are checked against the **manifest** only: the tool allow-list,
 /// the agent's own list, and `[policy]`. Not the live grant set
@@ -1243,9 +1253,30 @@ fn verify_connection(e: &Evidence, name: &str) -> (PrereqStatus, String) {
                      unreachable, so this has not been verified either way"
             ),
         ),
-        Some((true, via, _)) => (
+        Some((true, via, _)) if via.iter().any(|v| v == "composio") => (
             PrereqStatus::Satisfied,
             format!("{name} is connected (via {})", via.join(" + ")),
+        ),
+        // Connected, but only natively: the credential sits in the host's own
+        // `oauth/{provider}` namespace, which the Connections tab writes and
+        // which nothing under `src/harness/` ever reads. No agent tool
+        // resolves a credential from it, so the capability this prerequisite
+        // asks for does not exist — stamping `satisfied` here green-lights a
+        // plan that cannot run (issue #396). The note acknowledges the stored
+        // connection instead of claiming the provider is not connected,
+        // because "connect it again" is not the action that helps.
+        //
+        // **This is the arm to revisit** if native tokens are ever wired
+        // through to tools — issue #319 owns the token-custody half. At that
+        // point the test becomes "via ∩ {composio, native} ≠ ∅" and the
+        // `composio` kind is what stays Composio-only.
+        Some((true, _, _)) => (
+            PrereqStatus::Missing,
+            format!(
+                "{name} is connected in this host's catalog, but no agent tool uses that \
+                 credential — agents reach {name} through Composio, so connect it there from \
+                 the Connections tab"
+            ),
         ),
         Some((false, _, _)) => (
             PrereqStatus::Missing,

@@ -75,6 +75,30 @@ env (OPENCOMPANY_*, TINYHUMANS_TOKEN_FILE, TINYHUMANS_API_KEY)
 Earlier layers win. `opencompany doctor` prints every effective value, which
 layer set it, and what is missing for each optional capability.
 
+### The bind address
+
+`serve` takes a `--bind` flag, so its listener address has one extra layer on
+top of the chain above:
+
+```text
+--bind
+  ⟵ OPENCOMPANY_BIND
+  ⟵ ~/.opencompany/config.toml  (bind = "…")
+  ⟵ 127.0.0.1:8080
+```
+
+A blank `OPENCOMPANY_BIND` counts as unset and falls through, as everywhere
+else in the chain. `serve` prints the address and the layer that chose it on
+startup — `listening on 0.0.0.0:8080 (from OPENCOMPANY_BIND)` — so a
+configured address that disagrees with the one in use is visible immediately
+rather than only when something fails to reach the host. An address that
+cannot be bound aborts boot naming that address; there is no silent fallback
+to the default.
+
+The default is loopback. A wildcard bind is reached only by an explicit flag,
+variable, or config entry — see [network exposure](#network-exposure) for what
+that does and does not imply.
+
 ## Reference
 
 | Variable | Default | Purpose |
@@ -82,7 +106,7 @@ layer set it, and what is missing for each optional capability.
 | `TINYHUMANS_TOKEN_FILE` | — | Platform-projected, audience-bound token file; rotates in place and outranks `TINYHUMANS_API_KEY` |
 | `TINYHUMANS_API_KEY` | — (required for cycles when no token file) | Static TinyHumans credential (JWT or API key) |
 | `TINYHUMANS_API_URL` | `https://api.tinyhumans.ai` | Backend base URL |
-| `OPENCOMPANY_BIND` | `127.0.0.1:8080` | HTTP bind address |
+| `OPENCOMPANY_BIND` | `127.0.0.1:8080` | HTTP bind address. Outranked by `serve --bind`, outranks `config.toml`'s `bind` — see [the bind address](#the-bind-address) |
 | `OPENCOMPANY_DATA_DIR` | `~/.opencompany` (workspace and bundle home alike; bundles at `companies/<slug>`) | The instance data root: both the workspace layout and the company-bundle home. `--home` outranks it for the bundle home **only** — the workspace (`memory/`, `store/`, `files/`, `logs/`, `tmp/`) still resolves under this variable, so `--home` alone does not move a whole instance. The only knob that isolates two hosts from each other — see [storage](storage.md#choosing-the-root-srcstorepathsrs) |
 | `OPENCOMPANY_BRAIN_MODE` | `hosted` | `hosted` \| `sidecar` (overrides `[brain].mode`) |
 | `OPENCOMPANY_OPENHUMAN_URL` | — | Attach to a running `openhuman-core serve` instead of launching |

@@ -268,10 +268,15 @@ prompt = "Weekly review and operator digest"
     `expected_updated_at` revision token taken from a prior read, so a note
     edited in the console since the agent read it is refused rather than
     clobbered; creating, renaming and deleting notes stay operator-only. Both
-    sides are capped at 64 KiB, which makes a larger note agent-read-only: the
-    agent sees a truncated body, and a write against it is refused rather than
-    discarding the part it could not see, so only an operator can edit it in the
-    console. Under
+    sides are capped at the agent harness's own per-tool-result byte budget
+    minus the framing a read wraps a body in (issue #417) — 12 KiB today,
+    derived rather than chosen so a full read always survives the harness cut
+    and the write gate is measured against the bytes the model actually
+    received. A larger note is agent-read-only: the agent sees a truncated body,
+    and a write against it is refused rather than discarding the part it could
+    not see, so only an operator can edit it in the console. **Operator edits
+    are not capped by this** — the console and the REST handlers write through
+    the `WorkspaceStore` port directly and never enter the agent tool path. Under
     `[policy].mode = "supervised"` (the default) a write additionally parks for
     approval, and under `readonly` it is denied — reads stay available in every
     mode. The namespace is **not** gateable by `[plan].token_budgets`: reads
