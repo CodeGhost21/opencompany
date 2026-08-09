@@ -21,6 +21,16 @@ pub const BUILTIN_UNINSTALL: &str =
 pub const MANIFEST_TEAMMATE_DELETE: &str =
     "This teammate is part of your company's blueprint and can't be removed here.";
 
+/// Error shown when a write tries to edit a teammate defined in the manifest
+/// (issue #264). Says where the edit belongs, because the answer is not "you
+/// may not" but "not from here" — the blueprint is version-controlled, and the
+/// one thing the console can change on such a teammate is its daily budget,
+/// which is stored as an override rather than as a rewrite.
+pub const MANIFEST_TEAMMATE_EDIT: &str = concat!(
+    "This teammate is part of your company's blueprint. ",
+    "Edit it in company.toml and redeploy; its daily budget can still be changed here.",
+);
+
 /// Error shown when a write tries to remove a desk member defined in the
 /// manifest (only operator-added members can be removed at runtime).
 pub const MANIFEST_DESK_MEMBER_DELETE: &str =

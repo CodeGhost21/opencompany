@@ -1,5 +1,17 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { Check, KeyRound, Loader2, LogIn, Plug, Save, ShieldCheck, Trash2 } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  AlertTriangle,
+  Check,
+  ChevronDown,
+  KeyRound,
+  Loader2,
+  LogIn,
+  Plug,
+  Save,
+  Search,
+  ShieldCheck,
+  Trash2,
+} from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -17,6 +29,12 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import {
+  buildProviderRows,
+  catalogWarning,
+  toolkitLabel,
+  visibleProviderRows,
+} from "@/lib/composio-catalog";
 
 interface Props {
   client: OpenCompanyClient;
@@ -32,20 +50,6 @@ interface Props {
    * operator has already pasted a live credential into it.
    */
   canManage: boolean;
-}
-
-/** Friendly display labels for the common toolkits; slug-cased fallback otherwise. */
-const TOOLKIT_LABELS: Record<string, string> = {
-  gmail: "Gmail",
-  slack: "Slack",
-  github: "GitHub",
-  googlecalendar: "Google Calendar",
-  notion: "Notion",
-  linear: "Linear",
-};
-
-function toolkitLabel(slug: string): string {
-  return TOOLKIT_LABELS[slug.toLowerCase()] ?? slug.charAt(0).toUpperCase() + slug.slice(1);
 }
 
 /**
@@ -81,13 +85,21 @@ export function ComposioSection({ client, company, canManage }: Props) {
   // Only meaningful in the attested state, where the paste card is an override
   // rather than the way in.
   const [showOverride, setShowOverride] = useState(false);
-  // Open mode only: a slug typed into the "another provider" field. Open mode
-  // permits every toolkit the backend allows, and the curated rows are a
-  // starting point rather than the whole set (issue #397).
+  // Open mode only: a slug typed into the "connect by slug" field. It is now an
+  // escape hatch rather than the way to reach the tail — the rows above are the
+  // backend's real catalog — but it still earns its place: it is the only way to
+  // connect a provider when the catalog could not be fetched, and the only way
+  // to reach one the catalog happens to omit (issue #397).
   const [otherToolkit, setOtherToolkit] = useState("");
   // Slugs connected through that field this session, so they get a row of their
   // own instead of vanishing after a successful sign-in.
   const [extraToolkits, setExtraToolkits] = useState<string[]>([]);
+  // Provider search. In open mode the host now hands over the backend's real
+  // catalog — roughly a hundred toolkits — so finding one by scrolling stopped
+  // being reasonable (issue #397).
+  const [query, setQuery] = useState("");
+  // Whether the operator asked to see past the preview.
+  const [expanded, setExpanded] = useState(false);
 
   const requestGeneration = useRef(0);
   const pollTimers = useRef<Record<string, number>>({});
@@ -143,6 +155,8 @@ export function ComposioSection({ client, company, canManage }: Props) {
     setShowOverride(false);
     setOtherToolkit("");
     setExtraToolkits([]);
+    setQuery("");
+    setExpanded(false);
     setLoad("loading");
     void refresh();
   }, [refresh]);
@@ -222,6 +236,17 @@ export function ComposioSection({ client, company, canManage }: Props) {
     }
   }
 
+  // Ordered once per status/connection change: connected first, then the
+  // handful everyone reaches for, then the tail alphabetically. Ordering and
+  // filtering live in `@/lib/composio-catalog` so they are testable without a
+  // document — see `vitest.config.ts` on where the line sits.
+  const rows = useMemo(
+    () => buildProviderRows(status?.effectiveToolkits ?? [], extraToolkits, connected),
+    [status?.effectiveToolkits, extraToolkits, connected],
+  );
+  const { visible, hidden } = visibleProviderRows(rows, query, expanded);
+  const degraded = status ? catalogWarning(status) : null;
+
   if (load === "unavailable") return null;
 
   const attested = status?.credentialSource === "attested";
@@ -299,24 +324,42 @@ export function ComposioSection({ client, company, canManage }: Props) {
                     authorize against. Paste a token below first.
                   </p>
                 )}
-                {openMode && (
-                  <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    This company allows <span className="font-medium">any</span> provider Composio
-                    offers — these are the common ones. Connect a different provider by its slug
-                    below.
+                {degraded ? (
+                  // The host could not read Composio's catalog. Say so — a
+                  // built-in list rendered like a fetched one is a claim we
+                  // cannot back (issue #397).
+                  <p className="flex items-start gap-2 rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+                    <AlertTriangle className="mt-px size-3 shrink-0" />
+                    <span>{degraded}</span>
                   </p>
+                ) : (
+                  openMode && (
+                    <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+                      This company allows <span className="font-medium">any</span> provider Composio
+                      offers — {rows.length} in total, most-used first. Search to narrow them.
+                    </p>
+                  )
+                )}
+                {rows.length > 8 && (
+                  <div className="relative">
+                    <Search className="absolute top-1/2 left-2 size-3.5 -translate-y-1/2 text-muted-foreground" />
+                    <Input
+                      aria-label="Search providers"
+                      autoComplete="off"
+                      className="pl-7"
+                      placeholder={`Search ${rows.length} providers…`}
+                      value={query}
+                      onChange={(e) => setQuery(e.target.value)}
+                    />
+                  </div>
                 )}
                 <ul className="divide-y divide-border">
-                  {[
-                    ...status.effectiveToolkits,
-                    ...extraToolkits.filter((t) => !status.effectiveToolkits.includes(t)),
-                  ].map((toolkit) => {
-                    const isConnected = connected[toolkit.toLowerCase()] === true;
-                    const isSigningIn = signingIn === toolkit;
+                  {visible.map((row) => {
+                    const isSigningIn = signingIn === row.slug;
                     return (
-                      <li key={toolkit} className="flex items-center justify-between py-2">
-                        <span className="text-sm">{toolkitLabel(toolkit)}</span>
-                        {isConnected ? (
+                      <li key={row.slug} className="flex items-center justify-between py-2">
+                        <span className="text-sm">{row.label}</span>
+                        {row.connected ? (
                           <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
                             <Check className="size-3" /> connected
                           </span>
@@ -327,7 +370,7 @@ export function ComposioSection({ client, company, canManage }: Props) {
                             size="sm"
                             variant="outline"
                             disabled={signingIn !== null || noCredential}
-                            onClick={() => void signIn(toolkit)}
+                            onClick={() => void signIn(row.slug)}
                           >
                             {isSigningIn ? (
                               <Loader2 className="size-4 animate-spin" />
@@ -341,11 +384,23 @@ export function ComposioSection({ client, company, canManage }: Props) {
                     );
                   })}
                 </ul>
+                {visible.length === 0 && query.trim() !== "" && (
+                  <p className="py-2 text-xs text-muted-foreground">
+                    No provider matches “{query.trim()}”. Composio&apos;s slug may differ from the
+                    product name — try connecting it by slug below.
+                  </p>
+                )}
+                {hidden > 0 && (
+                  <Button size="sm" variant="ghost" onClick={() => setExpanded(true)}>
+                    <ChevronDown className="size-4" />
+                    Show all {rows.length} providers
+                  </Button>
+                )}
                 {openMode && canManage && (
                   <div className="flex items-end gap-2 border-t border-border pt-3">
                     <div className="flex-1 space-y-1">
                       <Label htmlFor="composio-other-toolkit" className="text-xs">
-                        Another provider
+                        Connect by slug
                       </Label>
                       <Input
                         id="composio-other-toolkit"

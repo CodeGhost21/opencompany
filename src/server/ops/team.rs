@@ -35,7 +35,7 @@
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, put};
+use axum::routing::{get, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
@@ -54,7 +54,14 @@ use crate::server::users::admin::require_admin;
 /// Builds the team route fragment.
 pub fn router() -> Router<AppState> {
     scoped("/team", get(list_team).post(add_member))
-        .merge(scoped("/team/{agent_id}", delete(remove_member)))
+        // `GET`/`PATCH` come from the sibling `team_agent` module (issue #264)
+        // and are attached to this one entry rather than merged in as a second
+        // router: axum panics when two routers claim the same path, even for
+        // disjoint methods.
+        .merge(scoped(
+            "/team/{agent_id}",
+            super::team_agent::method_router().delete(remove_member),
+        ))
         .merge(scoped("/team/{agent_id}/inbox", put(toggle_inbox)))
         .merge(scoped(
             "/team/{agent_id}/budget",
@@ -142,7 +149,7 @@ struct AddMember {
 /// remove a cap has to say `null` and mean it.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct SetBudget {
+pub(super) struct SetBudget {
     #[serde(deserialize_with = "double_option")]
     budget_usd_daily: Option<Option<f64>>,
 }
@@ -150,7 +157,7 @@ struct SetBudget {
 /// Deserializes into `Some(inner)` when the field is present (so an explicit
 /// `null` becomes `Some(None)`). Without a companion `#[serde(default)]` an
 /// omitted field stays an error — which is what [`SetBudget`] wants.
-fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+pub(super) fn double_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
 where
     D: serde::Deserializer<'de>,
     T: Deserialize<'de>,
@@ -171,10 +178,11 @@ struct InboxAck {
     address: String,
 }
 
-/// The sub-resource path (`agent_id`).
+/// The sub-resource path (`agent_id`). Shared with the sibling `team_agent`
+/// module, which serves `GET`/`PATCH` on the same path (issue #264).
 #[derive(Debug, Deserialize)]
-struct AgentPath {
-    agent_id: String,
+pub(super) struct AgentPath {
+    pub(super) agent_id: String,
 }
 
 /// `GET {scope}/team` — the merged roster: manifest teammates (versioned in
@@ -287,7 +295,7 @@ fn member_row(
 /// spend beside it; and overlay teammates are now cappable, so restricting the
 /// scan to manifest agents would miss the only capped teammate on a company
 /// whose roster was built entirely from the console.
-async fn daily_spend_samples(
+pub(super) async fn daily_spend_samples(
     company: &ScopedCompany,
     record: Option<&CompanyRecord>,
 ) -> Result<Option<Vec<crate::ports::usage::UsageSample>>, ApiError> {
