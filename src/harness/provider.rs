@@ -1955,4 +1955,55 @@ mod tests {
             .expect_err("no provider configured");
         assert!(err.to_string().contains("no inference provider"), "{err}");
     }
+
+    /// The product-identity contract at the transport: `HostedProvider::invoke`
+    /// — the sole production inference path — must tag every chat-completions
+    /// request with `x-sdk-name: opencompany`, mirroring the embeddings client
+    /// and the openhuman-core call sites. This is the header the platform uses
+    /// to attribute backend traffic to the `opencompany` SDK.
+    #[tokio::test]
+    async fn hosted_provider_invoke_carries_the_product_identity_header() {
+        use axum::http::HeaderMap;
+        use axum::routing::post;
+        use axum::{Json, Router};
+
+        let seen: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
+        let capture = Arc::clone(&seen);
+        let app = Router::new().route(
+            "/chat/completions",
+            post(move |headers: HeaderMap| {
+                let capture = Arc::clone(&capture);
+                async move {
+                    *capture.lock().unwrap() = headers
+                        .get(crate::product::PRODUCT_IDENTITY_HEADER)
+                        .and_then(|value| value.to_str().ok())
+                        .map(str::to_string);
+                    Json(serde_json::json!({
+                        "choices": [{ "message": { "role": "assistant", "content": "ok" } }]
+                    }))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+
+        let provider = HostedProvider::new(HostedProviderConfig {
+            base_url: format!("http://{addr}"),
+            credential: Credential::None,
+            extra_headers: Vec::new(),
+        });
+        provider
+            .invoke(&(), user_request("hi"))
+            .await
+            .expect("turn against the stub");
+
+        assert_eq!(
+            seen.lock().unwrap().as_deref(),
+            Some(crate::product::PRODUCT_IDENTITY),
+            "every hosted chat-completions request must attach the product identity header"
+        );
+    }
 }
