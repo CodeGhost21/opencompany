@@ -202,6 +202,7 @@ Compile against vendored TinyAgents, or preview an OpenHuman launch:
 ```sh
 cargo check --features tiny
 cargo run --bin opencompany -- open-human --dry-run -- status
+```
 
 Preview the Tauri desktop host (drives OpenHuman's own `pnpm dev:app`/
 `dev:wry` scripts — CEF on macOS, `wry` on Linux/Windows):
@@ -210,7 +211,6 @@ Preview the Tauri desktop host (drives OpenHuman's own `pnpm dev:app`/
 cargo run --bin opencompany -- open-human --mode desktop --dry-run
 cargo run --bin opencompany -- open-human --mode desktop            # launch
 cargo run --bin opencompany -- open-human --mode desktop --release  # bundle
-```
 ```
 
 ## Under the hood
