@@ -113,7 +113,9 @@ export function connectionConfig(
     baseUrl: connection.baseUrl,
     company: connection.defaultCompany,
     operatorToken:
-      connection.credential.kind === "platform" ? connection.credential.token : null,
+      connection.credential.kind === "platform"
+        ? (connection.credential.token ?? null)
+        : null,
   };
 }
 
