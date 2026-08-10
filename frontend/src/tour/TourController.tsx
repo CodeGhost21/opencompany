@@ -133,7 +133,7 @@ export function TourController({
   const handleSkip = useCallback(() => {
     setWelcomeOpen(false);
     writeTourState(scope, { skipped: true });
-  }, [company]);
+  }, [company, scope]);
 
   // "Replay product tour" from Settings clears the flag and dispatches
   // RESTART_EVENT; jump straight into the tour (no welcome dialog).
