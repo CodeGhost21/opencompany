@@ -119,7 +119,7 @@ export function RunResultPanel({
         )}
 
         {nodeResults && nodeResults.length > 0 ? (
-          <div className="mb-2 space-y-2">
+          <div className="mb-2 space-y-2" data-testid="workflow-run-node-results">
             {nodeResults.map((n) => (
               <NodeResultCard key={n.id} node={n} />
             ))}
