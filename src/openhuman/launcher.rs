@@ -812,6 +812,68 @@ mod tests {
         assert!(!tmp.join(".env").exists());
     }
 
+    #[test]
+    fn desktop_path_env_prefers_install_bin_and_gates_cargo_bin_on_home() {
+        let install_root = PathBuf::from("/root/.cache/cargo-install");
+        // HOME set: install bin first, then ~/.cargo/bin, then the inherited PATH.
+        let with_home = desktop_path_env(&install_root, Some("/home/dev"), "/usr/bin:/bin");
+        assert_eq!(
+            with_home,
+            "/root/.cache/cargo-install/bin:/home/dev/.cargo/bin:/usr/bin:/bin"
+        );
+        // HOME unset (Windows): install bin is still prepended; no ~/.cargo/bin.
+        let without_home = desktop_path_env(&install_root, None, "/usr/bin:/bin");
+        assert_eq!(without_home, "/root/.cache/cargo-install/bin:/usr/bin:/bin");
+    }
+
+    #[test]
+    fn apply_desktop_env_sets_path_dotenv_and_signing_identity() {
+        let tmp = tempfile_dir("desktop-env");
+        // `.env` is applied after CEF_PATH, so it overrides preflight vars.
+        fs::write(tmp.join(".env"), b"CEF_PATH=/from-dotenv/orig\nFOO=bar\n").unwrap();
+
+        let launch = OpenHumanLaunch::desktop(&tmp);
+        let mut command = Command::new("true");
+        launch.apply_desktop_env(&mut command).unwrap();
+
+        let envs: Vec<(std::ffi::OsString, Option<std::ffi::OsString>)> = command
+            .as_std()
+            .get_envs()
+            .map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned())))
+            .collect();
+        let get = |key: &str| {
+            envs.iter()
+                .find(|(k, _)| k == key)
+                .and_then(|(_, v)| v.as_ref())
+                .map(|v| v.to_string_lossy().into_owned())
+        };
+
+        // PATH leads with the vendored install-root bin.
+        let path = get("PATH").unwrap();
+        let install_root = launch.tauri_install_root();
+        assert!(
+            path.starts_with(&format!("{}/bin:", install_root.display())),
+            "PATH should prefer the vendored cargo-tauri bin: {path}"
+        );
+        // The ~/.cargo/bin segment is present iff HOME was set.
+        let home_set = std::env::var("HOME").is_ok();
+        assert_eq!(path.contains("/.cargo/bin"), home_set);
+
+        // .env vars landed, and the CEF_PATH it names overrode any preflight value.
+        assert_eq!(get("FOO").as_deref(), Some("bar"));
+        assert_eq!(get("CEF_PATH").as_deref(), Some("/from-dotenv/orig"));
+
+        // macOS dev sets the signing identity; everywhere else it stays absent.
+        assert_eq!(
+            get("APPLE_SIGNING_IDENTITY").as_deref(),
+            if cfg!(target_os = "macos") && !launch.release {
+                Some("OpenHuman Dev Signer")
+            } else {
+                None
+            }
+        );
+    }
+
     fn tempfile_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "opencompany-launcher-{}-{name}",
