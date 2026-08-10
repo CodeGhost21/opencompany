@@ -949,6 +949,101 @@ pub enum CompanyEvent {
     },
 }
 
+impl CompanyEvent {
+    /// The variant's serialized discriminant — the same string that appears
+    /// under the internally-tagged `kind` field of a journal line.
+    ///
+    /// Written out rather than derived so the value is available without
+    /// serializing, and so a rename of the wire tag has to be made here too
+    /// instead of drifting silently.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::WebhookReceived { .. } => "WebhookReceived",
+            Self::ScheduleFired { .. } => "ScheduleFired",
+            Self::A2aTaskReceived { .. } => "A2aTaskReceived",
+            Self::ApprovalParked { .. } => "ApprovalParked",
+            Self::ApprovalResolved { .. } => "ApprovalResolved",
+            Self::FeedbackFiled { .. } => "FeedbackFiled",
+            Self::PaymentReceived { .. } => "PaymentReceived",
+            Self::LifecycleChanged { .. } => "LifecycleChanged",
+            Self::AgentReply { .. } => "AgentReply",
+            Self::ReactionToggled { .. } => "ReactionToggled",
+            Self::MemoryFactDeleted { .. } => "MemoryFactDeleted",
+            Self::ToolAccessChanged { .. } => "ToolAccessChanged",
+            Self::TaskDispatched { .. } => "TaskDispatched",
+            Self::McpCallFailed { .. } => "McpCallFailed",
+            Self::WorkflowCreated { .. } => "WorkflowCreated",
+            Self::WorkflowUpdated { .. } => "WorkflowUpdated",
+            Self::WorkflowDeleted { .. } => "WorkflowDeleted",
+            Self::TaskSteered { .. } => "TaskSteered",
+            Self::TaskCardChanged { .. } => "TaskCardChanged",
+            Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
+            Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
+            Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
+            Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
+            Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
+            Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
+        }
+    }
+
+    /// Whether a retention pass may ever discard this entry (issue #275).
+    ///
+    /// **Exhaustive on purpose — do not add a `_` arm.** A new event variant
+    /// must fail this match and make somebody choose, because the safe default
+    /// for an unclassified entry is to keep it forever, and a wildcard would
+    /// silently pick the other one.
+    ///
+    /// Only four kinds are prunable, and each is high-volume machine exhaust
+    /// that no other entry addresses:
+    ///
+    /// - the three workflow-run kinds — the growth the issue was filed for,
+    ///   left behind when #259 deletes a workflow, and
+    /// - `McpCallFailed`, a per-attempt tool failure whose durable meaning is
+    ///   already carried by the run outcome it belongs to.
+    ///
+    /// Everything else is permanent. `WebhookReceived` and `ScheduleFired` are
+    /// tempting — both are voluminous and machine-generated — but a webhook
+    /// body is the only record of what a counterparty actually sent, and a
+    /// schedule tick is the only evidence a cron fired at all. Both are
+    /// evidence, so both stay. Chat kinds stay for a second, harder reason:
+    /// `OperatorMessage`, `AgentReply` and `TaskDiscussionPosted` are addressed
+    /// by sequence from thread parents, reactions, and #358's redaction
+    /// tombstone, so pruning one dangles a pointer nothing can repair.
+    pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
+        use crate::ports::events::RetentionClass::{Permanent, Prunable};
+        match self {
+            Self::WorkflowRunStarted { .. }
+            | Self::WorkflowRunFinished { .. }
+            | Self::WorkflowNodeFinished { .. }
+            | Self::McpCallFailed { .. } => Prunable,
+
+            Self::OperatorMessage { .. }
+            | Self::WebhookReceived { .. }
+            | Self::ScheduleFired { .. }
+            | Self::A2aTaskReceived { .. }
+            | Self::ApprovalParked { .. }
+            | Self::ApprovalResolved { .. }
+            | Self::FeedbackFiled { .. }
+            | Self::PaymentReceived { .. }
+            | Self::LifecycleChanged { .. }
+            | Self::AgentReply { .. }
+            | Self::ReactionToggled { .. }
+            | Self::MemoryFactDeleted { .. }
+            | Self::ToolAccessChanged { .. }
+            | Self::TaskDispatched { .. }
+            | Self::WorkflowCreated { .. }
+            | Self::WorkflowUpdated { .. }
+            | Self::WorkflowDeleted { .. }
+            | Self::TaskSteered { .. }
+            | Self::TaskCardChanged { .. }
+            | Self::DeskTaskCompleted { .. }
+            | Self::TaskDiscussionPosted { .. }
+            | Self::TaskDiscussionRedacted { .. } => Permanent,
+        }
+    }
+}
+
 /// How one workflow node's execution came out (issue #371).
 ///
 /// A closed two-value set on purpose: it is the entire payload of

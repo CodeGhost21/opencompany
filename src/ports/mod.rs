@@ -41,7 +41,7 @@ pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;
 pub use context::ContextStore;
 pub use economy::AgentEconomy;
-pub use events::EventLog;
+pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
 pub use ids::{generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
