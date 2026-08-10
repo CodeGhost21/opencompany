@@ -5,6 +5,10 @@
 //! report its effective configuration. The cognition kernel (Brain, cycle
 //! loop, stores) lands in later phases; see `docs/spec/roadmap.md`.
 
+/// Issue #552: the seam between a task artifact and the shared workspace tree.
+/// Always compiled — the console's workspace and artifact routes reach it in
+/// every build, and only the publish drain's half is behind `openhuman`.
+pub mod artifact_mirror;
 pub mod composio;
 #[cfg(test)]
 mod content_test;
