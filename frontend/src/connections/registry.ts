@@ -17,8 +17,9 @@ import { useSyncExternalStore } from "react";
 
 import { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import { defaultTransport } from "@/api/transport";
+import { defaultTransport, isDesktopRuntime } from "@/api/transport";
 import type { Transport } from "@/api/transport";
+import { forgetConnection, registerConnection } from "@/api/transport/desktop";
 import { findProfile, forgetProfile, readProfiles, saveProfile } from "./profileStore";
 import {
   type Connection,
@@ -198,6 +199,7 @@ export function addConnection(input: AddConnection): ConnectionId {
   // what made a single expired session blank the whole console.
   client.onUnauthorized = () => patch(id, { status: "unauthenticated" });
   entries = [...entries, { connection, client, transport }];
+  announceToDesktop(connection);
   saveProfile({
     id,
     baseUrl,
@@ -240,6 +242,7 @@ function adoptCredential(id: ConnectionId, credential: Credential): void {
   entries = entries.map((e) =>
     e.connection.id === id ? { connection, client, transport: existing.transport } : e,
   );
+  announceToDesktop(connection);
   saveProfile({
     id,
     baseUrl: connection.baseUrl,
@@ -271,9 +274,35 @@ export function restoreConnections(transport?: Transport): ConnectionId[] {
   );
 }
 
+/**
+ * Tells the desktop core about a connection, so its proxy can address it.
+ *
+ * A no-op in a browser. Registration is awaited by `ProxyTransport` rather than
+ * here, because `addConnection` is synchronous — React renders off its return
+ * value — and blocking it on an IPC round trip would stall the first paint on
+ * every host.
+ *
+ * A `device` credential is not forwarded: its `ref` names a keychain entry and
+ * nothing resolves one yet, so passing the handle through as if it were a token
+ * would authenticate as the literal string "keychain-handle". Such a connection
+ * registers unauthenticated and the host answers 401, which the row already
+ * renders.
+ */
+function announceToDesktop(connection: Connection): void {
+  if (!isDesktopRuntime()) return;
+  void registerConnection(
+    connection.id,
+    connection.baseUrl,
+    connection.credential.kind === "platform"
+      ? { platformToken: connection.credential.token }
+      : {},
+  );
+}
+
 export function removeConnection(id: ConnectionId): void {
   entries = entries.filter((e) => e.connection.id !== id);
   forgetProfile(id);
+  if (isDesktopRuntime()) forgetConnection(id);
   emit();
 }
 
