@@ -418,15 +418,19 @@ impl OpenHumanLaunch {
 /// `~/.cargo/bin` when `home` is known — HOME is what locates that directory
 /// and is often unset on Windows — then the inherited PATH.
 fn desktop_path_env(install_root: &std::path::Path, home: Option<&str>, inherited: &str) -> String {
-    match home {
-        Some(home) => format!(
-            "{}/bin:{}/.cargo/bin:{}",
-            install_root.display(),
-            home,
-            inherited
-        ),
-        None => format!("{}/bin:{}", install_root.display(), inherited),
+    let mut parts = vec![install_root.join("bin")];
+    if let Some(home) = home {
+        parts.push(PathBuf::from(home).join(".cargo").join("bin"));
     }
+    parts.extend(std::env::split_paths(inherited));
+    // join_paths uses the platform PATH separator (`:` on Unix, `;` on Windows)
+    // and understands drive-letter colons, so the vendored bin stays resolvable
+    // on every host. It only errors on a NUL or a bare separator inside a
+    // component, which checkout-derived paths cannot contain.
+    std::env::join_paths(parts)
+        .expect("install root, home cargo dir, and inherited paths contain no separator")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Whether the installed `cargo-tauri` (per `.crates.toml`) came from the
