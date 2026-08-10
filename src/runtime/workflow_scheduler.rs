@@ -192,22 +192,42 @@ impl WorkflowScheduler {
     /// * a workflow whose graph is malformed (skipped by the union loader with a
     ///   warning, so one bad graph never silences the rest);
     /// * a workflow already fired this minute, or whose previous scheduled run
-    ///   is still in flight.
+    ///   is still in flight;
+    /// * a workflow the operator has switched **off** (issue #276) — see below.
     ///
-    /// **Why the manifest's `[workflows].enabled` list is not a filter here.**
-    /// A trigger `schedule` is itself the operator's explicit "run this on a
-    /// cron" statement — a graph that declares one has already said it wants to
-    /// fire, so re-asking the enabled list adds a second switch for the same
-    /// decision and a way to half-configure it. Enumeration therefore runs over
-    /// the union of seed files and overlay graph bodies, both of which survive a
-    /// rebuild.
+    /// # The switch, and which one it is (issue #276)
     ///
-    /// (An earlier version of this doc rested the argument partly on the enabled
-    /// list not surviving a restart. That was true — a boot rebuild re-seeded the
-    /// record's manifest from `company.toml` — but issue #208 fixed it: the
-    /// rebuild now merges runtime-enabled ids forward. Gating the scheduler on
-    /// `enabled` is a live design option again; it is deliberately not taken
-    /// here, on the argument above.)
+    /// The tick gates on
+    /// [`CompanyRecord::workflow_enabled`](crate::ports::types::CompanyRecord::workflow_enabled),
+    /// **not** on the manifest's `[workflows].enabled` list. Until #276 it gated
+    /// on neither, and the argument for that was: a trigger `schedule` is itself
+    /// the operator's "run this on a cron" statement, so re-asking a second list
+    /// adds a second switch for one decision.
+    ///
+    /// That argument was right about `[workflows].enabled` and wrong about
+    /// having no switch at all. Two things it did not account for:
+    ///
+    /// * **There was no way to pause.** Stopping a schedule meant deleting the
+    ///   workflow, which threw the graph away to silence it for an afternoon.
+    /// * **A schedule could arm itself without review.** An edit that added a
+    ///   cron to a manual workflow — or an orchestrator-authored create — went
+    ///   live on the next tick with nobody having looked at it.
+    ///
+    /// So the gate is a **dedicated** durable field rather than the manifest
+    /// list, which stays exactly what it was: a declaration of which workflows
+    /// this company was provisioned with. It could not have become the switch:
+    /// `merge_enabled_workflows` (`src/runtime/builder.rs`, issue #208) rebuilds
+    /// that list at boot from seed ids ∪ surviving overlay ids, so "off"
+    /// expressed as absence from it would re-arm itself on the next restart.
+    ///
+    /// Enumeration still runs over the union of seed files and overlay graph
+    /// bodies, both of which survive a rebuild — the gate filters that set, it
+    /// does not replace it, so a paused workflow is still listed and still
+    /// runnable by hand from the console's Run button. Pausing stops the
+    /// *schedule*, not the workflow.
+    ///
+    /// The flag is read from the record this tick already loaded for its overlay
+    /// bodies, so the gate costs no extra store round-trip.
     pub async fn tick(&mut self) -> usize {
         let now = self.clock.now_millis();
         let minute = now / MINUTE_MS;
@@ -222,12 +242,19 @@ impl WorkflowScheduler {
             if runtime.ensure_running().await.is_err() {
                 continue;
             }
-            // The record's runtime-authored graph bodies. A company with no
-            // persisted record contributes none; a store failure is logged and
-            // skipped rather than aborting every other company's schedules.
-            let overlays = match runtime.store().load(&company).await {
-                Ok(Some(record)) => record.overlay_workflows,
-                Ok(None) => Vec::new(),
+            // The record's runtime-authored graph bodies, and the ids the
+            // operator has switched off (issue #276) — both off the SAME load, so
+            // the gate costs no second round-trip and cannot read a record that
+            // moved between the two reads. A company with no persisted record
+            // contributes neither; a store failure is logged and skipped rather
+            // than aborting every other company's schedules.
+            //
+            // A load failure skipping the company is what makes the gate
+            // fail-safe: an unreadable record fires nothing, rather than firing
+            // everything because the disable list came back empty.
+            let (overlays, disabled) = match runtime.store().load(&company).await {
+                Ok(Some(record)) => (record.overlay_workflows, record.disabled_workflows),
+                Ok(None) => (Vec::new(), Vec::new()),
                 Err(err) => {
                     tracing::warn!(%company, %err, "workflow scheduler: cannot read company record");
                     continue;
@@ -242,6 +269,19 @@ impl WorkflowScheduler {
                 let Some(cron) = trigger_schedule(&file) else {
                     continue; // no schedule: manual-run only
                 };
+                // Issue #276: switched off. Filtered here, above the `scheduled`
+                // list, so a paused workflow also does not count toward the
+                // unwired-company warning below — a company whose only schedule
+                // is paused is not misconfigured, it is switched off, and saying
+                // otherwise would train an operator to ignore that warning.
+                if disabled.iter().any(|id| id == &file.id) {
+                    tracing::trace!(
+                        %company,
+                        workflow = %file.id,
+                        "workflow scheduler: skipping a switched-off workflow"
+                    );
+                    continue;
+                }
                 // Validation already accepted this expression; a parse failure
                 // here would mean a body written by an older/looser path, so
                 // skip that one workflow loudly rather than panicking.
@@ -633,13 +673,13 @@ fn lock_in_flight(
 /// scheduled trigger per graph, so the node this finds is the only one there is
 /// — a graph with two schedules is rejected at parse rather than silently
 /// resolving to whichever came first.
+///
+/// Delegates to [`WorkflowFile::trigger_schedule`] rather than re-deriving the
+/// predicate: the disarm rule in `workflow_create.rs` reads the same one, and a
+/// second copy here is how "the host thinks this is manual, the scheduler thinks
+/// it is armed" would get in.
 fn trigger_schedule(file: &WorkflowFile) -> Option<String> {
-    file.nodes
-        .iter()
-        .find(|node| {
-            node.kind == crate::company::WorkflowNodeKind::Trigger && node.schedule.is_some()
-        })
-        .and_then(|node| node.schedule.clone())
+    file.trigger_schedule().map(str::to_string)
 }
 
 #[cfg(test)]
@@ -2281,6 +2321,17 @@ to = "done"
         store.save(&record).await.unwrap();
     }
 
+    /// Flips a workflow's armed state on the persisted record, the way
+    /// `PUT …/workflows/{wid}/enabled` does (issue #276).
+    async fn set_enabled(registry: &CompanyRegistry, id: &str, wid: &str, enabled: bool) {
+        let company = CompanyId::new(id);
+        let runtime = registry.get(&company).expect("registered");
+        let store = runtime.store().clone();
+        let mut record: CompanyRecord = store.load(&company).await.unwrap().unwrap();
+        record.set_workflow_enabled(wid, enabled);
+        store.save(&record).await.unwrap();
+    }
+
     /// **Delete needs no scheduler teardown.** The workflow fires, is removed
     /// from the record, and never fires again — no restart, no unbind call.
     #[tokio::test]
@@ -2369,19 +2420,24 @@ to = "done"
         drain(&scheduler).await;
     }
 
-    /// Adding a schedule to a previously manual workflow arms it on the next
-    /// tick — no `enabled` toggle involved, because this scheduler deliberately
-    /// does not gate on `[workflows].enabled` (see [`WorkflowScheduler::tick`]).
+    /// A schedule appearing on a stored graph is picked up on the next tick with
+    /// no re-registration — the reconcile property, still true after #276.
     ///
-    /// This is also the honest record of what #259 does NOT ship: OpenHuman's
-    /// `flows_update` forces `enabled = false` on exactly this manual→automatic
-    /// transition so a schedule cannot go live unreviewed. That rule has no
-    /// lever here yet — writing `enabled = false` would stop nothing — and note
-    /// that create already behaves identically, so an edit is no riskier than
-    /// authoring the same graph fresh. Adopting the disarm rule means first
-    /// reversing the gating decision, for create and update together.
+    /// **This is not "an edit arms a workflow", and it used to be.** The test it
+    /// replaces was named `adding_a_schedule_by_edit_arms_the_workflow_on_the_next_tick`
+    /// and pinned exactly that, on the pre-#276 argument that the scheduler gated
+    /// on nothing. It does now, so arming is a separate decision made by
+    /// `set_company_workflow_enabled` (or refused by the disarm rule), and this
+    /// test writes the overlay body **directly** to isolate the reconcile from
+    /// that decision.
+    ///
+    /// What the disarm rule does to a real edit is pinned where the rule lives —
+    /// `company::workflow_create`'s
+    /// `an_edit_that_adds_a_schedule_switches_the_workflow_off`. Keep the two
+    /// together in your head: this one says the tick sees graph changes, that one
+    /// says a person still has to arm them.
     #[tokio::test]
-    async fn adding_a_schedule_by_edit_arms_the_workflow_on_the_next_tick() {
+    async fn a_schedule_added_to_the_stored_graph_is_picked_up_without_re_registration() {
         let home_dir = tmp_home();
         let home = home_dir.path().to_path_buf();
         let (runner, started, _completed) = RecordingRunner::new();
@@ -2408,6 +2464,106 @@ to = "done"
         clock.set(millis_at(2026, 7, 14, 9, 0));
         assert_eq!(scheduler.tick().await, 1);
         wait_for(|| started.lock().unwrap().len() == 1).await;
+        drain(&scheduler).await;
+    }
+
+    // ── Issue #276: the pause switch ────────────────────────────────────────
+
+    /// A switched-off workflow does not fire, however well its cron matches.
+    ///
+    /// The core of issue #276(a): before this, silencing a schedule meant
+    /// deleting the workflow and losing the graph.
+    #[tokio::test]
+    async fn a_switched_off_workflow_does_not_fire() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        set_enabled(&registry, "acme", "digest", false).await;
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "a switched-off workflow must not fire on a matching minute"
+        );
+        assert!(
+            started.lock().unwrap().is_empty(),
+            "nothing may reach the runner"
+        );
+    }
+
+    /// Switching a workflow back on resumes it on the very next tick — no
+    /// restart, no rebind, the same reconcile the graph edits rely on.
+    ///
+    /// Asserted **after** a suppressed minute, so the test proves the pause was
+    /// real rather than that the cron never matched.
+    #[tokio::test]
+    async fn switching_a_workflow_back_on_resumes_it_on_the_next_tick() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        set_enabled(&registry, "acme", "digest", false).await;
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+        assert_eq!(scheduler.tick().await, 0, "paused");
+
+        set_enabled(&registry, "acme", "digest", true).await;
+        clock.set(millis_at(2026, 7, 14, 9, 0));
+        assert_eq!(scheduler.tick().await, 1, "armed again");
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        drain(&scheduler).await;
+    }
+
+    /// Pausing one workflow leaves its siblings firing. The gate is per-workflow,
+    /// not per-company — a company-wide pause is `lifecycle`, and conflating the
+    /// two would make the switch far blunter than the console shows it as.
+    #[tokio::test]
+    async fn pausing_one_workflow_does_not_silence_the_others() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![
+                overlay("digest", Some("0 9 * * *")),
+                overlay("standup", Some("0 9 * * *")),
+            ],
+            Some(runner),
+            "running",
+        )
+        .await;
+        set_enabled(&registry, "acme", "digest", false).await;
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock.clone());
+
+        assert_eq!(scheduler.tick().await, 1, "only the armed sibling fires");
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        assert_eq!(
+            started.lock().unwrap()[0].workflow,
+            "standup",
+            "the paused workflow must be the one that did not run"
+        );
         drain(&scheduler).await;
     }
 }
