@@ -48,6 +48,13 @@ function mintId(): ConnectionId {
 interface Entry {
   connection: Connection;
   client: OpenCompanyClient;
+  /**
+   * Kept beside the client because the client holds it privately, and
+   * `adoptCredential` has to rebuild the client over the *same* transport — a
+   * connection that silently fell back to `fetch` mid-session would bypass the
+   * desktop's proxy and its CORS-free lane with it.
+   */
+  transport: Transport;
 }
 
 let entries: Entry[] = [];
@@ -158,7 +165,16 @@ export function addConnection(input: AddConnection): ConnectionId {
   // existing entry rather than a duplicate row for one host.
   if (remembered) {
     const existing = entries.find((e) => e.connection.id === remembered.id);
-    if (existing) return existing.connection.id;
+    if (existing) {
+      // A caller that brought a credential wins over whatever this entry was
+      // restored with. `restoreConnections` runs first and can only supply what
+      // was written down — which is never a platform bearer, by design (see
+      // `profileStore.persistable`). The bootstrap add that follows carries the
+      // live one from `?token=`, and returning early without taking it would
+      // leave the connection permanently unauthenticated on every reload.
+      if (input.credential) adoptCredential(existing.connection.id, input.credential);
+      return existing.connection.id;
+    }
   }
 
   const id = remembered?.id ?? mintId();
@@ -175,15 +191,13 @@ export function addConnection(input: AddConnection): ConnectionId {
   // The desktop routes this connection through its own core; the browser
   // build keeps `fetch`. `defaultTransport` decides, so neither the registry
   // nor the client has to know which shell it is in.
-  const client = new OpenCompanyClient(
-    connectionConfig(connection),
-    input.transport ?? defaultTransport(id),
-  );
+  const transport = input.transport ?? defaultTransport(id);
+  const client = new OpenCompanyClient(connectionConfig(connection), transport);
   // Per connection, so one host refusing this client's credential marks that
   // row and leaves the other N-1 alone. The globally-fatal version of this is
   // what made a single expired session blank the whole console.
   client.onUnauthorized = () => patch(id, { status: "unauthenticated" });
-  entries = [...entries, { connection, client }];
+  entries = [...entries, { connection, client, transport }];
   saveProfile({
     id,
     baseUrl,
@@ -207,6 +221,44 @@ export function addConnection(input: AddConnection): ConnectionId {
  * Idempotent: `addConnection` returns the existing entry for a host already
  * registered, so calling this alongside the bootstrap add cannot double up.
  */
+/**
+ * Re-points an already-registered connection at a different credential.
+ *
+ * The client bakes the credential in at construction (`connectionConfig` reads
+ * it into `operatorToken`), so this replaces the client rather than mutating
+ * one — a half-updated client that kept the old bearer for requests already
+ * configured would be worse than either state.
+ */
+function adoptCredential(id: ConnectionId, credential: Credential): void {
+  const existing = entries.find((e) => e.connection.id === id);
+  if (!existing) return;
+  if (sameCredential(existing.connection.credential, credential)) return;
+
+  const connection = { ...existing.connection, credential };
+  const client = new OpenCompanyClient(connectionConfig(connection), existing.transport);
+  client.onUnauthorized = () => patch(id, { status: "unauthenticated" });
+  entries = entries.map((e) =>
+    e.connection.id === id ? { connection, client, transport: existing.transport } : e,
+  );
+  saveProfile({
+    id,
+    baseUrl: connection.baseUrl,
+    label: connection.label,
+    defaultCompany: connection.defaultCompany,
+    credential,
+  });
+  emit();
+}
+
+function sameCredential(a: Credential, b: Credential): boolean {
+  if (a.kind !== b.kind) return false;
+  // A restored profile carries `{ kind: "platform" }` with no token, so this
+  // comparison is what makes the bootstrap's live token count as a change.
+  if (a.kind === "platform" && b.kind === "platform") return a.token === b.token;
+  if (a.kind === "device" && b.kind === "device") return a.ref === b.ref;
+  return true;
+}
+
 export function restoreConnections(transport?: Transport): ConnectionId[] {
   return readProfiles().map((profile) =>
     addConnection({
