@@ -55,6 +55,12 @@ export function ConnectionConsole({
   const [phase, setPhase] = useState<Phase>(
     forceLogin ? { kind: "login", company: defaultCompany, notice } : { kind: "loading" },
   );
+  // Incremented to re-run discovery on demand. The boot effect's dependencies
+  // (`client`, `defaultCompany`, `forceLogin`) never change when a sign-in
+  // completes, so without an explicit epoch a successful re-login would either
+  // hang on "Connecting…" (nothing re-ran the boot) or reload the document
+  // (every other connection's stream died with it).
+  const [bootEpoch, setBootEpoch] = useState(0);
   const connection = useConnection(connectionId);
 
   // The registry marks this connection `unauthenticated` when its client sees a
@@ -63,8 +69,20 @@ export function ConnectionConsole({
   // that status rather than from a second callback is what keeps it that way.
   const refused = connection?.status === "unauthenticated";
 
+  // Re-probe this connection and re-run the boot effect. A reload would tear
+  // down every *other* connection's stream to recover this one; bumping the
+  // epoch keeps the recovery local.
+  const reBoot = useCallback(() => {
+    void probe(connectionId).then(() => {
+      setPhase({ kind: "loading" });
+      setBootEpoch((n) => n + 1);
+    });
+  }, [connectionId]);
+
   useEffect(() => {
-    if (forceLogin) return;
+    // `forceLogin` forces the sign-in view until the *first* boot; a sign-in
+    // bumps the epoch, so the forced-login recover cannot re-enter the boot.
+    if (forceLogin && bootEpoch === 0) return;
     let cancelled = false;
     const set = (p: Phase) => !cancelled && setPhase(p);
 
