@@ -345,8 +345,10 @@ impl OpenHumanLaunch {
                 "--locked",
                 "--path",
                 &vendored_cli.to_string_lossy(),
-            ])
-            .env("CEF_PATH", Self::cef_path()?);
+            ]);
+        if let Some(cef) = Self::cef_path() {
+            install.env("CEF_PATH", cef);
+        }
         // Put the install root's bin and ~/.cargo/bin first so the install
         // itself resolves a CEF-aware toolchain if it shells out.
         if let Ok(home) = std::env::var("HOME") {
