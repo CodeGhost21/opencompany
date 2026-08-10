@@ -36,7 +36,7 @@ use crate::Result;
 use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::EventLog;
+use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::login_codes::LoginCodeRecord;
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
@@ -533,6 +533,48 @@ impl EventLog for SqliteStore {
             }
         });
         Box::pin(stream)
+    }
+
+    async fn prune(&self, id: &CompanyId, policy: &RetentionPolicy) -> Result<PruneReport> {
+        // Whole-log read rather than a `DELETE … WHERE at_ms < ?`: the policy's
+        // per-kind bound is a property of the decoded event, and routing every
+        // backend through `plan_prune` is what keeps fs, sqlite and mongodb
+        // from drifting on the one operation that cannot be undone. Journals
+        // are bounded by this very feature, so the read is affordable.
+        let all = self.read_from(id, EventSeq::new(0), usize::MAX).await?;
+        let doomed = plan_prune(&all, policy);
+
+        let mut report = PruneReport {
+            scanned: all.len(),
+            removed: 0,
+            oldest_retained: all.iter().map(|e| e.seq).min(),
+        };
+        if doomed.is_empty() {
+            return Ok(report);
+        }
+
+        {
+            let mut conn = self.conn();
+            let tx = conn.transaction().map_err(sql_err)?;
+            {
+                let mut stmt = tx
+                    .prepare("DELETE FROM events WHERE company_id = ?1 AND seq = ?2")
+                    .map_err(sql_err)?;
+                for seq in &doomed {
+                    stmt.execute(params![id.as_ref(), seq.value() as i64])
+                        .map_err(sql_err)?;
+                }
+            }
+            tx.commit().map_err(sql_err)?;
+        }
+
+        report.removed = doomed.len();
+        report.oldest_retained = all
+            .iter()
+            .map(|e| e.seq)
+            .filter(|seq| doomed.binary_search(seq).is_err())
+            .min();
+        Ok(report)
     }
 }
 
@@ -2150,6 +2192,12 @@ mod test {
     async fn conformance_monotonic_event_seq() {
         let s = store();
         conformance::assert_monotonic_event_seq(s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_retention() {
+        let s = store();
+        conformance::assert_event_retention(s).await;
     }
 
     #[tokio::test]
