@@ -1066,7 +1066,7 @@ mod tests {
             server("enc-token", "https://api.example.com/mcp?tok%65n=secret"),
             server(
                 "enc-access-token",
-                "https://api.example.com/mcp?auth%5Fkey%2Daccess%2Dtoken=secret",
+                "https://api.example.com/mcp?access%2Dtoken=secret",
             ),
             server("fine", "https://api.example.com/mcp?project%5Fid=p"),
         ];
