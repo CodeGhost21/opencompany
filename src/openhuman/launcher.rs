@@ -456,9 +456,11 @@ fn desktop_path_env(install_root: &std::path::Path, home: Option<&str>, inherite
 }
 
 /// The `OPENHUMAN_DEV_PORT` value, parsed as a `u16` and falling back to
-/// Tauri/Vite's default 1420 on an unset, non-numeric, or out-of-range value.
+/// Tauri/Vite's default 1420 on an unset, non-numeric, out-of-range, or zero
+/// value. Port zero is reserved and must not be baked into the `devUrl` JSON.
 fn desktop_dev_port(raw: Option<&str>) -> u16 {
     raw.and_then(|p| p.trim().parse::<u16>().ok())
+        .filter(|port| *port != 0)
         .unwrap_or(1420)
 }
 
