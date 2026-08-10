@@ -164,6 +164,21 @@ impl OpenHumanLaunch {
         }
     }
 
+    /// The single line a `--dry-run` prints: the working directory followed by
+    /// the command. Desktop runs from the checkout root (like [`run`](Self::run)
+    /// passes `current_dir`), so the preview is copy-paste executable from any
+    /// cwd; Core carries an absolute `--manifest-path`, so it needs no `cd`.
+    pub fn dry_run_preview(&self) -> String {
+        match self.mode {
+            LaunchMode::Desktop => format!(
+                "cd {} && {}",
+                self.root.display(),
+                self.command_preview().join(" ")
+            ),
+            _ => self.command_preview().join(" "),
+        }
+    }
+
     /// Rejects passthrough args in Desktop mode, which drives a fixed
     /// `cargo tauri` invocation that does not forward them. Called by
     /// [`run`](Self::run) and by the CLI's dry-run path so execution and
