@@ -151,7 +151,7 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
-use crate::company::workspace_agents::AGENTS_ROOT;
+use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
@@ -2612,7 +2612,7 @@ mod tests {
     async fn create_cannot_mint_a_rival_agents_root() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        crate::company::workspace_agents::ensure_agent_folders(store.as_ref(), &id, [TEST_AGENT])
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
             .await
             .unwrap();
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));

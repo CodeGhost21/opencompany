@@ -34,9 +34,11 @@ fn manifest() -> CompanyManifest {
 
 /// The sorted node names in a workspace tree body.
 ///
-/// A freshly-built company is no longer an empty tree: boot provisions the
-/// reserved `Agents/` root and one folder per manifest agent (issue #551), so
-/// the tests below name what they expect rather than counting to zero.
+/// A freshly-built company is no longer an empty tree: boot scaffolds the
+/// reserved `Agents/` and `Desks/` roots (issue #551), so the tests below name
+/// what they expect rather than counting to zero. Nothing is provisioned
+/// *inside* them — a member folder is minted when that agent or desk first
+/// produces something.
 fn provisioned_names(tree: &serde_json::Value) -> Vec<String> {
     let mut names: Vec<String> = tree
         .as_array()
@@ -1223,15 +1225,16 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     let state = state_with_company(&home).await;
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
-    // and not a fixture. It is not *empty*, though: boot provisions the
-    // reserved `Agents/` root plus one folder per manifest agent (issue #551),
-    // and the manifest here has one agent — so `Agents` and `Agents/ceo`.
+    // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
+    // `Agents/` and `Desks/` roots (issue #551). The manifest here has an agent
+    // and it gets no folder — a member folder is minted on first use, not on
+    // joining the roster.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents", "ceo"],
-        "a fresh company starts with just its agent folders"
+        vec!["Agents", "Desks"],
+        "a fresh company starts with the two system roots and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
 
@@ -1296,21 +1299,17 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     // are the console's, so the console is the operator.
     assert_eq!(listed["createdBy"], json!({"kind": "operator"}));
     assert_eq!(listed["updatedBy"], json!({"kind": "operator"}));
-    // …and the provisioner's own nodes say what they are, so the console can
-    // tell "the runtime laid this down" from "somebody wrote this".
-    let agents_root = tree
-        .iter()
-        .find(|node| node["name"] == json!("Agents"))
-        .expect("the Agents root is in the tree");
-    assert_eq!(agents_root["createdBy"], json!({"kind": "seed"}));
-    let ceo_folder = tree
-        .iter()
-        .find(|node| node["name"] == json!("ceo"))
-        .expect("Agents/ceo is in the tree");
-    assert_eq!(
-        ceo_folder["createdBy"],
-        json!({"kind": "agent", "id": "ceo"})
-    );
+    // …and the scaffold's own nodes say what they are, so the console can tell
+    // "the runtime laid this down" from "somebody wrote this".
+    for root in ["Agents", "Desks"] {
+        let node = tree
+            .iter()
+            .find(|node| node["name"] == json!(root))
+            .unwrap_or_else(|| panic!("the {root} root is in the tree"));
+        assert_eq!(node["createdBy"], json!({"kind": "seed"}));
+        assert_eq!(node["kind"], json!("folder"));
+        assert!(node["parentId"].is_null());
+    }
 
     // The file read carries the body and the inbound backlink, computed server
     // side — the console derives neither.
@@ -1432,8 +1431,8 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     let note_id = note["id"].as_str().unwrap().to_string();
 
-    // B's own workspace holds only its own provisioned agent folders — A's
-    // note is not in it.
+    // B's own workspace holds only its own scaffolded system roots — A's note
+    // is not in it.
     let (status, tree_b) = send_auth(
         &state,
         "GET",
@@ -1443,7 +1442,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "ceo"]);
+    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "Desks"]);
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(
