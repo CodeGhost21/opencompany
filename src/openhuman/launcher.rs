@@ -784,6 +784,26 @@ mod tests {
         assert_eq!(fs::read_to_string(tmp.join(".env")).unwrap(), "PORT=9999\n");
     }
 
+    #[tokio::test]
+    async fn ensure_tauri_cli_errors_when_vendored_cli_missing() {
+        // A checkout without the vendored `tauri-cef` (e.g. submodules not
+        // initialized) must fail fast with the guidance message before any
+        // `cargo install` is spawned.
+        let tmp = tempfile_dir("ensure-cli-missing");
+        let err = OpenHumanLaunch::desktop(&tmp)
+            .ensure_tauri_cli()
+            .await
+            .unwrap_err();
+        let OpenCompanyError::OpenHuman { code, message } = &err else {
+            panic!("expected OpenHuman error, got {err:?}");
+        };
+        assert_eq!(*code, 500);
+        assert!(
+            message.contains("vendored CEF-aware tauri-cli not found"),
+            "error should name the missing vendored cli: {message}"
+        );
+    }
+
     #[test]
     fn ensure_env_is_noop_without_example() {
         let tmp = tempfile_dir("ensure-env-no-example");
