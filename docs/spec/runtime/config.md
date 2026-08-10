@@ -185,7 +185,7 @@ starting. The rules:
 | Rule | Why |
 | --- | --- |
 | `http(s)://` endpoint, no stdio `command` | The hosted-v1 transport boundary — the same `validate_one` check every other declaration path uses |
-| No credential in the endpoint (`user:pass@host`, or `?token=` / `?apiKey=` / `?access_token=`) | The entry ships to every company; a secret here is a secret everywhere |
+| No credential in the endpoint (`user:pass@host`, or `?token=` / `?apiKey=` / `?access_token=` — percent-encoded key spellings included) | The entry ships to every company; a secret here is a secret everywhere |
 | No `auth_secret` | A default must not depend on a credential. A server needing auth is declared in that company's `company.toml`, or added from the console, where the token is stored per company |
 | Unique `name` | Two rows claiming one slug would let merge order decide which wins. The first is kept |
 
