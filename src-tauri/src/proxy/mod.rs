@@ -127,10 +127,27 @@ impl From<ProxyError> for ProxyErrorWire {
 }
 
 /// Every host this client is connected to.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct ProxyRegistry {
     connections: RwLock<HashMap<ConnectionId, Connection>>,
     http: reqwest::Client,
+}
+
+impl Default for ProxyRegistry {
+    fn default() -> Self {
+        Self {
+            connections: RwLock::new(HashMap::new()),
+            http: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                // A host that accepts a connection but never answers must not
+                // hold a console command open forever. Deliberately *not* a
+                // client-wide `timeout`: that would also cut the long-lived
+                // `subscribe` event stream.
+                .connect_timeout(std::time::Duration::from_secs(10))
+                .build()
+                .expect("reqwest client with fixed settings cannot fail"),
+        }
+    }
 }
 
 impl ProxyRegistry {
