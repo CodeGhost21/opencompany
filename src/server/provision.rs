@@ -18,6 +18,7 @@
 //! records deliveries in memory.
 
 use axum::extract::{Path, State};
+use axum::extract::rejection::JsonRejection;
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
