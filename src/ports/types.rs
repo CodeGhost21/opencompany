@@ -1077,7 +1077,6 @@ impl CompanyEvent {
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
-            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
         }
     }
 
