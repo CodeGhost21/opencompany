@@ -914,6 +914,16 @@ fn summarize_event(event: &CompanyEvent) -> String {
             node_id,
             ..
         } => format!("workflow {workflow_id} finished node {node_id}"),
+        // Issue #529: a delivered-report record. Same no-payload rule as its
+        // neighbours — the node and the destination kind, never the target
+        // address, which is operator-only. The run's own finished line already
+        // folds the delivery counts, so this is summarized, not surfaced.
+        CompanyEvent::WorkflowReportDelivered {
+            workflow_id,
+            node,
+            kind,
+            ..
+        } => format!("workflow {workflow_id} delivered {kind} report from node {node}"),
     }
 }
 

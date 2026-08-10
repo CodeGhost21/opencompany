@@ -374,15 +374,40 @@ async fn run_workflow_inner(
     // scheduled run is exactly the case where nobody is watching the console's
     // run-result drawer. Never fails the run — each attempt is reported instead.
     //
-    // Issue #438: `already_delivered` is what a continuation must NOT send
-    // again. It is read off the trigger input, where the approval that started
-    // this run threaded it — an empty list on a run nobody resumed, so a
-    // first-run delivery is untouched.
-    let already_delivered = crate::runtime::workflow_resume::delivered_in_input(&trigger_input);
+    // Issue #438: the per-lineage half of the guard. `delivered_in_input` is
+    // what a *continuation* must NOT send again — read off the trigger input,
+    // where the approval that started this run threaded it. Empty on a run nobody
+    // resumed.
+    //
+    // Issue #529: unioned with the durable half. A crashed run journals its
+    // sends write-behind but never its finish, so its deliveries are stranded in
+    // the journal with nothing on any trigger input to carry them. An
+    // *independent* re-run (the operator pressing Run again, or a schedule
+    // firing) has an empty per-lineage ledger and would re-mail every already-
+    // sent report. `delivered_by_unsettled_runs` folds those stranded deliveries
+    // back so the re-run skips them. Consulted only when the journal is wired
+    // (`events` is `Some`) — the default build and every unwired test degrade to
+    // the pre-#529 per-lineage behaviour, delivering as before.
+    let mut already_delivered = crate::runtime::workflow_resume::delivered_in_input(&trigger_input);
+    if let Some(events) = events.as_ref() {
+        for entry in
+            crate::runtime::delivered_by_unsettled_runs(events, &record.id, &workflow.id).await
+        {
+            // Deduped by node — the two ledgers may name the same report, and a
+            // reached node is skipped on the first match regardless.
+            if !already_delivered
+                .iter()
+                .any(|prior| prior.node == entry.node)
+            {
+                already_delivered.push(entry);
+            }
+        }
+    }
     let deliveries = super::delivery::deliver_outputs(
         delivery.as_ref(),
         record,
         workflow,
+        &run_id,
         &outcome.output,
         &already_delivered,
     )
@@ -860,6 +885,7 @@ to = "done"
             channels: vec![Arc::new(channel.clone())],
             // This case delivers to a channel, which never parks.
             parking: None,
+            events: Arc::new(crate::store::FsEventLog::new(dir.path())),
         });
 
         let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
@@ -1881,6 +1907,7 @@ to = "done"
                 approvals: gate,
                 journal: journal.clone(),
             }),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
         (deps, journal)
     }
@@ -2172,6 +2199,7 @@ to = "gate"
                 approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
                 journal: journal.clone(),
             }),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
         });
         (deps, journal, mail)
     }
@@ -2265,6 +2293,233 @@ to = "gate"
         assert_eq!(
             second.deliveries[0].reason,
             crate::ports::DeliveryReason::AlreadyDelivered
+        );
+    }
+
+    // --- issue #529: the durable delivery ledger across a crash --------------
+
+    /// Deps that deliver a report to the operator channel, sharing an event log
+    /// and a channel across runs — so a run 1's write-behind record and the
+    /// count of sends are both visible to run 2.
+    fn deps_delivering_to_channel(
+        dir: &std::path::Path,
+        events: Arc<dyn crate::ports::EventLog>,
+        channel: crate::runtime::channel::OperatorChannel,
+        consult_journal: bool,
+    ) -> HarnessDeps {
+        let mut deps = deps(dir);
+        // `consult_journal` toggles ONLY whether the runner reads the durable
+        // ledger — the delivery bundle always journals write-behind to the same
+        // log, so the journal state is identical between the two. This is what
+        // makes the negative control a true control: same journal, guard off.
+        deps.events = consult_journal.then(|| events.clone());
+        deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
+            users: Arc::new(FsOps::new(dir)),
+            channels: vec![Arc::new(channel)],
+            parking: None,
+            events,
+        });
+        deps
+    }
+
+    /// **The headline regression for issue #529.** A run delivers a report and
+    /// then crashes — `run_workflow` returns, but the caller never journals the
+    /// finish (exactly what a host kill leaves). The boot sweep settles it with
+    /// the synthetic interrupted finish, and an operator re-runs the workflow.
+    /// The report must NOT go out a second time: the transport count stays at 1
+    /// and the re-run's row reads `Skipped` / `AlreadyDelivered`.
+    ///
+    /// Breaking the union/fold (the durable consult in `run_workflow_inner`)
+    /// turns this into the negative control below — the count becomes 2 and this
+    /// assertion fails, which is what makes the guard provably load-bearing.
+    #[tokio::test]
+    async fn a_crashed_runs_delivery_is_not_repeated_on_an_independent_re_run() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path()));
+        let channel = OperatorChannel::new();
+        let rec = record();
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+
+        // Run 1 delivers, then "crashes": run_workflow returns, but nothing
+        // journals a WorkflowRunFinished for it.
+        let deps1 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
+        let ctx1 = WorkflowRunContext::new(false);
+        let run1 = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps1,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+            &ctx1,
+        )
+        .await
+        .expect("run 1 runs");
+        assert_eq!(
+            run1.deliveries[0].status,
+            crate::ports::DeliveryStatus::Sent
+        );
+        assert_eq!(channel.sent().len(), 1, "run 1 delivered exactly once");
+
+        // The boot sweep settles the crashed run with the synthetic interrupted
+        // finish — an error, which must NOT clear the durable ledger.
+        crate::runtime::sweep_interrupted_runs(&events, &rec.id).await;
+
+        // Run 2 is an independent re-run of the same workflow.
+        let deps2 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
+        let ctx2 = WorkflowRunContext::new(false);
+        let run2 = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps2,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+            &ctx2,
+        )
+        .await
+        .expect("run 2 runs");
+
+        assert_eq!(
+            channel.sent().len(),
+            1,
+            "the durable ledger stopped the crashed run's report from being re-delivered"
+        );
+        assert_eq!(run2.deliveries.len(), 1, "{:?}", run2.deliveries);
+        assert_eq!(
+            run2.deliveries[0].status,
+            crate::ports::DeliveryStatus::Skipped
+        );
+        assert_eq!(
+            run2.deliveries[0].reason,
+            crate::ports::DeliveryReason::AlreadyDelivered
+        );
+    }
+
+    /// **The committed negative control.** The identical journal state as the
+    /// test above — run 1 delivered and crashed — but run 2 runs with the
+    /// durable consult bypassed (`deps.events` unwired, so the fold never runs).
+    /// The report goes out a second time: the count reaches 2. This proves the
+    /// guard is load-bearing rather than incidental — without the consult, the
+    /// re-delivery the whole issue is about happens.
+    #[tokio::test]
+    async fn without_the_durable_consult_a_crashed_runs_report_is_re_delivered() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path()));
+        let channel = OperatorChannel::new();
+        let rec = record();
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+
+        let deps1 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
+        let ctx1 = WorkflowRunContext::new(false);
+        run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps1,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+            &ctx1,
+        )
+        .await
+        .expect("run 1 runs");
+        assert_eq!(channel.sent().len(), 1);
+        crate::runtime::sweep_interrupted_runs(&events, &rec.id).await;
+
+        // Run 2: SAME journal, but the guard is off (`consult_journal = false`).
+        let deps2 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), false);
+        let ctx2 = WorkflowRunContext::new(false);
+        let run2 = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps2,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+            &ctx2,
+        )
+        .await
+        .expect("run 2 runs");
+
+        assert_eq!(
+            channel.sent().len(),
+            2,
+            "without consulting the durable ledger, the crashed run's report goes out again"
+        );
+        assert_eq!(
+            run2.deliveries[0].status,
+            crate::ports::DeliveryStatus::Sent,
+            "the unguarded re-run delivers rather than skips"
+        );
+    }
+
+    /// The cadence guarantee: a run that delivers AND finishes cleanly must not
+    /// suppress the next scheduled run. Run 1 delivers and its clean finish is
+    /// journaled; run 2 delivers again — a daily digest keeps going out every
+    /// day, because a clean finish clears the durable ledger.
+    #[tokio::test]
+    async fn a_clean_finish_lets_the_next_run_deliver_again() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let events: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path()));
+        let channel = OperatorChannel::new();
+        let rec = record();
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+
+        // Run 1 delivers…
+        let deps1 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
+        let ctx1 = WorkflowRunContext::new(false);
+        let run1 = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps1,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+            &ctx1,
+        )
+        .await
+        .expect("run 1 runs");
+        assert_eq!(channel.sent().len(), 1);
+        // …and the caller journals its clean finish, the way a real entry point
+        // does once the run returns.
+        crate::runtime::record_run_finished(
+            &events,
+            &rec.id,
+            &file.id,
+            true,
+            &ctx1.run_id,
+            Ok(&run1),
+        )
+        .await;
+
+        // Run 2 (the next day's fire) delivers again — never suppressed.
+        let deps2 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
+        let ctx2 = WorkflowRunContext::new(false);
+        let run2 = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps2,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "quarterly numbers" }),
+            &ctx2,
+        )
+        .await
+        .expect("run 2 runs");
+
+        assert_eq!(
+            channel.sent().len(),
+            2,
+            "a clean finish must not suppress the next legitimate delivery"
+        );
+        assert_eq!(
+            run2.deliveries[0].status,
+            crate::ports::DeliveryStatus::Sent
         );
     }
 

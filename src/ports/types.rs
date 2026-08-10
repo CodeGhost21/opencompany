@@ -947,6 +947,70 @@ pub enum CompanyEvent {
         /// Wall-clock duration of the node's execution, in milliseconds.
         elapsed_ms: u64,
     },
+    /// One `output` node's report actually left the process (issue #529) — the
+    /// durable record of a dispatch that the run's own
+    /// [`WorkflowRunFinished`](Self::WorkflowRunFinished) does not carry across a
+    /// crash.
+    ///
+    /// # The hole this closes
+    ///
+    /// A run's delivery rows live only on
+    /// [`WorkflowRunFinished::deliveries`](Self::WorkflowRunFinished), which is
+    /// journaled **after** the run returns. A crash, panic, or mid-graph failure
+    /// therefore orphans the side effect: the mail left the process, but the
+    /// boot sweep settles the run `FAILED` with no delivery record, and the
+    /// operator's re-run re-delivers every already-sent report to real people
+    /// (issue #438's ledger rides one approval lineage's trigger input and is not
+    /// persisted, so an independently re-run workflow re-delivers). This event is
+    /// written **write-behind, at dispatch** — immediately after each `Sent` send
+    /// and each `Pending` park — so a durable ledger of what already went out
+    /// survives a crash and a re-run can skip it. See
+    /// [`delivered_by_unsettled_runs`](crate::runtime::delivered_by_unsettled_runs).
+    ///
+    /// Write-behind, not write-ahead: a crash *between* the journal and the send
+    /// would silently suppress a report, which is worse than one duplicate. So
+    /// the record can only ever lag the send, never precede it.
+    ///
+    /// # Dedupe identity is `node`
+    ///
+    /// The fold keys on [`node`](Self::WorkflowReportDelivered::node) so it
+    /// unions cleanly with #438's
+    /// [`DeliveredReport`](crate::runtime::workflow_resume::DeliveredReport),
+    /// whose identity is also the node. An `owner` destination that fanned out to
+    /// several admins writes one line per recipient, so `target` differs across
+    /// lines for one node; per-recipient dedupe is a documented deferred limit,
+    /// exactly as #438's ledger is per node rather than per recipient.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowReportDelivered {
+        /// The workflow graph that delivered (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// The run that dispatched this report — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) carries.
+        run_id: String,
+        /// The `output` node whose report left the process. This is the dedupe
+        /// identity the fold and #438's ledger both key on.
+        node: String,
+        /// The destination kind as authored (`owner` / `email` / `channel`) — the
+        /// description beside the identity, so a reader sees *what* went where.
+        ///
+        /// Renamed to `destination_kind` on the wire: this enum is
+        /// internally-tagged under `kind`, so a field literally named `kind`
+        /// would collide with the tag and emit a duplicate key. The Rust name
+        /// stays `kind` to read the same as its
+        /// [`DeliveryReport`](crate::ports::DeliveryReport) and
+        /// [`DeliveredReport`](crate::runtime::workflow_resume::DeliveredReport)
+        /// siblings.
+        #[serde(rename = "destination_kind")]
+        kind: String,
+        /// The address or channel actually dispatched to. `None` only when a
+        /// destination named none; for `owner` this is the server-resolved
+        /// recipient, not something the graph named. Optional on the wire so a
+        /// line stays minimal when there is nothing to record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
 }
 
 /// How one workflow node's execution came out (issue #371).
@@ -3952,6 +4016,66 @@ mod test {
                 pending_approvals: vec!["review".to_string()],
                 error: None,
                 cancelled: false,
+            }
+        );
+    }
+
+    /// Issue #529: the delivered-report event survives the JSONL round trip the
+    /// journal puts every event through, `target` and all — the whole reason it
+    /// exists is to be read back after a crash.
+    #[test]
+    fn workflow_report_delivered_round_trips() {
+        let event = CompanyEvent::WorkflowReportDelivered {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node: "owner_summary".to_string(),
+            kind: "owner".to_string(),
+            target: Some("ada@example.com".to_string()),
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// Issue #529: the wire shape is pinned, and `target` is omitted entirely
+    /// when a destination named none — the same `skip_serializing_if` economy
+    /// every optional field on this enum keeps, so a channel line stays minimal.
+    #[test]
+    fn workflow_report_delivered_pins_its_wire_shape_and_omits_absent_target() {
+        let with_target = serde_json::to_string(&CompanyEvent::WorkflowReportDelivered {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node: "owner_summary".to_string(),
+            kind: "owner".to_string(),
+            target: Some("ada@example.com".to_string()),
+        })
+        .expect("serialize");
+        assert_eq!(
+            with_target,
+            r#"{"kind":"WorkflowReportDelivered","workflow_id":"digest","run_id":"run-1","node":"owner_summary","destination_kind":"owner","target":"ada@example.com"}"#
+        );
+
+        let no_target = serde_json::to_string(&CompanyEvent::WorkflowReportDelivered {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node: "notice".to_string(),
+            kind: "channel".to_string(),
+            target: None,
+        })
+        .expect("serialize");
+        assert_eq!(
+            no_target,
+            r#"{"kind":"WorkflowReportDelivered","workflow_id":"digest","run_id":"run-1","node":"notice","destination_kind":"channel"}"#,
+            "an absent target must not ride the line as a null"
+        );
+        // …and a line with no `target` loads back as `None` rather than failing.
+        let decoded: CompanyEvent = serde_json::from_str(&no_target).expect("minimal line loads");
+        assert_eq!(
+            decoded,
+            CompanyEvent::WorkflowReportDelivered {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                node: "notice".to_string(),
+                kind: "channel".to_string(),
+                target: None,
             }
         );
     }

@@ -45,6 +45,7 @@ use std::sync::Arc;
 use crate::ports::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
 use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun};
+use crate::runtime::workflow_resume::DeliveredReport;
 
 /// The error stamped on a run the host never got to finish (issue #371).
 ///
@@ -231,6 +232,113 @@ pub async fn sweep_interrupted_runs(events: &Arc<dyn EventLog>, company: &Compan
         )
         .await;
     }
+}
+
+/// What the trailing suffix of **unclean** runs of one workflow already
+/// delivered, folded from the journal (issue #529).
+///
+/// # The hole this closes
+///
+/// A run's deliveries live only on
+/// [`WorkflowRunFinished::deliveries`](CompanyEvent::WorkflowRunFinished), which
+/// is journaled *after* the run returns. A crash, a mid-graph failure, or a
+/// panic therefore orphans the side effect: the report left the process, but the
+/// boot sweep settles the run `FAILED` (or the run simply has no finish at all),
+/// so no delivery record exists — and an operator's re-run re-mails every
+/// already-sent report to real people. Issue #438's ledger does not cover this:
+/// it rides one approval lineage's trigger input and is never persisted, so an
+/// *independently* re-run or re-triggered workflow re-delivers.
+///
+/// This fold is the durable half. It replays the journal and returns the reports
+/// dispatched by the **uncleanly-finished trailing runs** — the ones that owe
+/// the next run nothing, because their work is stranded.
+///
+/// # Semantics: a clean finish absorbs and clears
+///
+/// One pass in journal order, holding a set of delivered nodes for `workflow_id`:
+///
+/// * a [`WorkflowReportDelivered`](CompanyEvent::WorkflowReportDelivered) for
+///   this workflow **inserts** its node (write-behind at dispatch, so a
+///   crashed run's sends are here even though its finish is not);
+/// * a [`WorkflowRunFinished`](CompanyEvent::WorkflowRunFinished) for this
+///   workflow with **no error clears** the set.
+///
+/// The clear is what keeps a daily scheduled digest delivering every day: a run
+/// that finishes cleanly (a normal completion, or a
+/// [`cancelled`](CompanyEvent::WorkflowRunFinished) one — which returns *before*
+/// `deliver_outputs` and so dispatched nothing here, and carries no error)
+/// absorbs everything delivered up to it, so the next run starts owed nothing.
+/// Only deliveries by the *unclean* trailing suffix — a crash whose boot-sweep
+/// finish carries the synthetic `error: Some(..)`, a mid-graph failure, or a
+/// panic that never journaled a finish at all — survive the fold, and those are
+/// exactly the ones a re-run must not repeat.
+///
+/// Identity is the **node**, so this unions cleanly with issue #438's
+/// [`DeliveredReport`](crate::runtime::workflow_resume::DeliveredReport): the
+/// caller concatenates the two and dedupes. An `owner` fan-out that wrote one
+/// line per admin collapses to a single node entry here.
+///
+/// Best-effort read, the same posture as
+/// [`sweep_interrupted_runs`] (which is left untouched): a journal read failure
+/// yields an empty ledger and a warn, because a delivery guard that cannot read
+/// the journal must fail *open* to the pre-#529 behaviour (deliver) rather than
+/// silently suppress a report.
+pub async fn delivered_by_unsettled_runs(
+    events: &Arc<dyn EventLog>,
+    company: &CompanyId,
+    workflow_id: &str,
+) -> Vec<DeliveredReport> {
+    let stored = match events
+        .read_from(company, EventSeq::new(0), usize::MAX)
+        .await
+    {
+        Ok(stored) => stored,
+        Err(err) => {
+            tracing::warn!(
+                %company,
+                workflow = %workflow_id,
+                %err,
+                "could not read the journal to fold this workflow's stranded deliveries; a re-run \
+                 will not know what a crashed run already sent"
+            );
+            return Vec::new();
+        }
+    };
+
+    // Insertion order preserved, deduped by node — an output node has exactly one
+    // destination, so its id is the identity and the first-seen kind describes
+    // it. A `Vec` rather than a set keeps the returned order deterministic for
+    // the caller's union.
+    let mut delivered: Vec<DeliveredReport> = Vec::new();
+    for stored in stored {
+        match stored.event {
+            // The dedupe (`not already present`) rides the guard: a repeat of a
+            // node already in the ledger simply does not match, and falls through
+            // to the no-op arm below — an `owner` fan-out's one-line-per-admin
+            // collapses to a single entry this way.
+            CompanyEvent::WorkflowReportDelivered {
+                workflow_id: wid,
+                node,
+                kind,
+                ..
+            } if wid == workflow_id && !delivered.iter().any(|prior| prior.node == node) => {
+                delivered.push(DeliveredReport { node, kind });
+            }
+            // A clean finish (no error) absorbs everything delivered up to it and
+            // resets the ledger — the cadence guarantee. A failed / interrupted
+            // finish carries an error and does NOT clear, so its run's stranded
+            // deliveries stay owed-nothing to the next run.
+            CompanyEvent::WorkflowRunFinished {
+                workflow_id: wid,
+                error,
+                ..
+            } if wid == workflow_id && error.is_none() => {
+                delivered.clear();
+            }
+            _ => {}
+        }
+    }
+    delivered
 }
 
 #[cfg(test)]
@@ -604,5 +712,317 @@ mod test {
             settled,
             vec![("run-a".to_string(), true), ("run-b".to_string(), false)]
         );
+    }
+
+    // --- issue #529: the durable delivery fold --------------------------------
+
+    /// Appends a `WorkflowReportDelivered` — the write-behind record a dispatch
+    /// leaves at run time.
+    async fn deliver(
+        events: &Arc<dyn EventLog>,
+        company: &CompanyId,
+        workflow_id: &str,
+        run_id: &str,
+        node: &str,
+        kind: &str,
+    ) {
+        events
+            .append(
+                company,
+                CompanyEvent::WorkflowReportDelivered {
+                    workflow_id: workflow_id.to_string(),
+                    run_id: run_id.to_string(),
+                    node: node.to_string(),
+                    kind: kind.to_string(),
+                    target: Some("ada@example.com".to_string()),
+                },
+            )
+            .await
+            .expect("append");
+    }
+
+    /// The nodes the fold returns for `workflow_id`, in order.
+    async fn stranded(
+        events: &Arc<dyn EventLog>,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Vec<String> {
+        delivered_by_unsettled_runs(events, company, workflow_id)
+            .await
+            .into_iter()
+            .map(|d| d.node)
+            .collect()
+    }
+
+    /// A report delivered by a run that never journaled a finish (a crash) is
+    /// owed-nothing to the next run — it is in the ledger.
+    #[tokio::test]
+    async fn a_delivery_without_a_finish_is_stranded() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+
+        let ledger = delivered_by_unsettled_runs(&events, &company, "digest").await;
+        assert_eq!(
+            ledger,
+            vec![DeliveredReport {
+                node: "owner_summary".to_string(),
+                kind: "owner".to_string(),
+            }],
+            "a crashed run's delivery must be owed-nothing to the next run"
+        );
+    }
+
+    /// The cadence guarantee: a run that delivered AND finished cleanly clears
+    /// the ledger, so the next scheduled run of the same workflow delivers
+    /// again rather than being suppressed forever.
+    #[tokio::test]
+    async fn a_clean_finish_clears_the_ledger() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            true,
+            "run-1",
+            Ok(&run_with(Vec::new(), Vec::new())),
+        )
+        .await;
+
+        assert!(
+            stranded(&events, &company, "digest").await.is_empty(),
+            "a clean finish absorbs what the run delivered"
+        );
+    }
+
+    /// A failed finish carries an error and does NOT clear — its run's stranded
+    /// delivery stays owed-nothing to the next run.
+    #[tokio::test]
+    async fn a_failed_finish_keeps_the_ledger() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+        record_run_finished(&events, &company, "digest", true, "run-1", Err("it broke")).await;
+
+        assert_eq!(
+            stranded(&events, &company, "digest").await,
+            vec!["owner_summary".to_string()],
+            "a finish that failed must not clear the delivered ledger"
+        );
+    }
+
+    /// The boot sweep's synthetic INTERRUPTED finish is a failed finish
+    /// (`error: Some`), so it likewise keeps the ledger — a host that died
+    /// mid-run still owes the next run nothing for what it managed to send.
+    #[tokio::test]
+    async fn a_swept_interrupted_finish_keeps_the_ledger() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+        // The host went away before finishing; boot settles it synthetically.
+        sweep_interrupted_runs(&events, &company).await;
+
+        assert_eq!(
+            stranded(&events, &company, "digest").await,
+            vec!["owner_summary".to_string()],
+            "the sweep's synthetic error must not read as a clean finish"
+        );
+    }
+
+    /// A cancelled run carries `error: None`, so it clears the ledger — and that
+    /// is correct: a cancelled run returns before `deliver_outputs`, so it
+    /// dispatched nothing here, and clearing simply resets to owed-nothing.
+    #[tokio::test]
+    async fn a_cancelled_finish_clears_the_ledger() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        // A prior crashed run stranded a delivery…
+        start(&events, &company, "run-1", true).await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+        // …then a later run of the same workflow was stopped by an operator.
+        let mut cancelled = run_with(Vec::new(), Vec::new());
+        cancelled.cancelled = true;
+        record_run_finished(&events, &company, "digest", true, "run-2", Ok(&cancelled)).await;
+
+        assert!(
+            stranded(&events, &company, "digest").await.is_empty(),
+            "a cancelled run has no error, so it clears like any clean finish"
+        );
+    }
+
+    /// The multi-crash union: run 1 sends A then crashes, run 2 skips A, sends B,
+    /// then crashes. The ledger accumulates {A, B} across both unclean runs.
+    #[tokio::test]
+    async fn deliveries_union_across_multiple_crashes() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        deliver(&events, &company, "digest", "run-1", "a", "owner").await;
+        record_run_finished(&events, &company, "digest", true, "run-1", Err("crash 1")).await;
+
+        start(&events, &company, "run-2", true).await;
+        // run 2 skipped A (its own already_delivered saw it) and sent B.
+        deliver(&events, &company, "digest", "run-2", "b", "owner").await;
+        record_run_finished(&events, &company, "digest", true, "run-2", Err("crash 2")).await;
+
+        assert_eq!(
+            stranded(&events, &company, "digest").await,
+            vec!["a".to_string(), "b".to_string()],
+            "two unclean runs accumulate rather than the second forgetting the first"
+        );
+    }
+
+    /// The same node delivered twice (an `owner` fan-out writes one line per
+    /// admin) collapses to a single ledger entry, keyed on the node.
+    #[tokio::test]
+    async fn a_fanned_out_node_collapses_to_one_entry() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+
+        assert_eq!(
+            stranded(&events, &company, "digest").await,
+            vec!["owner_summary".to_string()],
+            "per-recipient lines dedupe to one node in the ledger"
+        );
+    }
+
+    /// The fold is per-workflow: a crash in workflow A does not strand a
+    /// delivery against workflow B, and a clean finish of A does not clear B.
+    #[tokio::test]
+    async fn the_fold_is_isolated_per_workflow() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        deliver(&events, &company, "digest", "run-1", "a", "owner").await;
+        deliver(&events, &company, "weekly", "run-2", "b", "owner").await;
+        // A clean finish of `digest` clears only `digest`.
+        record_run_finished(
+            &events,
+            &company,
+            "digest",
+            true,
+            "run-1",
+            Ok(&run_with(Vec::new(), Vec::new())),
+        )
+        .await;
+
+        assert!(
+            stranded(&events, &company, "digest").await.is_empty(),
+            "digest's own clean finish cleared it"
+        );
+        assert_eq!(
+            stranded(&events, &company, "weekly").await,
+            vec!["b".to_string()],
+            "weekly's stranded delivery is untouched by digest's finish"
+        );
+    }
+
+    /// Events the fold does not care about — starts, node finishes, unrelated
+    /// records — are ignored rather than disturbing the ledger.
+    #[tokio::test]
+    async fn unrelated_events_are_ignored() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        start(&events, &company, "run-1", true).await;
+        events
+            .append(
+                &company,
+                CompanyEvent::WorkflowNodeFinished {
+                    workflow_id: "digest".to_string(),
+                    run_id: "run-1".to_string(),
+                    node_id: "ceo".to_string(),
+                    status: crate::ports::types::WorkflowNodeStatus::Ok,
+                    elapsed_ms: 3,
+                },
+            )
+            .await
+            .expect("append");
+        deliver(
+            &events,
+            &company,
+            "digest",
+            "run-1",
+            "owner_summary",
+            "owner",
+        )
+        .await;
+
+        assert_eq!(
+            stranded(&events, &company, "digest").await,
+            vec!["owner_summary".to_string()],
+            "only delivered/finished events for this workflow move the ledger"
+        );
+    }
+
+    /// An empty or delivery-free journal folds to nothing rather than erroring.
+    #[tokio::test]
+    async fn an_empty_journal_folds_to_nothing() {
+        let (_home, events) = log();
+        let company = CompanyId::new("acme");
+        assert!(stranded(&events, &company, "digest").await.is_empty());
     }
 }
