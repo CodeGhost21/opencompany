@@ -383,16 +383,9 @@ impl OpenHumanLaunch {
         // `~/.cargo/bin` segment depends on HOME, which is often unset on
         // Windows.
         let install_root = self.tauri_install_root();
-        let inherited = std::env::var("PATH").unwrap_or_default();
-        let path = match std::env::var("HOME") {
-            Ok(home) => format!(
-                "{}/bin:{}/.cargo/bin:{}",
-                install_root.display(),
-                home,
-                inherited
-            ),
-            Err(_) => format!("{}/bin:{}", install_root.display(), inherited),
-        };
+        // Home may be unset on Windows; `~/.cargo/bin` is only appended then.
+        let home = std::env::var("HOME").ok();
+        let path = desktop_path_env(&install_root, home.as_deref(), &env_pathent());
         command.env("PATH", path);
 
         // Load <root>/.env (set after CEF_PATH so a .env override wins, matching
