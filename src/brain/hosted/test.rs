@@ -493,10 +493,21 @@ fn manifest(policy_mode: &str) -> CompanyManifest {
     toml::from_str(&toml_src).expect("valid manifest")
 }
 
+/// How many events a fresh company already has in its journal by the time it
+/// finishes booting (issue #327).
+///
+/// Boot lays down the reserved workspace roots, and since #327 the workspace
+/// store announces its own writes — so one `WorkspaceChanged` per root is
+/// journalled before any operator message arrives. Derived from `SYSTEM_ROOTS`
+/// rather than written as a literal, so adding a root cannot silently
+/// desynchronise the scripted cycle id below from the one the runtime computes.
+const BOOT_JOURNAL_EVENTS: u64 = crate::company::workspace_scaffold::SYSTEM_ROOTS.len() as u64;
+
 /// The deterministic first-cycle id a real runtime for `Acme` produces: the
-/// company id slugs to `acme`, the first event lands at seq 0.
+/// company id slugs to `acme`, and the first *cycle* event lands at the first
+/// sequence boot did not already use.
 fn runtime_cid() -> String {
-    wire::cycle_id("opencompany:acme", "acme", 0)
+    wire::cycle_id("opencompany:acme", "acme", BOOT_JOURNAL_EVENTS)
 }
 
 #[tokio::test]

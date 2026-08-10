@@ -388,16 +388,21 @@ mod test {
         assert_eq!(scheduler.tick().await.unwrap(), 1);
 
         // A ScheduleFired event landed in the log and the brain answered.
+        //
+        // Filtered rather than counted: since issue #327 boot's workspace
+        // scaffold journals a `WorkspaceChanged` per reserved root, so the log
+        // is not empty before the tick. This test is about the cron firing
+        // once, which is a question about `ScheduleFired` entries specifically.
         let events = rt
             .events
             .read_from(rt.id(), EventSeq::new(0), 10)
             .await
             .unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].event,
-            CompanyEvent::ScheduleFired { .. }
-        ));
+        let fired: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.event, CompanyEvent::ScheduleFired { .. }))
+            .collect();
+        assert_eq!(fired.len(), 1);
 
         // A second tick within the same minute does not re-fire (dedupe).
         clock.advance(30_000);
@@ -416,7 +421,13 @@ mod test {
             .read_from(rt.id(), EventSeq::new(0), 10)
             .await
             .unwrap();
-        assert_eq!(events.len(), 2);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, CompanyEvent::ScheduleFired { .. }))
+                .count(),
+            2
+        );
     }
 
     #[tokio::test]

@@ -2495,14 +2495,22 @@ mod test {
         assert_eq!(report.responses[0].text, "You said: hi");
 
         // (b) the event was appended to the log.
+        //
+        // Filtered rather than counted: since issue #327 boot's workspace
+        // scaffold journals a `WorkspaceChanged` per reserved root, so the log
+        // already holds entries this test is not about.
         let stored = rt
             .events
             .read_from(rt.id(), EventSeq::new(0), 10)
             .await
             .unwrap();
-        assert_eq!(stored.len(), 1);
+        let operator: Vec<_> = stored
+            .iter()
+            .filter(|e| matches!(e.event, CompanyEvent::OperatorMessage { .. }))
+            .collect();
+        assert_eq!(operator.len(), 1);
         assert_eq!(
-            stored[0].event,
+            operator[0].event,
             CompanyEvent::OperatorMessage {
                 parent: None,
                 text: "hi".into(),
