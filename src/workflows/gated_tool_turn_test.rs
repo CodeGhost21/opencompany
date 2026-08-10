@@ -229,6 +229,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
                 approvals: gate,
                 journal: journal.clone(),
             }),
+            events: Arc::new(crate::store::FsEventLog::new(dir)),
         }),
         workspace: None,
         search: None,
