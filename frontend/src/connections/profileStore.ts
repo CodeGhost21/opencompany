@@ -106,10 +106,25 @@ export function findProfile(
   );
 }
 
+/**
+ * The credential in a persisted profile.
+ *
+ * A platform bearer is redacted to its kind before writing: `localStorage` is
+ * readable by any script that reaches the page, and the token is `?token=` URL
+ * material re-derived on the next load, never something storage needs to hold.
+ */
+function persistedCredential(credential: Credential): Credential {
+  if (credential.kind === "platform") return { kind: "platform" };
+  return credential;
+}
+
 /** Records a profile, replacing any entry with the same id. */
 export function saveProfile(profile: ConnectionProfile): void {
   const rest = readProfiles().filter((p) => p.id !== profile.id);
-  writeProfiles([...rest, profile]);
+  writeProfiles([
+    ...rest,
+    { ...profile, credential: persistedCredential(profile.credential) },
+  ]);
 }
 
 export function forgetProfile(id: ConnectionId): void {
