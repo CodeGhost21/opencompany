@@ -67,6 +67,7 @@ use crate::ports::types::{CompanyId, CompanyRecord};
 use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
+pub(crate) use self::tools::WORKFLOW_TOOL_NAMESPACES;
 use self::tools::WorkflowToolInvoker;
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.

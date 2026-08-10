@@ -437,6 +437,21 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
                 node.id
             )));
         };
+        // (b.1) The slug's namespace must be one the workflow `tool_call` invoker
+        // actually wires (`WORKFLOW_TOOL_NAMESPACES` == shell/code/web/search).
+        // `media` and `composio` map to a namespace but are agent-turn families the
+        // invoker never builds, so a run passes the grant gate and then ALWAYS
+        // misses the tool lookup ("not available in company workflows"). Reject them
+        // here so this gate mirrors the run-time outcome instead of green-lighting a
+        // slug that can never execute.
+        if !crate::workflows::caps::WORKFLOW_TOOL_NAMESPACES.contains(&namespace) {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}` (namespace `{namespace}`), which workflow \
+                 `tool_call` nodes cannot run — `{namespace}` is an agent-turn tool family, not a \
+                 workflow tool.",
+                node.id
+            )));
+        }
         // (c) The company's `[tools].allow` must grant that namespace. The priced
         // `search` family needs an EXPLICIT `search` grant — a `*` wildcard never
         // confers it — while every other namespace uses the ordinary grant-glob
@@ -2252,5 +2267,36 @@ to = "done"
             "{err:?}"
         );
         assert!(err.to_string().contains("whitespace"), "{err}");
+    }
+
+    /// `media` and `composio` are agent-turn tool families the workflow invoker
+    /// never wires (see `WORKFLOW_TOOL_NAMESPACES`), so a `tool_call` naming one
+    /// would clear the run-time grant gate and then ALWAYS miss the lookup.
+    /// Author-time validation rejects it up front even when the namespace is
+    /// explicitly granted, so the save mirrors the run. (Regression, #540.)
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_in_an_agent_turn_only_family_is_rejected() {
+        let company = CompanyId::new("acme");
+        // Grant BOTH families explicitly, so the rejection is about the workflow
+        // surface — not a missing grant.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["media", "composio"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("media_generate_image")),
+        )
+        .await
+        .expect_err("media is not a workflow tool family");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("cannot run"), "{err}");
     }
 }
