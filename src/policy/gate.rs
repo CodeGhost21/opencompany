@@ -1009,8 +1009,11 @@ mod test {
     async fn a_new_gate_is_not_stopped() {
         let gate = ManifestApprovalGate::new(policy("full", None));
         assert!(!gate.is_emergency());
+        // A side-effecting group, so this would be `Deny` if the switch
+        // defaulted engaged — but a kind outside `always_approve`, so under
+        // `full` the undisturbed answer is `Allow` rather than a park.
         assert_eq!(
-            decide(&gate, &effect("external.publish", EffectGroup::Publish)).await,
+            decide(&gate, &effect("blog.post", EffectGroup::Publish)).await,
             PolicyDecision::Allow
         );
     }
