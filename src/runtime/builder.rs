@@ -1918,7 +1918,7 @@ async fn seed_workspace(
 
     use crate::company::workspace_seed::{NodeKind as SeedKind, walk_workspace};
     use crate::ports::now_millis;
-    use crate::ports::workspace::{NodeKind, WorkspaceNode};
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 
     let nodes = walk_workspace(&seed_dir.join("workspace"))?;
     let mut path_to_id: HashMap<PathBuf, String> = HashMap::new();
@@ -1942,6 +1942,10 @@ async fn seed_workspace(
             kind,
             parent_id,
             updated_at_millis: now_millis(),
+            // Shipped with the company bundle: authored by neither the operator
+            // nor an agent, and the console says exactly that (issue #326).
+            created_by: WorkspaceOrigin::Seed,
+            updated_by: WorkspaceOrigin::Seed,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);
