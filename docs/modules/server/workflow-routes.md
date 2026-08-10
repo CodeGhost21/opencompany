@@ -157,12 +157,13 @@ with an operator-readable reason. A delivery failure never fails the run, so on
 that run the list is where an operator learns a report did not go out; an
 unwired runtime writes a loud `failed` row rather than skipping silently.
 
-A **scheduled** run is not persisted, so its delivery outcomes are not surfaced
-yet. The scheduler logs each undelivered report and drops the run value — see
-`src/runtime/workflow_scheduler.rs`. That makes a failed scheduled delivery
-diagnosable in the host's stdout, which is not the same as operator-visible.
-Surfacing those outcomes is issue #228; the durable record it needs is the
-first-class `Run` tracked by issue #242.
+A **scheduled** run is journaled too (issue #228): the same
+`WorkflowRunFinished` record a manual run writes, with its `deliveries` rows,
+folded into `GET …/workflows/runs` — so a failed scheduled delivery is as
+operator-readable as a manual one. The scheduler's stdout log still exists, but
+it is the platform team's diagnostic, not the operator surface: the run rows
+carry the full `detail`, while the log never carries a field that could bear an
+address (issue #248).
 
 That distinction decides what the scheduler's log line may say. Every row
 carries two reasons: `detail`, the free text the run response and the console
