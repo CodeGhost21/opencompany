@@ -107,7 +107,7 @@ export function TourController({
     setStartIndex(0);
     if (tourForced() || !tourSeen(scope)) setWelcomeOpen(true);
     else setWelcomeOpen(false);
-  }, [company]);
+  }, [company, scope]);
 
   const start = useCallback(() => {
     // A replay from Settings always opens at the top, even if this mount had
