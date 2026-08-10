@@ -887,6 +887,18 @@ async fn main() -> Result<()> {
             // `--home` > OPENCOMPANY_DATA_DIR > $HOME/.opencompany, then any
             // legacy doubled install is moved up before a single bundle is read.
             let home = resolve_home_migrated(home)?;
+            // Exclusive ownership of the data root, held for the whole process.
+            //
+            // `docs/spec/runtime/storage.md` has always said the runtime journal
+            // is single-writer and that two hosts sharing a home write over each
+            // other; nothing enforced it. The common way to hit that is not
+            // exotic — a `serve` left running in another terminal, then a second
+            // one started against the same default `~/.opencompany`.
+            //
+            // Bound to a name that lives until `serve` returns. Binding it to
+            // `_` would drop it immediately and release the root while this
+            // process carried on writing, which is worse than not locking.
+            let _home_lock = opencompany::store::lock::acquire(&home)?;
             // Materialize the canonical data-dir workspace layout and empty the
             // ephemeral `tmp/` scratch so nothing stale survives a restart. The
             // `[workspace]` section of `config.toml` (in the data dir) toggles
@@ -992,6 +1004,14 @@ async fn main() -> Result<()> {
             let public_url = std::env::var("OPENCOMPANY_PUBLIC_URL")
                 .ok()
                 .filter(|value| !value.trim().is_empty());
+            // A friendly name for this instance, shown by a client that holds
+            // several connections at once. Cosmetic only: nothing selects,
+            // authorizes, or routes on it, and `/spec` is unauthenticated, so
+            // an operator naming a host "prod-eu" is publishing that.
+            let instance_name = std::env::var("OPENCOMPANY_INSTANCE_NAME")
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| value.chars().take(120).collect::<String>());
             // Shared-single-DB tenant identity. When set, company ids are
             // namespaced with this value so many tenants can share one logical
             // database without colliding on the `companies` unique index. Unset
@@ -1039,6 +1059,7 @@ async fn main() -> Result<()> {
                 api_url,
                 tinyplace_api_url,
                 public_url,
+                instance_name,
                 tenant_namespace,
                 admin_email,
                 tinyhumans_credential,
@@ -1082,7 +1103,9 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                state = state.with_stores(handles);
+                state = state
+                    .with_stores(handles)
+                    .with_storage_kind(storage_settings.kind);
                 println!("storage backend: {:?}", storage_settings.kind);
             }
             // Memory engine overlay (`OPENCOMPANY_MEMORY`): swaps just the

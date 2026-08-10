@@ -37,7 +37,10 @@ pub mod adapter;
 pub mod client;
 #[cfg(feature = "tinyplace")]
 pub mod outbox;
-#[cfg(feature = "tinyplace")]
+// Available under `identity` as well as `tinyplace`: the runner lane needs the
+// same Ed25519 keys and the same base58 handling, and a second implementation
+// is how two callers come to disagree about what verifies.
+#[cfg(feature = "identity")]
 pub mod signer;
 #[cfg(feature = "tinyplace")]
 pub mod siwx;

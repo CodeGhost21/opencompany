@@ -1961,6 +1961,7 @@ members = ["engineer"]
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }

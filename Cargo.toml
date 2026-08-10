@@ -62,6 +62,14 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 # directory, so the default build's behavior is byte-for-byte unchanged. Pure
 # Rust, no system libs, no network.
 tower-http = { version = "0.7", features = ["fs"] }
+
+# Exclusive ownership of an instance data root (`src/store/lock.rs`). An OS
+# advisory lock rather than a pid file: the kernel drops it when the process
+# exits for ANY reason, so there is no stale state to detect and nothing for an
+# operator to delete by hand. Already in `Cargo.lock` as a transitive
+# dependency, so this declaration adds no new download — the same reasoning
+# `base64` and `url` are declared under. Pure Rust, no system libs.
+fs2 = "0.4"
 # `ServiceExt::oneshot` lets the `/` SPA fallback hand a request off to
 # `ServeDir` from inside an axum handler, so reserved server prefixes can 404
 # before the static service ever sees them. Already in the tree via `tower-http`
@@ -286,7 +294,21 @@ medulla = ["dep:reqwest"]
 # tiny.place economy: Ed25519 identity, SIWX auth, x402 payment authorization,
 # and (in later batches) the HTTP transport. Card projection + wire types stay
 # in the default build; only crypto and the networked client are gated here.
-tinyplace = ["dep:reqwest", "dep:ed25519-dalek", "dep:bs58", "dep:rand_core"]
+# Ed25519 keys and signatures, lifted out from under `tinyplace` (issue: the
+# runner lane needs them too).
+#
+# `tinyplace` used to own `economy::signer` outright, which meant the runner
+# handshake could only exist in a build that also pulled the whole tiny.place
+# economy — an unrelated surface. Naming the capability separately lets two
+# features share one reviewed signing implementation instead of growing a
+# second one, which is the outcome worth avoiding: two curves, or two base58
+# key parsers, is how a signature check comes to differ between two callers.
+identity = ["dep:ed25519-dalek", "dep:bs58", "dep:rand_core"]
+tinyplace = ["identity", "dep:reqwest"]
+# The runner control lane: machines that dial out and execute this host's work.
+# Dispatch folds an ACP turn into a `TurnOutcome`, which lives behind
+# `openhuman` along with the `RunTurn` seam it satisfies.
+runner = ["identity", "openhuman"]
 # Real HTTP POST webhook delivery + HMAC-SHA256 signing. The `WebhookSink` trait,
 # the offline `RecordingWebhookSink`, and the deterministic default signer
 # compile without this; only `HttpWebhookSink`/`HmacSha256Signer` are gated here.

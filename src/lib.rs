@@ -30,6 +30,9 @@ pub mod ports;
 /// backend HTTP clients. Ungated (no `openhuman` feature requirement) because
 /// `brain/` and `feedback/` need it and neither is feature-gated.
 pub mod product;
+/// Machines that dial out to execute this host's work (the `runner` feature).
+#[cfg(feature = "runner")]
+pub mod runner;
 pub mod runtime;
 pub mod server;
 pub mod store;

@@ -810,12 +810,24 @@ mod tests {
         let src = tmp.join("tauri-cef");
         fs::create_dir_all(src.join("crates/tauri-cli")).unwrap();
         fs::write(src.join("crates/tauri-cli/Cargo.toml"), b"[]").unwrap();
-        // Binary just written is newer than the source → fresh.
+
+        // Pin the binary's mtime strictly later than the sources instead of
+        // relying on write ordering: on nanosecond-resolution filesystems a
+        // source written *after* the binary is strictly newer than it, which
+        // correctly reports stale and flips the assertion.
+        let bin_mtime = SystemTime::now() + std::time::Duration::from_secs(3600);
+        fs::File::open(&bin)
+            .unwrap()
+            .set_modified(bin_mtime)
+            .unwrap();
+        // Binary is pinned newer than the source → fresh.
         assert!(tauri_cli_is_fresh(&bin, &src));
 
-        // Touch a source file to be newer than the binary → stale.
-        std::thread::sleep(std::time::Duration::from_millis(20));
-        fs::write(src.join("crates/tauri-cli/Cargo.toml"), b"[updated]").unwrap();
+        // Pin a source file strictly newer than the binary → stale.
+        fs::File::open(src.join("crates/tauri-cli/Cargo.toml"))
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(7200))
+            .unwrap();
         assert!(!tauri_cli_is_fresh(&bin, &src));
     }
 

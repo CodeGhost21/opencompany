@@ -18,7 +18,25 @@
 //!
 //! - [`token`]: minting and hashing the login/session secrets.
 //! - [`password`]: optional password hashing, verification, and policy.
-//! - [`cookie`]: naming, parsing, and rendering the session cookie.
+//! - [`cookie`]: naming, parsing, and rendering the session carriers.
+//! - [`devices`]: pairing a non-browser client as a person.
+//!
+//! ## Two carriers, one session
+//!
+//! Step 4 above says "cookie", and for a browser it is. A desktop client cannot
+//! use one: `SameSite=Lax` means the browser never sends a cookie cross-site,
+//! and such a client is cross-site with every server it talks to. It presents
+//! the same session in [`cookie::SESSION_HEADER`] instead.
+//!
+//! A *paired device* is what that client holds — the same [`SessionRecord`]
+//! with [`SessionKind::Device`], a label, and a year-long TTL, minted by
+//! [`devices`] from a code a signed-in human pasted in. Deliberately not a
+//! separate credential system, so that suspension, admin reset and a user's own
+//! password change already revoke devices without any of them growing a second
+//! code path to remember.
+//!
+//! [`SessionRecord`]: crate::ports::SessionRecord
+//! [`SessionKind::Device`]: crate::ports::SessionKind::Device
 //!
 //! ## Passwords are optional
 //!
@@ -33,6 +51,7 @@
 
 pub mod admin;
 pub mod cookie;
+pub mod devices;
 pub mod password;
 pub mod routes;
 pub mod token;
@@ -43,6 +62,8 @@ pub use routes::router;
 
 #[cfg(test)]
 mod auth_test;
+#[cfg(test)]
+mod devices_test;
 #[cfg(test)]
 mod hub_test;
 #[cfg(test)]

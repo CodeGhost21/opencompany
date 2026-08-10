@@ -53,7 +53,7 @@ export function CompanyPicker({ companies, onPick }: Props) {
                 <div className="min-w-0 flex-1">
                   <p className="truncate font-medium">{c.name}</p>
                   <div className="mt-2 flex flex-wrap items-center gap-2">
-                    <StatusPill lifecycle={c.lifecycle} />
+                    <StatusPill lifecycle={c.lifecycle} emergencyPaused={c.emergency_paused} />
                     {c.pending_approvals > 0 && (
                       <Badge variant="secondary">{c.pending_approvals} to approve</Badge>
                     )}

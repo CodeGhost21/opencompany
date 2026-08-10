@@ -19,7 +19,7 @@ use tokio::sync::{Mutex as TokioMutex, broadcast};
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::EventLog;
+use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::secrets::SecretStore;
@@ -310,6 +310,12 @@ struct Meta {
     /// `#[serde(default)]` keeps those loading with the manifest in charge.
     #[serde(default)]
     overlay_budgets: Vec<crate::ports::types::BudgetOverride>,
+    /// The workflow ids the operator has switched off (issue #276). Absent on
+    /// meta files written before the pause switch existed, and
+    /// `#[serde(default)]` reads that absence as "nothing is paused" — which is
+    /// exactly what those companies meant.
+    #[serde(default)]
+    disabled_workflows: Vec<String>,
     /// The source-template provenance stamped at launch. `None` for companies
     /// provisioned from a raw manifest and for legacy meta files written before
     /// provenance existed (the `#[serde(default)]` keeps those loading).
@@ -331,6 +337,7 @@ impl Default for Meta {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -422,6 +429,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
         }))
     }
@@ -442,6 +450,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: record.overlay_desks.clone(),
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
@@ -552,10 +561,24 @@ impl EventLog for FsEventLog {
         let lock = path_lock(&path);
         let _guard = lock.lock().await;
 
-        // The next sequence is the current line count; held under the lock so
-        // concurrent appends never collide on a seq.
+        // The next sequence is one past the highest already present; held under
+        // the lock so concurrent appends never collide on a seq.
+        //
+        // Reading the *maximum* rather than the line count is what makes
+        // `prune` safe (issue #275): a count-derived sequence silently reuses
+        // the numbers of any removed lines, and sequences are stable ids —
+        // thread parents, reaction targets and #358's redaction tombstone all
+        // address a message by one. For a log that has never been pruned the
+        // two agree exactly (n lines numbered 0..n-1 both yield n), so this
+        // changes no existing behaviour.
         let existing = read_optional(&path).await?;
-        let seq = existing.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+        let seq = existing
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<StoredEvent>(l).ok())
+            .map(|ev| ev.seq.value() + 1)
+            .max()
+            .unwrap_or(0);
 
         let stored = StoredEvent {
             seq: EventSeq::new(seq),
@@ -597,6 +620,43 @@ impl EventLog for FsEventLog {
             }
         });
         Box::pin(stream)
+    }
+
+    async fn prune(&self, id: &CompanyId, policy: &RetentionPolicy) -> Result<PruneReport> {
+        let path = self.bundle(id).events_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+
+        // Strict parsing on purpose: `read_jsonl` fails the whole pass on a
+        // line it cannot read, where `read_jsonl_lenient` would skip it and
+        // then the rewrite below would drop it for good. A file we cannot
+        // fully understand is a file we must not rewrite.
+        let all = read_jsonl::<StoredEvent>(&path).await?;
+        let doomed = plan_prune(&all, policy);
+
+        let mut report = PruneReport {
+            scanned: all.len(),
+            removed: 0,
+            oldest_retained: all.iter().map(|e| e.seq).min(),
+        };
+        if doomed.is_empty() {
+            return Ok(report);
+        }
+
+        let kept: Vec<StoredEvent> = all
+            .into_iter()
+            .filter(|ev| doomed.binary_search(&ev.seq).is_err())
+            .collect();
+        report.removed = doomed.len();
+        report.oldest_retained = kept.iter().map(|e| e.seq).min();
+
+        let mut body = String::new();
+        for record in &kept {
+            body.push_str(&serde_json::to_string(record)?);
+            body.push('\n');
+        }
+        write_atomic(&path, &body).await?;
+        Ok(report)
     }
 }
 
@@ -1069,6 +1129,13 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_event_retention() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_event_retention(Arc::new(FsEventLog::new(&root))).await;
+    }
+
+    #[tokio::test]
     async fn conformance_inbox_store() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
@@ -1215,6 +1282,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         };
         store.save(&record).await.unwrap();
@@ -1255,6 +1323,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
@@ -1310,6 +1379,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await

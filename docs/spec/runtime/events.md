@@ -16,7 +16,7 @@ Append-only, replayable, **single-writer**, and company-scoped. Boot replays the
 tail to rebuild in-flight state. Every variant is serialized internally-tagged
 under `kind`, so each JSONL line is self-describing.
 
-Two properties are load-bearing everywhere below:
+Three properties are load-bearing everywhere below:
 
 * **Additive-only.** A new variant, or a new field carrying
   `#[serde(default, skip_serializing_if = …)]`, cannot change how an
@@ -30,6 +30,12 @@ Two properties are load-bearing everywhere below:
   interleave a record and its newline onto one line and brick the next replay).
   Several boot-time sweeps rest on this; see
   [Interrupted runs](#interrupted-runs-issue-371).
+* **A sequence is a stable id, and retention keeps it that way** (issue #275).
+  Only the three workflow-run kinds and `McpCallFailed` may ever be pruned;
+  everything else is permanent, because it is either the audit trail or the
+  referent of a stored `EventSeq` (a thread `parent`, a `ReactionToggled`
+  target, a `TaskDiscussionRedacted` tombstone). Pruning renumbers nothing and
+  leaves gaps. See [Retention](ports-state.md#retention-issue-275).
 
 ## Variants
 

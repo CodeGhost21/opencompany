@@ -35,6 +35,7 @@
 //! offline [`MockProvider`](provider::MockProvider) does not, so test turns stay
 //! inert.
 
+pub mod acp_run_turn;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
@@ -2179,6 +2180,7 @@ description = "Builds the product."
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -3406,6 +3408,7 @@ description = "Sets direction."
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }

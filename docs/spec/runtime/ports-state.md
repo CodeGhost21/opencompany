@@ -73,8 +73,47 @@ pub trait EventLog: Send + Sync {
     async fn read_from(&self, id: &CompanyId, seq: EventSeq, limit: usize)
         -> Result<Vec<StoredEvent>>;
     fn subscribe(&self, id: &CompanyId) -> BoxStream<'static, StoredEvent>;
+    async fn prune(&self, id: &CompanyId, policy: &RetentionPolicy)
+        -> Result<PruneReport>;
 }
 ```
+
+### Retention (issue #275)
+
+`prune` is the only operation that removes a journal entry. Nothing calls it on
+the append path — retention is an operator action, not a side effect of writing
+— and it is built so that the irreversible direction is the hard one to reach:
+
+| Guard | Effect |
+| --- | --- |
+| `RetentionPolicy::default()` | removes nothing; both bounds are `None` |
+| `CompanyEvent::retention_class()` | exhaustive match, no `_` arm — a new variant fails the build until classified, and `Permanent` is the answer for anything ambiguous |
+| `plan_prune` | one pure function all three backends route through, so fs / sqlite / mongodb cannot disagree about what a policy means |
+| the sequence watermark | the highest-sequence entry is never removed, whatever the policy |
+| default trait body | `Err(Unimplemented)` — a backend without retention refuses, rather than reporting a pass that removed nothing |
+
+Only four kinds are `Prunable`: `WorkflowRunStarted`, `WorkflowRunFinished`,
+`WorkflowNodeFinished` and `McpCallFailed`. Everything else is `Permanent`,
+either because it is the audit trail (approvals, lifecycle, payments) or
+because another entry addresses it *by sequence* — thread parents, reaction
+targets, and the `TaskDiscussionRedacted` tombstone from issue #358 all name a
+message by its `EventSeq`, so pruning a referent would dangle a pointer no fold
+can repair.
+
+**Sequences are never renumbered.** Pruning leaves gaps, which `read_from`'s
+`seq >=` scan already tolerates: a cursor or SSE subscriber parked on a removed
+sequence resumes at the next survivor. The watermark rule exists because
+`FsEventLog` and `SqliteStore` both derive the next sequence from the highest
+one present, so an emptied log would hand the next append a number a retained
+cross-reference still holds.
+
+The age bound is measured back from the newest entry in the log, not from
+wall-clock now — the same anchoring
+[`UsageMeter`](ports-console.md#usagemeter) uses, which keeps a pass
+deterministic, testable without a clock, and unable to empty a dormant
+company's journal just because time passed. Unlike `UsageMeter`, which evicts
+on write against a fixed 90-day window, the journal never evicts implicitly:
+it is what export/import ships and what boot replays.
 
 **The `CompanyEvent` vocabulary lives in
 [`events.md`](events.md)** — every variant, the additive-serialization contract
