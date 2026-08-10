@@ -96,6 +96,11 @@ pub mod workflow_scheduler;
 /// Issue #395: the supervisor-registration + outcome-journalling discipline
 /// every workflow entry point owes, in one place. See [`workflow_spawn`].
 pub mod workflow_spawn;
+/// Issue #327: [`WorkspaceAnnouncer`] — [`BoardAnnouncer`]'s counterpart for the
+/// note tree. A note created, overwritten, moved or deleted by *anything* — the
+/// console, an agent tool, the publish drain, the seeder — reaches a watching
+/// console without a reload. See [`workspace_events`].
+pub mod workspace_events;
 
 pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
 pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
@@ -116,6 +121,7 @@ pub use workflow_outcome::{
 pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub use workflow_spawn::WorkflowSpawn;
+pub use workspace_events::WorkspaceAnnouncer;
 
 // The assembly struct lives under `company/` to match the `ports.md` sketch
 // (`src/company/runtime.rs`); re-export it here as the kernel's public surface.
