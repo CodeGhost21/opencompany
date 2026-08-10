@@ -1529,24 +1529,43 @@ impl HarnessBrain {
             }
             // Issue #552: the deliverable also goes into the shared workspace
             // tree, which is the one surface the operator browses and every
-            // other agent can read. The artifact chain above stays the
+            // other agent can read. The artifact chain here stays the
             // authoritative version history; the node holds the current body.
             //
+            // # Chain first, without exception
+            //
+            // A re-publish inherits the node the previous version named, so the
+            // version can be written *before* the tree is touched. That
+            // ordering is the load-bearing half of keeping the chain
+            // authoritative, not a preference: a node one version ahead of the
+            // chain is the tree showing content the version history has no
+            // record of, which makes `human_edit_diff` quietly wrong rather
+            // than loudly broken — the same #187 rot arriving by a different
+            // door. Requiring the store to half-fail bounds how *often* that
+            // happens and not at all how bad it is, and on a data path a silent
+            // wrong answer outlives the incident that caused it.
+            //
+            // A *fresh* publish has no node id to inherit, so its v1 is stored
+            // unlinked and the link is stamped by the second upsert below. Note
+            // what that buys beyond ordering: because the record is written
+            // first, a node is only ever created for a deliverable that is
+            // already recorded, so this path can no longer leave a node in the
+            // tree with no artifact behind it at all.
+            if let Some(node_id) = prior_node.as_deref() {
+                // Inherit before storing, so a failure anywhere below leaves
+                // the version pointing at the node that currently holds it.
+                record.stamp_workspace_node(node_id);
+            }
+            artifacts.upsert(&self.record.id, &record).await?;
+
             // **A failed mirror does not lose the deliverable.** An explicit
             // publish that could not be filed into the tree is still recorded
             // as an artifact — dropping a produced file over tree bookkeeping
             // would be far worse than a deliverable the operator has to reach
             // through the Artifacts tab. So this logs at `error` (loudly: the
-            // tree is where people look) and continues with no node id, which
+            // tree is where people look) and leaves the version unlinked, which
             // is exactly what a pre-#552 record carries. The next publish of
-            // the same path retries and heals it.
-            //
-            // The node is written before the artifact upsert because the id it
-            // returns is what gets stamped onto this version, and doing it
-            // afterwards would need a second upsert. The residual is narrow and
-            // named: if the upsert below then fails, a re-published node shows
-            // a body one version ahead of the chain until the next write on
-            // either surface reconciles them.
+            // the same source retries and heals it.
             if let Some(workspace) = self.deps.workspace.as_ref() {
                 let target = artifact_mirror::PublishTarget {
                     agent_id: author,
@@ -1558,7 +1577,34 @@ impl HarnessBrain {
                 match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
                     .await
                 {
-                    Ok(node_id) => record.stamp_workspace_node(node_id),
+                    Ok(node_id) => {
+                        // A second write only when the link actually changed:
+                        // a fresh publish (nothing was inherited) or a
+                        // re-publish whose node the operator deleted, which
+                        // `materialize` replaces with a new one. The ordinary
+                        // re-publish reuses its node and stores once.
+                        if record.workspace_node_id() != Some(node_id.as_str()) {
+                            record.stamp_workspace_node(&node_id);
+                            // Warn rather than `?`: at this point BOTH surfaces
+                            // already hold this body and only the pointer
+                            // between them is missing, so failing the batch
+                            // would discard the remaining publishes' records to
+                            // report a link that heals on the next publish —
+                            // `materialize` finds an existing node by path and
+                            // re-adopts it rather than duplicating.
+                            if let Err(err) = artifacts.upsert(&self.record.id, &record).await {
+                                tracing::warn!(
+                                    task_id = %card.id,
+                                    source = %pending.source,
+                                    node = %node_id,
+                                    error = %err,
+                                    "[publish] the deliverable and its note are both stored but \
+                                     could not be linked; the next publish of this source \
+                                     re-adopts the note and repairs it"
+                                );
+                            }
+                        }
+                    }
                     Err(err) => tracing::error!(
                         task_id = %card.id,
                         agent = %author,
@@ -1569,7 +1615,6 @@ impl HarnessBrain {
                     ),
                 }
             }
-            artifacts.upsert(&self.record.id, &record).await?;
             written.push(TaskOutputArtifact {
                 artifact_id: record.id.clone(),
                 version,
@@ -2652,6 +2697,23 @@ members = ["engineer"]
         with_workspace: bool,
     ) -> (HarnessBrain, Arc<FsOps>) {
         let ops = Arc::new(FsOps::new(dir));
+        let artifacts = ops.clone() as Arc<dyn crate::ports::artifacts::ArtifactStore>;
+        brain_with_injected_artifacts(dir, ops, artifacts, with_workspace)
+    }
+
+    /// As [`brain_with_stores`], but with the artifact store supplied by the
+    /// caller — so a test can make `upsert` refuse and observe what the publish
+    /// drain did to the *tree* before it got there.
+    ///
+    /// That is the only way to pin issue #552's write ordering. An ordering
+    /// described in a comment is not an ordering: the next refactor reorders it
+    /// and nothing objects.
+    fn brain_with_injected_artifacts(
+        dir: &std::path::Path,
+        ops: Arc<FsOps>,
+        artifacts: Arc<dyn crate::ports::artifacts::ArtifactStore>,
+        with_workspace: bool,
+    ) -> (HarnessBrain, Arc<FsOps>) {
         let deps = HarnessDeps {
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
@@ -2661,7 +2723,7 @@ members = ["engineer"]
             workspace_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(ops.clone()),
-            artifacts: Some(ops.clone()),
+            artifacts: Some(artifacts),
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
@@ -2693,6 +2755,306 @@ members = ["engineer"]
         )
     }
 
+    // -- issue #552: the write ordering, proven by failure injection ---------
+
+    /// An [`ArtifactStore`](crate::ports::artifacts::ArtifactStore) that refuses
+    /// `upsert` from the Nth call onward, delegating everything else.
+    ///
+    /// The instrument the ordering tests need: with the artifact write made to
+    /// fail at a chosen point, what the *tree* holds afterwards says
+    /// unambiguously which surface was written first.
+    struct FailingArtifacts {
+        inner: Arc<FsOps>,
+        /// How many `upsert` calls succeed before the rest refuse.
+        allowed: std::sync::atomic::AtomicUsize,
+        seen: std::sync::atomic::AtomicUsize,
+    }
+
+    impl FailingArtifacts {
+        fn new(inner: Arc<FsOps>, allowed: usize) -> Arc<Self> {
+            Arc::new(Self {
+                inner,
+                allowed: std::sync::atomic::AtomicUsize::new(allowed),
+                seen: std::sync::atomic::AtomicUsize::new(0),
+            })
+        }
+
+        /// Let every later `upsert` through again, so a test can publish
+        /// normally after the injected failure and watch the repair.
+        fn heal(&self) {
+            self.allowed
+                .store(usize::MAX, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl crate::ports::artifacts::ArtifactStore for FailingArtifacts {
+        async fn list(
+            &self,
+            company: &CompanyId,
+            task_id: Option<&str>,
+        ) -> crate::Result<Vec<ArtifactRecord>> {
+            crate::ports::artifacts::ArtifactStore::list(&*self.inner, company, task_id).await
+        }
+        async fn get(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> crate::Result<Option<ArtifactRecord>> {
+            crate::ports::artifacts::ArtifactStore::get(&*self.inner, company, id).await
+        }
+        async fn upsert(
+            &self,
+            company: &CompanyId,
+            artifact: &ArtifactRecord,
+        ) -> crate::Result<()> {
+            let n = self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n >= self.allowed.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(crate::error::OpenCompanyError::Store(
+                    "artifact store is down".to_string(),
+                ));
+            }
+            crate::ports::artifacts::ArtifactStore::upsert(&*self.inner, company, artifact).await
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> crate::Result<bool> {
+            crate::ports::artifacts::ArtifactStore::delete(&*self.inner, company, id).await
+        }
+    }
+
+    fn publish_of(source: &str, body: &str) -> crate::harness::publish::PendingPublish {
+        crate::harness::publish::PendingPublish {
+            agent: "maya".to_string(),
+            source: source.to_string(),
+            title: "Launch spec".to_string(),
+            kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            note: None,
+            body: body.to_string(),
+        }
+    }
+
+    /// The named node under `Agents/maya/t-1/`, with its body — the tree's own
+    /// answer, read without going through the artifact chain at all.
+    async fn note_in_tree(
+        ops: &FsOps,
+        company: &CompanyId,
+        name: &str,
+    ) -> Option<(String, String)> {
+        use crate::ports::workspace::WorkspaceStore;
+        let nodes = WorkspaceStore::tree(ops, company).await.unwrap();
+        let found = nodes.iter().find(|n| n.name == name)?;
+        let (_, body) = WorkspaceStore::read(ops, company, &found.id)
+            .await
+            .unwrap()?;
+        Some((found.id.clone(), body))
+    }
+
+    /// **Chain first, proven.** A re-publish whose artifact write fails must
+    /// leave the note holding the PREVIOUS body — the version was stored before
+    /// the tree was touched, so a refused version means an untouched tree.
+    ///
+    /// The opposite ordering is what this rules out, and it is not a stylistic
+    /// difference: a note one version ahead of the chain shows the operator
+    /// content the version history has no record of, which makes
+    /// `human_edit_diff` quietly wrong rather than loudly broken — the same rot
+    /// the artifact port exists to prevent, arriving through the tree instead.
+    #[tokio::test]
+    async fn a_refused_republish_leaves_the_note_on_the_previous_body() {
+        use crate::ports::artifacts::ArtifactStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(FsOps::new(dir.path()));
+        // v1 costs two upserts: the record, then the link once the node exists.
+        let artifacts = FailingArtifacts::new(ops.clone(), 2);
+        let (brain, _) =
+            brain_with_injected_artifacts(dir.path(), ops.clone(), artifacts.clone(), true);
+        let company = CompanyId::new("acme");
+        let c = card("t-1", "maya");
+
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish_of("launch.md", "v1")], None)
+            .await
+            .expect("the first publish lands");
+        let (node_id, body) = note_in_tree(&ops, &company, "launch.md")
+            .await
+            .expect("v1 is in the tree");
+        assert_eq!(body, "v1");
+
+        // Now the artifact store refuses. The re-publish must fail *before*
+        // reaching the tree.
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish_of("launch.md", "v2")], None)
+            .await
+            .expect_err("a refused artifact write fails the publish");
+
+        let (still, body) = note_in_tree(&ops, &company, "launch.md")
+            .await
+            .expect("the note is still there");
+        assert_eq!(still, node_id, "no rival note was minted");
+        assert_eq!(
+            body, "v1",
+            "the tree must not hold a body the version history never recorded"
+        );
+        // And the chain is unchanged too — one version, not a half-written two.
+        let stored = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].versions.len(), 1);
+        assert_eq!(stored[0].latest().unwrap().body, "v1");
+    }
+
+    /// The same ordering on a **fresh** publish: an artifact write that fails
+    /// creates nothing in the tree at all.
+    ///
+    /// This is what makes the fresh path's residual an *orphan note* rather
+    /// than a lost deliverable — a node is only ever created for a deliverable
+    /// that is already recorded, so this path cannot leave a file in the tree
+    /// with no artifact behind it.
+    #[tokio::test]
+    async fn a_refused_first_publish_creates_nothing_in_the_tree() {
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(FsOps::new(dir.path()));
+        let artifacts = FailingArtifacts::new(ops.clone(), 0);
+        let (brain, _) = brain_with_injected_artifacts(dir.path(), ops.clone(), artifacts, true);
+        let company = CompanyId::new("acme");
+
+        brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                "maya",
+                vec![publish_of("launch.md", "v1")],
+                None,
+            )
+            .await
+            .expect_err("a refused artifact write fails the publish");
+
+        assert!(
+            note_in_tree(&ops, &company, "launch.md").await.is_none(),
+            "no note may exist for a deliverable that was never recorded"
+        );
+        assert!(
+            WorkspaceStore::tree(&*ops, &company)
+                .await
+                .unwrap()
+                .is_empty(),
+            "not even the agent's folder is minted for a publish that failed"
+        );
+    }
+
+    /// The fresh path's one residual, and its repair.
+    ///
+    /// A fresh publish has no node id to inherit, so v1 is stored unlinked and
+    /// a *second* artifact write stamps the link. If that second write fails,
+    /// both surfaces hold the body and only the pointer between them is
+    /// missing. That is deliberately warned-and-tolerated rather than fatal:
+    /// failing would discard the rest of the batch to report a link that the
+    /// next publish repairs.
+    ///
+    /// The repair is the half worth proving. `materialize` find-or-creates by
+    /// path, so the next publish of the same source **re-adopts the very same
+    /// note** rather than duplicating it — which is what makes the orphan
+    /// self-healing rather than permanent.
+    #[tokio::test]
+    async fn an_unlinked_first_publish_is_repaired_by_the_next_one() {
+        use crate::ports::artifacts::ArtifactStore;
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(FsOps::new(dir.path()));
+        // Exactly one upsert succeeds: the record lands, the link does not.
+        let artifacts = FailingArtifacts::new(ops.clone(), 1);
+        let (brain, _) =
+            brain_with_injected_artifacts(dir.path(), ops.clone(), artifacts.clone(), true);
+        let company = CompanyId::new("acme");
+        let c = card("t-1", "maya");
+
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish_of("launch.md", "v1")], None)
+            .await
+            .expect("a missing link must not fail the publish");
+
+        // Both surfaces hold the body; only the pointer is absent.
+        let (orphan, body) = note_in_tree(&ops, &company, "launch.md")
+            .await
+            .expect("the note was still written");
+        assert_eq!(body, "v1");
+        let stored = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].latest().unwrap().body, "v1");
+        assert_eq!(
+            stored[0].workspace_node_id(),
+            None,
+            "this is the orphan: recorded and written, but not linked"
+        );
+
+        // The next publish of the same source repairs it.
+        artifacts.heal();
+        let nodes_before = WorkspaceStore::tree(&*ops, &company).await.unwrap().len();
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish_of("launch.md", "v2")], None)
+            .await
+            .expect("the repairing publish lands");
+
+        let stored = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap();
+        assert_eq!(stored[0].versions.len(), 2, "one record, extended");
+        assert_eq!(
+            stored[0].workspace_node_id(),
+            Some(orphan.as_str()),
+            "the very same note is re-adopted, which is what makes the orphan self-healing"
+        );
+        assert_eq!(
+            WorkspaceStore::tree(&*ops, &company).await.unwrap().len(),
+            nodes_before,
+            "re-adoption, not duplication: no rival note beside the orphan"
+        );
+        assert_eq!(
+            WorkspaceStore::read(&*ops, &company, &orphan)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            "v2"
+        );
+    }
+
+    /// The ordinary re-publish stores **once**, not twice. The second artifact
+    /// write exists only for a link that actually changed — a fresh publish, or
+    /// a note the operator deleted — and a re-publish that reuses its note has
+    /// nothing to restate.
+    #[tokio::test]
+    async fn an_ordinary_republish_writes_the_artifact_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(FsOps::new(dir.path()));
+        let artifacts = FailingArtifacts::new(ops.clone(), usize::MAX);
+        let (brain, _) =
+            brain_with_injected_artifacts(dir.path(), ops.clone(), artifacts.clone(), true);
+        let c = card("t-1", "maya");
+
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish_of("launch.md", "v1")], None)
+            .await
+            .unwrap();
+        // v1: the record, then the link once the node id exists.
+        assert_eq!(
+            artifacts.seen.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a fresh publish stores the record, then stamps the link"
+        );
+
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish_of("launch.md", "v2")], None)
+            .await
+            .unwrap();
+        assert_eq!(
+            artifacts.seen.load(std::sync::atomic::Ordering::SeqCst),
+            3,
+            "a re-publish inherits its note, so one store is enough"
+        );
+    }
     // -- issue #552: a published deliverable reaches the shared workspace -----
 
     /// The headline of #552. A published file used to reach the artifact store
