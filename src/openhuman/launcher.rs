@@ -410,6 +410,31 @@ impl OpenHumanLaunch {
     }
 }
 
+/// The CEF distribution path for a given backend: `None` for Wry hosts even
+/// when `override_path` is set (a caller's `CEF_PATH` must not leak into a
+/// non-CEF run); on CEF the `CEF_PATH` override wins, otherwise
+/// `$HOME/Library/Caches/tauri-cef` is derived from `home`. Pure so the Wry
+/// branch is testable from any host rather than only via
+/// [`DesktopBackend::for_host`].
+fn cef_path_for(
+    backend: DesktopBackend,
+    override_path: Option<&str>,
+    home: Option<&str>,
+) -> Option<PathBuf> {
+    if backend != DesktopBackend::Cef {
+        return None;
+    }
+    match override_path {
+        Some(path) => Some(PathBuf::from(path)),
+        None => home.map(|home| {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Caches")
+                .join("tauri-cef")
+        }),
+    }
+}
+
 /// The PATH for a Desktop launch or install: `<install_root>/bin` first (where
 /// `ensure_tauri_cli` puts the vendored CEF-aware `cargo-tauri`), then
 /// `~/.cargo/bin` when `home` is known — HOME is what locates that directory
