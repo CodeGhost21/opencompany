@@ -12,9 +12,16 @@
 // longer exists falls through to the same unknown-channel notice as any other
 // stale id (issue #370).
 
+import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+
 /** Namespaced so a host serving several companies remembers each separately. */
-function keyFor(company: string | null): string {
-  return `oc.chat.last-channel.${company ?? "__default__"}`;
+function keyFor(scope: LocalScope): string {
+  return scopedKeyAdoptingLegacy(
+    "oc.chat.last-channel",
+    scope,
+    // Note the different shape: this one used a `.` and `__default__`.
+    `oc.chat.last-channel.${scope.company ?? "__default__"}`,
+  );
 }
 
 /**
@@ -33,8 +40,8 @@ function storage(): Storage | null {
 }
 
 /** The channel this company was last read in, or `null` if nothing is remembered. */
-export function readLastChannel(company: string | null): string | null {
-  const value = storage()?.getItem(keyFor(company));
+export function readLastChannel(scope: LocalScope): string | null {
+  const value = storage()?.getItem(keyFor(scope));
   return value && value.length > 0 ? value : null;
 }
 
@@ -46,10 +53,10 @@ export function readLastChannel(company: string | null): string | null {
  * are synchronous — re-writing the same string on every frame of a busy channel
  * would put disk I/O on the render path for no gain.
  */
-export function writeLastChannel(company: string | null, channelId: string): void {
+export function writeLastChannel(scope: LocalScope, channelId: string): void {
   const store = storage();
   if (!store) return;
-  const key = keyFor(company);
+  const key = keyFor(scope);
   try {
     if (store.getItem(key) === channelId) return;
     store.setItem(key, channelId);

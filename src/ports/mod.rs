@@ -52,7 +52,7 @@ pub use runs::{
     reap_orphaned_runs,
 };
 pub use secrets::SecretStore;
-pub use sessions::{SessionRecord, SessionStore};
+pub use sessions::{SessionKind, SessionRecord, SessionStore};
 pub use skills_state::{SkillSource, SkillState, SkillStateStore};
 pub use store::CompanyStore;
 pub use tasks::{TaskRecord, TaskStore};

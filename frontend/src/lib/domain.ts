@@ -3,6 +3,8 @@
 // and SMTP tests are host-side once wired. Secrets live here only as a local
 // draft until the host stores them securely.
 
+import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+
 export interface DomainConfig {
   domain: string;
   verified: boolean;
@@ -67,11 +69,12 @@ export function isValidDomain(domain: string): boolean {
   return /^(?!-)[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(domain.trim());
 }
 
-const KEY = (company: string | null) => `oc-mail:${company ?? "single"}`;
+const KEY = (scope: LocalScope) =>
+  scopedKeyAdoptingLegacy("oc-mail", scope, `oc-mail:${scope.company ?? "single"}`);
 
-export function loadMailSettings(company: string | null): MailSettings {
+export function loadMailSettings(scope: LocalScope): MailSettings {
   try {
-    const raw = localStorage.getItem(KEY(company));
+    const raw = localStorage.getItem(KEY(scope));
     if (raw) return { ...emptyMailSettings(), ...(JSON.parse(raw) as MailSettings) };
   } catch {
     /* fall through */
@@ -79,9 +82,9 @@ export function loadMailSettings(company: string | null): MailSettings {
   return emptyMailSettings();
 }
 
-export function saveMailSettings(company: string | null, settings: MailSettings): void {
+export function saveMailSettings(scope: LocalScope, settings: MailSettings): void {
   try {
-    localStorage.setItem(KEY(company), JSON.stringify(settings));
+    localStorage.setItem(KEY(scope), JSON.stringify(settings));
   } catch {
     /* storage unavailable */
   }

@@ -57,6 +57,8 @@ pub(crate) async fn seed_session(state: &AppState, company: &str, role: UserRole
                 created_at_millis: now,
                 expires_at_millis: now + 60 * 60 * 1000,
                 user_agent: None,
+                kind: crate::ports::SessionKind::Browser,
+                label: None,
             },
         )
         .await
@@ -122,6 +124,8 @@ pub(crate) async fn seed_fixed_admin(state: &AppState, company: &str) {
                 created_at_millis: now,
                 expires_at_millis: now + 60 * 60 * 1000,
                 user_agent: None,
+                kind: crate::ports::SessionKind::Browser,
+                label: None,
             },
         )
         .await

@@ -35,6 +35,7 @@
 //! offline [`MockProvider`](provider::MockProvider) does not, so test turns stay
 //! inert.
 
+pub mod acp_run_turn;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;

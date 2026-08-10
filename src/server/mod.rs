@@ -1,5 +1,6 @@
 #[cfg(feature = "tinyplace")]
 pub mod a2a;
+pub mod acp;
 pub mod chat_history;
 pub mod cors;
 mod error;
@@ -23,4 +24,4 @@ pub(crate) mod test_support;
 pub mod webhook;
 
 pub use error::ApiError;
-pub use routes::{router, serve};
+pub use routes::{Serving, bind, router, serve, serve_on};

@@ -28,6 +28,7 @@ import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { restartTour } from "@/tour/state";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
   client: OpenCompanyClient;
@@ -38,6 +39,8 @@ interface Props {
 
 /** Connection details, lifecycle controls, and the feedback entry point. */
 export function SettingsView({ client, company, feed, onFlag }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const { status } = feed;
   const scoped = company ?? client.defaultCompany;
 
@@ -121,7 +124,7 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             <Button
               variant="outline"
               onClick={() => {
-                restartTour(company);
+                restartTour(scope);
                 toast.success("Starting the product tour.");
               }}
             >

@@ -26,6 +26,28 @@ use axum::response::Response;
 
 use crate::error::OpenCompanyError;
 
+/// The schemes an allow-listed origin may use.
+///
+/// `http`/`https` cover browsers. The rest are the origins a native webview
+/// reports itself as, which are **not** http URLs and were rejected outright
+/// before — meaning a desktop client could not be allow-listed at all, even
+/// deliberately:
+///
+/// - `tauri://` — Tauri on macOS and Linux.
+/// - `capacitor://` — the same problem shape on mobile shells.
+///
+/// Tauri on Windows reports `http://tauri.localhost`, which needs nothing here.
+///
+/// This widens what may be *written* in the allowlist; it does not widen what
+/// matches. Comparison stays byte-exact, so adding a scheme cannot turn into
+/// prefix or suffix matching by accident — see
+/// [`matching_is_exact`](test::matching_is_exact).
+///
+/// Note the desktop does not normally need any of this: it proxies its HTTP
+/// through its own Rust core, where CORS does not apply. This exists so a
+/// webview talking *directly* to a host is configurable rather than impossible.
+const ALLOWED_SCHEMES: [&str; 4] = ["http://", "https://", "tauri://", "capacitor://"];
+
 /// The origins permitted to make credentialed cross-origin requests.
 ///
 /// Empty means CORS is off, which is the default and the right answer for every
@@ -45,10 +67,22 @@ impl CorsConfig {
     /// everything", and with credentials that is precisely what must not
     /// happen. Failing tells them; silently never matching would not.
     pub fn from_env() -> Result<Self, OpenCompanyError> {
-        let raw = match std::env::var("OPENCOMPANY_CORS_ORIGINS") {
-            Ok(raw) if !raw.trim().is_empty() => raw,
-            _ => return Ok(Self::default()),
-        };
+        match std::env::var("OPENCOMPANY_CORS_ORIGINS") {
+            Ok(raw) => Self::from_env_value(&raw),
+            Err(_) => Ok(Self::default()),
+        }
+    }
+
+    /// Parses one `OPENCOMPANY_CORS_ORIGINS` value.
+    ///
+    /// Split out from [`from_env`](Self::from_env) so the rules below are
+    /// testable without setting a process-global environment variable — which
+    /// tests running in parallel cannot do safely, and which is why this
+    /// module's validation went untested for so long.
+    pub(crate) fn from_env_value(raw: &str) -> Result<Self, OpenCompanyError> {
+        if raw.trim().is_empty() {
+            return Ok(Self::default());
+        }
         let mut allowed_origins = Vec::new();
         for origin in raw.split(',').map(str::trim).filter(|o| !o.is_empty()) {
             if origin == "*" {
@@ -59,10 +93,13 @@ impl CorsConfig {
                         .to_string(),
                 ));
             }
-            if !origin.starts_with("http://") && !origin.starts_with("https://") {
+            if !ALLOWED_SCHEMES
+                .iter()
+                .any(|scheme| origin.starts_with(scheme))
+            {
                 return Err(OpenCompanyError::Config(format!(
                     "OPENCOMPANY_CORS_ORIGINS entry {origin:?} is not an origin; it needs a \
-                     scheme, e.g. http://localhost:5173"
+                     known scheme, e.g. http://localhost:5173 or tauri://localhost"
                 )));
             }
             // An origin is scheme+host+port only. A trailing path never matches
@@ -228,6 +265,63 @@ mod test {
             assert!(
                 c.headers_for(&with_origin(hostile)).is_empty(),
                 "{hostile:?} must not match"
+            );
+        }
+
+        // The same discipline for a webview origin. Admitting the `tauri://`
+        // scheme widened what may be *written* in the allowlist; if it ever
+        // widened what *matches*, every one of these would be a live origin.
+        let t = cfg(&["tauri://localhost"]);
+        for hostile in [
+            "tauri://localhost.evil.test",
+            "tauri://localhostx",
+            "tauri://evil.test",
+            "http://localhost",
+            "https://localhost",
+            "tauri://localhost:1420",
+            "capacitor://localhost",
+        ] {
+            assert!(
+                t.headers_for(&with_origin(hostile)).is_empty(),
+                "{hostile:?} must not match tauri://localhost"
+            );
+        }
+        assert!(
+            !t.headers_for(&with_origin("tauri://localhost")).is_empty(),
+            "the exact webview origin must still match"
+        );
+    }
+
+    #[test]
+    fn a_webview_origin_can_be_allow_listed_at_all() {
+        // Before schemes were a list, this failed configuration outright: a
+        // desktop client could not be allowed even deliberately.
+        for origin in [
+            "tauri://localhost",
+            "capacitor://localhost",
+            // Tauri on Windows, which was always expressible.
+            "http://tauri.localhost",
+        ] {
+            let parsed = CorsConfig::from_env_value(origin).expect("{origin} should configure");
+            assert_eq!(parsed.allowed_origins, vec![origin.to_string()]);
+        }
+    }
+
+    #[test]
+    fn an_unknown_scheme_is_still_refused() {
+        // The list is an allowlist, not a suggestion. A scheme nobody vetted —
+        // or a bare host with no scheme — is a configuration error, named at
+        // boot rather than silently never matching.
+        for bad in [
+            "ftp://localhost",
+            "localhost:5173",
+            "javascript:alert(1)",
+            "file://",
+            "tauri:/localhost",
+        ] {
+            assert!(
+                CorsConfig::from_env_value(bad).is_err(),
+                "{bad:?} must be refused"
             );
         }
     }

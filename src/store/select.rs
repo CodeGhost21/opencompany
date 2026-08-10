@@ -48,6 +48,18 @@ pub enum StorageKind {
     Mongodb,
 }
 
+impl StorageKind {
+    /// The backend's name, for `/spec`. Stable wire strings — a client keys
+    /// behaviour off these, so they are not `Debug` output.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Fs => "fs",
+            Self::Sqlite => "sqlite",
+            Self::Mongodb => "mongodb",
+        }
+    }
+}
+
 impl std::str::FromStr for StorageKind {
     type Err = OpenCompanyError;
     fn from_str(value: &str) -> Result<Self> {
