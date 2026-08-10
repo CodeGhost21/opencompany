@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf, process::ExitStatus};
+use std::{fs, path::PathBuf, process::ExitStatus, time::SystemTime};
 
 use serde::Serialize;
 use tokio::process::Command;
@@ -10,7 +10,7 @@ use crate::{OpenCompanyError, Result};
 pub enum LaunchMode {
     /// Launch the core Rust binary (`openhuman-core`).
     Core,
-    /// Launch the Tauri desktop host, driving OpenHuman's own `pnpm` scripts.
+    /// Launch the Tauri desktop host, driving `cargo tauri` directly.
     Desktop,
 }
 
@@ -71,39 +71,64 @@ impl OpenHumanLaunch {
 
     /// Switch from a dev launch to a release build (a bundled `.app`/dmg on
     /// macOS, a deb/AppImage elsewhere). For Core this adds `--release` to the
-    /// `cargo run`; for Desktop it selects OpenHuman's `*build*` script.
+    /// `cargo run`; for Desktop it selects OpenHuman's `*build*` invocation.
     pub fn release(mut self) -> Self {
         self.release = true;
         self
     }
 
     /// Adds passthrough arguments forwarded after `--` to the OpenHuman core
-    /// binary. Desktop mode ignores these — it drives OpenHuman's own
-    /// opinionated pnpm scripts, which do not accept passthrough args.
+    /// binary. Desktop mode ignores these — it drives a fixed `cargo tauri`
+    /// invocation, which does not accept passthrough args.
     pub fn with_args(mut self, args: impl IntoIterator<Item = String>) -> Self {
         self.args = args.into_iter().collect();
         self
     }
 
-    /// The OpenHuman `pnpm` script Desktop mode drives, picked from the host
-    /// backend and whether this is a dev or release build.
-    fn desktop_script(&self) -> &'static str {
+    /// The `cargo tauri` subcommand arguments Desktop mode drives, picked from
+    /// the host backend and whether this is a dev or release build. Copied
+    /// verbatim from OpenHuman's own `dev:app`/`dev:wry`/`macos:build:release`/
+    /// `tauri:build:ui` pnpm scripts so the host matches what OpenHuman expects.
+    fn desktop_tauri_args(&self) -> Vec<String> {
+        let port = std::env::var("OPENHUMAN_DEV_PORT").unwrap_or_else(|_| "1420".to_string());
         match (self.release, DesktopBackend::for_host()) {
-            (false, DesktopBackend::Cef) => "dev:app",
-            (false, DesktopBackend::Wry) => "dev:wry",
-            (true, DesktopBackend::Cef) => "macos:build:release",
-            (true, DesktopBackend::Wry) => "tauri:build:ui",
+            (false, DesktopBackend::Cef) => {
+                let config = format!(
+                    "{{\"build\":{{\"devUrl\":\"http://localhost:{port}\"}}}}"
+                );
+                vec!["dev".into(), "--config".into(), config]
+            }
+            (false, DesktopBackend::Wry) => {
+                vec![
+                    "dev".into(),
+                    "--no-default-features".into(),
+                    "--features".into(),
+                    "wry".into(),
+                ]
+            }
+            (true, DesktopBackend::Cef) => vec![
+                "build".into(),
+                "--bundles".into(),
+                "app".into(),
+                "dmg".into(),
+                "--".into(),
+                "--bin".into(),
+                "OpenHuman".into(),
+            ],
+            (true, DesktopBackend::Wry) => {
+                vec!["build".into(), "--".into(), "--bin".into(), "OpenHuman".into()]
+            }
         }
     }
 
     /// Returns the command OpenCompany will spawn, without spawning it.
     ///
-    /// Desktop mode drives OpenHuman's own pnpm scripts (`dev:app`/`dev:wry`/
-    /// `macos:build:release`/`tauri:build:ui`) rather than `cargo run --bin
-    /// OpenHuman` directly, because those scripts are the only thing that wires
-    /// up the vendored CEF-aware `tauri-cli`, the CEF runtime, the Vite dev
-    /// server, the macOS signing identity, and `.env` — without them the Tauri
-    /// window opens blank or panics inside `cef::library_loader`.
+    /// Desktop mode calls `cargo tauri dev`/`build` directly. The preflight
+    /// (installing the vendored CEF-aware `cargo-tauri`, pinning `CEF_PATH`,
+    /// loading `<root>/.env`, and on macOS seeding the Chromium keychain +
+    /// the signing identity) is performed by [`run`](Self::run) before this
+    /// command is spawned — `cargo run --bin OpenHuman` alone opens a blank
+    /// window or panics inside `cef::library_loader`.
     pub fn command_preview(&self) -> Vec<String> {
         match self.mode {
             LaunchMode::Core => {
@@ -122,13 +147,9 @@ impl OpenHumanLaunch {
                 command
             }
             LaunchMode::Desktop => {
-                vec![
-                    "pnpm".to_string(),
-                    "--filter".to_string(),
-                    "openhuman-app".to_string(),
-                    "run".to_string(),
-                    self.desktop_script().to_string(),
-                ]
+                let mut command = vec!["cargo".to_string(), "tauri".to_string()];
+                command.extend(self.desktop_tauri_args());
+                command
             }
         }
     }
@@ -143,36 +164,50 @@ impl OpenHumanLaunch {
             return Err(OpenCompanyError::OpenHuman {
                 code: 400,
                 message: format!(
-                    "desktop mode drives OpenHuman's own pnpm scripts ({}) and does \
-                     not accept passthrough args; use --mode core for binary args",
-                    self.desktop_script()
+                    "desktop mode drives a fixed `cargo tauri` invocation and does \
+                     not accept passthrough args; use --mode core for binary args"
                 ),
             });
         }
 
-        // OpenHuman's `dev:*`/build scripts source `<root>/.env` via
-        // `load-dotenv.sh`, which hard-exits when the file is absent. Seed it
-        // from the vendored `.env.example` so a fresh checkout launches
-        // out-of-the-box without a manual copy step.
-        if matches!(self.mode, LaunchMode::Desktop) {
-            self.ensure_env()?;
-        }
+        match self.mode {
+            LaunchMode::Core => {
+                let preview = self.command_preview();
+                let status = Command::new(&preview[0])
+                    .args(&preview[1..])
+                    .status()
+                    .await?;
+                Ok(status)
+            }
+            LaunchMode::Desktop => {
+                // `.env` is loaded by the preflight below; seed it from the
+                // vendored example so a fresh checkout launches out-of-the-box.
+                self.ensure_env()?;
 
-        let preview = self.command_preview();
-        let mut command = Command::new(&preview[0]);
-        command.args(&preview[1..]);
-        // pnpm resolves the workspace relative to its cwd, and the OpenHuman
-        // scripts are written to run from the checkout root — anchor there.
-        if matches!(self.mode, LaunchMode::Desktop) {
-            command.current_dir(&self.root);
+                // Install the vendored CEF-aware cargo-tauri if missing or stale.
+                // Stock tauri-cli cannot bundle the CEF runtime, so this is the
+                // step that makes `cargo tauri build` produce a working `.app`.
+                self.ensure_tauri_cli().await?;
+
+                // macOS CEF dev also pre-seeds the Chromium Safe Storage keychain
+                // entry so CEF reads it without a prompt (no-op off macOS).
+                if !self.release && DesktopBackend::for_host() == DesktopBackend::Cef {
+                    setup_chromium_safe_storage();
+                }
+
+                let preview = self.command_preview();
+                let mut command = Command::new(&preview[0]);
+                command.args(&preview[1..]).current_dir(&self.root);
+                self.apply_desktop_env(&mut command)?;
+                let status = command.status().await?;
+                Ok(status)
+            }
         }
-        let status = command.status().await?;
-        Ok(status)
     }
 
     /// Copy `<root>/.env.example` to `<root>/.env` when the latter is missing,
-    /// so OpenHuman's `load-dotenv.sh` does not abort. No-op once it exists or
-    /// when no example is present (OpenHuman's script then surfaces the error).
+    /// so the preflight env loader does not skip. No-op once `.env` exists or
+    /// when no example is present.
     fn ensure_env(&self) -> Result<()> {
         let env = self.root.join(".env");
         if env.exists() {
@@ -185,7 +220,296 @@ impl OpenHumanLaunch {
         fs::copy(&example, &env).map_err(OpenCompanyError::from)?;
         Ok(())
     }
+
+    /// Where the vendored CEF-aware `cargo-tauri` is installed. Mirrors
+    /// `ensure-tauri-cli.sh`: `OPENHUMAN_CARGO_INSTALL_ROOT` or
+    /// `<root>/.cache/cargo-install`.
+    fn tauri_install_root(&self) -> PathBuf {
+        std::env::var("OPENHUMAN_CARGO_INSTALL_ROOT")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| self.root.join(".cache").join("cargo-install"))
+    }
+
+    /// The CEF binary distribution location. Mirrors `ensure-tauri-cli.sh`:
+    /// `CEF_PATH` or `$HOME/Library/Caches/tauri-cef`.
+    fn cef_path() -> Result<PathBuf> {
+        if let Ok(p) = std::env::var("CEF_PATH") {
+            return Ok(PathBuf::from(p));
+        }
+        let home = std::env::var("HOME").map_err(|_| OpenCompanyError::OpenHuman {
+            code: 500,
+            message: "CEF_PATH is unset and $HOME is not set; cannot derive the CEF \
+                      binary distribution location"
+                .into(),
+        })?;
+        Ok(PathBuf::from(home)
+            .join("Library")
+            .join("Caches")
+            .join("tauri-cef"))
+    }
+
+    /// Install the vendored CEF-aware `tauri-cli` as `cargo-tauri` under
+    /// [`tauri_install_root`](Self::tauri_install_root) when it is missing or
+    /// stale. A port of `vendor/openhuman/scripts/ensure-tauri-cli.sh`.
+    async fn ensure_tauri_cli(&self) -> Result<()> {
+        let vendored_cef = self
+            .root
+            .join("app")
+            .join("src-tauri")
+            .join("vendor")
+            .join("tauri-cef");
+        let vendored_cli = vendored_cef.join("crates").join("tauri-cli");
+        if !vendored_cli.join("Cargo.toml").exists() {
+            return Err(OpenCompanyError::OpenHuman {
+                code: 500,
+                message: format!(
+                    "vendored CEF-aware tauri-cli not found at {}; run \
+                     `git submodule update --init --recursive` in the OpenHuman \
+                     checkout",
+                    vendored_cli.display()
+                ),
+            });
+        }
+
+        let install_root = self.tauri_install_root();
+        let bin = install_root.join("bin").join("cargo-tauri");
+        fs::create_dir_all(&install_root)
+            .map_err(OpenCompanyError::from)
+            .and_then(|_| {
+                fs::create_dir_all(Self::cef_path()?).map_err(OpenCompanyError::from)
+            })?;
+
+        let crates_toml = install_root.join(".crates.toml");
+        let from_vendored = fs::read_to_string(&crates_toml)
+            .map(|content| installed_from_vendored(&content, &vendored_cli))
+            .unwrap_or(false);
+        let fresh = from_vendored && tauri_cli_is_fresh(&bin, &vendored_cef);
+        if fresh {
+            return Ok(());
+        }
+
+        eprintln!(
+            "[ensure-tauri-cli] installing vendored CEF-aware tauri-cli from {}",
+            vendored_cli.display()
+        );
+        eprintln!(
+            "[ensure-tauri-cli] (first install only — takes a few minutes; \
+             subsequent runs are instant)"
+        );
+
+        let mut install = Command::new("cargo");
+        install
+            .args([
+                "install",
+                "--root",
+                &install_root.to_string_lossy(),
+                "--locked",
+                "--path",
+                &vendored_cli.to_string_lossy(),
+            ])
+            .env("CEF_PATH", Self::cef_path()?);
+        // Put the install root's bin and ~/.cargo/bin first so the install
+        // itself resolves a CEF-aware toolchain if it shells out.
+        if let Ok(home) = std::env::var("HOME") {
+            let path = format!(
+                "{}/bin:{}/.cargo/bin:{}",
+                install_root.display(),
+                home,
+                std::env::var("PATH").unwrap_or_default()
+            );
+            install.env("PATH", path);
+        }
+        let status = install.status().await?;
+        if !status.success() {
+            return Err(OpenCompanyError::OpenHuman {
+                code: 500,
+                message: "cargo install of the vendored CEF-aware tauri-cli failed"
+                    .into(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Apply the Desktop preflight environment to a `cargo tauri` command:
+    /// `CEF_PATH`, a `PATH` that prefers the vendored `cargo-tauri`, the
+    /// loaded `<root>/.env` vars, and (for macOS CEF dev) the signing identity.
+    fn apply_desktop_env(&self, command: &mut Command) -> Result<()> {
+        let cef = Self::cef_path()?;
+        command.env("CEF_PATH", &cef);
+
+        // Prefer the CEF-aware cargo-tauri over any stock install on PATH.
+        let install_root = self.tauri_install_root();
+        let path = match std::env::var("HOME") {
+            Ok(home) => format!(
+                "{}/bin:{}/.cargo/bin:{}",
+                install_root.display(),
+                home,
+                std::env::var("PATH").unwrap_or_default()
+            ),
+            Err(_) => std::env::var("PATH").unwrap_or_default(),
+        };
+        command.env("PATH", path);
+
+        // Load <root>/.env (set after CEF_PATH so a .env override wins, matching
+        // the scripts: `export CEF_PATH=...; source load-dotenv.sh`).
+        let env_file = self.root.join(".env");
+        if env_file.exists() {
+            for (key, value) in load_dotenv(&env_file)? {
+                command.env(key, value);
+            }
+        }
+
+        // macOS CEF dev sets the signing identity inline after .env, so it wins.
+        if !self.release && cfg!(target_os = "macos") {
+            command.env("APPLE_SIGNING_IDENTITY", "OpenHuman Dev Signer");
+        }
+        Ok(())
+    }
 }
+
+/// Whether the installed `cargo-tauri` (per `.crates.toml`) came from the
+/// vendored CEF-aware path. A port of the `grep -q "tauri-cli.*$VENDOR_CLI"`
+/// check in `ensure-tauri-cli.sh`.
+fn installed_from_vendored(crates_toml: &str, vendored_cli: &std::path::Path) -> bool {
+    let path = vendored_cli.to_string_lossy();
+    crates_toml
+        .lines()
+        .any(|line| line.contains("tauri-cli") && line.contains(path.as_ref()))
+}
+
+/// Whether the installed `cargo-tauri` binary is newer than every file under
+/// the vendored `tauri-cef` tree. A port of `find … -newer` in
+/// `ensure-tauri-cli.sh`; returns false (stale) when the binary is absent.
+fn tauri_cli_is_fresh(bin: &std::path::Path, source_root: &std::path::Path) -> bool {
+    let Ok(bin_meta) = fs::metadata(bin) else {
+        return false;
+    };
+    let Ok(bin_mtime) = bin_meta.modified() else {
+        return false;
+    };
+    !any_file_newer_than(source_root, bin_mtime)
+}
+
+/// True if any regular file under `dir` (recursively) was modified after
+/// `threshold`. Early-exits on the first match.
+fn any_file_newer_than(dir: &std::path::Path, threshold: SystemTime) -> bool {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return false;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if meta.is_file() {
+            if let Ok(mtime) = meta.modified() {
+                if mtime > threshold {
+                    return true;
+                }
+            }
+        } else if meta.is_dir() {
+            if any_file_newer_than(&path, threshold) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Parse a `.env` file into `(key, value)` pairs. A port of
+/// `vendor/openhuman/scripts/load-dotenv.sh`: strip a line at the first `#`,
+/// trim whitespace, drop a leading `export `, split on the first `=`, and
+/// strip one surrounding pair of quotes from the value.
+fn load_dotenv(path: &std::path::Path) -> Result<Vec<(String, String)>> {
+    let content = fs::read_to_string(path).map_err(OpenCompanyError::from)?;
+    Ok(content
+        .lines()
+        .filter_map(parse_env_line)
+        .collect())
+}
+
+/// Parse one `.env` line into `(key, value)`, or `None` for blanks/comments.
+fn parse_env_line(line: &str) -> Option<(String, String)> {
+    // Strip from the first `#` (comment) — matches load-dotenv.sh.
+    let line = line.split('#').next().unwrap_or("");
+    let line = line.trim();
+    if line.is_empty() {
+        return None;
+    }
+    // Drop a leading `export `.
+    let line = line.strip_prefix("export ").unwrap_or(line);
+    let (key, value) = line.split_once('=')?;
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let mut value = value.trim().to_string();
+    // Strip one surrounding pair of quotes (either kind), in the order the
+    // script does: leading/trailing `"` then leading/trailing `'`.
+    if value.starts_with('"') {
+        value.remove(0);
+    }
+    if value.ends_with('"') {
+        value.pop();
+    }
+    if value.starts_with('\'') {
+        value.remove(0);
+    }
+    if value.ends_with('\'') {
+        value.pop();
+    }
+    Some((key.to_string(), value))
+}
+
+/// Pre-seed the macOS "Chromium Safe Storage" keychain entry with a permissive
+/// ACL so CEF/Chromium reads it without prompting. A port of
+/// `vendor/openhuman/scripts/setup-chromium-safe-storage.sh`; no-op off macOS
+/// and best-effort (never fatal) on macOS. Called only for the macOS CEF dev
+/// path, as in `dev:app`.
+#[cfg(target_os = "macos")]
+fn setup_chromium_safe_storage() {
+    use std::process::Command as StdCommand;
+    let svc = "Chromium Safe Storage";
+    let acct = "Chromium";
+    let keychain = format!("{}/Library/Keychains/login.keychain-db", std::env::var("HOME").unwrap_or_default());
+    let exists = StdCommand::new("security")
+        .args(["find-generic-password", "-s", svc, "-a", acct, &keychain])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if exists {
+        // Refresh the ACL only; leave the encryption key intact.
+        let _ = StdCommand::new("security")
+            .args([
+                "set-generic-password-partition-list",
+                "-S",
+                "apple-tool:,apple:,unsigned:",
+                "-s",
+                svc,
+                "-a",
+                acct,
+                "-k",
+                "",
+                &keychain,
+            ])
+            .status();
+    } else {
+        // Seed a random key with a permissive ACL.
+        let key = StdCommand::new("openssl")
+            .args(["rand", "-base64", "16"])
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default();
+        let _ = StdCommand::new("security")
+            .args(["add-generic-password", "-s", svc, "-a", acct, "-w", &key, "-A", &keychain])
+            .status();
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn setup_chromium_safe_storage() {}
 
 #[cfg(test)]
 mod tests {
@@ -214,50 +538,54 @@ mod tests {
     }
 
     #[test]
-    fn desktop_preview_drives_pnpm_script_not_cargo_run() {
+    fn desktop_preview_calls_cargo_tauri_not_pnpm_or_cargo_run() {
         let preview = OpenHumanLaunch::desktop("vendor/openhuman").command_preview();
 
-        // Drives pnpm, not a raw `cargo run --bin OpenHuman` (which opens a
-        // blank window because it skips the Vite dev server, CEF runtime, and
-        // vendored CEF-aware tauri-cli).
-        assert_eq!(preview.first().map(String::as_str), Some("pnpm"));
-        assert!(preview.contains(&"--filter".to_string()));
-        assert!(preview.contains(&"openhuman-app".to_string()));
-        assert!(preview.contains(&"run".to_string()));
+        assert_eq!(preview.first().map(String::as_str), Some("cargo"));
+        assert_eq!(preview.get(1).map(String::as_str), Some("tauri"));
+        // Not a raw `cargo run --bin OpenHuman` (blank window / CEF panic) and
+        // not a pnpm script delegation.
         assert!(
-            !preview.contains(&"cargo".to_string()),
-            "desktop must not shell out to cargo directly: {preview:?}"
-        );
-
-        let script = preview.last().unwrap();
-        assert!(
-            matches!(
-                script.as_str(),
-                "dev:app" | "dev:wry" | "macos:build:release" | "tauri:build:ui"
-            ),
-            "unexpected desktop script: {script}"
+            !preview.contains(&"run".to_string()) || preview.iter().any(|p| p == "dev"),
+            "desktop must call `cargo tauri dev`, not `cargo run`: {preview:?}"
         );
     }
 
     #[test]
-    fn desktop_release_switches_to_a_build_script() {
+    fn desktop_wry_dev_args_match_openhuman_script() {
+        // On Linux/Windows the dev args are exactly `dev --no-default-features
+        // --features wry` — copied verbatim from OpenHuman's `dev:wry`.
+        if cfg!(target_os = "macos") {
+            return;
+        }
+        let preview = OpenHumanLaunch::desktop("vendor/openhuman").command_preview();
+        let tail = &preview[2..];
+        assert_eq!(
+            tail,
+            &[
+                "dev".to_string(),
+                "--no-default-features".into(),
+                "--features".into(),
+                "wry".into()
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_release_switches_to_build() {
         let dev = OpenHumanLaunch::desktop("vendor/openhuman").command_preview();
         let rel = OpenHumanLaunch::desktop("vendor/openhuman")
             .release()
             .command_preview();
 
-        assert_ne!(dev.last(), rel.last());
-        let script = rel.last().unwrap();
-        assert!(
-            script.starts_with("macos:build") || script == "tauri:build:ui",
-            "release should select a build script, got {script}"
-        );
+        assert_ne!(dev.get(2), rel.get(2));
+        assert_eq!(rel.get(2).map(String::as_str), Some("build"));
+        assert!(rel.contains(&"--bin".to_string()));
+        assert!(rel.contains(&"OpenHuman".to_string()));
     }
 
     #[test]
     fn desktop_backend_matches_host_os() {
-        // CEF on macOS, wry everywhere else — the same split OpenHuman's own
-        // script set assumes.
         assert_eq!(
             DesktopBackend::for_host(),
             if cfg!(target_os = "macos") {
@@ -266,5 +594,78 @@ mod tests {
                 DesktopBackend::Wry
             }
         );
+    }
+
+    #[test]
+    fn parse_env_line_handles_comments_quotes_and_export() {
+        assert_eq!(
+            parse_env_line("FOO=bar"),
+            Some(("FOO".into(), "bar".into()))
+        );
+        assert_eq!(
+            parse_env_line("export FOO=bar"),
+            Some(("FOO".into(), "bar".into()))
+        );
+        assert_eq!(
+            parse_env_line(r#"FOO="bar baz""#),
+            Some(("FOO".into(), "bar baz".into()))
+        );
+        assert_eq!(
+            parse_env_line("FOO='bar'"),
+            Some(("FOO".into(), "bar".into()))
+        );
+        assert_eq!(parse_env_line("# a comment"), None);
+        assert_eq!(parse_env_line("   "), None);
+        assert_eq!(parse_env_line("FOO=bar # inline"), Some(("FOO".into(), "bar".into())));
+        assert_eq!(parse_env_line("=novalue"), None);
+    }
+
+    #[test]
+    fn installed_from_vendored_detects_origin() {
+        let vendored = std::path::Path::new("/repo/vendor/openhuman/app/src-tauri/vendor/tauri-cef/crates/tauri-cli");
+        let yes = format!(
+            "[[..]]\nname = \"tauri-cli\"\nversion = \"0.0.0\"\nsource = \"{}\"\n",
+            vendored.display()
+        );
+        assert!(installed_from_vendored(&yes, vendored));
+        let no = "[[..]]\nname = \"tauri-cli\"\nsource = \"registry+https://crates.io\"\n";
+        assert!(!installed_from_vendored(&no, vendored));
+    }
+
+    #[test]
+    fn tauri_cli_is_fresh_when_binary_is_newer_than_sources() {
+        let tmp = tempfile_dir();
+        let bin = tmp.join("bin").join("cargo-tauri");
+        fs::create_dir_all(bin.parent().unwrap()).unwrap();
+        fs::write(&bin, b"#!/bin/sh\n").unwrap();
+        let src = tmp.join("tauri-cef");
+        fs::create_dir_all(src.join("crates/tauri-cli")).unwrap();
+        fs::write(src.join("crates/tauri-cli/Cargo.toml"), b"[]").unwrap();
+        // Binary just written is newer than the source → fresh.
+        assert!(tauri_cli_is_fresh(&bin, &src));
+
+        // Touch a source file to be newer than the binary → stale.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        fs::write(src.join("crates/tauri-cli/Cargo.toml"), b"[updated]").unwrap();
+        assert!(!tauri_cli_is_fresh(&bin, &src));
+    }
+
+    #[test]
+    fn tauri_cli_is_fresh_false_when_binary_missing() {
+        let tmp = tempfile_dir();
+        let src = tmp.join("tauri-cef");
+        fs::create_dir_all(&src).unwrap();
+        assert!(!tauri_cli_is_fresh(&tmp.join("missing"), &src));
+    }
+
+    fn tempfile_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "opencompany-launcher-{}-{}",
+            std::process::id(),
+            "fixed-seed"
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
     }
 }
