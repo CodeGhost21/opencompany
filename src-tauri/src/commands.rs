@@ -188,15 +188,24 @@ pub async fn oc_pair_device(
 
     // Re-register so the credential takes effect without waiting for a reload.
     // The console cannot do this itself — it has nothing to pass.
-    if let Ok(existing) = proxy.connection(&connection_id).await {
+    //
+    // The session is read back from the keychain rather than reused from the
+    // claim: what matters is what the store will hand out on the *next* boot,
+    // so a write that did not survive surfaces here rather than as a mysterious
+    // 401 later. A miss is `Credential::None`, never `Device("")` — an empty
+    // session header is a credential that authenticates as nobody while looking
+    // like one to every check that only asks whether a device is paired.
+    if let Ok(base_url) = proxy.base_url(&connection_id).await {
+        let credential = match crate::keychain::device_session(&connection_id) {
+            Some(session) => Credential::Device(session),
+            None => Credential::None,
+        };
         proxy
             .upsert(
                 connection_id.clone(),
                 Connection {
-                    base_url: existing.base_url,
-                    credential: Credential::Device(
-                        crate::keychain::device_session(&connection_id).unwrap_or_default(),
-                    ),
+                    base_url,
+                    credential,
                 },
             )
             .await;
@@ -220,12 +229,12 @@ pub async fn oc_forget_device(
     connection_id: String,
 ) -> Result<(), String> {
     crate::keychain::forget_device(&connection_id).map_err(|error| error.to_string())?;
-    if let Ok(existing) = proxy.connection(&connection_id).await {
+    if let Ok(base_url) = proxy.base_url(&connection_id).await {
         proxy
             .upsert(
                 connection_id,
                 Connection {
-                    base_url: existing.base_url,
+                    base_url,
                     credential: Credential::None,
                 },
             )
