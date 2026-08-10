@@ -352,7 +352,11 @@ impl OpenHumanLaunch {
         // CEF-aware toolchain if it shells out; `~/.cargo/bin` is appended
         // only when HOME is set, since HOME is what locates that directory.
         let inherited = std::env::var("PATH").unwrap_or_default();
-        let path = desktop_path_env(&install_root, std::env::var("HOME").ok().as_deref(), &inherited);
+        let path = desktop_path_env(
+            &install_root,
+            std::env::var("HOME").ok().as_deref(),
+            &inherited,
+        );
         install.env("PATH", path);
         let status = install.status().await?;
         if !status.success() {
@@ -385,7 +389,11 @@ impl OpenHumanLaunch {
         let install_root = self.tauri_install_root();
         let inherited = std::env::var("PATH").unwrap_or_default();
         // Home may be unset on Windows; `~/.cargo/bin` is only appended then.
-        let path = desktop_path_env(&install_root, std::env::var("HOME").ok().as_deref(), &inherited);
+        let path = desktop_path_env(
+            &install_root,
+            std::env::var("HOME").ok().as_deref(),
+            &inherited,
+        );
         command.env("PATH", path);
 
         // Load <root>/.env (set after CEF_PATH so a .env override wins, matching
