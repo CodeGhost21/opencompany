@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn tauri_cli_is_fresh_false_when_binary_missing() {
-        let tmp = tempfile_dir();
+        let tmp = tempfile_dir("missing");
         let src = tmp.join("tauri-cef");
         fs::create_dir_all(&src).unwrap();
         assert!(!tauri_cli_is_fresh(&tmp.join("missing"), &src));
