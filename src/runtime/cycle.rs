@@ -1275,6 +1275,7 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowCreated { .. }
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
+            | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             // Issue #371: a run's start and its per-node finishes are records of
             // a workflow walking its graph, not stimuli for a new cycle. They
@@ -1398,6 +1399,7 @@ fn cycle_thread_id(
             | CompanyEvent::WorkflowCreated { .. }
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
+            | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }

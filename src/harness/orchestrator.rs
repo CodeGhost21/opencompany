@@ -846,6 +846,19 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..
         } => format!("workflow deleted: {name} ({workflow_id})"),
+        CompanyEvent::WorkflowEnabledChanged {
+            workflow_id,
+            name,
+            enabled,
+            ..
+        } => format!(
+            "workflow {}: {name} ({workflow_id})",
+            if *enabled {
+                "switched on"
+            } else {
+                "switched off"
+            }
+        ),
         CompanyEvent::TaskSteered {
             task_id, action, ..
         } => format!("task steered ({action}): {task_id}"),
@@ -3274,6 +3287,7 @@ name = "Morning"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -3785,6 +3799,7 @@ name = "Morning"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }

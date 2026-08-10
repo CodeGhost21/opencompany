@@ -592,6 +592,33 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// A workflow was switched on or off (issue #276) — from the console's
+    /// `PUT …/workflows/{wid}/enabled` route, or from the disarm rule that
+    /// forces `false` when a create or an edit arms a schedule. Journaled
+    /// best-effort **after** the flag is persisted, so it records a completed
+    /// change. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// **Only a real transition is journaled.** Toggling a workflow to the state
+    /// it already holds writes nothing, so this log answers "when did this stop
+    /// firing, and was it a person or the disarm rule" rather than counting
+    /// clicks.
+    WorkflowEnabledChanged {
+        /// The workflow's id.
+        workflow_id: String,
+        /// Its display name at the moment of the change, so an audit reader need
+        /// not resolve the id against a graph that may since have been edited.
+        name: String,
+        /// The state it moved **to**: `true` armed, `false` paused.
+        enabled: bool,
+        /// Why it moved. See [`WorkflowEnabledReason`].
+        reason: WorkflowEnabledReason,
+        /// Who changed it, when known. `None` from the current unattributed
+        /// surfaces, and always `None` for a [`Disarmed`](WorkflowEnabledReason::Disarmed)
+        /// entry — that one is the host's rule firing, not a person's decision.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
     /// An operator steered an in-flight run — paused, cancelled, or redirected a
     /// dispatched task (or cancelled a delegation) from chat (issue #111).
     /// Journaled best-effort **after** the steer is accepted by the in-flight
@@ -2043,6 +2070,25 @@ pub struct OverlayWorkflow {
     pub toml: String,
 }
 
+/// Why a workflow's armed state changed (issue #276). Serialized in
+/// `snake_case` (`operator` / `disarmed`).
+///
+/// The distinction is the point of journaling this at all: "an operator paused
+/// this" and "the host refused to arm a schedule nobody had reviewed" are
+/// different facts, and only the second one explains a workflow that never fired
+/// after it was created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowEnabledReason {
+    /// An explicit `PUT …/workflows/{wid}/enabled`.
+    Operator,
+    /// The disarm rule fired: a create or an edit produced a trigger schedule
+    /// that had not been armed before, so the host wrote `false` rather than
+    /// letting an unreviewed cron go live. Only ever paired with
+    /// `enabled: false` — the rule has no arming direction.
+    Disarmed,
+}
+
 /// An operator-set daily spend cap for one teammate, persisted on the
 /// [`CompanyRecord`] so it wins over the manifest's `budget_usd_daily` without
 /// rewriting `company.toml` and without a redeploy (issue #343).
@@ -2135,6 +2181,12 @@ pub struct OverlayBlob {
     /// loads them as empty — which is exactly "the manifest still decides".
     #[serde(default)]
     pub budgets: Vec<BudgetOverride>,
+    /// The workflow ids the operator has switched off (issue #276). Absent on
+    /// rows written before the pause switch existed, and `#[serde(default)]`
+    /// reads that absence as "nothing is paused" — the pre-#276 behaviour
+    /// exactly.
+    #[serde(default)]
+    pub disabled_workflows: Vec<String>,
     /// The source-template provenance recorded at launch. `None` for companies
     /// provisioned from a raw manifest and for legacy rows written before
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
@@ -2152,6 +2204,7 @@ impl OverlayBlob {
             desks: record.overlay_desks.clone(),
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
     }
@@ -2175,6 +2228,7 @@ impl OverlayBlob {
                     desks: Vec::new(),
                     workflows: Vec::new(),
                     budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     provenance: None,
                 })
                 .map_err(|_| original),
@@ -2234,6 +2288,37 @@ pub struct CompanyRecord {
     /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
+    /// Workflow ids the operator has switched **off** (issue #276). A workflow
+    /// named here keeps its graph, stays listed and stays runnable by hand, and
+    /// is skipped by
+    /// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler) — the pause
+    /// switch that used to require deleting the workflow outright.
+    ///
+    /// Read through [`Self::workflow_enabled`] and mutate through
+    /// [`Self::set_workflow_enabled`], never directly, so the scheduler gate, the
+    /// two read surfaces and the write path cannot drift.
+    ///
+    /// **A disable list, not an enable list, and that direction is the whole
+    /// design.** Absent means enabled, so every record written before this
+    /// existed keeps firing exactly as it did — the `#[serde(default)]` is a
+    /// no-op migration rather than a silent mass-disable of every saved schedule.
+    ///
+    /// **Not `[workflows].enabled`.** The manifest list is a *declaration* —
+    /// which workflows this company was provisioned with — and
+    /// `merge_enabled_workflows` (`src/runtime/builder.rs`, issue #208) rebuilds
+    /// it at boot from seed ids ∪ surviving overlay ids. Expressing "off" as
+    /// absence from that list would therefore un-express itself on the next
+    /// restart, which for a safety switch is the one failure mode that must not
+    /// exist. This field is the runtime override the console writes, the same
+    /// split [`Self::effective_budget`] draws between a manifest cap and an
+    /// operator's.
+    ///
+    /// Unlike the edit and delete paths, an id here **may name a seed-backed
+    /// workflow**. Pausing does not touch the source tree and can only ever
+    /// remove capability, so it cannot let a runtime write outlive a seed
+    /// rollback the way a record-wins `[tools]` or `[policy]` merge could.
+    #[serde(default)]
+    pub disabled_workflows: Vec<String>,
     /// Where this company's manifest was seeded from — the source template's
     /// stable identity, stamped once at launch and carried across rebuilds.
     /// `None` for companies provisioned from a raw manifest body. The
@@ -2450,6 +2535,44 @@ impl CompanyRecord {
     /// any. See [`BudgetOverride::duplicate_agent_id`].
     pub fn duplicate_budget_agent_id(&self) -> Option<&str> {
         BudgetOverride::duplicate_agent_id(&self.overlay_budgets)
+    }
+
+    /// Whether `wid` is switched on (issue #276) — the single predicate the
+    /// scheduler gate and both read surfaces share.
+    ///
+    /// Enabled is the default: an id this record has never heard of is on, which
+    /// is what makes [`Self::disabled_workflows`] a no-op for every record
+    /// written before the switch existed.
+    pub fn workflow_enabled(&self, wid: &str) -> bool {
+        !self.disabled_workflows.iter().any(|id| id == wid)
+    }
+
+    /// Switches `wid` on or off, returning whether the record actually changed.
+    ///
+    /// Idempotent in both directions, and the `bool` is why: the write path uses
+    /// it to skip the store save and the audit event when an operator toggles a
+    /// workflow to the state it is already in, so the journal records decisions
+    /// rather than clicks.
+    ///
+    /// Deliberately the **only** mutator. The disarm rules in
+    /// `workflow_create.rs` call it with `false` and nothing else ever calls it
+    /// with `true` except the explicit enable route — keeping the "an edit
+    /// disarms, it never re-arms" invariant in one place instead of in every
+    /// caller's discipline.
+    pub fn set_workflow_enabled(&mut self, wid: &str, enabled: bool) -> bool {
+        let held = self.disabled_workflows.iter().any(|id| id == wid);
+        match (enabled, held) {
+            // Already in the requested state.
+            (true, false) | (false, true) => false,
+            (true, true) => {
+                self.disabled_workflows.retain(|id| id != wid);
+                true
+            }
+            (false, false) => {
+                self.disabled_workflows.push(wid.to_string());
+                true
+            }
+        }
     }
 }
 
@@ -3392,6 +3515,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }

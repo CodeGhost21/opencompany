@@ -1274,6 +1274,17 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
             .unwrap_or_default();
+        // Issue #276: the workflows the operator switched off. This is the field
+        // that makes the pause switch durable, and it is carried across the
+        // rebuild for a sharper reason than the two above: `merge_enabled_workflows`
+        // below re-derives `[workflows].enabled` from the seed ∪ overlay ids, so
+        // that list re-arms everything on every boot by design. If the disable
+        // set were dropped here, a paused workflow would resume firing at the
+        // next restart — the one failure mode a safety switch may not have.
+        let disabled_workflows = existing
+            .as_ref()
+            .map(|r| r.disabled_workflows.clone())
+            .unwrap_or_default();
         // Issue #208: `[workflows].enabled` is the one manifest field a runtime
         // write mutates (`create_company_workflow` pushes the new id alongside
         // the overlay body, in the same save). Rebuilding the record from the
@@ -1597,6 +1608,7 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
+                                disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
@@ -1720,6 +1732,7 @@ impl RuntimeBuilder {
                 overlay_desks,
                 overlay_workflows,
                 overlay_budgets,
+                disabled_workflows,
                 template_provenance,
             })
             .await?;
@@ -3404,6 +3417,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
