@@ -188,9 +188,10 @@ export function WorkflowsView({
    */
   runEvents?: CompanyStreamEvent[];
   /**
-   * Bumped by the shell on every workflow **authoring** frame —
-   * `workflow_created`, `workflow_updated`, `workflow_deleted` (issue #384) —
-   * so the picker follows what the host holds while this tab stays open.
+   * Bumped by the shell on every frame that changes what the picker should show
+   * — `workflow_created`, `workflow_updated`, `workflow_deleted` (issue #384)
+   * and `workflow_enabled_changed` (issue #276) — so the picker follows what the
+   * host holds while this tab stays open, including the armed state.
    *
    * Distinct from `runEventTick`, which is about what a run did. A workflow the
    * orchestrator authored (or a second session deleted) changes which entries

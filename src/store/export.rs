@@ -1495,7 +1495,12 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: budgets.clone(),
-            disabled_workflows: Vec::new(),
+            // Issue #276: a paused workflow rides the same bundle. The empty
+            // list this fixture used to carry could not have detected the field
+            // being dropped — and dropping it would silently re-arm a schedule
+            // an operator had switched off, which is the one direction an
+            // import must never move on its own.
+            disabled_workflows: vec!["digest".to_string()],
             template_provenance: None,
         })
         .await
@@ -1516,6 +1521,10 @@ mod test {
         assert_eq!(
             dst_record.overlay_budgets, budgets,
             "budget overrides altered by the bundle round-trip"
+        );
+        assert!(
+            !dst_record.workflow_enabled("digest"),
+            "the bundle round-trip re-armed a paused workflow"
         );
 
         // Cap, attribution and timestamp, read the way every surface reads them.

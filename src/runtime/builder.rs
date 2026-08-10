@@ -3331,6 +3331,80 @@ mod test {
             .expect("the built economy degrades offline, which it may only do with a replayer");
     }
 
+    /// **Issue #276's durability claim, at the path that actually threatens it.**
+    ///
+    /// `merge_enabled_workflows` re-derives `[workflows].enabled` from seed ∪
+    /// overlay ids on every build — it re-arms that list by design. The pause
+    /// switch is a separate field precisely so a rebuild cannot undo it, and
+    /// this is the test that says so: disable a workflow, build again over the
+    /// same store, and it must still be disabled.
+    ///
+    /// The store round-trip tests cover save→load; this covers build→save, which
+    /// is a different write and the one that would silently re-arm every paused
+    /// schedule on restart.
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_paused_workflow_paused() {
+        use crate::ports::types::OverlayWorkflow;
+        use crate::store::FsCompanyStore;
+
+        let home_dir = tmp_home("oc-paused-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("pause-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Pause Co"
+
+            [[agent]]
+            id = "assistant"
+            role = "Assistant"
+            "#,
+        );
+
+        // First build materializes the record.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // An overlay workflow, switched off — the state an operator would have
+        // left behind by clicking Pause.
+        let store = FsCompanyStore::new(home.clone());
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_workflows.push(OverlayWorkflow {
+            id: "digest".to_string(),
+            toml: "id = \"digest\"\nname = \"Digest\"\n[[node]]\nid = \"start\"\nkind = \"trigger\"\nname = \"Start\"\n"
+                .to_string(),
+        });
+        record.set_workflow_enabled("digest", false);
+        store.save(&record).await.unwrap();
+
+        // Rebuild, exactly as a restart does.
+        RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let rebuilt = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            !rebuilt.workflow_enabled("digest"),
+            "the rebuild re-armed a paused workflow — `disabled_workflows` was not carried forward"
+        );
+        // And the merge it has to survive did run: the id is back in the
+        // manifest's declaration list, which is exactly why that list could not
+        // have been the switch.
+        assert!(
+            rebuilt
+                .manifest
+                .workflows
+                .enabled
+                .contains(&"digest".to_string()),
+            "merge_enabled_workflows did not run, so this test proves nothing"
+        );
+    }
+
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.

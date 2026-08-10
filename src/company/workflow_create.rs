@@ -755,8 +755,10 @@ pub(crate) async fn update_company_workflow(
 /// # What may be toggled, and why it is a wider set than edit and delete
 ///
 /// Any id the company actually answers for with a **graph** — a seed file or an
-/// overlay body, resolved through
-/// [`load_workflow_union`](crate::company::load_workflow_union). That is
+/// overlay body. Membership is decided by whether a body *exists*, not by
+/// whether it parses: a stored graph the host can no longer read still toggles
+/// (journalling under its id), because it is exactly the kind an operator most
+/// wants stopped and refusing would leave them nothing to do about it. That is
 /// deliberately broader than [`update_company_workflow`] and
 /// [`delete_company_workflow`], which are overlay-only:
 ///
@@ -804,14 +806,19 @@ pub(crate) async fn set_company_workflow_enabled(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
 
-    // Resolve through the same union the scheduler and the read routes use, so
-    // "can I pause this" and "would this have fired" answer off one source. A
-    // malformed body resolves to `None` here and 404s, which is correct: the
-    // scheduler skips it too, so there is nothing running to stop.
-    let file = crate::company::load_workflow_union(source_dir, &record.overlay_workflows, wid)
-        .ok()
-        .flatten();
-    let Some(file) = file else {
+    // Does this company answer for `wid` with a graph at all? Asked as "is there
+    // a body" rather than "does it parse", because the two are different states
+    // and only one of them is the operator's fault.
+    //
+    // `load_workflow_union` returns `Err` for a body that exists but no longer
+    // parses, and `Ok(None)` only when there is nothing there. Collapsing both
+    // into "not found" — which an earlier revision did, with `.ok().flatten()` —
+    // sent a corrupt-graph id down the bodiless branch and told the operator it
+    // "was provisioned by name only". That is false for a workflow they created,
+    // and it leaves them with no way to pause it and no accurate reason why.
+    let has_body =
+        seed_file_exists(source_dir, wid) || record.overlay_workflows.iter().any(|w| w.id == wid);
+    if !has_body {
         if record.manifest.workflows.enabled.iter().any(|id| id == wid) {
             return Err(OpenCompanyError::Conflict(format!(
                 "Workflow `{wid}` is enabled for this company but has no saved graph, so there is \
@@ -819,7 +826,19 @@ pub(crate) async fn set_company_workflow_enabled(
             )));
         }
         return Err(OpenCompanyError::CompanyNotFound(format!("workflow {wid}")));
-    };
+    }
+
+    // The display name for the journal, read before anything changes. A body
+    // that no longer parses still toggles — the same call
+    // [`delete_company_workflow`] makes, and for the same reason: a graph the
+    // host cannot read is exactly the kind an operator most wants to stop, and
+    // refusing would leave them nothing to do about it. It just journals under
+    // its id.
+    let name = crate::company::load_workflow_union(source_dir, &record.overlay_workflows, wid)
+        .ok()
+        .flatten()
+        .map(|file| file.name)
+        .unwrap_or_else(|| wid.to_string());
 
     if !record.set_workflow_enabled(wid, enabled) {
         return Ok(false);
@@ -832,7 +851,7 @@ pub(crate) async fn set_company_workflow_enabled(
         company,
         events,
         wid,
-        &file.name,
+        &name,
         enabled,
         WorkflowEnabledReason::Operator,
     )
@@ -2590,6 +2609,55 @@ to = "done"
                 .await
                 .expect_err("bodiless id");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    }
+
+    /// A stored graph that no longer parses is pausable, and is NOT reported as
+    /// "provisioned by name only".
+    ///
+    /// The bodiless-409 message says the id was provisioned by name — true for a
+    /// manifest entry with no graph, and false for a workflow whose saved body
+    /// simply broke. An earlier revision collapsed both into one branch by
+    /// swallowing `load_workflow_union`'s error, so a corrupt graph read back as
+    /// the wrong explanation with no way to act on it.
+    #[tokio::test]
+    async fn a_workflow_whose_stored_graph_no_longer_parses_can_still_be_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let mut seed = record(&company, manifest_with_assistant());
+        seed.overlay_workflows.push(OverlayWorkflow {
+            id: "broken".to_string(),
+            toml: "id = \"broken\"\nname = \"Broken\"\n".to_string(), // no nodes: fails validation
+        });
+        seed.manifest.workflows.enabled.push("broken".to_string());
+        let store = store_of(MemStore::seeded(seed));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        assert!(
+            set_company_workflow_enabled(
+                &company,
+                Some(dir.path()),
+                &store,
+                Some(&log_dyn),
+                "broken",
+                false,
+            )
+            .await
+            .expect("an unreadable graph is still pausable")
+        );
+        assert!(
+            !store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("broken")
+        );
+        // Journals under the id, since there is no readable name to use.
+        match log.events.lock().unwrap().last().expect("an event") {
+            CompanyEvent::WorkflowEnabledChanged { name, .. } => assert_eq!(name, "broken"),
+            other => panic!("expected WorkflowEnabledChanged, got {other:?}"),
+        }
     }
 
     /// A **seed-defined** workflow can be paused, even though `PUT`/`DELETE`
