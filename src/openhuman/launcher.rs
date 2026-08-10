@@ -548,19 +548,24 @@ fn setup_chromium_safe_storage() {
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
-        let _ = StdCommand::new("security")
-            .args([
-                "add-generic-password",
-                "-s",
-                svc,
-                "-a",
-                acct,
-                "-w",
-                &key,
-                "-A",
-                &keychain,
-            ])
-            .status();
+        // Never store an empty Safe Storage key: if `openssl` is missing or
+        // produced no usable output, seed nothing rather than a weak blank
+        // password. Seeding is best-effort anyway, so a skipped key is fine.
+        if !key.is_empty() {
+            let _ = StdCommand::new("security")
+                .args([
+                    "add-generic-password",
+                    "-s",
+                    svc,
+                    "-a",
+                    acct,
+                    "-w",
+                    &key,
+                    "-A",
+                    &keychain,
+                ])
+                .status();
+        }
     }
 }
 
