@@ -166,10 +166,9 @@ impl OpenHumanLaunch {
         if matches!(self.mode, LaunchMode::Desktop) && !self.args.is_empty() {
             return Err(OpenCompanyError::OpenHuman {
                 code: 400,
-                message:
-                    "desktop mode drives a fixed `cargo tauri` invocation and does not \
+                message: "desktop mode drives a fixed `cargo tauri` invocation and does not \
                      accept passthrough args; use --mode core for binary args"
-                        .to_string(),
+                    .to_string(),
             });
         }
 
