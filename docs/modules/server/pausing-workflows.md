@@ -37,6 +37,6 @@ learns to click through it. `a_switched_off_workflow_does_not_fire` and
 **In the console.** Each row carries a switch, rendered from `enabled` on the
 list read. Like `editable`, only an explicit `false` counts — a host predating
 issue `#276` sends no field, and `undefined` must not read as paused. A row the
-disarm
-rule just switched off reports `enabled: false` on the create/update response
+disarm rule just switched off reports `enabled: false` on the create/update
+response
 itself, so the console learns about it from the write it made.
