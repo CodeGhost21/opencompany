@@ -724,6 +724,62 @@ mod tests {
         assert!(!tauri_cli_is_fresh(&tmp.join("missing"), &src));
     }
 
+    #[test]
+    fn desktop_validate_rejects_passthrough_args() {
+        let tmp = tempfile_dir("desktop-args");
+        let launch = OpenHumanLaunch::desktop(&tmp).with_args(["--flag".to_string()]);
+        let err = launch.validate().unwrap_err();
+        assert!(matches!(&err, OpenCompanyError::OpenHuman { code: 400, .. }));
+        // Core mode still accepts passthrough args.
+        let core = OpenHumanLaunch::core(&tmp).with_args(["--flag".to_string()]);
+        assert!(core.validate().is_ok());
+    }
+
+    #[tokio::test]
+    async fn desktop_run_rejects_passthrough_args_before_spawning() {
+        let tmp = tempfile_dir("desktop-run-args");
+        let launch = OpenHumanLaunch::desktop(&tmp).with_args(["--flag".to_string()]);
+        let err = launch.run().await.unwrap_err();
+        assert!(matches!(&err, OpenCompanyError::OpenHuman { code: 400, .. }));
+    }
+
+    #[test]
+    fn dry_run_preview_names_desktop_working_directory() {
+        let tmp = tempfile_dir("desktop-preview-cwd");
+        let preview = OpenHumanLaunch::desktop(&tmp).dry_run_preview();
+        assert!(preview.starts_with(&format!("cd {} && cargo tauri", tmp.display())));
+        // Core preview has an absolute --manifest-path and needs no cd.
+        let core = OpenHumanLaunch::core(&tmp).dry_run_preview();
+        assert!(!core.starts_with("cd "));
+    }
+
+    #[test]
+    fn ensure_env_copies_example_when_env_absent() {
+        let tmp = tempfile_dir("ensure-env-copy");
+        fs::write(tmp.join(".env.example"), b"PORT=4242\n").unwrap();
+        OpenHumanLaunch::desktop(&tmp).ensure_env().unwrap();
+        assert_eq!(
+            fs::read_to_string(tmp.join(".env")).unwrap(),
+            "PORT=4242\n"
+        );
+    }
+
+    #[test]
+    fn ensure_env_preserves_existing_env() {
+        let tmp = tempfile_dir("ensure-env-existing");
+        fs::write(tmp.join(".env"), b"PORT=9999\n").unwrap();
+        fs::write(tmp.join(".env.example"), b"PORT=4242\n").unwrap();
+        OpenHumanLaunch::desktop(&tmp).ensure_env().unwrap();
+        assert_eq!(fs::read_to_string(tmp.join(".env")).unwrap(), "PORT=9999\n");
+    }
+
+    #[test]
+    fn ensure_env_is_noop_without_example() {
+        let tmp = tempfile_dir("ensure-env-no-example");
+        OpenHumanLaunch::desktop(&tmp).ensure_env().unwrap();
+        assert!(!tmp.join(".env").exists());
+    }
+
     fn tempfile_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "opencompany-launcher-{}-{name}",
