@@ -341,6 +341,31 @@ pub enum CompanyEvent {
         /// Who performed the transition.
         by: Actor,
     },
+    /// The governance kill switch was pulled or released (issue #86).
+    ///
+    /// Separate from [`LifecycleChanged`](Self::LifecycleChanged) because the
+    /// two states are orthogonal: emergency stop leaves `lifecycle` alone so
+    /// chat keeps working. Folding it into the lifecycle event would make the
+    /// audit trail claim a transition that never happened.
+    ///
+    /// The **durable state**, not just an audit line: the last such event in a
+    /// company's log is what the boot replay reads back to decide whether to
+    /// come up stopped. There is deliberately no `CompanyRecord` field beside
+    /// it, because a second copy of a safety flag is a second thing that can
+    /// disagree with the first.
+    ///
+    /// Written *after* the in-memory flag on engage and *before* it on release,
+    /// so whichever of the two writes lands alone leaves the company stopped.
+    /// See `CompanyRuntime::emergency_pause`.
+    EmergencyPauseChanged {
+        /// `true` when the stop was engaged, `false` when it was released.
+        engaged: bool,
+        /// The operator who did it.
+        by: Actor,
+        /// Their free-text note, when one was given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// An agent replied in a desk/chat. Journaled by the harness/chat layer so
     /// the GraphQL `Chat.history` resolver (WS2c) can read replies back
     /// alongside the operator messages that prompted them.

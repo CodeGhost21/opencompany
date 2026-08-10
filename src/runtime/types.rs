@@ -96,6 +96,18 @@ pub struct CompanyStatus {
     /// console's read-only "Launched from template" line (issue #85).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_provenance: Option<TemplateProvenance>,
+    /// Whether the governance kill switch is engaged (issue #86): new effects
+    /// outside `EffectGroup::Other` are being denied.
+    ///
+    /// Orthogonal to `lifecycle` — a company in emergency stop still reports
+    /// `running`, because chat still works. A console that only reads
+    /// `lifecycle` would show it as perfectly healthy, which is exactly the
+    /// reading this field exists to prevent.
+    ///
+    /// `#[serde(default)]` (to `false`) keeps a status payload produced before
+    /// the kill switch existed deserializing unchanged.
+    #[serde(default)]
+    pub emergency_paused: bool,
 }
 
 /// A parked approval as surfaced to the operator.
