@@ -480,8 +480,16 @@ async fn emergency_resume(
         .emergency_resume(lifecycle_actor(&auth), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed).await,
-        Err(err) => ApiError(err).into_response(),
+        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Err(err) => emergency_response(
+            &runtime,
+            false,
+            Some(format!(
+                "the emergency stop is still engaged in memory but its journal \
+                 write failed and will not survive a restart: {err}"
+            )),
+        )
+        .await,
     }
 }
 
