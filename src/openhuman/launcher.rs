@@ -917,7 +917,8 @@ mod tests {
         // HOME set: install bin first, then ~/.cargo/bin, then the inherited
         // PATH. Compare segment-by-segment, not against a `:`-joined string.
         let dev_home = PathBuf::from("home").join("dev");
-        let with_home = desktop_path_env(&install_root, Some(&dev_home.to_string_lossy()), &inherited);
+        let with_home =
+            desktop_path_env(&install_root, Some(&dev_home.to_string_lossy()), &inherited);
         let segments: Vec<_> = std::env::split_paths(&with_home).collect();
         assert_eq!(
             segments,
@@ -933,11 +934,7 @@ mod tests {
         let segments: Vec<_> = std::env::split_paths(&without_home).collect();
         assert_eq!(
             segments,
-            vec![
-                install_root.join("bin"),
-                first_inherited,
-                second_inherited,
-            ]
+            vec![install_root.join("bin"), first_inherited, second_inherited,]
         );
     }
 
