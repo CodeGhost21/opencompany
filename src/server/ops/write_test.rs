@@ -2313,6 +2313,16 @@ fn mcp_manifest() -> CompanyManifest {
 /// Boots an fs-backed company from a caller-supplied manifest (mirrors
 /// `state_with_company`, which pins the default manifest).
 async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+    state_with_manifest_and_defaults(home, manifest, Vec::new()).await
+}
+
+/// Like [`state_with_manifest`], but with install-wide default MCP servers
+/// configured (issue #527), for asserting the default-override guards.
+async fn state_with_manifest_and_defaults(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    defaults: Vec<crate::company::McpServer>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -2335,6 +2345,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
         .unwrap();
     let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
         .with_id(id.clone())
+        .with_default_mcp_servers(defaults)
         .build()
         .await
         .unwrap();
