@@ -1058,6 +1058,25 @@ mod tests {
     }
 
     #[test]
+    fn an_encoded_credential_key_in_the_query_string_is_refused() {
+        // Percent-decode each key before matching, or `api%4Bey` (apiKey) sails
+        // past the raw-name scan and ships a secret-bearing default.
+        let raw = vec![
+            server("enc-apikey", "https://api.example.com/mcp?api%4Bey=secret"),
+            server("enc-token", "https://api.example.com/mcp?tok%65n=secret"),
+            server(
+                "enc-access-token",
+                "https://api.example.com/mcp?auth%5Fkey%2Daccess%2Dtoken=secret",
+            ),
+            server("fine", "https://api.example.com/mcp?project%5Fid=p"),
+        ];
+        let (kept, problems) = normalize_default_servers(&raw);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["fine"], "a decoded-benign key is kept");
+        assert_eq!(problems.len(), 3);
+    }
+
+    #[test]
     fn a_default_may_not_depend_on_a_credential_key() {
         // A default is handed to every agent on the install unprompted, so it
         // has to work unattended. One that needs auth belongs per company.
