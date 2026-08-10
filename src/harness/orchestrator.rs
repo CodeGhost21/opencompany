@@ -3395,6 +3395,7 @@ name = "Morning"
                 pending_approvals: Vec::new(),
                 deliveries: Vec::new(),
                 cancelled: false,
+                nodes: Vec::new(),
             })
         }
     }
@@ -3485,6 +3486,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         });
         let calls = runner_impl.calls.clone();
         let runner: Arc<dyn WorkflowRunner> = Arc::new(runner_impl);
@@ -3526,6 +3528,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3620,6 +3623,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: true,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3652,6 +3656,7 @@ name = "Morning"
             pending_approvals: vec!["worker".to_string()],
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3845,6 +3850,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3911,6 +3917,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -4007,6 +4014,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
