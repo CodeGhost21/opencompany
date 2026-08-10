@@ -281,9 +281,14 @@ impl ProxyRegistry {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| ProxyError::Transport(error.to_string()))?;
-            // Lossy on purpose: a stream is not a place to fail over one
-            // malformed byte, and the payloads are JSON the console re-parses.
-            for event in decoder.push(&String::from_utf8_lossy(&chunk)) {
+            // Bytes, not `from_utf8_lossy` per chunk: a read boundary can fall
+            // inside a multi-byte codepoint, and decoding each chunk on its own
+            // would turn both halves into U+FFFD. The decoder holds the
+            // incomplete tail until the chunk that finishes it. Genuinely
+            // malformed bytes are still lossy — a stream is not a place to fail
+            // over one bad sequence, and the payloads are JSON the console
+            // re-parses.
+            for event in decoder.push_bytes(&chunk) {
                 on_event(event);
             }
         }
