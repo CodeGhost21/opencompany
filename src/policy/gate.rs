@@ -151,12 +151,20 @@ impl ManifestApprovalGate {
 
     /// Engages (`true`) or releases (`false`) the emergency stop.
     ///
+    /// Returns the **previous** value. The atomic swap is what makes a
+    /// transition race-safe: exactly one caller observes the old state, so
+    /// [`CompanyRuntime::emergency_pause`] and
+    /// [`CompanyRuntime::emergency_resume`] can journal an
+    /// [`EmergencyPauseChanged`](crate::ports::types::CompanyEvent::EmergencyPauseChanged)
+    /// event only for the caller that actually changed the switch, matching the
+    /// event count to the number of real transitions under a double-press.
+    ///
     /// `Ordering::SeqCst` on both ends: this is a safety flag read by request
     /// handlers on other threads, and the cost of the strongest ordering on a
     /// single boolean is irrelevant next to being sure a handler that starts
     /// after the switch was pulled observes it pulled.
-    pub fn set_emergency(&self, engaged: bool) {
-        self.emergency.store(engaged, Ordering::SeqCst);
+    pub fn set_emergency(&self, engaged: bool) -> bool {
+        self.emergency.swap(engaged, Ordering::SeqCst)
     }
 
     /// Whether the emergency stop is currently engaged.
