@@ -217,10 +217,13 @@ export function App() {
   // in-flight guard makes that safe regardless; this keeps it from happening.
   const connectionIds = connections.map((c) => c.id).join(",");
   useEffect(() => {
+    // Redemption must land first: a probe before it would read a session that
+    // does not exist yet and park the bootstrap row on `unauthenticated`.
+    if (!auth.ready) return;
     for (const id of connectionIds.split(",").filter(Boolean)) {
       void probe(id);
     }
-  }, [connectionIds]);
+  }, [auth.ready, connectionIds]);
 
   if (!auth.ready) {
     return (
