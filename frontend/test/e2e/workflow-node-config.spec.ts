@@ -80,10 +80,10 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await dialog.getByRole("textbox", { name: "Node name" }).nth(1).fill("Do it");
 
     // The config form is now mounted. Fill the engine-exact keys.
-    await dialog.getByRole("textbox", { name: "Tool slug", exact: true }).fill("web_search");
+    await dialog.getByRole("textbox", { name: "Tool slug", exact: true }).fill("web_fetch");
     await dialog
       .getByRole("textbox", { name: "Arguments", exact: true })
-      .fill('{ "query": "hi" }');
+      .fill('{ "url": "https://example.com" }');
 
     // Connect trigger → tool call so the graph is valid.
     await dialog.getByRole("button", { name: "Add edge" }).click();
@@ -107,7 +107,7 @@ test("authoring a tool_call node's config through the form round-trips to the ho
         },
         { timeout: 15_000 },
       )
-      .toEqual({ slug: "web_search", args: { query: "hi" } });
+      .toEqual({ slug: "web_fetch", args: { url: "https://example.com" } });
 
     // Reopen from the saved graph (a fresh load, not local state) and click the
     // node: the inspector's Config block shows the slug the host round-tripped.
@@ -120,7 +120,7 @@ test("authoring a tool_call node's config through the form round-trips to the ho
     await node.click();
 
     await expect(page.getByText("Config", { exact: true })).toBeVisible();
-    await expect(page.getByText(/"slug": "web_search"/)).toBeVisible();
+    await expect(page.getByText(/"slug": "web_fetch"/)).toBeVisible();
   } finally {
     await removeWorkflow(request, id);
   }
