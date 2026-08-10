@@ -241,7 +241,7 @@ whose desktop keeps working.
 The flow runs the opposite way to OAuth's device flow, which removes a problem
 rather than solving it:
 
-1. A **signed-in** human asks for a pairing code (`POST …/devices/pair`).
+1. A **signed-in** human asks for a pairing code (`POST …/devices`).
    Authentication has already happened; nothing is pending approval.
 2. They paste it into the desktop client.
 3. The client redeems it (`POST …/devices/claim`) and receives a session token

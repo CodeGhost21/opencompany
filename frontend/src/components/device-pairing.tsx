@@ -94,9 +94,17 @@ export function DevicePairing() {
               variant="outline"
               size="sm"
               onClick={() => {
-                void forgetDevice(scope.connection).then(() =>
-                  unpairConnection(scope.connection),
-                );
+                setError(null);
+                void forgetDevice(scope.connection)
+                  .then(() => unpairConnection(scope.connection))
+                  // Without this the rejection is unhandled, `unpairConnection`
+                  // never runs, and the button appears to do nothing — the row
+                  // still says "Paired" with no reason given.
+                  .catch((err: unknown) =>
+                    setError(
+                      err instanceof Error ? err.message : "could not forget this device",
+                    ),
+                  );
               }}
             >
               Forget on this machine

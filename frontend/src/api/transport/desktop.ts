@@ -96,10 +96,44 @@ export function registerConnection(
   return pending;
 }
 
-/** Drops a host from the core. */
+/**
+ * Drops a host from the core.
+ *
+ * Sequenced after any registration still in flight. This and
+ * `registerConnection` race the same way a request does: `oc_connect` resolving
+ * *after* `oc_disconnect` landed would leave the connection registered in the
+ * core while the console believes it is gone — a dangling entry that the next
+ * `registerConnection` for a reused id may or may not overwrite cleanly.
+ *
+ * Stays synchronous because callers are React event handlers, so the ordering
+ * is expressed by chaining onto the pending promise rather than by awaiting it.
+ * The map entry is cleared only once the disconnect has been issued; deleting
+ * it up front is what dropped the ordering in the first place.
+ */
 export function forgetConnection(id: string): void {
-  registrations.delete(id);
-  void bridge()?.invoke("oc_disconnect", { connectionId: id });
+  const desktop = bridge();
+  if (!desktop) {
+    registrations.delete(id);
+    return;
+  }
+  const pending = registrations.get(id) ?? Promise.resolve();
+  const disconnected: Promise<void> = pending
+    .then(() => desktop.invoke<void>("oc_disconnect", { connectionId: id }))
+    .then(
+      () => undefined,
+      (error: unknown) => {
+        console.error(`[desktop] could not drop connection ${id}`, error);
+      },
+    )
+    .finally(() => {
+      // Only remove the entry this call created. A `registerConnection` that
+      // landed while the disconnect was in flight owns the id now, and clearing
+      // its promise would let a request run before its registration.
+      if (registrations.get(id) === disconnected) registrations.delete(id);
+    });
+  // Parked under the same id so a `connectionReady` in between waits for the
+  // disconnect rather than racing past it.
+  registrations.set(id, disconnected);
 }
 
 /**

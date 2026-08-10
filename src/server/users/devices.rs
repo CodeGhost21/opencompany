@@ -18,7 +18,7 @@
 //! Turning the flow around removes the problem instead of solving it:
 //!
 //! 1. A **signed-in human** asks their console for a pairing code
-//!    (`POST …/devices/pair`). Authentication already happened; nothing is
+//!    (`POST …/devices`). Authentication already happened; nothing is
 //!    pending approval.
 //! 2. They paste it into the desktop client.
 //! 3. The client redeems it (`POST …/devices/claim`) and receives a session

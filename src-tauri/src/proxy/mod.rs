@@ -168,10 +168,15 @@ impl ProxyRegistry {
         self.connections.read().await.keys().cloned().collect()
     }
 
-    /// One registered connection, for a caller that needs its base url without
-    /// making a request — re-registering after a credential changes.
-    pub async fn connection(&self, id: &str) -> Result<Connection, ProxyError> {
-        self.get(id).await
+    /// The base url a connection is registered against.
+    ///
+    /// Returns the url alone, never the [`Connection`]: `get` is private
+    /// precisely so a credential cannot leave this registry, and a public
+    /// accessor handing back the whole struct would put `Credential::Device`
+    /// one `serde` derive away from the webview. The only caller needs the url
+    /// — to re-register after a credential changes — so the url is all it gets.
+    pub async fn base_url(&self, id: &str) -> Result<String, ProxyError> {
+        self.get(id).await.map(|connection| connection.base_url)
     }
 
     async fn get(&self, id: &str) -> Result<Connection, ProxyError> {
@@ -479,6 +484,33 @@ mod test {
         for name in ["content-type", "accept", "x-request-id"] {
             assert!(!reserved(name), "{name} must pass");
         }
+    }
+
+    #[tokio::test]
+    async fn the_public_accessor_hands_back_no_credential() {
+        // `get` is private so a credential cannot leave this registry. The one
+        // public accessor exists for a caller that needs somewhere to re-point
+        // a connection, and it must stay a url — a `Connection` here would put
+        // `Credential::Device` one `serde` derive away from the webview.
+        let registry = ProxyRegistry::new();
+        registry
+            .upsert(
+                "primary".into(),
+                Connection {
+                    base_url: "https://acme.test".into(),
+                    credential: Credential::Device("acme.the-secret".into()),
+                },
+            )
+            .await;
+
+        let url = registry
+            .base_url("primary")
+            .await
+            .expect("a registered host");
+        assert_eq!(url, "https://acme.test");
+        // The type is what enforces this; the assertion is here so a future
+        // widening of the return type has to delete a test that says why.
+        assert!(!url.contains("the-secret"));
     }
 
     #[test]

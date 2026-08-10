@@ -95,30 +95,64 @@ describe("registering connections with the core", () => {
     expect(JSON.stringify(connect?.args)).not.toContain("device-abc");
   });
 
-  it("keeps the token out of the console when pairing", async () => {
-    // The property the whole keychain exists for. `oc_pair_device` answers
-    // with what a person needs to see and nothing else — a console that
-    // received the token, even to hand it straight back, would be a console an
-    // injected script could read it from.
+  it("asks the core to pair, and passes the code and label through", async () => {
+    // What this CAN assert from the console: the command shape. Whether a token
+    // comes back is decided in Rust by `PairedDevice`, which has no token
+    // field — a mock here proves nothing about that, and the earlier version of
+    // this test omitted `token` from its own fixture and then asserted the
+    // absence of it, which is a test checking itself. The real guarantee is the
+    // Rust-side `a_paired_device_carries_no_token`.
     (window as unknown as { __TAURI__: { invoke: unknown } }).__TAURI__.invoke = (
       command: string,
       args: Record<string, unknown>,
     ) => {
       calls.push({ command, args });
-      return Promise.resolve({
-        company: "acme",
-        deviceId: "dev-1",
-        expiresAtMillis: 1,
-      });
+      return Promise.resolve({ company: "acme", deviceId: "dev-1", expiresAtMillis: 1 });
     };
 
     const device = await pairDevice("conn-1", "https://acme.test", "the-code", "Ada's Mac");
     expect(device).toEqual({ company: "acme", deviceId: "dev-1", expiresAtMillis: 1 });
-    expect(Object.keys(device)).not.toContain("token");
     expect(calls.at(-1)).toMatchObject({
       command: "oc_pair_device",
-      args: { connectionId: "conn-1", code: "the-code", label: "Ada's Mac" },
+      args: {
+        connectionId: "conn-1",
+        baseUrl: "https://acme.test",
+        code: "the-code",
+        label: "Ada's Mac",
+      },
     });
+  });
+
+  it("does not disconnect before a registration still in flight has landed", async () => {
+    // `oc_connect` resolving after `oc_disconnect` landed would leave the
+    // connection registered in the core while the console believes it is gone.
+    const order: string[] = [];
+    let releaseConnect: (() => void) | undefined;
+    (window as unknown as { __TAURI__: { invoke: unknown } }).__TAURI__.invoke = (
+      command: string,
+    ) => {
+      if (command === "oc_connect") {
+        return new Promise<void>((resolve) => {
+          releaseConnect = () => {
+            order.push("oc_connect");
+            resolve();
+          };
+        });
+      }
+      order.push(command);
+      return Promise.resolve();
+    };
+
+    const pending = registerConnection("conn-race", "https://acme.test");
+    forgetConnection("conn-race");
+    // Nothing has gone out yet: the connect is parked, so the disconnect is too.
+    expect(order).toEqual([]);
+
+    releaseConnect?.();
+    await pending;
+    await connectionReady("conn-race");
+
+    expect(order).toEqual(["oc_connect", "oc_disconnect"]);
   });
 
   it("re-announces when a connection adopts a new credential", async () => {
@@ -139,6 +173,9 @@ describe("registering connections with the core", () => {
     const id = addConnection({ baseUrl: "https://acme.test" });
     await connectionReady(id);
     removeConnection(id);
+    // The disconnect is sequenced behind any registration still in flight, so
+    // it is issued on a later tick rather than synchronously.
+    await connectionReady(id);
 
     expect(calls.filter((c) => c.command === "oc_disconnect")).toEqual([
       { command: "oc_disconnect", args: { connectionId: id } },
