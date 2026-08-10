@@ -4455,6 +4455,7 @@ label = "ok"
                         toml: GRAPH.to_string(),
                     }],
                     overlay_budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
                 })
