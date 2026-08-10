@@ -1138,7 +1138,7 @@ impl CompanyEvent {
             | Self::DeskTaskCompleted { .. }
             | Self::EmergencyPauseChanged { .. }
             | Self::TaskDiscussionPosted { .. }
-| Self::TaskDiscussionRedacted { .. } => Permanent,
+            | Self::TaskDiscussionRedacted { .. } => Permanent,
 
             // Permanent for the third reason, and the sharpest one: something
             // still *reads* this at boot.
