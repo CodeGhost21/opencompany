@@ -562,6 +562,14 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     // case — it must NOT be caught by the `error`-label ⇔ `on_error = "route"`
     // coupling check in the edge pass.
     let mut switch_nodes = std::collections::HashSet::new();
+    // Ids of every `condition` node, collected the same way as `switch_nodes`.
+    // Both are the branch kinds that can steer a run OUT of a loop, so the
+    // inescapable-cycle check below treats them alike: an SCC with no edge
+    // leaving it from a condition/switch is a trap the engine can never exit.
+    let mut condition_nodes = std::collections::HashSet::new();
+    // Ids of every `trigger` node (the graph's entry points), in file order.
+    // The reachability check below does a BFS from all of them.
+    let mut trigger_ids: Vec<&str> = Vec::new();
     // Ids of every `trigger` node carrying a `schedule`. More than one is
     // rejected below: the graph is ONE workflow, so two schedules on it would
     // double-run it on any minute both matched.
@@ -584,7 +592,12 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
         let kind = WorkflowNodeKind::parse(&node.kind);
         match kind {
-            Some(WorkflowNodeKind::Trigger) => trigger_count += 1,
+            Some(WorkflowNodeKind::Trigger) => {
+                trigger_count += 1;
+                if !node.id.trim().is_empty() {
+                    trigger_ids.push(node.id.as_str());
+                }
+            }
             Some(kind) => {
                 if kind != WorkflowNodeKind::Agent && node.agent.is_some() {
                     problems.push(format!(
@@ -602,6 +615,9 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
         if kind == Some(WorkflowNodeKind::Switch) && !node.id.trim().is_empty() {
             switch_nodes.insert(node.id.as_str());
+        }
+        if kind == Some(WorkflowNodeKind::Condition) && !node.id.trim().is_empty() {
+            condition_nodes.insert(node.id.as_str());
         }
 
         // `schedule` says *when* the workflow starts, so it is trigger-only —
@@ -859,6 +875,164 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
         }
     }
 
+    // --- Graph traversal: inescapable cycles + reachability -----------------
+    //
+    // Everything above checks a node or an edge in isolation. These two checks
+    // are about the SHAPE of the whole graph, so they run last, over a directed
+    // graph built only from edges whose BOTH endpoints resolve to real nodes —
+    // an unresolved endpoint already produced its own problem above, and a
+    // self-loop already did too, so neither cascades a second, confusing message
+    // here. A branch label (`yes` / `error` / a switch case) is an ordinary
+    // directed edge for traversal; it steers WHICH way the run goes, not whether
+    // the edge exists.
+    let mut node_ids: Vec<&str> = Vec::new();
+    let mut index_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for node in &raw.nodes {
+        let id = node.id.as_str();
+        if id.trim().is_empty() {
+            continue;
+        }
+        // First occurrence wins, mirroring `seen`; a duplicate id is one vertex.
+        index_of.entry(id).or_insert_with(|| {
+            node_ids.push(id);
+            node_ids.len() - 1
+        });
+    }
+    let node_count = node_ids.len();
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    for edge in &raw.edges {
+        if let (Some(&from), Some(&to)) = (
+            index_of.get(edge.from.as_str()),
+            index_of.get(edge.to.as_str()),
+        ) {
+            adjacency[from].push(to);
+        }
+    }
+
+    // Tarjan's strongly-connected-components, iteratively (a recursive DFS could
+    // blow the stack on a pathological hand-authored graph). `scc_of[v]` is the
+    // component index of node `v`; nodes in the same component are mutually
+    // reachable — i.e. they form a cycle.
+    let mut scc_of = vec![usize::MAX; node_count];
+    let mut disc = vec![usize::MAX; node_count];
+    let mut low = vec![0usize; node_count];
+    let mut on_stack = vec![false; node_count];
+    let mut tarjan_stack: Vec<usize> = Vec::new();
+    let mut next_disc = 0usize;
+    let mut scc_count = 0usize;
+    for start in 0..node_count {
+        if disc[start] != usize::MAX {
+            continue;
+        }
+        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&(v, child)) = call_stack.last() {
+            if child == 0 {
+                disc[v] = next_disc;
+                low[v] = next_disc;
+                next_disc += 1;
+                tarjan_stack.push(v);
+                on_stack[v] = true;
+            }
+            if child < adjacency[v].len() {
+                let w = adjacency[v][child];
+                call_stack.last_mut().unwrap().1 += 1;
+                if disc[w] == usize::MAX {
+                    call_stack.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(disc[w]);
+                }
+            } else {
+                if low[v] == disc[v] {
+                    loop {
+                        let w = tarjan_stack.pop().unwrap();
+                        on_stack[w] = false;
+                        scc_of[w] = scc_count;
+                        if w == v {
+                            break;
+                        }
+                    }
+                    scc_count += 1;
+                }
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+            }
+        }
+    }
+
+    // Inescapable-cycle check. A cycle is FINE as long as the run can choose to
+    // leave it — that is what a guarded retry loop is (a `condition`/`switch`
+    // inside the loop with a branch that exits it). So for every SCC bigger than
+    // one node, require at least one `condition`/`switch` member with an edge
+    // that leaves the SCC. An SCC with no such exit is a trap: once the run
+    // enters, every path leads back in, and it never terminates.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); scc_count];
+    for v in 0..node_count {
+        members[scc_of[v]].push(v); // ascending v == file order
+    }
+    for component in &members {
+        if component.len() < 2 {
+            continue;
+        }
+        let scc = scc_of[component[0]];
+        let has_exit = component.iter().any(|&v| {
+            (condition_nodes.contains(node_ids[v]) || switch_nodes.contains(node_ids[v]))
+                && adjacency[v].iter().any(|&w| scc_of[w] != scc)
+        });
+        if !has_exit {
+            let names: Vec<String> = component
+                .iter()
+                .map(|&v| format!("`{}`", node_ids[v]))
+                .collect();
+            problems.push(format!(
+                "nodes {} form a loop with no conditional way out — add a `condition`/`switch` branch that leaves the loop, or remove an edge.",
+                names.join(", ")
+            ));
+        }
+    }
+
+    // Reachability check. Every node must sit on some path from a `trigger`, or
+    // the engine will never execute it. SKIPPED entirely when there are no
+    // triggers: the "needs at least one trigger" problem already fired above, and
+    // without an entry point EVERY node is trivially unreachable — reporting all
+    // of them would just bury the real problem in noise.
+    if trigger_count > 0 {
+        let mut reached = vec![false; node_count];
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        for tid in &trigger_ids {
+            if let Some(&i) = index_of.get(tid)
+                && !reached[i]
+            {
+                reached[i] = true;
+                queue.push_back(i);
+            }
+        }
+        while let Some(v) = queue.pop_front() {
+            for &w in &adjacency[v] {
+                if !reached[w] {
+                    reached[w] = true;
+                    queue.push_back(w);
+                }
+            }
+        }
+        let unreached: Vec<String> = (0..node_count)
+            .filter(|&v| !reached[v])
+            .map(|v| format!("`{}`", node_ids[v]))
+            .collect();
+        if !unreached.is_empty() {
+            let (subject, tail) = if unreached.len() == 1 {
+                ("node", "it")
+            } else {
+                ("nodes", "them")
+            };
+            problems.push(format!(
+                "{subject} {} cannot be reached from any `trigger` — connect an edge that leads to {tail}, or remove {tail}.",
+                unreached.join(", ")
+            ));
+        }
+    }
+
     problems
 }
 
@@ -1107,6 +1281,9 @@ mod tests {
             [node.config.args]
             filename = "out.csv"
             data = "[]"
+            [[edge]]
+            from = "start"
+            to = "call"
         "#;
         let file = parse_workflow(src).expect("config parses");
         let call = file.nodes.iter().find(|n| n.id == "call").unwrap();
@@ -1151,6 +1328,9 @@ mod tests {
             max_attempts = 3
             backoff_ms = 100
             backoff = "exponential"
+            [[edge]]
+            from = "start"
+            to = "call"
         "#;
         let file = parse_workflow(src).expect("parses");
         let call = file.nodes.iter().find(|n| n.id == "call").unwrap();
@@ -1367,6 +1547,21 @@ mod tests {
             id = "op"
             kind = "output_parser"
             name = "Parse"
+            [[edge]]
+            from = "start"
+            to = "sw"
+            [[edge]]
+            from = "sw"
+            to = "mg"
+            [[edge]]
+            from = "mg"
+            to = "so"
+            [[edge]]
+            from = "so"
+            to = "tf"
+            [[edge]]
+            from = "tf"
+            to = "op"
         "#;
         let file = parse_workflow(src).expect("new kinds parse");
         let kind = |id: &str| file.nodes.iter().find(|n| n.id == id).unwrap().kind;
@@ -1531,6 +1726,200 @@ mod tests {
         assert!(
             parse_workflow(src).is_ok(),
             "an error-labeled switch case must be valid without on_error = route"
+        );
+    }
+
+    // --- G15: inescapable cycles + reachability (issue #540) ----------------
+
+    /// A bare two-node cycle with no branch to leave it is a trap: once the run
+    /// reaches `a` it loops `a → b → a` forever. Rejected, naming both nodes.
+    /// (Negative control for the cycle check: delete the SCC-exit check and this
+    /// graph — which has no condition/switch at all — would wrongly pass.)
+    #[test]
+    fn multi_node_cycle_with_no_exit_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "a"
+            kind = "agent"
+            name = "A"
+            agent = "ceo"
+            [[node]]
+            id = "b"
+            kind = "agent"
+            name = "B"
+            agent = "ceo"
+            [[edge]]
+            from = "start"
+            to = "a"
+            [[edge]]
+            from = "a"
+            to = "b"
+            [[edge]]
+            from = "b"
+            to = "a"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("form a loop"), "{message}");
+        assert!(message.contains("`a`"), "{message}");
+        assert!(message.contains("`b`"), "{message}");
+    }
+
+    /// A miniature of the shipped `game_build_pipeline` shape: a `condition`
+    /// guards the loop, with a `pass` branch that leaves it and a `fail` branch
+    /// that loops back. That is a legal bounded retry — it must parse clean.
+    #[test]
+    fn condition_guarded_loop_is_valid() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "work"
+            kind = "agent"
+            name = "Work"
+            agent = "ceo"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Good enough?"
+            [[node]]
+            id = "done"
+            kind = "output"
+            name = "Ship"
+            [[edge]]
+            from = "start"
+            to = "work"
+            [[edge]]
+            from = "work"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "done"
+            label = "pass"
+            [[edge]]
+            from = "gate"
+            to = "work"
+            label = "fail"
+        "#;
+        assert!(
+            parse_workflow(src).is_ok(),
+            "a condition-guarded retry loop must stay valid"
+        );
+    }
+
+    /// The shipped guarded-retry preset itself must stay valid — its loop
+    /// (`gameplay → assets → balance → qa → gate → gameplay`) is escapable
+    /// because `gate` is a `condition` whose `pass` branch leaves the loop.
+    #[test]
+    fn the_shipped_guarded_loop_preset_is_valid() {
+        const GAME: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/companies/agentic_game_studio/workflows/game_build_pipeline.toml"
+        ));
+        parse_workflow(GAME).expect("the game-studio guarded loop is valid");
+    }
+
+    /// A cycle that DOES contain a `condition`, but whose only edges all stay
+    /// inside the loop, is still inescapable — a branch that never leaves the SCC
+    /// buys nothing. (Negative control: the exit test, not merely "contains a
+    /// condition", is what this asserts.)
+    #[test]
+    fn inescapable_cycle_containing_condition_with_no_exit_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "a"
+            kind = "agent"
+            name = "A"
+            agent = "ceo"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [[edge]]
+            from = "start"
+            to = "a"
+            [[edge]]
+            from = "a"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "a"
+            label = "again"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("form a loop"), "{err}");
+    }
+
+    /// A node no edge ever reaches from the trigger would never execute. It is
+    /// rejected, naming the orphan. (Negative control for reachability.)
+    #[test]
+    fn unreachable_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "reached"
+            kind = "output"
+            name = "Reached"
+            [[node]]
+            id = "orphan"
+            kind = "output"
+            name = "Orphan"
+            [[edge]]
+            from = "start"
+            to = "reached"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cannot be reached"), "{message}");
+        assert!(message.contains("`orphan`"), "{message}");
+        // The reached node must NOT be named — only the genuine orphan.
+        assert!(!message.contains("`reached`"), "{message}");
+    }
+
+    /// With no trigger at all, the reachability check stays silent: the
+    /// "needs at least one trigger" problem is the real one, and flagging every
+    /// node as unreachable on top of it would just be noise.
+    #[test]
+    fn no_trigger_skips_reachability_noise() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "only"
+            kind = "output"
+            name = "Only"
+            [[node]]
+            id = "other"
+            kind = "output"
+            name = "Other"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("trigger"), "{message}");
+        assert!(
+            !message.contains("cannot be reached"),
+            "reachability must be skipped with no trigger: {message}"
         );
     }
 
