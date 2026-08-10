@@ -3,7 +3,8 @@
 `PUT …/workflows/{wid}/enabled` with `{"enabled": false}` stops a workflow's
 schedule without deleting it. **Pausing stops the schedule, not the workflow**:
 a paused workflow keeps its graph, stays in the picker and still runs from the
-Run button. `WorkflowScheduler::tick` is the only reader of the flag.
+Run button. `WorkflowScheduler::tick` is the only execution gate that uses the
+flag to skip scheduled runs.
 
 The switch is `CompanyRecord.disabled_workflows`, **not** the manifest's
 `[workflows].enabled`. That list is a declaration of what this company was
