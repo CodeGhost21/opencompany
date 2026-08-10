@@ -168,6 +168,12 @@ impl ProxyRegistry {
         self.connections.read().await.keys().cloned().collect()
     }
 
+    /// One registered connection, for a caller that needs its base url without
+    /// making a request — re-registering after a credential changes.
+    pub async fn connection(&self, id: &str) -> Result<Connection, ProxyError> {
+        self.get(id).await
+    }
+
     async fn get(&self, id: &str) -> Result<Connection, ProxyError> {
         self.connections
             .read()
