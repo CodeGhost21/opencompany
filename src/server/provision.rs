@@ -446,7 +446,7 @@ async fn emergency_resume(
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<Json<EmergencyBody>>,
+    body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
     let id = CompanyId::new(id);
     if let Some(resp) = authorize_address(&state, &auth, &id) {
@@ -455,7 +455,10 @@ async fn emergency_resume(
     if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
         return resp;
     }
-    let body = body.map(|Json(b)| b).unwrap_or(EmergencyBody {
+    // Same contract as `emergency_pause`: a missing, empty, or malformed body
+    // reads as "no step-up was supplied" and answers with the documented
+    // `confirmation_required` envelope rather than a bare `Json` rejection.
+    let body = body.ok().map(|Json(b)| b).unwrap_or(EmergencyBody {
         confirm: String::new(),
         reason: None,
     });
