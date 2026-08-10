@@ -169,6 +169,40 @@ mod tests {
         assert!(PRESETS.iter().all(|preset| !preset.manifest.is_empty()));
     }
 
+    /// No shipped template narrows Composio to a hand-written toolkit list.
+    ///
+    /// Absent means open mode: the host answers with the backend's live catalog,
+    /// which is every toolkit it permits. A non-empty list is authoritative and
+    /// offered verbatim — the catalog is not consulted and nothing may widen it —
+    /// so declaring one here caps both the agent belt and the Connections tab at
+    /// whatever was typed, for every operator who starts from that template.
+    ///
+    /// `agentic_software_company` briefly carried such a list, added to work
+    /// around a console that rendered zero provider rows for an empty one
+    /// (#397). That root cause is fixed, so a list added here now buys nothing
+    /// and silently restores the cap. Narrowing a template is a legitimate
+    /// choice — it is just one that has to be made deliberately, which is what
+    /// this test forces (#550).
+    #[test]
+    fn no_shipped_template_caps_the_composio_toolkit_list() {
+        for preset in PRESETS {
+            let manifest: toml::Value = toml::from_str(preset.manifest)
+                .unwrap_or_else(|e| panic!("{} manifest does not parse: {e}", preset.id));
+            let declared = manifest
+                .get("tools")
+                .and_then(|tools| tools.get("composio"))
+                .and_then(|composio| composio.get("toolkits"));
+            assert!(
+                declared.is_none(),
+                "{} declares [tools.composio].toolkits = {:?}, which pins its \
+                 Connections tab to that list instead of the backend's catalog. \
+                 Remove it, or narrow this template on purpose and say why here.",
+                preset.id,
+                declared.unwrap(),
+            );
+        }
+    }
+
     #[tokio::test]
     async fn starts_a_loopback_runtime_from_the_default_preset() {
         let directory = tempfile::tempdir().unwrap();

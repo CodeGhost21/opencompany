@@ -16,20 +16,21 @@ human_role = "Product direction"
 # bearer, media backend, per-server MCP config).
 allow = ["*", "media", "composio"]
 
-# The Composio toolkits this company may reach. Two effects, and the second is
-# the reason this is set rather than left empty:
+# There is deliberately no `[tools.composio].toolkits` here. Absent means "open
+# mode": defer to the backend's own server-enforced allowlist, which is every
+# toolkit it permits — roughly a hundred — rather than a list this file has to
+# keep in step by hand.
 #
-#  1. Runtime narrowing — a toolkit outside this list is rejected client-side,
-#     before any network call. Empty would defer to the backend's own
-#     server-enforced allowlist ("open mode"), which is not unsafe, just wider.
-#  2. The console's per-provider "Sign in" list renders from THIS list. With it
-#     empty the Connections tab shows no provider rows at all, so an operator has
-#     no way to start an OAuth handoff from the UI.
+# A non-empty list would be authoritative and offered verbatim: the backend
+# catalog is not consulted and nothing may widen it, because a fetch must never
+# hand a company providers it decided against. So setting it caps both the agent
+# belt and the Connections tab at whatever is typed here.
 #
-# Keep it to the toolkits a company is actually expected to use; adding one here
-# is what makes it appear in the Connections tab.
-[tools.composio]
-toolkits = ["gmail", "slack", "github"]
+# It briefly was set, as a workaround for the console rendering zero provider
+# rows on an empty list (#397). That root cause is fixed — the host now answers
+# open mode with the live catalog — so re-adding a list here to make providers
+# appear would restore the cap it was meant to relieve. Narrow it only to
+# genuinely narrow this company.
 
 [[agent]]
 id = "product_manager"
