@@ -45,7 +45,7 @@ use crate::Result;
 use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::EventLog;
+use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::login_codes::LoginCodeRecord;
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
@@ -444,6 +444,40 @@ impl EventLog for MongoStore {
             }
         });
         Box::pin(stream)
+    }
+
+    async fn prune(&self, id: &CompanyId, policy: &RetentionPolicy) -> Result<PruneReport> {
+        // Same whole-log read as the sqlite backend, and for the same reason:
+        // the decision belongs to `plan_prune` so the three backends cannot
+        // disagree about what a policy means.
+        let all = self.read_from(id, EventSeq::new(0), usize::MAX).await?;
+        let doomed = plan_prune(&all, policy);
+
+        let mut report = PruneReport {
+            scanned: all.len(),
+            removed: 0,
+            oldest_retained: all.iter().map(|e| e.seq).min(),
+        };
+        if doomed.is_empty() {
+            return Ok(report);
+        }
+
+        let seqs: Vec<i64> = doomed.iter().map(|s| s.value() as i64).collect();
+        self.collection("events")
+            .delete_many(doc! {
+                "company_id": id.as_ref(),
+                "seq": {"$in": seqs},
+            })
+            .await
+            .map_err(mongo_err)?;
+
+        report.removed = doomed.len();
+        report.oldest_retained = all
+            .iter()
+            .map(|e| e.seq)
+            .filter(|seq| doomed.binary_search(seq).is_err())
+            .min();
+        Ok(report)
     }
 }
 
@@ -2029,6 +2063,13 @@ mod test {
     async fn conformance_monotonic_event_seq() {
         let Some(s) = store().await else { return };
         conformance::assert_monotonic_event_seq(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_retention() {
+        let Some(s) = store().await else { return };
+        conformance::assert_event_retention(s.clone()).await;
         drop_db(&s).await;
     }
 

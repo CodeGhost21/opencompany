@@ -187,22 +187,70 @@ fn restart_pending(runtime: &CompanyRuntime, configured: bool) -> bool {
         && harness_reachable(runtime)
 }
 
-/// [`restart_pending`] resolved from scratch, for callers outside this module
-/// that hold only a runtime.
+/// The three distinct reasons a company's `workflow_runner()` is `None`. All
+/// three look identical from `workflow_runner() == None`, but the operator's
+/// next step differs for each, so the run route classifies before answering
+/// (issues #266, #514).
+pub(crate) enum RunnerGap {
+    /// A saved inference config is stranded behind a boot-time decision: a
+    /// restart would rebuild the runner from it. → `restart_required` (issue
+    /// #266).
+    RestartPending,
+    /// Nothing is configured, but this host *could* run the harness — so the
+    /// operator has to configure an inference source first (which triggers
+    /// #290's rebuild-in-place). → `inference_required` (issue #514).
+    InferenceRequired,
+    /// This build/deployment genuinely has no workflow execution, or no restart
+    /// or config here would produce one (default build, resolve error, or a
+    /// company already on the harness path). → `not_wired`.
+    NotWired,
+}
+
+/// Classifies *why* a company has no workflow runner, resolving inference from
+/// scratch in one manifest read/resolve pass.
 ///
-/// The workflow-run route uses it to tell "this build has no workflow execution"
-/// apart from "this *boot* has none, and a restart would fix it" — the two look
-/// identical from `workflow_runner() == None`, and the operator's next step is
-/// completely different. Degrades to `false` on a resolve error: a config we
-/// cannot read is not evidence that a restart would help.
-pub(crate) async fn restart_pending_for(runtime: &CompanyRuntime) -> bool {
+/// The workflow-run route uses it to pick between three responses a bare
+/// `workflow_runner() == None` cannot tell apart (issues #266, #514):
+///
+/// - [`RunnerGap::RestartPending`] — a config resolves *now*, the company is off
+///   the harness path, and the harness is reachable here, so a restart would
+///   wire the runner (the same predicate `build` tests, via [`restart_pending`]).
+/// - [`RunnerGap::InferenceRequired`] — nothing resolves, but the harness is
+///   reachable and the company is off the harness path, so *configuring* an
+///   inference source is what wires the runner. Telling this operator the
+///   deployment is "not wired" is a lie: the deployment is fine; the company
+///   just has no brain yet.
+/// - [`RunnerGap::NotWired`] — everything else: the default build with no
+///   harness, a resolve error (a config we cannot read is not evidence a restart
+///   or a save would help — the #266 doctrine), or a company already on the
+///   harness path.
+pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
     let Ok(manifest) = manifest_inference(runtime).await else {
-        return false;
+        return RunnerGap::NotWired;
     };
-    let configured = resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
-        .await
-        .is_ok_and(|decl| decl.is_some());
-    restart_pending(runtime, configured)
+    // A resolve *error* is not the same as a clean resolve to nothing. `Err`
+    // means the config could not be read at all — which the #266 doctrine says
+    // is not evidence that a restart or a save would help, so it degrades to
+    // `NotWired`. Only `Ok(None)` — inference resolved, and nothing is set — can
+    // make configuring inference the honest next step. Folding the two together
+    // (the old `is_ok_and`) would tell an operator whose config we cannot read
+    // to "configure inference", a 409 promising a fix that may not exist.
+    let (configured, resolved_to_nothing) =
+        match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
+            Ok(Some(_)) => (true, false),
+            Ok(None) => (false, true),
+            Err(_) => (false, false),
+        };
+    if restart_pending(runtime, configured) {
+        return RunnerGap::RestartPending;
+    }
+    if resolved_to_nothing
+        && harness_reachable(runtime)
+        && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
+    {
+        return RunnerGap::InferenceRequired;
+    }
+    RunnerGap::NotWired
 }
 
 /// Resolves the effective status DTO. The ops layer resolves *tenant* config
@@ -773,17 +821,20 @@ mod tests {
         let (_, resp, _) = send(&state, "DELETE", "/api/v1/company/inference", None).await;
         assert_eq!(resp["status"]["restartRequired"], false);
 
-        // ...and with nothing pending, the run route is back to the honest
-        // "this deployment has no workflow execution" 404.
-        let (status, err, _) = send(
+        // #514: ...and with nothing pending BUT the harness reachable here,
+        // the run route no longer 404s "no workflow execution" — it names the
+        // real dead end, that this company never configured inference. (Before
+        // #514 this asserted 404 `not_wired`; that was the third, unhandled
+        // cause the console read as a permanent gap and degraded to read-only.)
+        let (status, err, raw) = send(
             &state,
             "POST",
             "/api/v1/company/workflows/daily/run",
             Some(json!({})),
         )
         .await;
-        assert_eq!(status, StatusCode::NOT_FOUND);
-        assert_eq!(err["code"], "not_wired");
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "inference_required");
     }
 
     /// A brain standing in for the one a rebuild puts a configured company on,
@@ -910,5 +961,196 @@ mod tests {
         let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
         assert_eq!(dto["restartRequired"], false);
         assert_eq!(dto["cognition"], "harness");
+    }
+
+    /// Issue #514, case (c): a company built with a harness pool that never
+    /// configured any inference source. `workflow_runner()` is `None` — but not
+    /// because the deployment lacks execution (the harness is right here) and
+    /// not because a saved config is stranded behind a boot decision (nothing
+    /// was ever saved). The run route must name the real dead end:
+    /// `inference_required` (409), pointing the operator at Settings — NOT the
+    /// `not_wired` 404 the console reads as a permanent gap and degrades to a
+    /// read-only view on.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn running_a_workflow_with_no_inference_configured_asks_to_configure_inference() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        // Precondition (case c): the harness was reachable, nothing is
+        // configured, and the company still landed with no runner — the exact
+        // shape that used to 404 `not_wired`.
+        assert_eq!(runtime.cognition().path, "echo");
+        assert!(runtime.workflow_runner().is_none());
+
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        // Nothing configured — the status read agrees.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["source"], "managed");
+        assert_eq!(dto["restartRequired"], false);
+
+        // The run route names the fix instead of blaming the deployment.
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "inference_required");
+        let msg = err["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("inference"),
+            "message must name inference: {msg}"
+        );
+        assert!(
+            msg.contains("Settings"),
+            "message must point at Settings: {msg}"
+        );
+        assert!(
+            !msg.contains("not wired"),
+            "message must not say 'not wired': {msg}"
+        );
+        assert!(
+            !msg.contains("deployment"),
+            "message must not blame the deployment: {msg}"
+        );
+
+        // The dead end left nothing behind — run history is still empty.
+        let (status, runs, raw) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(runs.as_array().map(Vec::len), Some(0), "{runs}");
+    }
+
+    /// Issue #514 (review): a config that cannot be *read* is not evidence to
+    /// tell the operator to configure inference. When `resolve_effective`
+    /// returns `Err` — the secret store is unreachable — the classifier must
+    /// degrade to `NotWired` (404), never `inference_required` (409), even with
+    /// a harness right here. A 409 would promise a fix ("configure inference")
+    /// that a resolve *failure* gives no reason to expect; the #266 doctrine is
+    /// that an unreadable config is not evidence a save would help. Guards the
+    /// `Err(_) => (false, false)` arm of `runner_gap_for` against a regression
+    /// back to the old `is_ok_and`, which folded `Err` into "not configured".
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_resolve_error_stays_not_wired_even_with_a_harness() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::SecretValue;
+
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl crate::ports::SecretStore for FailingSecrets {
+            async fn get(&self, _c: &CompanyId, _key: &str) -> crate::Result<Option<SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "secret store unreachable".into(),
+                ))
+            }
+            async fn set(&self, _c: &CompanyId, _key: &str, _v: SecretValue) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .with_secrets(std::sync::Arc::new(FailingSecrets))
+            .build()
+            .await
+            .unwrap();
+        assert!(runtime.workflow_runner().is_none());
+
+        // The classifier degrades an unreadable config to NotWired...
+        assert!(
+            matches!(
+                super::runner_gap_for(&runtime).await,
+                super::RunnerGap::NotWired
+            ),
+            "a resolve error must classify as NotWired, not InferenceRequired",
+        );
+
+        // ...and the run route answers 404 `not_wired`, not 409 `inference_required`.
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
+    }
+
+    /// Issue #514 negative control: on the default build (no `openhuman`
+    /// feature, so no harness is reachable), an unconfigured company still gets
+    /// the honest `not_wired` 404. The `inference_required` arm must NOT fire
+    /// where configuring inference would be a false promise — there is no
+    /// harness here to run it, so a restart or a save changes nothing.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn running_a_workflow_on_the_default_build_stays_not_wired() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
+    }
+
+    /// Issue #514 negative control: a company that *has* configured inference
+    /// but runs on a build with no harness reachable still gets `not_wired`.
+    /// Neither the `restart_pending` arm (no harness → a restart changes
+    /// nothing) nor the `inference_required` arm (a config is already present)
+    /// applies.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn running_a_workflow_configured_without_a_harness_stays_not_wired() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, _, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
     }
 }
