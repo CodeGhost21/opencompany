@@ -2297,6 +2297,12 @@ to = "done"
 
     /// A manifest with the `assistant` roster agent AND an explicit
     /// `[tools].allow`, so tool_call grant coverage can be exercised precisely.
+    ///
+    /// Only the tool_call grant-coverage tests use this, and every one of them
+    /// is gated on `openhuman` (the tool catalogue lives behind that feature);
+    /// without the gate the helper is dead code at default features and trips
+    /// `-D warnings` in the default `Rust` CI lane.
+    #[cfg(feature = "openhuman")]
     fn manifest_with_allow(allow: &[&str]) -> CompanyManifest {
         let list = allow
             .iter()
