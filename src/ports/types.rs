@@ -1068,11 +1068,13 @@ impl CompanyEvent {
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
             Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
+            Self::EmergencyPauseChanged { .. } => "EmergencyPauseChanged",
             Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
             Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
+            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
         }
     }
 
