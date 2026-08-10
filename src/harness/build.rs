@@ -458,6 +458,7 @@ pub fn build_agent(
             Some(crate::harness::workspace_tools::workspace_tools(
                 store.clone(),
                 company.clone(),
+                manifest_agent.id.clone(),
                 workspace_writes,
             ))
         }

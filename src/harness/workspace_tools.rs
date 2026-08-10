@@ -130,7 +130,7 @@ use openhuman_core::openhuman as oh;
 
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::types::CompanyId;
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 /// Tool name: list the company workspace's path index.
 pub const WORKSPACE_LIST_TOOL: &str = "workspace_list";
@@ -224,20 +224,37 @@ const MAX_PATH_DEPTH: usize = 64;
 // The company-scoped handle
 // ---------------------------------------------------------------------------
 
-/// A [`WorkspaceStore`] pinned to one company — the object every tool holds.
+/// A [`WorkspaceStore`] pinned to one company and one agent — the object every
+/// tool holds.
 ///
-/// The `company` is set once at agent-build time and is never derived from tool
-/// arguments, which is what makes the tenancy argument in the module docs hold.
+/// Both `company` and `agent_id` are set once at agent-build time and are never
+/// derived from tool arguments. For `company` that is what makes the tenancy
+/// argument in the module docs hold; for `agent_id` it is what makes the
+/// authorship stamp trustworthy — an agent cannot claim to be another agent,
+/// because it never gets to say who it is.
 #[derive(Clone)]
 pub struct CompanyWorkspace {
     store: Arc<dyn WorkspaceStore>,
     company: CompanyId,
+    agent_id: String,
 }
 
 impl CompanyWorkspace {
-    /// Pin `store` to `company`.
-    pub fn new(store: Arc<dyn WorkspaceStore>, company: CompanyId) -> Self {
-        Self { store, company }
+    /// Pin `store` to `company`, writing as `agent_id`.
+    pub fn new(store: Arc<dyn WorkspaceStore>, company: CompanyId, agent_id: String) -> Self {
+        Self {
+            store,
+            company,
+            agent_id,
+        }
+    }
+
+    /// This agent's origin, for stamping [`WorkspaceNode::created_by`] /
+    /// [`WorkspaceNode::updated_by`].
+    fn origin(&self) -> WorkspaceOrigin {
+        WorkspaceOrigin::Agent {
+            id: self.agent_id.clone(),
+        }
     }
 
     /// Read this company's whole tree and build the path index.
@@ -1080,7 +1097,12 @@ impl Tool for WorkspaceWriteTool {
         match self
             .workspace
             .store
-            .write(&self.workspace.company, &entry.node.id, content)
+            .write(
+                &self.workspace.company,
+                &entry.node.id,
+                content,
+                self.workspace.origin(),
+            )
             .await
         {
             Ok(node) => Ok(ToolResult::success(format!(
@@ -1112,9 +1134,10 @@ impl Tool for WorkspaceWriteTool {
 pub fn workspace_tools(
     store: Arc<dyn WorkspaceStore>,
     company: CompanyId,
+    agent_id: String,
     can_write: bool,
 ) -> Vec<Box<dyn Tool>> {
-    let workspace = CompanyWorkspace::new(store, company);
+    let workspace = CompanyWorkspace::new(store, company, agent_id);
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(WorkspaceListTool::new(workspace.clone())),
         Box::new(WorkspaceReadTool::new(workspace.clone())),
@@ -1132,6 +1155,22 @@ mod tests {
 
     // -- helpers ------------------------------------------------------------
 
+    /// The agent every test writes as, so an authorship assertion has a name to
+    /// check against.
+    const TEST_AGENT: &str = "ceo";
+
+    /// A [`CompanyWorkspace`] pinned to `company`, writing as [`TEST_AGENT`].
+    fn ws(store: Arc<dyn WorkspaceStore>, company: CompanyId) -> CompanyWorkspace {
+        CompanyWorkspace::new(store, company, TEST_AGENT.to_string())
+    }
+
+    /// This agent's origin — what a create or a write must stamp.
+    fn agent_origin() -> WorkspaceOrigin {
+        WorkspaceOrigin::Agent {
+            id: TEST_AGENT.to_string(),
+        }
+    }
+
     fn folder(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
         WorkspaceNode {
             id: id.to_string(),
@@ -1139,6 +1178,8 @@ mod tests {
             kind: NodeKind::Folder,
             parent_id: parent.map(str::to_string),
             updated_at_millis: 1_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
         }
     }
 
@@ -1149,6 +1190,8 @@ mod tests {
             kind: NodeKind::File,
             parent_id: parent.map(str::to_string),
             updated_at_millis: 2_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
         }
     }
 
@@ -1330,10 +1373,7 @@ mod tests {
     #[tokio::test]
     async fn tenancy_company_b_cannot_list_company_a_notes() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceListTool::new(CompanyWorkspace::new(
-            store.clone(),
-            CompanyId::new("other"),
-        ));
+        let tool = WorkspaceListTool::new(ws(store.clone(), CompanyId::new("other")));
         let out = text(&tool.execute(json!({})).await.unwrap());
         assert!(out.contains("workspace is empty"), "{out}");
         assert!(!out.contains("Engineering standards.md"), "{out}");
@@ -1346,15 +1386,11 @@ mod tests {
     async fn tenancy_a_borrowed_node_id_does_not_resolve_for_another_company() {
         let (_dir, store) = seeded("acme").await;
         // Sanity: the id is real and readable for its owner.
-        let owner =
-            WorkspaceReadTool::new(CompanyWorkspace::new(store.clone(), CompanyId::new("acme")));
+        let owner = WorkspaceReadTool::new(ws(store.clone(), CompanyId::new("acme")));
         let owned = text(&owner.execute(json!({"id": "n-eng"})).await.unwrap());
         assert!(owned.contains("Review every PR."), "{owned}");
 
-        let intruder = WorkspaceReadTool::new(CompanyWorkspace::new(
-            store.clone(),
-            CompanyId::new("other"),
-        ));
+        let intruder = WorkspaceReadTool::new(ws(store.clone(), CompanyId::new("other")));
         let result = intruder.execute(json!({"id": "n-eng"})).await.unwrap();
         assert!(result.is_error, "a borrowed id must not read");
         let out = text(&result);
@@ -1367,10 +1403,7 @@ mod tests {
     #[tokio::test]
     async fn tenancy_a_borrowed_node_id_cannot_be_written_by_another_company() {
         let (_dir, store) = seeded("acme").await;
-        let intruder = WorkspaceWriteTool::new(CompanyWorkspace::new(
-            store.clone(),
-            CompanyId::new("other"),
-        ));
+        let intruder = WorkspaceWriteTool::new(ws(store.clone(), CompanyId::new("other")));
         let result = intruder
             .execute(json!({
                 "id": "n-eng",
@@ -1395,7 +1428,7 @@ mod tests {
     #[tokio::test]
     async fn traversal_paths_cannot_escape_the_company_tree() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceReadTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         for path in [
             "../../../../etc/passwd",
             "Standards/../../../etc/passwd",
@@ -1414,7 +1447,7 @@ mod tests {
     #[tokio::test]
     async fn list_renders_paths_ids_and_revisions_and_prefix_narrows() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceListTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
 
         let all = text(&tool.execute(json!({})).await.unwrap());
         assert!(all.contains("folder\tStandards\tid=f-standards"), "{all}");
@@ -1432,7 +1465,7 @@ mod tests {
     #[tokio::test]
     async fn read_fences_the_body_and_hands_back_the_revision() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceReadTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         let out = text(
             &tool
                 .execute(json!({"path": "Standards/Engineering standards.md"}))
@@ -1462,7 +1495,7 @@ mod tests {
             .await
             .unwrap();
 
-        let tool = WorkspaceReadTool::new(CompanyWorkspace::new(store, id));
+        let tool = WorkspaceReadTool::new(ws(store, id));
         let out = text(&tool.execute(json!({"path": "evil.md"})).await.unwrap());
         // The body is returned byte-exact (so a round trip cannot corrupt it),
         // and the real terminator carries a nonce the note cannot contain.
@@ -1513,7 +1546,7 @@ mod tests {
     #[tokio::test]
     async fn reading_a_folder_points_at_the_listing_instead() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceReadTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         let result = tool.execute(json!({"path": "Standards"})).await.unwrap();
         assert!(result.is_error);
         let out = text(&result);
@@ -1524,7 +1557,7 @@ mod tests {
     #[tokio::test]
     async fn a_missing_path_fails_soft_with_guidance() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceReadTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
         let result = tool
             .execute(json!({"path": "Nope/missing.md"}))
             .await
@@ -1537,7 +1570,7 @@ mod tests {
     async fn an_empty_workspace_reports_itself_rather_than_erroring() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
-        let tool = WorkspaceListTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
         let result = tool.execute(json!({})).await.unwrap();
         assert!(!result.is_error, "an empty workspace is not an error");
         assert!(text(&result).contains("workspace is empty"));
@@ -1549,12 +1582,17 @@ mod tests {
     async fn reads_are_live_not_cached() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let tool = WorkspaceReadTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let tool = WorkspaceReadTool::new(ws(store.clone(), id.clone()));
         let before = text(&tool.execute(json!({"id": "n-eng"})).await.unwrap());
         assert!(before.contains("Review every PR."));
 
         store
-            .write(&id, "n-eng", "# Engineering\nShip on Fridays.")
+            .write(
+                &id,
+                "n-eng",
+                "# Engineering\nShip on Fridays.",
+                WorkspaceOrigin::Operator,
+            )
             .await
             .unwrap();
 
@@ -1569,7 +1607,7 @@ mod tests {
     async fn a_write_with_the_current_revision_lands() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
                 "path": "Standards/Engineering standards.md",
@@ -1593,7 +1631,7 @@ mod tests {
         for revision in [json!(2_000), json!("2000"), json!(" 2000 ")] {
             let (_dir, store) = seeded("acme").await;
             let id = CompanyId::new("acme");
-            let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+            let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
             let result = tool
                 .execute(json!({
                     "id": "n-eng",
@@ -1619,7 +1657,7 @@ mod tests {
     async fn a_non_numeric_revision_string_is_still_refused() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
                 "id": "n-eng",
@@ -1639,7 +1677,7 @@ mod tests {
     async fn a_stale_revision_is_refused_and_names_the_current_one() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
                 "id": "n-eng",
@@ -1669,7 +1707,7 @@ mod tests {
     async fn a_write_without_a_revision_is_refused() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({"id": "n-eng", "content": "blind"}))
             .await
@@ -1687,7 +1725,7 @@ mod tests {
     async fn a_write_cannot_create_a_note() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = tool
             .execute(json!({
                 "path": "Standards/brand new.md",
@@ -1707,7 +1745,7 @@ mod tests {
     #[tokio::test]
     async fn a_write_cannot_target_a_folder() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceWriteTool::new(ws(store, CompanyId::new("acme")));
         let result = tool
             .execute(json!({
                 "path": "Standards",
@@ -1733,7 +1771,7 @@ mod tests {
             .await
             .unwrap();
 
-        let read = WorkspaceReadTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let read = WorkspaceReadTool::new(ws(store.clone(), id.clone()));
         let out = text(&read.execute(json!({"path": "big.md"})).await.unwrap());
         assert!(out.contains("bytes truncated"), "{out}");
         assert!(out.contains("CANNOT be overwritten"), "{out}");
@@ -1745,7 +1783,7 @@ mod tests {
             .unwrap()
             .0
             .updated_at_millis;
-        let write = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let write = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = write
             .execute(json!({
                 "path": "big.md",
@@ -1786,6 +1824,7 @@ mod tests {
             _company: &CompanyId,
             _id: &str,
             _content: &str,
+            _author: WorkspaceOrigin,
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the listing never writes")
         }
@@ -1846,7 +1885,7 @@ mod tests {
         }
 
         let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree(nodes));
-        let list = WorkspaceListTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let list = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
         let out = text(&list.execute(json!({})).await.unwrap());
 
         // Every entry survives — the oversized one is clamped, not fatal.
@@ -1896,7 +1935,7 @@ mod tests {
         nodes.push(file("n-orphan-b", "orphan-b.md", Some("gone")));
 
         let store: Arc<dyn WorkspaceStore> = Arc::new(FixedTree(nodes));
-        let list = WorkspaceListTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let list = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
         let out = text(&list.execute(json!({})).await.unwrap());
 
         // The whole listing reaches the model, so nothing below is cut off.
@@ -1978,7 +2017,7 @@ mod tests {
             .await
             .unwrap();
 
-        let read = WorkspaceReadTool::new(CompanyWorkspace::new(store, id));
+        let read = WorkspaceReadTool::new(ws(store, id));
         let out = text(&read.execute(json!({"path": "big.md"})).await.unwrap());
 
         // The agent is told it may not write, and is never handed the sentence
@@ -2049,7 +2088,7 @@ mod tests {
             .await
             .unwrap();
 
-        let read = WorkspaceReadTool::new(CompanyWorkspace::new(store, id));
+        let read = WorkspaceReadTool::new(ws(store, id));
         let out = text(&read.execute(json!({"id": "n-max"})).await.unwrap());
 
         // Nothing was dropped, so this is the write-eligible branch — the one
@@ -2097,7 +2136,7 @@ mod tests {
             .0
             .updated_at_millis;
 
-        let write = WorkspaceWriteTool::new(CompanyWorkspace::new(store.clone(), id.clone()));
+        let write = WorkspaceWriteTool::new(ws(store.clone(), id.clone()));
         let result = write
             .execute(json!({
                 "path": "edge.md",
@@ -2140,7 +2179,7 @@ mod tests {
     #[tokio::test]
     async fn an_oversized_new_body_is_refused() {
         let (_dir, store) = seeded("acme").await;
-        let tool = WorkspaceWriteTool::new(CompanyWorkspace::new(store, CompanyId::new("acme")));
+        let tool = WorkspaceWriteTool::new(ws(store, CompanyId::new("acme")));
         let result = tool
             .execute(json!({
                 "id": "n-eng",
