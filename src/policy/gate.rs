@@ -384,8 +384,9 @@ impl ApprovalGate for ManifestApprovalGate {
         //    around, which is what "park all new work" has to mean.
         //
         //    `EffectGroup::Other` is exempt so chat survives — the operator has
-        //    to be able to ask the company what it was doing. Everything with a
-        //    side effect outside the conversation is stopped.
+        //    to be able to ask the company what it was doing. The gate does not
+        //    police which tools `Other` covers, so "chat survives" is an
+        //    observation, not a promise about every non-conversational effect.
         if self.is_emergency() && effect.group != EffectGroup::Other {
             return Ok(PolicyDecision::Deny);
         }
