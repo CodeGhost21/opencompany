@@ -344,12 +344,22 @@ async fn update_server(
         .map_err(ApiError)?;
 
     // The base to patch: an existing runtime entry (override or runtime server),
-    // else the manifest server (creating a fresh override), else 404.
+    // else the manifest server (creating a fresh override), else the install
+    // default (creating the operator's first override — the way a default is
+    // disabled, `delete_server` points the console at this route), else 404. A
+    // default shadowed by a manifest entry never reaches the third arm: the
+    // manifest entry is the effective declaration and is patched instead.
     let position = index.iter().position(|s| s.name.trim() == name);
-    let mut server = match (position, &manifest_entry) {
-        (Some(i), _) => index[i].clone(),
-        (None, Some(m)) => m.clone(),
-        (None, None) => {
+    let default_entry = runtime
+        .default_mcp_servers()
+        .iter()
+        .find(|d| d.name.trim() == name)
+        .cloned();
+    let mut server = match (position, &manifest_entry, &default_entry) {
+        (Some(i), _, _) => index[i].clone(),
+        (None, Some(m), _) => m.clone(),
+        (None, None, Some(d)) => d.clone(),
+        (None, None, None) => {
             return Err(ApiError(OpenCompanyError::InvalidRequest(format!(
                 "no MCP server named `{name}`."
             ))));
