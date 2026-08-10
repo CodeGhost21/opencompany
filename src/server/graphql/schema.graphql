@@ -352,6 +352,14 @@ type FsNode {
 	When it was last updated, ISO-8601 UTC.
 	"""
 	updatedAt: String!
+	"""
+	Who created the node.
+	"""
+	createdBy: WorkspaceOrigin!
+	"""
+	Who last wrote the node's content (a rename or move does not change it).
+	"""
+	updatedBy: WorkspaceOrigin!
 }
 
 type Inbox {
@@ -1064,9 +1072,36 @@ type WorkspaceFile {
 	"""
 	updatedAt: String!
 	"""
+	Who created this file.
+	"""
+	createdBy: WorkspaceOrigin!
+	"""
+	Who last wrote the content above.
+	"""
+	updatedBy: WorkspaceOrigin!
+	"""
 	Other files whose content links to this one via `[[name]]`.
 	"""
 	backlinks: [FsNode!]!
+}
+
+"""
+Who authored a workspace node. Mirrors [`WorkspaceOrigin`] (issue #326).
+
+Flattened into `kind` + optional `agentId` rather than exposed as a GraphQL
+union: `agentId` is non-null exactly when `kind` is `agent`, and a union of
+two empty types plus one single-field type buys a client nothing but three
+inline fragments. The Rust type keeps the invariant; this is its projection.
+"""
+type WorkspaceOrigin {
+	"""
+	`seed`, `operator` or `agent`.
+	"""
+	kind: String!
+	"""
+	The agent's roster id — set only when `kind` is `agent`.
+	"""
+	agentId: String
 }
 
 """
