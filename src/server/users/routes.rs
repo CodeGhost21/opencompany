@@ -36,8 +36,8 @@ use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
 use crate::ports::types::CompanyId;
 use crate::ports::{
-    InviteRecord, LoginCodeRecord, SessionRecord, UserRecord, UserRole, UserStatus, generate_id,
-    normalize_email, now_millis,
+    InviteRecord, LoginCodeRecord, SessionKind, SessionRecord, UserRecord, UserRole, UserStatus,
+    generate_id, normalize_email, now_millis,
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::{GqlAuth, UserPrincipal, resolve_principal};
@@ -181,7 +181,7 @@ fn invalid_login() -> Response {
 }
 
 /// `401` for a request with no live session where one is required.
-fn no_session() -> Response {
+pub(crate) fn no_session() -> Response {
     (
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({ "error": "not signed in", "code": "unauthorized" })),
@@ -317,7 +317,59 @@ async fn upsert_from_eligibility(
 // Session minting
 // ---------------------------------------------------------------------------
 
-/// Mints a session for `user` and renders the `Set-Cookie` response.
+/// Writes a session for `user` and returns the plaintext token, once.
+///
+/// The single minting path for both carriers. A device differs only in its
+/// [`SessionKind`], its label, and how long it lives — everything that makes a
+/// session safe (hash-only storage, the sign-in stamp, the opportunistic purge)
+/// is here so neither caller can skip it.
+pub(crate) async fn create_session(
+    runtime: &CompanyRuntime,
+    user: &UserRecord,
+    kind: SessionKind,
+    label: Option<String>,
+    user_agent: Option<String>,
+) -> crate::Result<String> {
+    let company = runtime.id();
+    let now = now_millis();
+    let plaintext = token::mint_session_token(&token::OsTokens);
+    let ttl = match kind {
+        SessionKind::Browser => token::SESSION_TTL_MILLIS,
+        SessionKind::Device => token::DEVICE_TTL_MILLIS,
+    };
+    let session = SessionRecord {
+        id: generate_id(),
+        // Only the hash is persisted; the plaintext is returned to exactly one
+        // caller and is never written down.
+        token_hash: token::sha256_hex(&plaintext),
+        user_id: user.id.clone(),
+        created_at_millis: now,
+        expires_at_millis: now + ttl,
+        user_agent,
+        kind,
+        label,
+    };
+    runtime.sessions().create(company, &session).await?;
+
+    // Record the sign-in on the user. Every session is minted here — link,
+    // password and device alike — so this is the one place that makes
+    // `last_seen` mean "last signed in" rather than "joined". It is
+    // deliberately not updated per request: that would be a store write on
+    // every authenticated call, and knowing someone signed in an hour ago is
+    // not worth that.
+    let mut signed_in = user.clone();
+    signed_in.last_seen_at_millis = Some(now);
+    signed_in.updated_at_millis = now;
+    let _ = runtime.users().upsert_user(company, &signed_in).await;
+
+    // Opportunistic cleanup on a cold path, so no background task is needed.
+    let _ = runtime.sessions().purge_expired(company, now).await;
+    let _ = runtime.login_codes().purge_expired(company, now).await;
+
+    Ok(plaintext)
+}
+
+/// Mints a browser session for `user` and renders the `Set-Cookie` response.
 async fn mint_session(
     state: &AppState,
     runtime: &CompanyRuntime,
@@ -333,40 +385,18 @@ async fn mint_session(
         ))
         .into_response());
     };
-    let now = now_millis();
-    let plaintext = token::mint_session_token(&token::OsTokens);
-    let session = SessionRecord {
-        id: generate_id(),
-        // Only the hash is persisted; the plaintext leaves in the cookie below
-        // and is never written down.
-        token_hash: token::sha256_hex(&plaintext),
-        user_id: user.id.clone(),
-        created_at_millis: now,
-        expires_at_millis: now + token::SESSION_TTL_MILLIS,
-        user_agent: headers
+    let plaintext = create_session(
+        runtime,
+        user,
+        SessionKind::Browser,
+        None,
+        headers
             .get(header::USER_AGENT)
             .and_then(|v| v.to_str().ok())
             .map(|v| v.chars().take(200).collect()),
-    };
-    runtime
-        .sessions()
-        .create(company, &session)
-        .await
-        .map_err(|e| ApiError(e).into_response())?;
-
-    // Record the sign-in on the user. Every session is minted here — link and
-    // password alike — so this is the one place that makes `last_seen` mean
-    // "last signed in" rather than "joined". It is deliberately not updated per
-    // request: that would be a store write on every authenticated call, and
-    // knowing someone signed in an hour ago is not worth that.
-    let mut signed_in = user.clone();
-    signed_in.last_seen_at_millis = Some(now);
-    signed_in.updated_at_millis = now;
-    let _ = runtime.users().upsert_user(company, &signed_in).await;
-
-    // Opportunistic cleanup on a cold path, so no background task is needed.
-    let _ = runtime.sessions().purge_expired(company, now).await;
-    let _ = runtime.login_codes().purge_expired(company, now).await;
+    )
+    .await
+    .map_err(|e| ApiError(e).into_response())?;
 
     let insecure = !state.config().host_base_url().starts_with("https://");
     let set = cookie::set_cookie(

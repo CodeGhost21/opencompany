@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
 import { TOUR } from "@/tour/steps";
+import { scopedKey } from "@/connections/types";
 import {
   armTourResume,
   clearTourResume,
@@ -36,6 +37,10 @@ import {
  */
 
 const COMPANY = "acme";
+/** One connection's view of `COMPANY`. */
+const SCOPE = { connection: "conn-a", company: COMPANY };
+/** A *different host* that happens to serve a company of the same name. */
+const SAME_NAME_ELSEWHERE = { connection: "conn-b", company: COMPANY };
 
 beforeEach(() => {
   window.localStorage.clear();
@@ -82,8 +87,8 @@ describe("the stop-view ⇄ resume-marker contract", () => {
 
   it("round-trips an armed marker through storage unchanged", () => {
     setActiveTourStop(connections!.view);
-    armTourResume(COMPANY);
-    expect(readTourResume(COMPANY)).toBe(connections!.view);
+    armTourResume(SCOPE);
+    expect(readTourResume(SCOPE)).toBe(connections!.view);
   });
 });
 
@@ -91,48 +96,59 @@ describe("armTourResume", () => {
   it("writes nothing when no tour is running", () => {
     // What lets ConnectionsView arm unconditionally without first asking
     // whether it is inside onboarding.
-    armTourResume(COMPANY);
-    expect(readTourResume(COMPANY)).toBeNull();
+    armTourResume(SCOPE);
+    expect(readTourResume(SCOPE)).toBeNull();
   });
 
   it("keeps each company's marker separate", () => {
     setActiveTourStop("settings");
-    armTourResume(COMPANY);
-    expect(readTourResume("other-co")).toBeNull();
-    expect(readTourResume(COMPANY)).toBe("settings");
+    armTourResume(SCOPE);
+    expect(readTourResume({ connection: "conn-a", company: "other-co" })).toBeNull();
+    expect(readTourResume(SCOPE)).toBe("settings");
+  });
+
+  it("keeps two hosts serving the same company name apart", () => {
+    // The buzz regression, in one assertion. Keyed on company alone — which is
+    // what this was before connections existed, and what block/buzz still does
+    // — these two are the same key, and one operator's tour progress silently
+    // becomes the other's.
+    setActiveTourStop("settings");
+    armTourResume(SCOPE);
+    expect(readTourResume(SAME_NAME_ELSEWHERE)).toBeNull();
+    expect(readTourResume(SCOPE)).toBe("settings");
   });
 });
 
 describe("readTourResume", () => {
   it("treats a marker past its TTL as absent", () => {
-    markTourResume(COMPANY, "settings");
-    const key = `oc-tour:${COMPANY}`;
+    markTourResume(SCOPE, "settings");
+    const key = scopedKey("oc-tour", SCOPE);
     const stored = JSON.parse(window.localStorage.getItem(key)!);
     stored.pendingResume.at = Date.now() - 16 * 60 * 1000;
     window.localStorage.setItem(key, JSON.stringify(stored));
 
-    expect(readTourResume(COMPANY)).toBeNull();
+    expect(readTourResume(SCOPE)).toBeNull();
   });
 
   it("honours a marker inside the TTL", () => {
     // The other half of the boundary — without this, a TTL of zero would pass
     // the test above and break the feature.
-    markTourResume(COMPANY, "settings");
-    expect(readTourResume(COMPANY)).toBe("settings");
+    markTourResume(SCOPE, "settings");
+    expect(readTourResume(SCOPE)).toBe("settings");
   });
 
   it("is null once the marker is consumed, so it cannot fire on a later visit", () => {
-    markTourResume(COMPANY, "settings");
-    clearTourResume(COMPANY);
-    expect(readTourResume(COMPANY)).toBeNull();
+    markTourResume(SCOPE, "settings");
+    clearTourResume(SCOPE);
+    expect(readTourResume(SCOPE)).toBeNull();
   });
 
   it("keeps the completed/skipped flags when the marker is cleared", () => {
-    window.localStorage.setItem(`oc-tour:${COMPANY}`, JSON.stringify({ skipped: true }));
-    markTourResume(COMPANY, "settings");
-    clearTourResume(COMPANY);
+    window.localStorage.setItem(scopedKey("oc-tour", SCOPE), JSON.stringify({ skipped: true }));
+    markTourResume(SCOPE, "settings");
+    clearTourResume(SCOPE);
 
-    const stored = JSON.parse(window.localStorage.getItem(`oc-tour:${COMPANY}`)!);
+    const stored = JSON.parse(window.localStorage.getItem(scopedKey("oc-tour", SCOPE))!);
     expect(stored.skipped).toBe(true);
     expect(stored.pendingResume).toBeUndefined();
   });

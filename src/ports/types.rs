@@ -1101,6 +1101,13 @@ impl CompanyEvent {
     /// `OperatorMessage`, `AgentReply` and `TaskDiscussionPosted` are addressed
     /// by sequence from thread parents, reactions, and #358's redaction
     /// tombstone, so pruning one dangles a pointer nothing can repair.
+    ///
+    /// And a third reason, sharper than either: **something still reads it.**
+    /// `WorkflowReportDelivered` is folded at boot by
+    /// `runtime::delivered_by_unsettled_runs` to learn what a crashed run
+    /// already sent. Pruning it re-delivers already-sent reports to real
+    /// people. When classifying a new variant, ask not only "is this evidence"
+    /// and "does anything point at it", but "does anything read it back".
     pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
         use crate::ports::events::RetentionClass::{Permanent, Prunable};
         match self {
@@ -1131,8 +1138,20 @@ impl CompanyEvent {
             | Self::DeskTaskCompleted { .. }
             | Self::EmergencyPauseChanged { .. }
             | Self::TaskDiscussionPosted { .. }
-            | Self::TaskDiscussionRedacted { .. }
-            | Self::WorkflowReportDelivered { .. } => Permanent,
+| Self::TaskDiscussionRedacted { .. } => Permanent,
+
+            // Permanent for the third reason, and the sharpest one: something
+            // still *reads* this at boot.
+            // `runtime::delivered_by_unsettled_runs` folds these lines from
+            // sequence 0 to learn what a crashed run already sent, so a re-run
+            // can skip it. The event is written write-behind at dispatch
+            // precisely because the mail has already left the process.
+            //
+            // Pruning it would not lose evidence — it would re-deliver
+            // already-sent reports to real people, which is the exact failure
+            // issue #529 added it to prevent. It looks like machine exhaust and
+            // sits beside the three prunable workflow-run kinds; it is not.
+            Self::WorkflowReportDelivered { .. } => Permanent,
         }
     }
 }

@@ -137,6 +137,38 @@ jobs:
       - name: Test
         run: cargo test --locked
 
+      # The SQLite backend's conformance suite, which until now RAN NOWHERE.
+      #
+      # `src/store/sqlite.rs` calls every `assert_*` in `src/store/conformance.rs`
+      # — isolation, append-only, monotonic seq, export totality, and the task /
+      # workspace / fact / skill / inbox / usage / run / user / session ports —
+      # 24 tests that read as the guarantee the backend is trustworthy. None of
+      # them had ever executed. `cargo test` above omits `--features sqlite`, so
+      # the module is not compiled into it; `rust-gated` pins
+      # `openhuman,tinycortex`; and the one step that does compile this code,
+      # `Check (--all-features)`, says so in its own comment: "compiling every
+      # target is not running any of them". Three lanes touched the file and no
+      # lane ran it.
+      #
+      # This is the same shape as issue #475 — a suite everyone reads as a gate,
+      # gating nothing — in the one place it costs the most, because the desktop
+      # client makes SQLite the primary store rather than an alternative.
+      #
+      # A STEP on this job, not a new one. A dedicated job pays for a runner, a
+      # submodule checkout, a toolchain install and a cache restore — minutes
+      # before it compiles anything — to run a suite that finishes in
+      # milliseconds. The cost here is one recompile of the lib under a second
+      # feature set; `rusqlite` vendors SQLite (`features = ["bundled"]`) so
+      # there are no system packages to install and `Swatinem/rust-cache` keeps
+      # the C amalgamation between runs.
+      #
+      # Scoped to `--lib store::sqlite` rather than a bare `cargo test --features
+      # sqlite`: this step exists to run the backend's own suite, and rerunning
+      # the other ~1600 default tests under a feature that does not change them
+      # would double the job's test time for no coverage.
+      - name: Test the SQLite backend
+        run: cargo test --locked --features sqlite --lib store::sqlite
+
       # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
       # binary. Building one over there would mean a second submodule checkout
       # and a second cold Rust compile — minutes of wall clock to produce a
@@ -279,6 +311,15 @@ jobs:
       # exactly how a whole suite sat in the tree for weeks looking like
       # coverage. This asserts a NUMBER per integration target, so the silent
       # zero becomes a red check, and prints the counts into the run log.
+      # The runner lane: identity, attestation, presence and dispatch. Behind
+      # its own feature, so `cargo test` at default features compiles none of
+      # it and the gated lane above pins `openhuman,tinycortex` — without this
+      # step the whole surface would be built by `Check (--all-features)` and
+      # RUN by nothing, which is issue #475's exact pathology and the one S0
+      # found already live in the SQLite backend.
+      - name: Test the runner lane
+        run: cargo test --locked --features runner --lib runner
+
       - name: Assert every integration target actually runs
         run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
 

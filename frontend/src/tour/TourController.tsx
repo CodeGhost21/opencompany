@@ -14,6 +14,7 @@ import {
   tourSeen,
   writeTourState,
 } from "./state";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 // react-joyride (and its floater/popper deps) is a fair chunk; only operators
 // who actually run the tour download it. Types above are `import type`, so they
@@ -59,6 +60,8 @@ export function TourController({
   /** `sub` names a section's sub-page, e.g. `#/settings/connections`. */
   setView: (view: View, sub?: string) => void;
 }) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const [welcomeOpen, setWelcomeOpen] = useState(false);
   const [session, setSession] = useState(false); // mounts Joyride for the run
   const [run, setRun] = useState(false); // joyride active
@@ -81,11 +84,11 @@ export function TourController({
     // started the tour, left to authorize a connection, and came back. Showing
     // "Welcome to your company" from step 1 here is the bug (issue #300) — the
     // tour never recorded completed/skipped, so `tourSeen` is still false.
-    const resumeView = readTourResume(company);
+    const resumeView = readTourResume(scope);
     if (resumeView !== null) {
       // Consume it either way: a marker that can't be honored must not sit
       // around waiting to fire on some later, unrelated visit.
-      clearTourResume(company);
+      clearTourResume(scope);
       // Match on view, not index — see `TourResume`. `findIndex` takes the
       // first stop for a view, which is unambiguous for every view that can
       // arm a marker today (only Connections navigates the page away).
@@ -102,9 +105,9 @@ export function TourController({
     }
 
     setStartIndex(0);
-    if (tourForced() || !tourSeen(company)) setWelcomeOpen(true);
+    if (tourForced() || !tourSeen(scope)) setWelcomeOpen(true);
     else setWelcomeOpen(false);
-  }, [company]);
+  }, [company, scope]);
 
   const start = useCallback(() => {
     // A replay from Settings always opens at the top, even if this mount had
@@ -122,15 +125,15 @@ export function TourController({
       setActiveTourStop(null);
       // Replaces the whole record, so any resume marker goes with it — the tour
       // is over, there is nothing left to resume.
-      writeTourState(company, skipped ? { skipped: true } : { completed: true });
+      writeTourState(scope, skipped ? { skipped: true } : { completed: true });
     },
-    [company],
+    [company, scope],
   );
 
   const handleSkip = useCallback(() => {
     setWelcomeOpen(false);
-    writeTourState(company, { skipped: true });
-  }, [company]);
+    writeTourState(scope, { skipped: true });
+  }, [company, scope]);
 
   // "Replay product tour" from Settings clears the flag and dispatches
   // RESTART_EVENT; jump straight into the tour (no welcome dialog).

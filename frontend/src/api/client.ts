@@ -7,6 +7,8 @@
 //     and calls use `/api/v1/companies/{id}/*`.
 
 import type { ConsoleConfig } from "../config";
+import { defaultTransport } from "./transport";
+import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
@@ -43,11 +45,19 @@ export class OpenCompanyClient {
   readonly baseUrl: string;
   readonly defaultCompany: string | null;
   private readonly token: string | null;
+  private readonly transport: Transport;
 
-  constructor(config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken">) {
+  constructor(
+    config: Pick<ConsoleConfig, "baseUrl" | "company" | "operatorToken">,
+    // Injected so a desktop shell can route the same client through its own
+    // core, and so tests can drive one without a network. Defaults to the
+    // browser's `fetch`/`EventSource`, which is what every web build uses.
+    transport: Transport = defaultTransport(),
+  ) {
     this.baseUrl = config.baseUrl;
     this.defaultCompany = config.company;
     this.token = config.operatorToken;
+    this.transport = transport;
   }
 
   /** Resolves the `/companies/{id}` vs single-company `/company` route prefix. */
@@ -64,26 +74,20 @@ export class OpenCompanyClient {
     if (body !== undefined) headers["content-type"] = "application/json";
     if (this.token) headers["authorization"] = `Bearer ${this.token}`;
 
-    let res: Response;
+    let res: TransportResponse;
     try {
-      res = await fetch(`${this.baseUrl}${path}`, {
+      res = await this.transport.request({
         method,
+        url: `${this.baseUrl}${path}`,
         headers,
         body: body === undefined ? undefined : JSON.stringify(body),
-        // The session is an HttpOnly cookie, so it only travels if we ask.
-        // Same-origin (the normal deployment, baseUrl "") this is a no-op.
-        // Cross-origin dev (`?api=http://localhost:8080` from a Vite server on
-        // another port) additionally needs CORS with
-        // Access-Control-Allow-Credentials, which the backend does not have —
-        // use the Vite proxy so the console stays same-origin.
-        credentials: "include",
       });
-    } catch (cause) {
+    } catch {
       throw new ApiError(0, "network_error", `cannot reach the company host at ${this.baseUrl || "this origin"}`);
     }
 
-    const text = await res.text();
-    if (!res.ok) {
+    const text = res.text;
+    if (!isOk(res)) {
       // Let the app react to an expired or revoked session. Auth routes opt out
       // (they 401 as a normal answer) so a failed login cannot loop the view.
       if (res.status === 401 && !path.includes("/auth/")) this.onUnauthorized?.();
@@ -125,18 +129,29 @@ export class OpenCompanyClient {
     const headers: Record<string, string> = {};
     if (this.token) headers["authorization"] = `Bearer ${this.token}`;
 
-    let res: Response;
+    let res: TransportResponse;
     try {
-      res = await fetch(`${this.baseUrl}${path}`, { method: "GET", headers, credentials: "include" });
+      res = await this.transport.request({ method: "GET", url: `${this.baseUrl}${path}`, headers });
     } catch {
       throw new ApiError(0, "network_error", `cannot reach the company host at ${this.baseUrl || "this origin"}`);
     }
-    const text = await res.text();
-    if (!res.ok) {
+    const text = res.text;
+    if (!isOk(res)) {
       if (res.status === 401) this.onUnauthorized?.();
       throw httpError(res, text);
     }
-    return { text, filename: attachmentFilename(res.headers.get("content-disposition")) };
+    return { text, filename: attachmentFilename(res.header("content-disposition")) };
+  }
+
+  /**
+   * Subscribes to this host's company event stream.
+   *
+   * On the client rather than in the hook so that "everything that talks to a
+   * host goes through the client" stays true — the hook would otherwise have to
+   * know which transport it is on, and every future caller would too.
+   */
+  subscribeToEvents(company: string | null | undefined, handlers: StreamHandlers): () => void {
+    return this.transport.subscribe(`${this.baseUrl}${this.scope(company)}/events`, handlers);
   }
 
   /** A typed POST, for surfaces that live outside this class (e.g. auth). */
@@ -696,8 +711,19 @@ function errorEnvelope(text: string): ApiErrorBody | undefined {
  * from. Falling back to `statusText` alone would have traded an HTML dump for a
  * blank message, so `HTTP 504` is the floor.
  */
-function statusMessage(res: Response): string {
+function statusMessage(res: TransportResponse): string {
   return res.statusText.trim() || `HTTP ${res.status}`;
+}
+
+/**
+ * Whether the host accepted the request.
+ *
+ * `fetch` hands back a `Response.ok`; a transport hands back a status. Same
+ * rule, stated once, so the two readers below cannot disagree about what "not
+ * an error" means.
+ */
+function isOk(res: TransportResponse): boolean {
+  return res.status >= 200 && res.status < 300;
 }
 
 /**
@@ -708,7 +734,7 @@ function statusMessage(res: Response): string {
  * fixed twice. One function means the next change to error handling cannot land
  * on only one of the two readers.
  */
-function httpError(res: Response, text: string): ApiError {
+function httpError(res: TransportResponse, text: string): ApiError {
   const envelope = errorEnvelope(text);
   const err = new ApiError(
     res.status,

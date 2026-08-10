@@ -77,6 +77,7 @@ import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { SettingsSection } from "@/views/SettingsSection";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
@@ -226,6 +227,8 @@ export function AppShell({
   onSwitchCompany,
   onBackToPicker,
 }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
   // Most call sites only ever change the top-level view.
   const setView = useCallback((next: View, nextSub?: string) => navigate(next, nextSub), [navigate]);
@@ -537,9 +540,9 @@ export function AppShell({
       // the operator was reading instead of whichever sorts first (issue #412).
       // The ref above cannot do it: it dies with this mount, and a reload is
       // exactly one of the trips that has to survive.
-      writeLastChannel(company, channelId);
+      writeLastChannel(scope, channelId);
     },
-    [company],
+    [scope],
   );
 
   const setThreadMessages = (

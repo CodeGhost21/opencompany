@@ -2454,6 +2454,8 @@ mod test {
                     created_at_millis: 1,
                     expires_at_millis: 10,
                     user_agent: None,
+                    kind: crate::ports::SessionKind::Browser,
+                    label: None,
                 },
             )
             .await

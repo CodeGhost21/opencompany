@@ -22,7 +22,47 @@ use serde::{Deserialize, Serialize};
 use crate::Result;
 use crate::ports::types::CompanyId;
 
-/// One logged-in browser session.
+/// What kind of client holds a session.
+///
+/// A device is not a second credential *system* — it is the same session record
+/// with a longer life and a name on it. That is a deliberate choice over a
+/// separate `DeviceStore` port, and the reasons are worth stating because the
+/// alternative looks tidier than it is:
+///
+/// - **Revocation stays one lever.** [`SessionStore::delete_for_user`] is what
+///   suspension and admin password reset call. A separate device table would be
+///   a second thing every one of those paths must remember to clear, and the
+///   failure mode of forgetting is a suspended user whose desktop keeps working.
+/// - **The security properties are already proven here.** Hash-only storage,
+///   lookup *by* hash, per-company partitioning, liveness, the per-request user
+///   re-read. A parallel port would have to re-establish every one of them.
+/// - **It costs no storage change.** All three backends persist this record as
+///   JSON (fs to an array file, sqlite to a `session_json` column, mongo via
+///   serde), so an additive `#[serde(default)]` field needs no migration.
+///
+/// What a device genuinely needs that a browser session does not — a much
+/// longer life, a human-chosen name, and the ability for a route to tell the
+/// two apart — is exactly this enum plus [`SessionRecord::label`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SessionKind {
+    /// A browser holding an `HttpOnly` cookie. The default, so every record
+    /// written before this field existed reads back as what it was.
+    #[default]
+    Browser,
+    /// A paired client presenting the session as a header, because a
+    /// `SameSite=Lax` cookie is never sent cross-site.
+    Device,
+}
+
+impl SessionKind {
+    /// Whether this is a paired device rather than a browser.
+    pub fn is_device(self) -> bool {
+        matches!(self, SessionKind::Device)
+    }
+}
+
+/// One logged-in session: a browser tab, or a paired device.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
@@ -44,6 +84,19 @@ pub struct SessionRecord {
     /// session when revoking it. Untrusted, display-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    /// Whether a browser or a paired device holds this session.
+    ///
+    /// `#[serde(default)]` so every record written before devices existed reads
+    /// back as [`SessionKind::Browser`], which is what it is.
+    #[serde(default)]
+    pub kind: SessionKind,
+    /// The human-chosen name for a paired device ("Ada's MacBook"), shown when
+    /// listing and revoking. `None` for a browser session, which is identified
+    /// by its [`user_agent`](Self::user_agent) instead.
+    ///
+    /// Untrusted and display-only: it is whatever the pairing client sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
 }
 
 impl SessionRecord {
@@ -103,6 +156,8 @@ mod test {
             created_at_millis: 0,
             expires_at_millis: 100,
             user_agent: None,
+            kind: SessionKind::Browser,
+            label: None,
         }
     }
 
@@ -122,6 +177,44 @@ mod test {
         assert_eq!(json["tokenHash"], "abc");
         assert_eq!(json["userId"], "u1");
         assert!(json.get("userAgent").is_none());
+        assert_eq!(json["kind"], "browser");
+        assert!(json.get("label").is_none());
+        assert_eq!(serde_json::from_value::<SessionRecord>(json).unwrap(), s);
+    }
+
+    /// The property the whole device design rests on.
+    ///
+    /// Every backend persists this record as JSON — fs to an array file, sqlite
+    /// to a `session_json` column, mongo through serde — so a record written
+    /// before `kind` existed must still load, and must load as a browser
+    /// session. If this ever stopped holding, upgrading a host would log every
+    /// existing user out, and there is no schema migration anywhere that would
+    /// have caught it.
+    #[test]
+    fn a_record_written_before_devices_existed_still_loads_as_a_browser() {
+        let legacy = serde_json::json!({
+            "id": "s1",
+            "tokenHash": "abc",
+            "userId": "u1",
+            "createdAtMillis": 0,
+            "expiresAtMillis": 100,
+        });
+        let loaded: SessionRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded, session());
+        assert_eq!(loaded.kind, SessionKind::Browser);
+        assert!(!loaded.kind.is_device());
+    }
+
+    #[test]
+    fn a_device_record_round_trips_with_its_label() {
+        let s = SessionRecord {
+            kind: SessionKind::Device,
+            label: Some("Ada's MacBook".to_string()),
+            ..session()
+        };
+        let json = serde_json::to_value(&s).unwrap();
+        assert_eq!(json["kind"], "device");
+        assert_eq!(json["label"], "Ada's MacBook");
         assert_eq!(serde_json::from_value::<SessionRecord>(json).unwrap(), s);
     }
 }

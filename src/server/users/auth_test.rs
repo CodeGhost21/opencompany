@@ -13,7 +13,7 @@ use tower::ServiceExt;
 
 use crate::company::CompanyManifest;
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::{CompanyStore, SessionRecord, UserRecord, UserRole, UserStatus};
+use crate::ports::{CompanyStore, SessionKind, SessionRecord, UserRecord, UserRole, UserStatus};
 use crate::runtime::RuntimeBuilder;
 use crate::server::graphql::auth::{GqlAuth, resolve_principal};
 use crate::server::router;
@@ -107,6 +107,8 @@ async fn seed_session(
                 created_at_millis: now,
                 expires_at_millis: now + 60_000,
                 user_agent: None,
+                kind: SessionKind::Browser,
+                label: None,
             },
         )
         .await
@@ -271,6 +273,8 @@ async fn an_expired_session_does_not_resolve() {
                 created_at_millis: 0,
                 expires_at_millis: now - 1, // already dead
                 user_agent: None,
+                kind: SessionKind::Browser,
+                label: None,
             },
         )
         .await
@@ -473,4 +477,248 @@ async fn without_an_addressed_company_ambiguous_cookies_resolve_no_user() {
         resolve_principal(&headers, &state, None).await.is_err(),
         "an ambiguous jar must not silently pick a company"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The header carrier
+//
+// A desktop client is cross-site with every server it talks to, and a
+// `SameSite=Lax` cookie is never sent cross-site — so the same session has to
+// be presentable as a header. These mirror the cookie tests above one for one:
+// the carrier changed, so every property the cookie tests pin has to be
+// re-pinned rather than assumed to carry over. The dangerous outcome is not the
+// header failing, it is the header succeeding somewhere the cookie would not.
+// ---------------------------------------------------------------------------
+
+fn session_header_value(company: &str, token: &str) -> String {
+    format!("{company}.{token}")
+}
+
+fn headers_with_session_header(company: &str, token: &str) -> axum::http::HeaderMap {
+    let mut h = axum::http::HeaderMap::new();
+    h.insert(
+        crate::server::users::cookie::SESSION_HEADER,
+        session_header_value(company, token).parse().unwrap(),
+    );
+    h
+}
+
+#[tokio::test]
+async fn a_session_header_resolves_to_a_user_of_that_company() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme"]).await;
+    let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
+
+    let acme = CompanyId::new("acme");
+    let auth = resolve_principal(
+        &headers_with_session_header("acme", &token),
+        &state,
+        Some(&acme),
+    )
+    .await
+    .unwrap();
+    match auth {
+        // Same principal as the cookie path, including the token hash logout
+        // revokes by: one session, two envelopes.
+        GqlAuth::User(user) => {
+            assert_eq!(user.company, acme);
+            assert_eq!(user.user_id, "u1");
+            assert_eq!(user.session_token_hash, sha256_hex(&token));
+        }
+        other => panic!("expected a user, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn without_an_addressed_company_the_header_names_its_own() {
+    // The property the cookie gets from its *name* and the header has to get
+    // from its value. Without this the header form would work on the REST
+    // routes and silently not on GraphQL, where the company is in the body.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme"]).await;
+    let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
+
+    let auth = resolve_principal(&headers_with_session_header("acme", &token), &state, None)
+        .await
+        .unwrap();
+    match auth {
+        GqlAuth::User(u) => assert_eq!(u.company, CompanyId::new("acme")),
+        other => panic!("expected a user, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_session_header_does_not_work_against_another_company() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme", "globex"]).await;
+    let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
+
+    let globex = CompanyId::new("globex");
+    // Addressed as globex while naming acme: the carrier is ignored.
+    assert!(
+        resolve_principal(
+            &headers_with_session_header("acme", &token),
+            &state,
+            Some(&globex)
+        )
+        .await
+        .is_err(),
+        "an acme session must not authenticate a globex request"
+    );
+    // And claiming to be globex does not help: the token is not in globex's
+    // storage partition.
+    assert!(
+        resolve_principal(
+            &headers_with_session_header("globex", &token),
+            &state,
+            Some(&globex)
+        )
+        .await
+        .is_err(),
+        "relabelling the company must not move a session between partitions"
+    );
+}
+
+#[tokio::test]
+async fn a_suspended_users_session_header_stops_working_immediately() {
+    // The per-request user re-read must apply to this carrier too. If the
+    // header path skipped it, suspension would take effect for the console and
+    // not for the desktop.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme"]).await;
+    let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Suspended).await;
+
+    let acme = CompanyId::new("acme");
+    assert!(
+        resolve_principal(
+            &headers_with_session_header("acme", &token),
+            &state,
+            Some(&acme)
+        )
+        .await
+        .is_err(),
+        "a suspended user must not resolve through the header"
+    );
+}
+
+#[tokio::test]
+async fn a_session_header_cannot_reach_the_platform_write_plane() {
+    // THE load-bearing property. `resolve_claims` cannot return a human, so
+    // provisioning and suspension are unreachable by any human credential. A
+    // new carrier is exactly the kind of change that could quietly route around
+    // that, so it is asserted against the real router rather than the resolver.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme"]).await;
+    let token = seed_session(&state, "acme", UserRole::Admin, UserStatus::Active).await;
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies")
+                .header("content-type", "application/toml")
+                .header(
+                    crate::server::users::cookie::SESSION_HEADER,
+                    session_header_value("acme", &token),
+                )
+                .body(Body::from("[company]\nname = \"Pwned\"\n"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an admin's session header must not provision companies"
+    );
+
+    let app = router(state.clone());
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/v1/companies/acme/suspend")
+                .header(
+                    crate::server::users::cookie::SESSION_HEADER,
+                    session_header_value("acme", &token),
+                )
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        response.status(),
+        StatusCode::UNAUTHORIZED,
+        "an admin's session header must not suspend a company"
+    );
+}
+
+#[tokio::test]
+async fn a_malformed_session_header_resolves_no_user() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme"]).await;
+    let token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
+    let acme = CompanyId::new("acme");
+
+    for hostile in [
+        // No separator at all: the whole value would otherwise be read as a
+        // company with no token, or a token with no company.
+        token.clone(),
+        "acme".to_string(),
+        // Empty on either side of the separator.
+        format!(".{token}"),
+        "acme.".to_string(),
+        ".".to_string(),
+        String::new(),
+        // A company id that could not name a cookie must not be able to name a
+        // header either — otherwise the two carriers disagree about which
+        // companies can hold a session at all.
+        format!("ac.me.{token}"),
+        format!("evil;Path=/.{token}"),
+    ] {
+        let mut headers = axum::http::HeaderMap::new();
+        let Ok(value) = hostile.parse() else {
+            continue; // Unrepresentable as a header value; nothing to test.
+        };
+        headers.insert(crate::server::users::cookie::SESSION_HEADER, value);
+        assert!(
+            resolve_principal(&headers, &state, Some(&acme))
+                .await
+                .is_err(),
+            "{hostile:?} must not authenticate"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_header_naming_another_company_falls_through_to_a_valid_cookie() {
+    // Same degrade-rather-than-fail policy the cookie path has: a credential
+    // for somewhere else must not brick a request that carried a good one.
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with(&home, &["acme", "globex"]).await;
+    let acme_token = seed_session(&state, "acme", UserRole::Member, UserStatus::Active).await;
+
+    let acme = CompanyId::new("acme");
+    let mut headers = headers_with_session_header("globex", "irrelevant");
+    headers.insert(
+        axum::http::header::COOKIE,
+        cookie_header("acme", &acme_token).parse().unwrap(),
+    );
+
+    let auth = resolve_principal(&headers, &state, Some(&acme))
+        .await
+        .unwrap();
+    match auth {
+        GqlAuth::User(u) => assert_eq!(u.company, acme),
+        other => panic!("expected the cookie to still win, got {other:?}"),
+    }
 }
