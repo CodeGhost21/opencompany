@@ -133,7 +133,7 @@ export function ConnectionConsole({
     return () => {
       cancelled = true;
     };
-  }, [client, defaultCompany, forceLogin]);
+  }, [client, defaultCompany, forceLogin, bootEpoch]);
 
   const switchCompany = useCallback(
     async (id: string, companies: CompanyStatus[]) => {
