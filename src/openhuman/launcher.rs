@@ -438,6 +438,13 @@ fn desktop_path_env(install_root: &std::path::Path, home: Option<&str>, inherite
         .into_owned()
 }
 
+/// The `OPENHUMAN_DEV_PORT` value, parsed as a `u16` and falling back to
+/// Tauri/Vite's default 1420 on an unset, non-numeric, or out-of-range value.
+fn desktop_dev_port(raw: Option<&str>) -> u16 {
+    raw.and_then(|p| p.trim().parse::<u16>().ok())
+        .unwrap_or(1420)
+}
+
 /// Whether the installed `cargo-tauri` (per `.crates.toml`) came from the
 /// vendored CEF-aware path. A port of the `grep -q "tauri-cli.*$VENDOR_CLI"`
 /// check in `ensure-tauri-cli.sh`.
