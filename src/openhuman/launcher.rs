@@ -164,12 +164,11 @@ impl OpenHumanLaunch {
         }
     }
 
-    /// Starts OpenHuman and waits for it to exit.
-    pub async fn run(self) -> Result<ExitStatus> {
-        if !self.root.exists() {
-            return Err(OpenCompanyError::MissingOpenHumanRoot(self.root));
-        }
-
+    /// Rejects passthrough args in Desktop mode, which drives a fixed
+    /// `cargo tauri` invocation that does not forward them. Called by
+    /// [`run`](Self::run) and by the CLI's dry-run path so execution and
+    /// `--dry-run` agree on what is launchable.
+    pub fn validate(&self) -> Result<()> {
         if matches!(self.mode, LaunchMode::Desktop) && !self.args.is_empty() {
             return Err(OpenCompanyError::OpenHuman {
                 code: 400,
@@ -178,6 +177,16 @@ impl OpenHumanLaunch {
                     .to_string(),
             });
         }
+        Ok(())
+    }
+
+    /// Starts OpenHuman and waits for it to exit.
+    pub async fn run(self) -> Result<ExitStatus> {
+        if !self.root.exists() {
+            return Err(OpenCompanyError::MissingOpenHumanRoot(self.root));
+        }
+
+        self.validate()?;
 
         match self.mode {
             LaunchMode::Core => {
