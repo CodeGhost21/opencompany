@@ -1749,8 +1749,16 @@ impl CompanyRuntime {
     /// TTL and no auto-release anywhere in this path — releasing is always an
     /// explicit act by an identified operator, recorded as one.
     ///
-    /// Returns `true` when this call released the stop, `false` when it was not
-    /// engaged.
+    /// Releasing is inherently racy in the *opposite* direction from pausing:
+    /// two concurrent releases can both observe `true` before either appends,
+    /// so the event-log replay (which takes the last event) settles it. The
+    /// in-memory flip at the end is the gate's atomic `set_emergency`, and the
+    /// returned previous value lets the caller answer with the real outcome —
+    /// `true` for the release that actually cleared the switch, `false` for a
+    /// second release that raced it.
+    ///
+    /// Returns `true` when this call released the stop, `false` when it did
+    /// not (it was not engaged, or a concurrent release already cleared it).
     pub async fn emergency_resume(&self, by: Actor, reason: Option<String>) -> Result<bool> {
         if !self.approval_gate.is_emergency() {
             return Ok(false);
@@ -1769,8 +1777,7 @@ impl CompanyRuntime {
         // Only now, with the release durably recorded, does enforcement stop.
         // A restart between the append and this line comes up running, which
         // matches what the log says the operator decided.
-        self.approval_gate.set_emergency(false);
-        Ok(true)
+        Ok(self.approval_gate.set_emergency(false))
     }
 
     /// Rejects operation on a company that is not accepting work.
