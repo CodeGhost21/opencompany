@@ -228,13 +228,23 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
     let Ok(manifest) = manifest_inference(runtime).await else {
         return RunnerGap::NotWired;
     };
-    let configured = resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
-        .await
-        .is_ok_and(|decl| decl.is_some());
+    // A resolve *error* is not the same as a clean resolve to nothing. `Err`
+    // means the config could not be read at all — which the #266 doctrine says
+    // is not evidence that a restart or a save would help, so it degrades to
+    // `NotWired`. Only `Ok(None)` — inference resolved, and nothing is set — can
+    // make configuring inference the honest next step. Folding the two together
+    // (the old `is_ok_and`) would tell an operator whose config we cannot read
+    // to "configure inference", a 409 promising a fix that may not exist.
+    let (configured, resolved_to_nothing) =
+        match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
+            Ok(Some(_)) => (true, false),
+            Ok(None) => (false, true),
+            Err(_) => (false, false),
+        };
     if restart_pending(runtime, configured) {
         return RunnerGap::RestartPending;
     }
-    if !configured
+    if resolved_to_nothing
         && harness_reachable(runtime)
         && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
     {
@@ -1023,6 +1033,67 @@ mod tests {
         let (status, runs, raw) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
         assert_eq!(status, StatusCode::OK, "{raw}");
         assert_eq!(runs.as_array().map(Vec::len), Some(0), "{runs}");
+    }
+
+    /// Issue #514 (review): a config that cannot be *read* is not evidence to
+    /// tell the operator to configure inference. When `resolve_effective`
+    /// returns `Err` — the secret store is unreachable — the classifier must
+    /// degrade to `NotWired` (404), never `inference_required` (409), even with
+    /// a harness right here. A 409 would promise a fix ("configure inference")
+    /// that a resolve *failure* gives no reason to expect; the #266 doctrine is
+    /// that an unreadable config is not evidence a save would help. Guards the
+    /// `Err(_) => (false, false)` arm of `runner_gap_for` against a regression
+    /// back to the old `is_ok_and`, which folded `Err` into "not configured".
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_resolve_error_stays_not_wired_even_with_a_harness() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::SecretValue;
+
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl crate::ports::SecretStore for FailingSecrets {
+            async fn get(&self, _c: &CompanyId, _key: &str) -> crate::Result<Option<SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "secret store unreachable".into(),
+                ))
+            }
+            async fn set(&self, _c: &CompanyId, _key: &str, _v: SecretValue) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .with_secrets(std::sync::Arc::new(FailingSecrets))
+            .build()
+            .await
+            .unwrap();
+        assert!(runtime.workflow_runner().is_none());
+
+        // The classifier degrades an unreadable config to NotWired...
+        assert!(
+            matches!(super::runner_gap_for(&runtime).await, super::RunnerGap::NotWired),
+            "a resolve error must classify as NotWired, not InferenceRequired",
+        );
+
+        // ...and the run route answers 404 `not_wired`, not 409 `inference_required`.
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
     }
 
     /// Issue #514 negative control: on the default build (no `openhuman`
