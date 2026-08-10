@@ -430,23 +430,38 @@ pub fn build_agent(
         }
     }
 
-    // Company workspace (issue #237) — live read (and optionally write) tools
-    // over the operator-owned note tree, so an agent can ground an answer in
-    // the company's own `Standards/` / `Playbooks/` instead of guessing. Two
-    // independent gates, deliberately asymmetric:
+    // Company workspace (issues #237, #551) — live read (and optionally
+    // create/write) tools over the shared note tree, so an agent can ground an
+    // answer in the company's own `Standards/` / `Playbooks/` instead of
+    // guessing, and can put what it produces somewhere the operator and its
+    // teammates will actually find it. Two independent gates, deliberately
+    // asymmetric:
     //
     //  1. READS follow the ordinary namespace rule, so a catch-all `*` confers
-    //     them — the whole point of the issue is that shared guidance should be
+    //     them — the whole point of #237 is that shared guidance should be
     //     reachable by default.
-    //  2. WRITES need an **EXPLICIT** `workspace` (or `workspace.write`) grant
-    //     (`grants_workspace_write_explicit`); `*` does NOT confer them,
-    //     mirroring the media/composio precedent, because a write mutates
-    //     operator-owned guidance every other agent then trusts.
+    //  2. CREATE + WRITE need an **EXPLICIT** `workspace` (or
+    //     `workspace.write`) grant (`grants_workspace_write_explicit`); `*`
+    //     does NOT confer them, mirroring the media/composio precedent, because
+    //     they mutate a tree every other agent then trusts. Both ride the one
+    //     flag: overwriting an existing standard is strictly more destructive
+    //     than adding a note beside it, so a grant that permits the first has
+    //     already permitted the second.
     //
     // Unwired-store is fail-closed: with no `deps.workspace` no tool is built
-    // and the agent behaves exactly as it did before this cell. Create, rename
-    // and delete stay operator-only — the write tool's required
-    // `expected_updated_at` means only an existing note can be targeted.
+    // and the agent behaves exactly as it did before this cell.
+    //
+    // Note what does and does not contain a write here, now that create is
+    // agent-reachable (#551). It is NOT intra-company isolation — an agent may
+    // create and overwrite anywhere in its company's tree, by design. What
+    // holds is: company tenancy (the store is pinned to one `CompanyId` at
+    // build time, and every tool resolves inside a single company-scoped tree
+    // read); the explicit grant above; the write tool's required
+    // `expected_updated_at` CAS token; policy parking, since `workspace_write`
+    // and `workspace_create` are both `Reach::Consequence` and never grantable
+    // standing (`policy::consequence`); and authorship, since every node
+    // records who created it and who last wrote it (#326). Rename and delete
+    // remain operator-only — they are not on this surface at all.
     //
     // Not mapped in `toolbelt::namespace_of`, so these stay intrinsic to the
     // capability filter (the `file_tools` precedent): the reads are free and

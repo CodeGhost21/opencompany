@@ -1,18 +1,20 @@
 //! Live read/write tools over the company [`WorkspaceStore`] (issue #237).
 //!
-//! The company workspace is the operator-owned note tree — `Playbooks/`,
-//! `Product/`, `Standards/` — seeded from `companies/<name>/workspace/**` and
-//! thereafter edited in the console. Before this module nothing under
-//! `src/harness/` touched it, so an operator could fill `Standards/` with the
-//! guidance every agent is supposed to follow and no agent would ever read a
-//! word of it.
+//! The company workspace is the shared note tree — `Playbooks/`, `Product/`,
+//! `Standards/` — seeded from `companies/<name>/workspace/**` and thereafter
+//! written by the operator in the console and by the agents through these
+//! tools. Before this module nothing under `src/harness/` touched it, so an
+//! operator could fill `Standards/` with the guidance every agent is supposed
+//! to follow and no agent would ever read a word of it.
 //!
-//! Three tools close that gap:
+//! Four tools close that gap:
 //!
 //! * [`WORKSPACE_LIST_TOOL`] — the bounded path index (path, kind, id,
 //!   revision), with an optional `prefix` for subtree listing.
 //! * [`WORKSPACE_READ_TOOL`] — one note by `path` or `id`, body capped and
 //!   fenced as untrusted reference material.
+//! * [`WORKSPACE_CREATE_TOOL`] — add one folder or note at a free path whose
+//!   parent already exists (issue #551).
 //! * [`WORKSPACE_WRITE_TOOL`] — overwrite one existing note, guarded by a
 //!   **required** `expected_updated_at` compare-and-swap token.
 //!
@@ -20,9 +22,27 @@
 //! session cache, so a note edited in the console between two turns changes
 //! what the agent quotes on the next turn with no agent rebuild.
 //!
+//! # Agents write unconfined — and why that is the right call (issue #551)
+//!
+//! There is no prefix gate here. An agent may create and overwrite anywhere in
+//! the company's tree, exactly as `workspace_write` always could. Confining
+//! *create* to `Agents/<id>/` while leaving *overwrite* free would protect
+//! nothing — overwriting an existing standard is the strictly more destructive
+//! of the two operations — so the confinement would be theatre with a
+//! maintenance cost.
+//!
+//! What replaces it is a steering-plus-attribution pair. [`workspace_brief`]
+//! and the tool descriptions name `Agents/<your agent id>/` as the default home
+//! for anything an agent produces and mark shared guidance as something to
+//! touch only on purpose; and every node records who created it and who last
+//! wrote it (issue #326), so a mess is legible and reversible rather than
+//! anonymous. Two irreversible operations, rename and delete, are still absent
+//! from this surface entirely — the operator has a console to undo them in and
+//! the agent does not.
+//!
 //! # The tenancy boundary
 //!
-//! This is a live read/write surface over operator-owned data, so the
+//! This is a live read/write surface over shared company data, so the
 //! containment argument has to be structural rather than asserted:
 //!
 //! 1. [`CompanyWorkspace::company`] is fixed at build time from `build_agent`'s
@@ -72,9 +92,12 @@
 //!   proposed it as optional. Under `[policy].mode = "full"` there is no
 //!   approval gate on writes at all, so the token is the *only* thing standing
 //!   between a hallucinated path and a clobbered standard. Requiring it makes
-//!   "read before you write" structural rather than advisory, and — because
-//!   only an existing note has a revision — also enforces the issue's
-//!   create/rename/delete-stay-operator-only rule for free.
+//!   "read before you write" structural rather than advisory. It used to carry
+//!   a second job — because only an existing note has a revision, requiring the
+//!   token also made creation impossible — and that side effect is what issue
+//!   #551 removed: agent output had nowhere to land in the shared tree, so it
+//!   stayed stranded in a private sandbox. [`WorkspaceCreateTool`] gives it a
+//!   home; the CAS token keeps doing the one job it was actually for.
 //! * **Diverges — a truncated read can never become a write.** OpenHuman
 //!   learned this as `file_state::check_partial_read` ("perform a full read
 //!   before overwriting"). Rather than track read stamps, [`WorkspaceWriteTool`]
@@ -128,6 +151,7 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
+use crate::company::workspace_agents::AGENTS_ROOT;
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
@@ -138,6 +162,8 @@ pub const WORKSPACE_LIST_TOOL: &str = "workspace_list";
 pub const WORKSPACE_READ_TOOL: &str = "workspace_read";
 /// Tool name: overwrite one workspace note.
 pub const WORKSPACE_WRITE_TOOL: &str = "workspace_write";
+/// Tool name: create one workspace folder or note.
+pub const WORKSPACE_CREATE_TOOL: &str = "workspace_create";
 
 /// Absolute cap on entries one [`WORKSPACE_LIST_TOOL`] call renders.
 ///
@@ -570,22 +596,43 @@ fn fence_nonce() -> String {
 /// and never embeds a tree snapshot. A snapshot baked into the system prompt at
 /// build time is stale the moment the operator edits a note, and the whole point
 /// of hitting the store per call is that there is no snapshot to go stale.
+///
+/// # Why the write half is steering, not a rule the code enforces
+///
+/// Issue #551 settled that agents write **unconfined** — anywhere in the tree,
+/// create as well as overwrite. There is no prefix gate, and adding one would
+/// be theatre while `{WORKSPACE_WRITE_TOOL}` can already overwrite any note (the
+/// strictly more destructive of the two operations). So what keeps the tree
+/// navigable is this paragraph: name the agent's own folder as the default
+/// home, name shared guidance as something to touch only on purpose, and leave
+/// the irreversible operations (rename, delete) with the operator, who is the
+/// only party with a console to undo them in. The safety net underneath is
+/// attribution — every node records who created it and who last wrote it
+/// (issue #326) — not refusal.
 pub fn workspace_brief(can_write: bool) -> String {
     let mut brief = format!(
         "\n\n## Company workspace\n\
          This company keeps a shared note tree — its single source of truth for standards, \
-         playbooks and product context, written and owned by the operator. It is NOT in your \
-         context: call `{WORKSPACE_LIST_TOOL}` to see what exists, then `{WORKSPACE_READ_TOOL}` \
-         to read a note by its path. Do this before answering anything about company standards, \
-         processes or product decisions — never guess at or invent their contents, and never \
-         assume a note you read earlier is still current."
+         playbooks and product context. Both the operator and your teammates read and write it, \
+         so it is how work becomes visible to the rest of the company. It is NOT in your context: \
+         call `{WORKSPACE_LIST_TOOL}` to see what exists, then `{WORKSPACE_READ_TOOL}` to read a \
+         note by its path. Do this before answering anything about company standards, processes \
+         or product decisions — never guess at or invent their contents, and never assume a note \
+         you read earlier is still current."
     );
     if can_write {
         brief.push_str(&format!(
-            " You may also revise an existing note with `{WORKSPACE_WRITE_TOOL}`, which requires \
-             the `expected_updated_at` revision from a `{WORKSPACE_READ_TOOL}` of that same note \
-             — so read it, apply your change to the full body you were given, and write the whole \
-             body back. Creating, renaming and deleting notes is the operator's job, not yours."
+            " `{AGENTS_ROOT}/<your agent id>/` is your own folder and the default home for anything you \
+             produce — put a deliverable, a draft or a working note there with \
+             `{WORKSPACE_CREATE_TOOL}` rather than leaving it only in your reply. You may create \
+             or edit notes anywhere in the tree, but shared guidance (`Standards/`, `Playbooks/`) \
+             belongs to everyone: edit it only when the task you were given is about it, and \
+             otherwise leave it alone. Revising an existing note is `{WORKSPACE_WRITE_TOOL}`, \
+             which requires the `expected_updated_at` revision from a `{WORKSPACE_READ_TOOL}` of \
+             that same note — so read it, apply your change to the full body you were given, and \
+             write the whole body back. Every note records who created it and who last wrote it, \
+             so your edits are attributed to you. Renaming and deleting stay the operator's job, \
+             not yours."
         ));
     }
     brief
@@ -925,11 +972,13 @@ impl Tool for WorkspaceWriteTool {
 
     fn description(&self) -> &str {
         "Overwrite one EXISTING note in the company's shared workspace with a complete new body. \
-         USE FOR revising operator-owned company documentation you have just read. You must pass \
-         `expected_updated_at` — the `rev` from a `workspace_read` of that same note — and the \
-         write is refused if the note changed since. This replaces the whole body, so include \
-         everything you want kept. NOT for creating, renaming or deleting notes (operator-only), \
-         and NOT for your own scratch files (use the `file_*` tools)."
+         USE FOR revising a note you have just read — your own work under `Agents/<your agent \
+         id>/`, or shared company documentation when the task you were given is about it. You \
+         must pass `expected_updated_at` — the `rev` from a `workspace_read` of that same note — \
+         and the write is refused if the note changed since. This replaces the whole body, so \
+         include everything you want kept. NOT for adding a new note (that is \
+         `workspace_create`), NOT for renaming or deleting (operator-only), and NOT for your own \
+         scratch files (use the `file_*` tools)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1123,14 +1172,250 @@ impl Tool for WorkspaceWriteTool {
 }
 
 // ---------------------------------------------------------------------------
+// workspace_create
+// ---------------------------------------------------------------------------
+
+/// Creates one new folder or note in the shared tree. Wired only under an
+/// explicit `workspace` grant, alongside [`WorkspaceWriteTool`].
+pub struct WorkspaceCreateTool {
+    workspace: CompanyWorkspace,
+}
+
+impl WorkspaceCreateTool {
+    fn new(workspace: CompanyWorkspace) -> Self {
+        Self { workspace }
+    }
+}
+
+#[async_trait]
+impl Tool for WorkspaceCreateTool {
+    fn name(&self) -> &str {
+        WORKSPACE_CREATE_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Create ONE new folder or note in the company's shared workspace at `path`. USE FOR \
+         putting work you have produced somewhere the operator and your teammates can find it — \
+         your own folder `Agents/<your agent id>/` is the default home for it. The parent folder \
+         must already exist (create it first, one level at a time), and the path must be free — \
+         this never overwrites. To change a note that already exists use `workspace_write`. NOT \
+         for your own scratch files (use the `file_*` tools)."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder. Include the file extension on a note."
+                },
+                "kind": {
+                    "type": "string",
+                    "enum": ["folder", "file"],
+                    "description": "`folder` for a directory, `file` for a Markdown note."
+                },
+                "content": {
+                    "type": "string",
+                    "description": "The note's initial Markdown body. Only meaningful when `kind` is `file`; omit for a folder."
+                }
+            },
+            "required": ["path", "kind"],
+            "additionalProperties": false
+        })
+    }
+
+    /// Honest level for a tool that adds operator-visible content. As with
+    /// [`WorkspaceWriteTool`], this is not what gates the call — see the
+    /// `workspace_create` descriptor in
+    /// [`policy::consequence`](crate::policy::consequence).
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::Write
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let Some(path) = args
+            .get("path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+        else {
+            return Ok(ToolResult::error(
+                "Invalid arguments: `path` is required, e.g. \"Agents/ceo/Launch brief.md\"."
+                    .to_string(),
+            ));
+        };
+
+        let kind = match args.get("kind").and_then(Value::as_str).map(str::trim) {
+            Some("folder") => NodeKind::Folder,
+            Some("file") => NodeKind::File,
+            other => {
+                return Ok(ToolResult::error(format!(
+                    "Invalid arguments: `kind` must be \"folder\" or \"file\"{extra}.",
+                    extra = match other {
+                        Some(got) => format!(", not `{got}`", got = echo_path(got)),
+                        None => String::new(),
+                    }
+                )));
+            }
+        };
+
+        let content = args
+            .get("content")
+            .and_then(Value::as_str)
+            .filter(|c| !c.is_empty());
+        if kind == NodeKind::Folder && content.is_some() {
+            return Ok(ToolResult::error(
+                "Refused: a folder has no body. Create the folder first, then create the note \
+                 inside it with its `content`."
+                    .to_string(),
+            ));
+        }
+        if let Some(content) = content
+            && content.len() > MAX_WRITE_BYTES
+        {
+            return Ok(ToolResult::error(format!(
+                "Refused: the body is {} bytes, over the {MAX_WRITE_BYTES}-byte limit for a \
+                 workspace note. Create it smaller — a note larger than the read limit could not \
+                 be read back or revised afterwards.",
+                content.len()
+            )));
+        }
+
+        // Validate the path BEFORE anything resolves, the same order the other
+        // tools use — a traversal-shaped argument is refused on its shape, not
+        // on whether it happens to match something.
+        let segments = match split_logical_path(path) {
+            Ok(segments) => segments,
+            Err(why) => return Ok(ToolResult::error(format!("Invalid `path`: {why}."))),
+        };
+        let normalized = segments.join("/");
+        let (parent_segments, name) = segments.split_at(segments.len() - 1);
+        let name = name[0];
+
+        let index = match self.workspace.index().await {
+            Ok(index) => index,
+            Err(e) => {
+                return Ok(ToolResult::error(format!(
+                    "Could not read the company workspace: {e}"
+                )));
+            }
+        };
+
+        // Never overwrite, and never add a second node at an existing path. The
+        // second half matters as much as the first: a duplicate name makes the
+        // path ambiguous for **every** agent from then on, and the reserved
+        // `Agents` root is exactly the path an agent must not be able to
+        // shadow with a rival of its own.
+        if let Some(existing) = index.by_path.get(&normalized) {
+            let what = match existing.first().map(|e| e.node.kind) {
+                Some(NodeKind::Folder) => "a folder",
+                _ => "a note",
+            };
+            return Ok(ToolResult::error(format!(
+                "Refused: `{path}` already exists ({what}). Nothing was changed. To replace a \
+                 note's body, read it with `{WORKSPACE_READ_TOOL}` and overwrite it with \
+                 `{WORKSPACE_WRITE_TOOL}`; to add something new, pick a path that is free.",
+                path = echo_path(&normalized),
+            )));
+        }
+
+        // The parent must already exist. This creates exactly one node — the
+        // store's `create` contract is one node with a resolved parent, and
+        // silently making the intermediate folders would let a single typo grow
+        // a whole phantom subtree nobody asked for.
+        let parent_id = if parent_segments.is_empty() {
+            None
+        } else {
+            let parent_path = parent_segments.join("/");
+            match index.by_path.get(&parent_path).map(Vec::as_slice) {
+                Some([entry]) if entry.node.kind == NodeKind::Folder => Some(entry.node.id.clone()),
+                Some([entry]) => {
+                    return Ok(ToolResult::error(format!(
+                        "Refused: `{parent}` is a note, not a folder, so nothing can be created \
+                         inside it.",
+                        parent = echo_path(&entry.path),
+                    )));
+                }
+                Some(entries) => {
+                    return Ok(ToolResult::error(format!(
+                        "Refused: the parent path `{parent}` is ambiguous — {n} nodes share it. \
+                         Ask the operator to rename one of them in the console.",
+                        parent = echo_path(&parent_path),
+                        n = entries.len(),
+                    )));
+                }
+                None => {
+                    return Ok(ToolResult::error(format!(
+                        "Refused: the folder `{parent}` does not exist, so `{path}` has nowhere to \
+                         go. Create the folder first with `{WORKSPACE_CREATE_TOOL}` and \
+                         kind=\"folder\" (one level at a time), then retry this call.",
+                        parent = echo_path(&parent_path),
+                        path = echo_path(&normalized),
+                    )));
+                }
+            }
+        };
+
+        let origin = self.workspace.origin();
+        let node = WorkspaceNode {
+            id: crate::ports::generate_id(),
+            name: name.to_string(),
+            kind,
+            parent_id,
+            updated_at_millis: crate::ports::now_millis(),
+            created_by: origin.clone(),
+            updated_by: origin,
+        };
+        match self
+            .workspace
+            .store
+            .create(&self.workspace.company, &node, content)
+            .await
+        {
+            // The id and revision go back with the acknowledgement so an
+            // immediate follow-up `workspace_write` needs no extra round trip
+            // through list + read.
+            Ok(()) => Ok(ToolResult::success(match kind {
+                NodeKind::Folder => format!(
+                    "Created the workspace folder `{path}` (id={id}). Create notes inside it with \
+                     `{WORKSPACE_CREATE_TOOL}`.",
+                    path = echo_path(&normalized),
+                    id = node.id,
+                ),
+                NodeKind::File => format!(
+                    "Created the workspace note `{path}` (id={id}, rev={rev}, {bytes} bytes). To \
+                     revise it, call `{WORKSPACE_WRITE_TOOL}` with expected_updated_at={rev} and \
+                     the complete new body.",
+                    path = echo_path(&normalized),
+                    id = node.id,
+                    rev = node.updated_at_millis,
+                    bytes = content.map_or(0, str::len),
+                ),
+            })),
+            Err(e) => Ok(ToolResult::error(format!(
+                "Could not create `{path}`: {e}",
+                path = echo_path(&normalized),
+            ))),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Wiring
 // ---------------------------------------------------------------------------
 
 /// Build the workspace tool set for one agent.
 ///
-/// `can_write` decides whether [`WORKSPACE_WRITE_TOOL`] is included; the caller
+/// `can_write` decides whether [`WORKSPACE_CREATE_TOOL`] and
+/// [`WORKSPACE_WRITE_TOOL`] are included; the caller
 /// ([`build_agent`](crate::harness::build::build_agent)) derives it from an
 /// **explicit** `workspace` grant, so a bare `*` yields the two read tools only.
+///
+/// Create and write ride the same flag on purpose. Overwriting an existing
+/// operator-owned standard is strictly more destructive than adding a new note
+/// beside it, so any grant that permits the first has already permitted the
+/// second.
 pub fn workspace_tools(
     store: Arc<dyn WorkspaceStore>,
     company: CompanyId,
@@ -1143,6 +1428,7 @@ pub fn workspace_tools(
         Box::new(WorkspaceReadTool::new(workspace.clone())),
     ];
     if can_write {
+        tools.push(Box::new(WorkspaceCreateTool::new(workspace.clone())));
         tools.push(Box::new(WorkspaceWriteTool::new(workspace)));
     }
     tools
@@ -2192,26 +2478,372 @@ mod tests {
         assert!(text(&result).contains("over the"));
     }
 
+    // -- workspace_create (issue #551) ---------------------------------------
+
+    /// The whole point of the feature, end to end: an agent creates a note that
+    /// was not there before, and it lands in the tree the operator reads.
+    #[tokio::test]
+    async fn create_lands_a_new_note_in_the_shared_tree() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({
+                "path": "Standards/Deploys.md",
+                "kind": "file",
+                "content": "# Deploys\nGreen builds only.",
+            }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let tree = store.tree(&id).await.unwrap();
+        let node = tree
+            .iter()
+            .find(|n| n.name == "Deploys.md")
+            .expect("the note is in the tree");
+        assert_eq!(node.kind, NodeKind::File);
+        let (_, body) = store.read(&id, &node.id).await.unwrap().unwrap();
+        assert_eq!(body, "# Deploys\nGreen builds only.");
+
+        // The acknowledgement hands back the id and the revision, so an
+        // immediate follow-up write needs no extra list + read round trip.
+        let out = text(&out);
+        assert!(out.contains(&format!("id={}", node.id)), "{out}");
+        assert!(
+            out.contains(&format!("expected_updated_at={}", node.updated_at_millis)),
+            "{out}"
+        );
+    }
+
+    /// Authorship: a created node is stamped with the creating agent on BOTH
+    /// origins, and the path it was created at has nothing to do with it.
+    ///
+    /// This test is deliberately sited under `Standards/` — shared,
+    /// operator-owned guidance, as far from the agent's own folder as the tree
+    /// goes. It is the executable form of the settled decision that agents
+    /// write **unconfined**: if someone later adds a prefix gate, this fails.
+    #[tokio::test]
+    async fn create_is_unconfined_and_stamps_the_creating_agent() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Standards/Agent addendum.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(
+            !out.is_error,
+            "creating outside `Agents/` must be allowed: {}",
+            text(&out)
+        );
+
+        let node = store
+            .tree(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "Agent addendum.md")
+            .unwrap();
+        assert_eq!(node.created_by, agent_origin());
+        assert_eq!(node.updated_by, agent_origin());
+    }
+
+    /// The steered-for case: the agent's own folder, created as a folder and
+    /// then filled.
+    #[tokio::test]
+    async fn create_makes_a_folder_then_a_note_inside_it() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        for args in [
+            json!({ "path": "Agents", "kind": "folder" }),
+            json!({ "path": "Agents/ceo", "kind": "folder" }),
+            json!({ "path": "Agents/ceo/Launch brief.md", "kind": "file", "content": "# Launch" }),
+        ] {
+            let out = tool.execute(args.clone()).await.unwrap();
+            assert!(!out.is_error, "{args}: {}", text(&out));
+        }
+
+        let tree = store.tree(&id).await.unwrap();
+        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        let ceo = tree.iter().find(|n| n.name == "ceo").unwrap();
+        assert_eq!(brief.parent_id.as_deref(), Some(ceo.id.as_str()));
+        assert_eq!(ceo.kind, NodeKind::Folder);
+    }
+
+    /// Create never overwrites. A path that already resolves is refused with
+    /// the note left byte-identical — the failure mode this tool must never
+    /// have, since it carries no compare-and-swap token to protect one.
+    #[tokio::test]
+    async fn create_refuses_a_path_that_already_exists_and_changes_nothing() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({
+                "path": "Standards/Engineering standards.md",
+                "kind": "file",
+                "content": "# Mine now",
+            }))
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", text(&out));
+        assert!(text(&out).contains(WORKSPACE_WRITE_TOOL), "{}", text(&out));
+
+        let (_, body) = store.read(&id, "n-eng").await.unwrap().unwrap();
+        assert_eq!(
+            body, "# Engineering\nReview every PR.",
+            "the existing note was clobbered"
+        );
+        assert_eq!(store.tree(&id).await.unwrap().len(), 3, "a node was added");
+    }
+
+    /// The reserved-root case of the rule above, called out because it is the
+    /// one that matters most: identity in `Agents/` is by path, so an agent
+    /// that could mint a rival root named `Agents` would make every
+    /// `Agents/...` path permanently ambiguous — for itself, for its teammates
+    /// and for the provisioner.
+    #[tokio::test]
+    async fn create_cannot_mint_a_rival_agents_root() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_agents::ensure_agent_folders(store.as_ref(), &id, [TEST_AGENT])
+            .await
+            .unwrap();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents", "kind": "folder" }))
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", text(&out));
+        assert_eq!(
+            store
+                .tree(&id)
+                .await
+                .unwrap()
+                .iter()
+                .filter(|n| n.name == "Agents" && n.parent_id.is_none())
+                .count(),
+            1,
+        );
+    }
+
+    /// One node per call: a missing parent is an actionable refusal, not a
+    /// silent `mkdir -p`. A single typo in a deep path would otherwise grow a
+    /// whole phantom subtree nobody asked for.
+    #[tokio::test]
+    async fn create_refuses_a_missing_parent_and_says_what_to_do() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Playbooks/Launch/Checklist.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        let message = text(&out);
+        assert!(message.contains("Playbooks/Launch"), "{message}");
+        assert!(message.contains(WORKSPACE_CREATE_TOOL), "{message}");
+        assert!(message.contains("folder"), "{message}");
+        assert_eq!(
+            store.tree(&id).await.unwrap().len(),
+            3,
+            "a refused create must not have made intermediate folders"
+        );
+    }
+
+    /// A note is not a folder, so nothing can be created inside one.
+    #[tokio::test]
+    async fn create_refuses_a_parent_that_is_a_note() {
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceCreateTool::new(ws(store, CompanyId::new("acme")));
+        let out = tool
+            .execute(json!({ "path": "README.md/child.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(text(&out).contains("not a folder"), "{}", text(&out));
+    }
+
+    /// The same traversal rules as every other tool, and applied on the
+    /// argument's *shape* before anything resolves.
+    #[tokio::test]
+    async fn create_refuses_traversal_shaped_paths() {
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), CompanyId::new("acme")));
+        for path in ["../escape.md", "Standards/../../etc/passwd", "./x.md", ".."] {
+            let out = tool
+                .execute(json!({ "path": path, "kind": "file" }))
+                .await
+                .unwrap();
+            assert!(out.is_error, "path {path:?} must be refused");
+        }
+        assert_eq!(
+            store.tree(&CompanyId::new("acme")).await.unwrap().len(),
+            3,
+            "a traversal-shaped path created something"
+        );
+    }
+
+    /// A body an agent could not read back in full must never be created —
+    /// the next `workspace_write` on it would be refused as oversized, leaving
+    /// a note nobody but the operator can ever touch again.
+    #[tokio::test]
+    async fn create_refuses_a_body_over_the_write_cap() {
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), CompanyId::new("acme")));
+        let out = tool
+            .execute(json!({
+                "path": "Standards/Huge.md",
+                "kind": "file",
+                "content": "x".repeat(MAX_WRITE_BYTES + 1),
+            }))
+            .await
+            .unwrap();
+        assert!(out.is_error);
+        assert!(text(&out).contains("over the"), "{}", text(&out));
+        assert_eq!(store.tree(&CompanyId::new("acme")).await.unwrap().len(), 3);
+    }
+
+    /// Bad arguments answer with the fix, not with a stack of nulls.
+    #[tokio::test]
+    async fn create_rejects_a_missing_or_unknown_kind() {
+        let (_dir, store) = seeded("acme").await;
+        let tool = WorkspaceCreateTool::new(ws(store, CompanyId::new("acme")));
+        for args in [
+            json!({ "path": "Standards/x.md" }),
+            json!({ "path": "Standards/x.md", "kind": "note" }),
+            json!({ "kind": "file" }),
+            json!({ "path": "Standards/x", "kind": "folder", "content": "body" }),
+        ] {
+            let out = tool.execute(args.clone()).await.unwrap();
+            assert!(out.is_error, "{args} must be refused");
+        }
+    }
+
+    /// The acceptance criterion issue #551 is actually about: one agent's
+    /// output is another agent's input. Agent A creates, agent B — a different
+    /// `CompanyWorkspace`, its own tool instances — lists and reads it.
+    #[tokio::test]
+    async fn one_agent_creates_and_another_reads_it_back() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+
+        let author = CompanyWorkspace::new(store.clone(), id.clone(), "cmo".to_string());
+        let out = WorkspaceCreateTool::new(author)
+            .execute(json!({
+                "path": "Standards/Brand voice.md",
+                "kind": "file",
+                "content": "# Brand voice\nWarm, plain, specific.",
+            }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let reader = CompanyWorkspace::new(store, id, "engineer".to_string());
+        let listing = text(
+            &WorkspaceListTool::new(reader.clone())
+                .execute(json!({}))
+                .await
+                .unwrap(),
+        );
+        assert!(listing.contains("Standards/Brand voice.md"), "{listing}");
+
+        let read = text(
+            &WorkspaceReadTool::new(reader)
+                .execute(json!({ "path": "Standards/Brand voice.md" }))
+                .await
+                .unwrap(),
+        );
+        assert!(read.contains("Warm, plain, specific."), "{read}");
+    }
+
+    /// A write restamps `updated_by` with the writer and leaves `created_by`
+    /// alone, so "who made this" survives someone else editing it.
+    #[tokio::test]
+    async fn a_write_restamps_the_writer_and_preserves_the_creator() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+
+        let created = WorkspaceCreateTool::new(CompanyWorkspace::new(
+            store.clone(),
+            id.clone(),
+            "cmo".to_string(),
+        ))
+        .execute(json!({ "path": "Standards/Voice.md", "kind": "file", "content": "v1" }))
+        .await
+        .unwrap();
+        assert!(!created.is_error, "{}", text(&created));
+
+        let node = store
+            .tree(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "Voice.md")
+            .unwrap();
+
+        let out = WorkspaceWriteTool::new(ws(store.clone(), id.clone()))
+            .execute(json!({
+                "path": "Standards/Voice.md",
+                "content": "v2",
+                "expected_updated_at": node.updated_at_millis,
+            }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let after = store
+            .tree(&id)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "Voice.md")
+            .unwrap();
+        assert_eq!(
+            after.created_by,
+            WorkspaceOrigin::Agent {
+                id: "cmo".to_string()
+            },
+            "the creator must survive another agent's edit"
+        );
+        assert_eq!(after.updated_by, agent_origin());
+    }
+
     // -- wiring -------------------------------------------------------------
 
     #[test]
-    fn the_write_tool_is_only_present_when_writes_are_granted() {
+    fn the_mutating_tools_are_only_present_when_writes_are_granted() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
 
-        let read_only = workspace_tools(store.clone(), CompanyId::new("acme"), false);
+        let read_only = workspace_tools(
+            store.clone(),
+            CompanyId::new("acme"),
+            TEST_AGENT.to_string(),
+            false,
+        );
         let names: Vec<&str> = read_only.iter().map(|t| t.name()).collect();
         assert_eq!(names, vec![WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL]);
 
-        let writable = workspace_tools(store, CompanyId::new("acme"), true);
+        let writable = workspace_tools(store, CompanyId::new("acme"), TEST_AGENT.to_string(), true);
         let names: Vec<&str> = writable.iter().map(|t| t.name()).collect();
         assert_eq!(
             names,
             vec![
                 WORKSPACE_LIST_TOOL,
                 WORKSPACE_READ_TOOL,
+                WORKSPACE_CREATE_TOOL,
                 WORKSPACE_WRITE_TOOL
-            ]
+            ],
+            "create and write ride the same explicit grant"
         );
     }
 
@@ -2219,10 +2851,11 @@ mod tests {
     fn declared_permission_levels_match_what_each_tool_does() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
-        let tools = workspace_tools(store, CompanyId::new("acme"), true);
+        let tools = workspace_tools(store, CompanyId::new("acme"), TEST_AGENT.to_string(), true);
         assert_eq!(tools[0].permission_level(), PermissionLevel::ReadOnly);
         assert_eq!(tools[1].permission_level(), PermissionLevel::ReadOnly);
         assert_eq!(tools[2].permission_level(), PermissionLevel::Write);
+        assert_eq!(tools[3].permission_level(), PermissionLevel::Write);
     }
 
     #[test]
@@ -2230,8 +2863,37 @@ mod tests {
         let read_only = workspace_brief(false);
         assert!(read_only.contains(WORKSPACE_LIST_TOOL));
         assert!(!read_only.contains(WORKSPACE_WRITE_TOOL));
+        assert!(!read_only.contains(WORKSPACE_CREATE_TOOL));
         let writable = workspace_brief(true);
         assert!(writable.contains(WORKSPACE_WRITE_TOOL));
+        assert!(writable.contains(WORKSPACE_CREATE_TOOL));
         assert!(writable.contains("expected_updated_at"));
+    }
+
+    /// Issue #551 replaced a refusal with steering, so the steering is the
+    /// mechanism and has to be asserted like one.
+    ///
+    /// The brief must name the agent's own folder as the default home, mark
+    /// shared guidance as conditional rather than forbidden (the tree is
+    /// unconfined — saying "never" here would be a lie the tools do not back),
+    /// and keep rename/delete with the operator.
+    #[test]
+    fn the_brief_steers_toward_the_agents_own_folder() {
+        let brief = workspace_brief(true);
+        assert!(
+            brief.contains(&format!("{AGENTS_ROOT}/<your agent id>/")),
+            "the brief must name the agent's own folder: {brief}"
+        );
+        for phrase in [
+            "default home",
+            "anywhere in the tree",
+            "Standards/",
+            "Renaming and deleting",
+        ] {
+            assert!(
+                brief.contains(phrase),
+                "the brief dropped {phrase:?}: {brief}"
+            );
+        }
     }
 }
