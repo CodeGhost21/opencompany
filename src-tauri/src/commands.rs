@@ -251,3 +251,32 @@ pub fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Option<EmbeddedIn
         data_dir: state.data_dir.display().to_string(),
     })
 }
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// The guarantee the console cannot make about itself.
+    ///
+    /// `pairDevice` in the console returns whatever the core sends, so a mock
+    /// there proves nothing — this is where "the token never reaches the
+    /// webview" is actually enforced, by a type that has nowhere to put one.
+    /// If a `token` field is ever added to `PairedDevice`, this fails.
+    #[test]
+    fn a_paired_device_carries_no_token() {
+        let wire = serde_json::to_value(PairedDevice {
+            company: "acme".into(),
+            device_id: "dev-1".into(),
+            expires_at_millis: 1,
+        })
+        .expect("serialise");
+
+        let object = wire.as_object().expect("an object");
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["company", "deviceId", "expiresAtMillis"],
+            "pairing must answer with these three fields and nothing else"
+        );
+        assert!(!wire.to_string().to_lowercase().contains("token"));
+    }
+}
