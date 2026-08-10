@@ -382,15 +382,21 @@ impl OpenHumanLaunch {
         };
 
         // Prefer the CEF-aware cargo-tauri over any stock install on PATH.
+        // `<install_root>/bin` is always prepended — it is where
+        // `ensure_tauri_cli` just installed the vendored binary, and cargo
+        // resolves the `tauri` subcommand through the child's PATH. Only the
+        // `~/.cargo/bin` segment depends on HOME, which is often unset on
+        // Windows.
         let install_root = self.tauri_install_root();
+        let inherited = std::env::var("PATH").unwrap_or_default();
         let path = match std::env::var("HOME") {
             Ok(home) => format!(
                 "{}/bin:{}/.cargo/bin:{}",
                 install_root.display(),
                 home,
-                std::env::var("PATH").unwrap_or_default()
+                inherited
             ),
-            Err(_) => std::env::var("PATH").unwrap_or_default(),
+            Err(_) => format!("{}/bin:{}", install_root.display(), inherited),
         };
         command.env("PATH", path);
 
