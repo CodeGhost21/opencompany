@@ -835,6 +835,41 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     Ok(())
 }
 
+/// Handle the `openhuman` subcommand: build the launch request, reject
+/// passthrough args in Desktop mode via [`OpenHumanLaunch::validate`]
+/// (before the dry-run branch so `--dry-run -- --arg` reports the same error
+/// as a real launch instead of printing an unlaunchable command), then either
+/// print the preview or run to completion and exit with the child's code.
+async fn run_openhuman(
+    root: PathBuf,
+    mode: ModeArg,
+    release: bool,
+    dry_run: bool,
+    args: Vec<String>,
+) -> Result<()> {
+    let mut launch = match LaunchMode::from(mode) {
+        LaunchMode::Core => OpenHumanLaunch::core(root),
+        LaunchMode::Desktop => OpenHumanLaunch::desktop(root),
+    }
+    .with_args(args);
+    if release {
+        launch = launch.release();
+    }
+
+    // validate() rejects passthrough args in Desktop mode; run it before
+    // the dry-run branch so `--dry-run -- --arg` reports the same error
+    // as an actual launch instead of printing an unlaunchable command.
+    launch.validate()?;
+
+    if dry_run {
+        println!("{}", launch.dry_run_preview());
+        return Ok(());
+    }
+
+    let status = launch.run().await?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
