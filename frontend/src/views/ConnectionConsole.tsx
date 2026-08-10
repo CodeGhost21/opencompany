@@ -163,11 +163,7 @@ export function ConnectionConsole({
         client={client}
         company={defaultCompany}
         notice={notice}
-        onSignedIn={() => {
-          // Re-probe rather than reload: a reload would tear down every *other*
-          // connection's stream to recover this one.
-          void probe(connectionId).then(() => setPhase({ kind: "loading" }));
-        }}
+        onSignedIn={reBoot}
       />
     );
   }
@@ -188,7 +184,7 @@ export function ConnectionConsole({
           client={client}
           company={phase.company}
           notice={phase.notice}
-          onSignedIn={() => window.location.reload()}
+          onSignedIn={reBoot}
         />
       );
 
