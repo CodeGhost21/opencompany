@@ -679,6 +679,55 @@ mod tests {
     }
 
     #[test]
+    fn desktop_cef_args_build_app_dmg_in_release() {
+        // The `--bundles app dmg` segment is what makes `cargo tauri build`
+        // produce a working macOS .app/dmg rather than a bare binary — it is
+        // only reachable on macOS via `for_host()`, so exercise the CEF branch
+        // directly from any host.
+        let launch = OpenHumanLaunch::desktop("vendor/openhuman").release();
+        assert_eq!(
+            launch.desktop_tauri_args_for(DesktopBackend::Cef, 1420),
+            vec![
+                "build".to_string(),
+                "--bundles".into(),
+                "app".into(),
+                "dmg".into(),
+                "--".into(),
+                "--bin".into(),
+                "OpenHuman".into()
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_cef_dev_args_interpolate_the_dev_port() {
+        // The CEF dev script drives `dev --config {"build":{"devUrl":"…"}}`; the
+        // JSON payload is the whole macOS dev surface, and it must carry the
+        // resolved OPENHUMAN_DEV_PORT.
+        let launch = OpenHumanLaunch::desktop("vendor/openhuman");
+        assert_eq!(
+            launch.desktop_tauri_args_for(DesktopBackend::Cef, 4242),
+            vec![
+                "dev".to_string(),
+                "--config".into(),
+                r#"{"build":{"devUrl":"http://localhost:4242"}}"#.to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn desktop_dev_port_parses_numbers_and_falls_back() {
+        assert_eq!(desktop_dev_port(None), 1420);
+        assert_eq!(desktop_dev_port(Some("3000")), 3000);
+        assert_eq!(desktop_dev_port(Some("  8080  ")), 8080);
+        // Non-numeric and out-of-range values fall back to the default 1420
+        // rather than emitting a devUrl JSON that could never parse.
+        assert_eq!(desktop_dev_port(Some("not-a-port")), 1420);
+        assert_eq!(desktop_dev_port(Some("70000")), 1420);
+        assert_eq!(desktop_dev_port(Some("")), 1420);
+    }
+
+    #[test]
     fn desktop_backend_matches_host_os() {
         assert_eq!(
             DesktopBackend::for_host(),
