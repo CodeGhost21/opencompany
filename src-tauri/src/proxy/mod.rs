@@ -291,6 +291,11 @@ impl ProxyRegistry {
     }
 }
 
+/// Header names the proxy owns. A caller-supplied `x-opencompany-session`,
+/// `authorization` or `cookie` is ignored so the connection's credential — the
+/// only value the Rust core should ever attach — is never shadowed or doubled.
+const RESERVED_HEADERS: [&str; 3] = ["x-opencompany-session", "authorization", "cookie"];
+
 /// Attaches whatever this connection authenticates with.
 fn apply_credential(
     builder: reqwest::RequestBuilder,
