@@ -118,11 +118,21 @@ every write anonymous in the journal.
 So a session has a second carrier and a way to get one. Both are documented in
 [`users.md`](users.md) → "Two carriers, one session" and "Device pairing".
 
-Nothing resolves a keychain handle yet, so the console does not forward a
-`device` credential to the core: passing the `ref` through as if it were a token
-would authenticate as the literal handle. Device connections therefore register
-unauthenticated today, and the host answers 401 — which the connection row
-already renders.
+The token lives in the OS keychain (`src-tauri/src/keychain.rs`), and the
+console never sees it. `oc_connect` takes no device material: the core resolves
+a paired session by connection id. Pairing runs entirely in Rust —
+`oc_pair_device` performs the claim, writes the result to the keychain, and
+answers with the company, device id and expiry — so the token exists for one
+HTTP response that the webview is not on the path of. That is the difference
+between a design where the webview *should not* hold the credential and one
+where it *cannot*.
+
+The console's `Credential { kind: "device", ref }` is therefore a record that
+this machine is paired, not something the core is told. `ref` is the host's
+device id, useful when deciding what to revoke from the host's device list.
+
+Backend selection, the test store, and the Linux session-keyring caveat (a
+pairing there does not survive a logout) are documented in the module.
 
 ## ACP
 
