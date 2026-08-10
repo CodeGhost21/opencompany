@@ -443,7 +443,10 @@ fn any_file_newer_than(dir: &std::path::Path, threshold: SystemTime) -> bool {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        let Ok(meta) = fs::metadata(&path) else {
+        // `symlink_metadata` (lstat) so a symlinked directory is neither
+        // followed (a link to an ancestor would recurse without bound) nor its
+        // target's mtimes attributed to the vendored tree.
+        let Ok(meta) = fs::symlink_metadata(&path) else {
             continue;
         };
         if meta.is_file() {
