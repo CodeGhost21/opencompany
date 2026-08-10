@@ -407,6 +407,20 @@ impl ApprovalGate for ManifestApprovalGate {
     }
 
     async fn park(&self, _company: &CompanyId, effect: Effect) -> Result<ApprovalId> {
+        // The emergency stop (issue #86) vetoes the park path too, not just
+        // `evaluate`. The harness approval route — a tool call OpenHuman already
+        // gated inline — parks without ever consulting `evaluate`, so without
+        // this check a gated effect queued *after* the switch was pulled could
+        // be released for execution by an approver. This is the same veto
+        // `evaluate` applies, so an `EffectGroup::Other` effect (chat) still
+        // parks and an approval parked *before* the stop stays resolvable.
+        if self.is_emergency() && effect.group != EffectGroup::Other {
+            return Err(crate::OpenCompanyError::EmergencyStop(format!(
+                "refusing to park {} while stopped",
+                effect.kind
+            )));
+        }
+
         let id = ApprovalId::generate();
         self.parked.lock().expect("parked map poisoned").insert(
             id.clone(),
