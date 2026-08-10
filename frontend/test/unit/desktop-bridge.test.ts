@@ -6,6 +6,7 @@ import {
   connectionReady,
   embeddedHost,
   forgetConnection,
+  pairDevice,
   registerConnection,
   resetDesktopRegistrations,
 } from "@/api/transport/desktop";
@@ -78,19 +79,46 @@ describe("registering connections with the core", () => {
     expect(calls.at(-1)?.args).toMatchObject({ platformToken: "bearer-1" });
   });
 
-  it("does not forward a device ref as if it were a token", async () => {
-    // `ref` names a keychain entry; nothing resolves one yet. Passing it
-    // through would authenticate as the literal handle, which is worse than
-    // arriving unauthenticated — the host would reject it with no clue why.
+  it("sends no device material at all, because the core looks it up", async () => {
+    // `oc_connect` takes no device token. The core resolves a paired session
+    // from the keychain by connection id, so there is nothing for the console
+    // to pass — which is what makes it impossible, rather than merely
+    // impolite, for the webview to choose one.
     const id = addConnection({
       baseUrl: "https://acme.test",
-      credential: { kind: "device", ref: "keychain-handle-1" },
+      credential: { kind: "device", ref: "device-abc" },
     });
     await connectionReady(id);
 
     const connect = calls.filter((c) => c.command === "oc_connect").at(-1);
-    expect(connect?.args.deviceSession).toBeNull();
-    expect(JSON.stringify(connect?.args)).not.toContain("keychain-handle-1");
+    expect(connect?.args).not.toHaveProperty("deviceSession");
+    expect(JSON.stringify(connect?.args)).not.toContain("device-abc");
+  });
+
+  it("keeps the token out of the console when pairing", async () => {
+    // The property the whole keychain exists for. `oc_pair_device` answers
+    // with what a person needs to see and nothing else — a console that
+    // received the token, even to hand it straight back, would be a console an
+    // injected script could read it from.
+    (window as unknown as { __TAURI__: { invoke: unknown } }).__TAURI__.invoke = (
+      command: string,
+      args: Record<string, unknown>,
+    ) => {
+      calls.push({ command, args });
+      return Promise.resolve({
+        company: "acme",
+        deviceId: "dev-1",
+        expiresAtMillis: 1,
+      });
+    };
+
+    const device = await pairDevice("conn-1", "https://acme.test", "the-code", "Ada's Mac");
+    expect(device).toEqual({ company: "acme", deviceId: "dev-1", expiresAtMillis: 1 });
+    expect(Object.keys(device)).not.toContain("token");
+    expect(calls.at(-1)).toMatchObject({
+      command: "oc_pair_device",
+      args: { connectionId: "conn-1", code: "the-code", label: "Ada's Mac" },
+    });
   });
 
   it("re-announces when a connection adopts a new credential", async () => {

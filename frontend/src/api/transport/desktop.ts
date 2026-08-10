@@ -37,14 +37,20 @@ export interface EmbeddedInfo {
 /**
  * How a connection authenticates, in the shape `oc_connect` takes.
  *
- * Deliberately not the console's `Credential`: this module is the boundary
- * where a credential stops being a record the UI passes around and becomes an
- * argument to the core. A `device` credential names a keychain entry rather
- * than holding a token, and nothing resolves one yet — see `registerConnection`.
+ * Note what is absent: any device token. The core resolves a paired device's
+ * session from the keychain by connection id, so the console has nothing to
+ * pass and — more to the point — nothing to leak. Only the platform bearer
+ * travels, because that one genuinely arrives in the URL.
  */
 export interface DesktopCredential {
-  deviceSession?: string;
   platformToken?: string;
+}
+
+/** What pairing tells the console. Carries no secret. */
+export interface PairedDevice {
+  company: string;
+  deviceId: string;
+  expiresAtMillis: number;
 }
 
 function bridge(): DesktopBridge | null {
@@ -78,7 +84,6 @@ export function registerConnection(
     .invoke<void>("oc_connect", {
       connectionId: id,
       baseUrl,
-      deviceSession: credential.deviceSession ?? null,
       platformToken: credential.platformToken ?? null,
     })
     .then(
@@ -124,6 +129,42 @@ export async function embeddedHost(): Promise<EmbeddedInfo | null> {
     console.error("[desktop] could not read the embedded host", error);
     return null;
   }
+}
+
+/**
+ * Redeems a pairing code for this machine.
+ *
+ * The token never comes back. It exists for one HTTP response, and the core
+ * keeps that response to itself: it writes the session to the OS keychain and
+ * answers with only what a person needs to see. A console that received the
+ * token — even to hand it straight back — would be a console an injected script
+ * could read it from.
+ */
+export async function pairDevice(
+  id: string,
+  baseUrl: string,
+  code: string,
+  label?: string,
+): Promise<PairedDevice> {
+  const desktop = bridge();
+  if (!desktop) throw new Error("pairing a device needs the desktop application");
+  return desktop.invoke<PairedDevice>("oc_pair_device", {
+    connectionId: id,
+    baseUrl,
+    code,
+    label: label ?? null,
+  });
+}
+
+/**
+ * Forgets this machine's stored session for a connection.
+ *
+ * Local only: the session still exists on the host until someone revokes it
+ * from the devices list there. Conflating the two would mean unpairing one
+ * laptop cut off another.
+ */
+export async function forgetDevice(id: string): Promise<void> {
+  await bridge()?.invoke("oc_forget_device", { connectionId: id });
 }
 
 /** Test seam: forget every registration. */

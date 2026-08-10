@@ -293,10 +293,27 @@ function announceToDesktop(connection: Connection): void {
   void registerConnection(
     connection.id,
     connection.baseUrl,
-    connection.credential.kind === "platform"
+    connection.credential.kind === "platform" && connection.credential.token
       ? { platformToken: connection.credential.token }
       : {},
   );
+}
+
+/**
+ * Records that this machine now holds a paired device session for `id`.
+ *
+ * The `ref` is the device id the host minted — a name for the pairing, useful
+ * when someone is looking at the host's device list deciding what to revoke. It
+ * is emphatically not the credential: the core resolves the session from the
+ * keychain by connection id, and this record only says that one exists.
+ */
+export function pairedConnection(id: ConnectionId, deviceId: string): void {
+  adoptCredential(id, { kind: "device", ref: deviceId });
+}
+
+/** Forgets a pairing locally. The host's session record is untouched. */
+export function unpairConnection(id: ConnectionId): void {
+  adoptCredential(id, { kind: "cookie" });
 }
 
 export function removeConnection(id: ConnectionId): void {
