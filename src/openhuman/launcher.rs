@@ -402,15 +402,13 @@ fn any_file_newer_than(dir: &std::path::Path, threshold: SystemTime) -> bool {
             continue;
         };
         if meta.is_file() {
-            if let Ok(mtime) = meta.modified() {
-                if mtime > threshold {
-                    return true;
-                }
-            }
-        } else if meta.is_dir() {
-            if any_file_newer_than(&path, threshold) {
+            if let Ok(mtime) = meta.modified()
+                && mtime > threshold
+            {
                 return true;
             }
+        } else if meta.is_dir() && any_file_newer_than(&path, threshold) {
+            return true;
         }
     }
     false
