@@ -65,6 +65,7 @@ import {
   subtreeIds,
   titleOf,
 } from "@/lib/workspace";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
   client: OpenCompanyClient;
@@ -146,6 +147,8 @@ function message(e: unknown, fallback: string): string {
  * appears on refresh/refocus rather than instantly (#327).
  */
 export function WorkspaceView({ client, company }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -338,7 +341,7 @@ export function WorkspaceView({ client, company }: Props) {
   /* ---- migration off the retired localStorage scratchpad ---- */
 
   useEffect(() => {
-    const mine = readLegacyLocalNodes(company);
+    const mine = readLegacyLocalNodes(scope);
     if (mine.length > 0) {
       setLegacy(mine);
       return;
@@ -346,7 +349,7 @@ export function WorkspaceView({ client, company }: Props) {
     // A key holding nothing but the bundled seed is app-shipped bytes with zero
     // user information — sweep it silently rather than offering to import
     // invented marketing copy into a real company's workspace.
-    if (hasLegacyLocal(company)) clearLegacyLocal(company);
+    if (hasLegacyLocal(scope)) clearLegacyLocal(scope);
     setLegacy([]);
   }, [company]);
 
@@ -382,7 +385,7 @@ export function WorkspaceView({ client, company }: Props) {
           content: file.content ?? "",
         });
       }
-      clearLegacyLocal(company);
+      clearLegacyLocal(scope);
       setLegacy([]);
       toast.success(`Imported ${importSummary(files.length, folders.length)}.`);
       await loadTree({ silent: true });
@@ -396,7 +399,7 @@ export function WorkspaceView({ client, company }: Props) {
   }
 
   function discardLegacy() {
-    clearLegacyLocal(company);
+    clearLegacyLocal(scope);
     setLegacy([]);
   }
 

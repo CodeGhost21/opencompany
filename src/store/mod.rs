@@ -17,10 +17,11 @@ pub mod fs;
 /// Filesystem backends for the WS3 console ports (tasks, facts, usage,
 /// skill-state, workspace tree) over the same [`Bundle`](paths::Bundle) layout.
 pub mod fs_ops;
+pub mod layout;
 /// The canonical per-instance directory layout under `OPENCOMPANY_DATA_DIR`
 /// (`companies/`, `memory/`, `store/`, `files/`, `logs/`, `tmp/`) and the
 /// startup lifecycle that creates them and, by default, clears `tmp/`.
-pub mod layout;
+pub mod lock;
 /// The one-shot boot migration off the legacy doubled home layout
 /// (`companies/companies/<slug>`), run by `serve`, `export`, and `import`
 /// against the resolved home before anything reads it.

@@ -301,6 +301,7 @@ impl SqliteStore {
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
+        Self::apply_pragmas(&conn)?;
         conn.execute_batch(MIGRATIONS).map_err(sql_err)?;
         // `CREATE TABLE IF NOT EXISTS` is a no-op on a database that predates a
         // column, so additive columns need their own idempotent step.
@@ -314,6 +315,43 @@ impl SqliteStore {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
         })
+    }
+
+    /// Connection settings applied before the first migration statement runs.
+    ///
+    /// Ordering is load-bearing: `journal_mode` cannot change inside a
+    /// transaction, and [`MIGRATIONS`] is an `execute_batch` that opens one. Set
+    /// here, not in `open`, so the in-memory constructor takes the identical
+    /// path — a divergence between the two would mean the test suite exercises
+    /// settings production never gets.
+    ///
+    /// `journal_mode=WAL` is a no-op on an in-memory database (SQLite answers
+    /// `memory` and reports no error), which is why this is safe to share.
+    ///
+    /// What each one is actually for, given this store holds exactly ONE
+    /// `Connection` behind a `StdMutex`:
+    ///
+    /// - `synchronous=NORMAL` is the real win, and only sound under WAL: it
+    ///   drops the per-commit fsync to a per-checkpoint one. A desktop instance
+    ///   commits an event per turn step, and `FULL` makes each of those a disk
+    ///   flush. Under WAL the failure mode it trades away is losing the last
+    ///   commits to an OS/power loss, not corruption.
+    /// - `busy_timeout` buys nothing against our own single connection — it is
+    ///   the guard for a SECOND one: an operator with the `sqlite3` CLI open
+    ///   against the same file, or a second process that got past the home lock.
+    ///   Five seconds of blocking beats an immediate `SQLITE_BUSY` surfacing as
+    ///   a 500.
+    /// - `foreign_keys=ON` is stated rather than assumed. SQLite defaults it
+    ///   OFF per-connection, so any future `REFERENCES` clause in [`MIGRATIONS`]
+    ///   would be inert decoration, and would stay inert silently.
+    fn apply_pragmas(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA foreign_keys=ON;",
+        )
+        .map_err(sql_err)
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -2132,6 +2170,39 @@ mod test {
 
     fn store() -> Arc<SqliteStore> {
         Arc::new(SqliteStore::open_in_memory().expect("open in-memory sqlite"))
+    }
+
+    /// [`SqliteStore::apply_pragmas`] settles for the connection the ports use.
+    ///
+    /// Asserted against a FILE-backed database on purpose. Every other test here
+    /// runs in memory, where `journal_mode=WAL` legitimately answers `memory` —
+    /// so an in-memory assertion could not distinguish "WAL was applied" from
+    /// "the pragma was never issued", which is the regression worth catching.
+    /// `synchronous=NORMAL` is only sound under WAL, so the two are checked
+    /// together rather than separately.
+    #[tokio::test]
+    async fn file_backed_store_runs_in_wal_with_relaxed_sync() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteStore::open(dir.path().join("opencompany.db")).expect("open sqlite file");
+
+        let conn = store.conn();
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal_mode");
+        // SQLite reports the mode lowercased regardless of how it was set.
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+
+        // 1 == NORMAL. The numeric form is what `PRAGMA synchronous` reads back;
+        // there is no symbolic getter.
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous");
+        assert_eq!(synchronous, 1, "expected synchronous=NORMAL");
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("read foreign_keys");
+        assert_eq!(foreign_keys, 1, "expected foreign_keys=ON");
     }
 
     #[tokio::test]

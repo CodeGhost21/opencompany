@@ -21,6 +21,7 @@ import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ChannelsSection } from "./connections/ChannelsSection";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
   client: OpenCompanyClient;
@@ -31,6 +32,8 @@ type Load = "loading" | "ready" | "unavailable";
 
 /** Wire the third-party accounts your company can act through. */
 export function ConnectionsView({ client, company }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   const [busy, setBusy] = useState<string | null>(null);
@@ -89,7 +92,7 @@ export function ConnectionsView({ client, company }: Props) {
       // (issue #300). No-op when no tour is running, and deliberately after the
       // start call succeeds: a provider that isn't configured 400s here and
       // never navigates, so it must not leave a marker behind.
-      armTourResume(company);
+      armTourResume(scope);
       window.location.href = url;
     } catch {
       toast.error(`Couldn't start the ${p.name} connection.`);

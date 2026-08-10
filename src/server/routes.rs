@@ -17,8 +17,13 @@ use crate::{AppState, Result};
 /// build without that feature), and absent server routes must keep 404ing so
 /// API and external clients can detect an unwired surface instead of receiving
 /// the `index.html` shell with a `200`.
-const RESERVED_PREFIXES: [&str; 8] = [
+const RESERVED_PREFIXES: [&str; 9] = [
     "/api", "/graphql", "/healthz", "/spec", "/tiny", "/a2a", "/hooks", "/oauth",
+    // The ACP endpoint. Reserved even in a build that does not mount it: an
+    // ACP client probing an older or feature-less host must get a 404, not the
+    // console shell with a `200`. A client cannot tell "no ACP here" from
+    // "here is your JSON-RPC" if both answer 200 with an HTML body.
+    "/acp",
 ];
 
 /// True when `path` is server-owned and so must 404 rather than fall through to
@@ -73,6 +78,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::feedback::router())
         .merge(crate::server::users::router())
         .merge(crate::server::users::admin::router())
+        .merge(crate::server::users::devices::router())
         .merge(crate::server::graphql::router());
     // tiny.place A2A inbound + discovery routes, only when the feature is on.
     #[cfg(feature = "tinyplace")]
@@ -145,22 +151,64 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
     ))
 }
 
-/// Serves the Axum application.
+/// Serves the Axum application on the configured bind address.
 pub async fn serve(state: AppState) -> Result<()> {
     // Cloned, not borrowed: `router(state)` below takes the state by value.
-    let bind = state.config().bind.clone();
+    let bind_addr = state.config().bind.clone();
+    let (_addr, serving) = bind(&bind_addr, state).await?;
+    serving.run().await
+}
+
+/// Binds `addr` and reports the address actually bound, alongside the future
+/// that serves it.
+///
+/// Exists for an **ephemeral port**. An embedder — the desktop shell — wants
+/// `127.0.0.1:0` so it cannot collide with a dev server or a second app, and
+/// then needs to know which port the OS chose in order to point a webview at
+/// it. [`serve`] cannot answer that: by the time it is running, the listener is
+/// consumed and `config().bind` still says `:0`.
+///
+/// The two halves come back separately because the caller has to learn the
+/// address *before* awaiting the server, which never returns.
+pub async fn bind(addr: &str, state: AppState) -> Result<(std::net::SocketAddr, Serving)> {
     // Name the address in the error. A bare `?` surfaces the bind failure as
     // `openhuman process error: Address already in use` — the io::Error `#[from]`
     // arm — which says nothing about *which* address, and points at the wrong
     // subsystem entirely. The configured address may have come from a flag, a
     // variable, or `config.toml` (issue #425), so the value actually honoured is
-    // the one piece of context worth carrying.
+    // the one piece of context worth carrying. It matters just as much for an
+    // embedded host, whose address nobody typed.
     //
     // Deliberately not pre-parsed to a `SocketAddr`: `ToSocketAddrs` resolves
     // hostnames, so `localhost:8080` binds today and must keep binding.
-    let listener = TcpListener::bind(&bind).await.map_err(|e| {
-        crate::error::OpenCompanyError::Config(format!("could not bind `{bind}`: {e}"))
+    let listener = TcpListener::bind(addr).await.map_err(|e| {
+        crate::error::OpenCompanyError::Config(format!("could not bind `{addr}`: {e}"))
     })?;
+    let local = listener.local_addr()?;
+    Ok((local, Serving { listener, state }))
+}
+
+/// A bound-but-not-yet-serving host. Await [`Serving::run`] to serve it.
+#[must_use = "binding a port without serving it accepts no connections"]
+pub struct Serving {
+    listener: TcpListener,
+    state: AppState,
+}
+
+impl Serving {
+    /// The address this host is listening on.
+    pub fn local_addr(&self) -> std::io::Result<std::net::SocketAddr> {
+        self.listener.local_addr()
+    }
+
+    /// Serves until the process ends or the task is dropped.
+    pub async fn run(self) -> Result<()> {
+        serve_on(self.listener, self.state).await
+    }
+}
+
+/// Serves on a listener the caller already bound.
+pub async fn serve_on(listener: TcpListener, state: AppState) -> Result<()> {
     axum::serve(listener, router(state)).await?;
     Ok(())
 }
@@ -279,6 +327,11 @@ mod tests {
             "/api/v1/does-not-exist",
             "/.well-known/agent-card.json",
             "/companies/acme/.well-known/agent-card.json",
+            // The ACP endpoint in a build that does not mount it. An ACP client
+            // probing a host cannot distinguish "no ACP here" from "here is
+            // your JSON-RPC" if both answer `200` with an HTML body — it would
+            // try to parse the console shell as a protocol response.
+            "/acp",
         ] {
             let response = app
                 .clone()
@@ -353,5 +406,108 @@ mod tests {
             .unwrap();
 
         assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// `/spec` is the handshake a multi-connection client boots from.
+    async fn spec_body(state: AppState) -> serde_json::Value {
+        let response = router(state)
+            .oneshot(Request::builder().uri("/spec").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 1 << 20)
+            .await
+            .unwrap();
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// The embedded shell asks for `:0` and needs the port back.
+    ///
+    /// A desktop app cannot hardcode 8080 — it would collide with a dev server
+    /// or a second app, and a support case that reads "it works on my machine
+    /// unless I have the terminal open" is the result. `serve` cannot answer
+    /// which port the OS chose, because by the time it runs the listener is
+    /// consumed and `config().bind` still says `:0`.
+    #[tokio::test]
+    async fn binding_an_ephemeral_port_reports_the_one_actually_bound() {
+        let state = AppState::new(AppConfig::default());
+        let (addr, serving) = bind("127.0.0.1:0", state)
+            .await
+            .expect("bind an ephemeral port");
+
+        assert_ne!(addr.port(), 0, "the OS-chosen port must come back");
+        assert!(
+            addr.ip().is_loopback(),
+            "an embedded host must not be routable"
+        );
+
+        // The listener really is open: something is accepting on that port
+        // before anything is served, which is what lets the caller hand the
+        // address to a webview without racing the server task.
+        let serve_task = tokio::spawn(serving.run());
+        let probe = tokio::net::TcpStream::connect(addr).await;
+        assert!(probe.is_ok(), "the reported address must be connectable");
+        serve_task.abort();
+    }
+
+    #[tokio::test]
+    async fn spec_identifies_the_instance_and_its_capabilities() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+
+        let body = spec_body(state.clone()).await;
+        let id = body["instance_id"].as_str().expect("an instance id");
+        assert_eq!(id.len(), 32, "a 128-bit id, hex-encoded");
+        assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
+
+        // Stable across calls, and across a fresh state over the same home —
+        // the client's whole reason for reading it.
+        assert_eq!(spec_body(state).await["instance_id"], id);
+        let restarted = AppState::new(AppConfig::default()).with_home(dir.path().to_path_buf());
+        assert_eq!(spec_body(restarted).await["instance_id"], id);
+
+        let caps = body["capabilities"].as_array().expect("capabilities");
+        for expected in ["rest", "graphql", "sse", "devices"] {
+            assert!(caps.iter().any(|c| c == expected), "missing {expected}");
+        }
+        assert_eq!(body["storage"], "fs");
+        // Unset by default rather than an empty string, so a client can tell
+        // "unnamed" from "named the empty string".
+        assert!(body.get("display_name").is_none());
+    }
+
+    #[tokio::test]
+    async fn two_instances_are_distinguishable() {
+        // The multi-connection requirement in one assertion: a client holding
+        // two servers must be able to tell them apart even when both are
+        // freshly initialised with identical config.
+        let a = tempfile::tempdir().unwrap();
+        let b = tempfile::tempdir().unwrap();
+        let spec_a =
+            spec_body(AppState::new(AppConfig::default()).with_home(a.path().to_path_buf())).await;
+        let spec_b =
+            spec_body(AppState::new(AppConfig::default()).with_home(b.path().to_path_buf())).await;
+        assert_ne!(spec_a["instance_id"], spec_b["instance_id"]);
+    }
+
+    #[tokio::test]
+    async fn spec_never_leaks_the_storage_location() {
+        // `/spec` is unauthenticated. The backend *kind* is useful to a client;
+        // a path or a connection string would be a gift to anyone who asks.
+        let dir = tempfile::tempdir().unwrap();
+        let state = AppState::new(AppConfig {
+            instance_name: Some("prod-eu".to_string()),
+            ..AppConfig::default()
+        })
+        .with_home(dir.path().to_path_buf());
+
+        let body = spec_body(state).await;
+        assert_eq!(body["display_name"], "prod-eu");
+        let rendered = body.to_string();
+        assert!(
+            !rendered.contains(&dir.path().display().to_string()),
+            "the home path must not appear in /spec: {rendered}"
+        );
+        assert!(!rendered.contains("mongodb://"), "no connection strings");
     }
 }

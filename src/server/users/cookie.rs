@@ -1,4 +1,5 @@
-//! Session cookie naming, parsing, and rendering.
+//! Session carrier naming, parsing, and rendering: the per-company cookie a
+//! browser uses, and the header form every non-browser client must use.
 //!
 //! Hand-rolled rather than pulled from a crate, for the same reason
 //! [`bearer`](crate::server::platform_auth) is: it is a small parse of a header
@@ -39,24 +40,73 @@ use crate::ports::types::CompanyId;
 /// The prefix every session cookie name carries.
 const SESSION_COOKIE_PREFIX: &str = "oc_session_";
 
-/// The session cookie name for `company`, or `None` when the id cannot safely
-/// name a cookie.
+/// The header a non-browser client presents a session in.
+///
+/// Lowercase because [`HeaderMap`] lookup is case-insensitive only through a
+/// `HeaderName`; a `&str` key is matched verbatim against the lowercased name
+/// `http` stores.
+pub const SESSION_HEADER: &str = "x-opencompany-session";
+
+/// Whether `id` may carry a session at all.
 ///
 /// Restricted to `[A-Za-z0-9_-]`: a superset-safe subset of RFC 6265's token
 /// characters, and enough for every id the runtime mints
-/// (`{millis:012x}-{counter:012x}`) or a manifest slug produces. A company that
-/// cannot name a cookie cannot mint a session; the login route refuses rather
-/// than rendering a header an attacker chose.
-pub fn session_cookie_name(company: &CompanyId) -> Option<String> {
-    let id = company.as_ref();
-    if id.is_empty()
-        || !id
+/// (`{millis:012x}-{counter:012x}`) or a manifest slug produces.
+///
+/// Shared by both carriers on purpose, and it is the reason they live in one
+/// file. The cookie needs it so a company id containing `;` or `=` cannot inject
+/// attributes into a rendered `Set-Cookie`. The header needs it so the id cannot
+/// contain the `.` that separates it from the token. Two rules that could drift
+/// apart would mean a company addressable by one carrier and not the other.
+fn may_carry_session(id: &str) -> bool {
+    !id.is_empty()
+        && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-    {
+}
+
+/// The session cookie name for `company`, or `None` when the id cannot safely
+/// name a cookie.
+///
+/// A company that cannot name a cookie cannot mint a session; the login route
+/// refuses rather than rendering a header an attacker chose.
+pub fn session_cookie_name(company: &CompanyId) -> Option<String> {
+    let id = company.as_ref();
+    if !may_carry_session(id) {
         return None;
     }
     Some(format!("{SESSION_COOKIE_PREFIX}{id}"))
+}
+
+/// Parses [`SESSION_HEADER`] into the company it names and the raw token.
+///
+/// ## Why the company travels inside the value
+///
+/// A cookie carries its company in its *name* (see above), which is what lets
+/// the GraphQL handler find the company for a request whose company argument is
+/// in the body. A header has no equivalent, so the value is `<company>.<token>`
+/// and the header is self-describing in exactly the same way. Without that, a
+/// header-authenticated GraphQL request would have nowhere to read the company
+/// from, and the header form would work on the REST routes only.
+///
+/// `.` is unambiguous as the separator because [`may_carry_session`] excludes it
+/// from the company id, so the *first* `.` is always the boundary.
+///
+/// ## Why this is not a CSRF regression
+///
+/// [`set_cookie`]'s `SameSite=Lax` is this codebase's CSRF defense. A header
+/// does not weaken it: a cross-site HTML form cannot set a request header at
+/// all, and a cross-site `fetch`/XHR that sets a custom one is preflighted,
+/// which [`cors`](crate::server::cors) answers for allow-listed origins only.
+/// The header form is, if anything, the stricter carrier — it is never attached
+/// ambiently the way a cookie is.
+pub fn session_from_header(headers: &HeaderMap) -> Option<(CompanyId, String)> {
+    let raw = headers.get(SESSION_HEADER)?.to_str().ok()?.trim();
+    let (company, token) = raw.split_once('.')?;
+    if !may_carry_session(company) || token.is_empty() {
+        return None;
+    }
+    Some((CompanyId::new(company), token.to_string()))
 }
 
 /// The company id embedded in a session cookie name, if it is one.
