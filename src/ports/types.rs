@@ -1072,6 +1072,8 @@ impl CompanyEvent {
             Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
             Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
             Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
+            Self::WorkflowEnabledChanged { .. } => "WorkflowEnabledChanged",
+            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
@@ -1130,7 +1132,20 @@ impl CompanyEvent {
             | Self::TaskCardChanged { .. }
             | Self::DeskTaskCompleted { .. }
             | Self::TaskDiscussionPosted { .. }
-            | Self::TaskDiscussionRedacted { .. } => Permanent,
+            | Self::TaskDiscussionRedacted { .. }
+            // Issue #276: an arming change is an audit record of a decision —
+            // by an operator, or by the host's disarm rule. Permanent for the
+            // same reason its create/update/delete siblings above are: it is the
+            // only answer to "when did this stop firing, and who stopped it".
+            | Self::WorkflowEnabledChanged { .. }
+            // Issue #529: permanent, and this one is load-bearing rather than
+            // conventional. It is the durable ledger of reports that already
+            // left the process, written write-behind at dispatch so a re-run
+            // after a crash can skip them. Pruning it would not lose evidence —
+            // it would re-deliver already-sent reports to real people on the
+            // next re-run, which is the exact failure the variant exists to
+            // prevent. See its own docs.
+            | Self::WorkflowReportDelivered { .. } => Permanent,
         }
     }
 }
