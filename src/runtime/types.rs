@@ -216,6 +216,6 @@ mod tests {
         });
         let status: CompanyStatus = serde_json::from_value(payload)
             .expect("a pre-stop status payload still deserializes");
-        assert_eq!(status.emergency_paused, false);
+        assert!(!status.emergency_paused);
     }
 }
