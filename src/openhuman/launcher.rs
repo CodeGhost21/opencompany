@@ -739,10 +739,12 @@ mod tests {
         assert_eq!(desktop_dev_port(None), 1420);
         assert_eq!(desktop_dev_port(Some("3000")), 3000);
         assert_eq!(desktop_dev_port(Some("  8080  ")), 8080);
-        // Non-numeric and out-of-range values fall back to the default 1420
-        // rather than emitting a devUrl JSON that could never parse.
+        // Non-numeric, out-of-range, and reserved zero values fall back to the
+        // default 1420 rather than emitting a devUrl JSON that could never
+        // parse or that points at an unconnectable port 0.
         assert_eq!(desktop_dev_port(Some("not-a-port")), 1420);
         assert_eq!(desktop_dev_port(Some("70000")), 1420);
+        assert_eq!(desktop_dev_port(Some("0")), 1420);
         assert_eq!(desktop_dev_port(Some("")), 1420);
     }
 
