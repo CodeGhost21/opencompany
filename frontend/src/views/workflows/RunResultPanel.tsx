@@ -58,7 +58,7 @@ export function RunResultPanel({
   ).length;
 
   return (
-    <div className="border-t bg-card/60">
+    <div className="border-t bg-card/60" data-testid="workflow-run-result">
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run result</span>

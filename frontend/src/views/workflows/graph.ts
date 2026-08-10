@@ -25,6 +25,16 @@ export interface LiveRun {
   elapsed: Record<string, number>;
   /** False once the run has settled — its ok/error marks stay, its running ones go. */
   active: boolean;
+  /**
+   * Whether a cron started this run rather than an operator (issue #528).
+   *
+   * Read verbatim off the winning `workflow_run_started` frame. It lets the
+   * console tell its OWN manual run apart from a concurrent scheduled fire while
+   * the run POST is still open: the synchronous run path (#528) re-seeds the
+   * mid-run Stop button and the connection-lost triage from the live fold, and a
+   * cron run — which nobody clicked Run for — must never feed either.
+   */
+  scheduled: boolean;
 }
 
 /** Folds the run-progress frame window (issue #371) into the canvas state for
@@ -60,6 +70,7 @@ export function foldLiveRun(
   if (started.type !== "workflow_run_started") return null;
 
   const runId = started.runId;
+  const scheduled = started.scheduled;
   // The trigger fired by definition, and the engine reports no step for it, so
   // nothing else would ever mark it. Its successors are where execution is now.
   const states = initialRunState(graph);
@@ -101,7 +112,7 @@ export function foldLiveRun(
     }
   }
 
-  return { runId, states, elapsed, active };
+  return { runId, states, elapsed, active, scheduled };
 }
 
 /** A node's display name, falling back to its id when the graph is not loaded

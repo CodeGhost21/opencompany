@@ -308,10 +308,21 @@ export function getWorkflow(
 /**
  * Runs a workflow.
  *
- * With `detach` the host answers as soon as the run has an id (`202`), instead
- * of holding the request open for the whole run — which is what stops a proxy's
- * idle timeout from severing a healthy multi-minute run. The outcome then
- * arrives over the event stream and in {@link listWorkflowRuns}.
+ * **The console omits `detach` on purpose (issue #528).** A run's full `output`
+ * is carried ONLY by the settled `200` body: the journal, the SSE frames, and
+ * {@link listWorkflowRuns} are all structural (per-node status and timing, no
+ * agent text), and there is no run-detail route to fetch the output back later.
+ * The one surface that renders what a run produced mounts on that body, so the
+ * console must hold the request open to receive it. This is affordable because
+ * since #383 the host runs even the synchronous path on a spawned server task —
+ * the run itself survives a dropped connection; only the answer rides the wire.
+ *
+ * With `detach` the host instead answers as soon as the run has an id (`202`),
+ * without holding the request open — which stops a proxy's idle timeout from
+ * severing a healthy multi-minute run, at the cost of the console never seeing
+ * the output. The option is kept for callers that only need the run to start
+ * (e.g. a fire-and-forget trigger) and will read the outcome from the stream or
+ * the history.
  *
  * **Always check {@link isDetached} on the result**, whatever you asked for: a
  * host predating #383 ignores the flag and answers with the settled run, and
