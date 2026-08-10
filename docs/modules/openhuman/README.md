@@ -102,8 +102,9 @@ The former out-of-process seam is retained for one release and then removed.
 [--mode core|desktop] [--release] [--dry-run]` — Core shells out through Cargo
 to `openhuman-core`, Desktop calls `cargo tauri dev`/`build` directly and ports
 OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/`tauri:build:ui` preflight
-into Rust: vendored CEF-aware `tauri-cli` install, `CEF_PATH`, `.env` load,
-and macOS keychain + signing) and the JSON-RPC adapters —
+into Rust: vendored CEF-aware `tauri-cli` install, `CEF_PATH`, `.env` load
+(seeded from `.env.example` only in Desktop mode when absent), and macOS
+keychain + signing) and the JSON-RPC adapters —
 `rpc.rs` (the `OpenHumanRpc` transport trait + `MockOpenHumanRpc`),
 `http_client.rs` (the `reqwest` client behind `openhuman-rpc`), `tools.rs`
 (`OpenHumanToolProvider`, catalog filtered by manifest grants, ungranted calls
