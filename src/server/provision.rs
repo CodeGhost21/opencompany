@@ -398,7 +398,7 @@ async fn emergency_pause(
     crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<Json<EmergencyBody>>,
+    body: Result<Json<EmergencyBody>, JsonRejection>,
 ) -> Response {
     let id = CompanyId::new(id);
     if let Some(resp) = authorize_address(&state, &auth, &id) {
@@ -407,7 +407,11 @@ async fn emergency_pause(
     if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
         return resp;
     }
-    let body = body.map(|Json(b)| b).unwrap_or(EmergencyBody {
+    // A missing, empty, or malformed JSON body all read as "no step-up was
+    // supplied" and fall through to the same `confirmation_required` envelope a
+    // request with an absent body already gets — a panic button has to tell the
+    // operator *what* to send, not answer with an opaque `Json` rejection.
+    let body = body.ok().map(|Json(b)| b).unwrap_or(EmergencyBody {
         confirm: String::new(),
         reason: None,
     });
