@@ -3808,7 +3808,34 @@ mod test {
         );
     }
 
-    /// A manifest with two teammates, one capped at $5/day and one uncapped —
+    /// Issue #276: the paused-workflow ids ride the same overlay blob as the
+    /// graph bodies, reconstructed on load by both string-column stores
+    /// (`sqlite` and `mongodb` read `OverlayBlob::parse`). A round trip here
+    /// pins that the field is not dropped in `from_record`/`parse`.
+    #[test]
+    fn overlay_blob_round_trips_disabled_workflows() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.disabled_workflows.push("digest".to_string());
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.disabled_workflows, record.disabled_workflows);
+
+        // A row written before the pause switch existed holds no `disabled_workflows`
+        // key and loads as empty — the pre-#276 behaviour, no migration needed.
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-#276 object")
+                .disabled_workflows
+                .is_empty()
+        );
+        assert!(
+            OverlayBlob::parse("[]")
+                .expect("legacy array")
+                .disabled_workflows
+                .is_empty()
+        );
+    }
     /// the two starting positions every budget-override case builds on.
     const BUDGET_ROSTER: &str = "[company]\nname = \"Acme\"\n\
          [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\nbudget_usd_daily = 5.0\n\
