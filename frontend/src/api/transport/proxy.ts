@@ -127,12 +127,17 @@ export class ProxyTransport implements Transport {
  * so a bug in URL composition cannot leak a token to another host.
  */
 function pathOf(url: string): string {
+  // A protocol-relative `//authority/path` must not pass through unchanged: the
+  // Rust side joins by string concatenation, so against an empty base it would
+  // resolve into an authority-bearing URL and carry the connection's session
+  // header to a different origin. Rooting it keeps it same-origin.
+  if (url.startsWith("//")) return `/${url.slice(2)}`;
   if (url.startsWith("/")) return url;
   try {
     const parsed = new URL(url);
     return `${parsed.pathname}${parsed.search}`;
   } catch {
-    // Not absolute and not rooted: hand it over as-is and let Rust join it.
-    return url.startsWith("/") ? url : `/${url}`;
+    // Not absolute and not rooted: hand it over as a same-origin path.
+    return `/${url}`;
   }
 }
