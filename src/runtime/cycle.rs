@@ -1282,6 +1282,11 @@ fn cycle_task_id(
             // like the run outcome they bracket.
             | CompanyEvent::WorkflowRunStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
+            // Issue #529: a report that left the process is a record of a
+            // dispatch a workflow already made, journaled write-behind so a
+            // re-run can skip it. Like the run outcome it precedes, it starts no
+            // cycle and rivals no card.
+            | CompanyEvent::WorkflowReportDelivered { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             // A withdrawal (#358) is a record about a record: it starts no
@@ -1396,6 +1401,9 @@ fn cycle_thread_id(
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
+            // Issue #529: a record of a report already dispatched — names no
+            // thread and rivals none, exactly like the run events it sits among.
+            | CompanyEvent::WorkflowReportDelivered { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             // A withdrawal (#358) is a record about a record: it starts no

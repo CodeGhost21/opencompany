@@ -339,6 +339,23 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Workflow {workflow_id} finished node {node_id}"),
             "workflow.node",
         ),
+        // Issue #529: a report left the process. Structural, like the per-node
+        // arm above — node id and destination kind, never the target address:
+        // the sidecar reads company activity for insight, and "the owner summary
+        // went out" is the insight; *whom* it reached is operator-only, the same
+        // boundary `DeliveryReport::detail` draws. The run's own
+        // `WorkflowRunFinished` arm already folds the delivery counts.
+        CompanyEvent::WorkflowReportDelivered {
+            workflow_id,
+            node,
+            kind,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Workflow {workflow_id} delivered its {kind} report from node {node}"),
+            "workflow.report_delivered",
+        ),
     };
     WireEvent {
         seq,
