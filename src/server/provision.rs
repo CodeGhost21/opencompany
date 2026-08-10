@@ -478,10 +478,14 @@ async fn emergency_resume(
 }
 
 /// The shared success body: the company's status plus whether this call was the
-/// one that moved the switch.
+/// one that moved the switch. `message` is only present on the degraded arm —
+/// when the in-memory transition happened but its journal append failed, so the
+/// operator gets the real `emergency_paused` state plus the caveat instead of a
+/// bare error that reads as "nothing happened".
 async fn emergency_response(
     runtime: &std::sync::Arc<crate::runtime::CompanyRuntime>,
     changed: bool,
+    message: Option<String>,
 ) -> Response {
     match runtime.status().await {
         Ok(status) => {
@@ -490,6 +494,9 @@ async fn emergency_response(
                 _ => serde_json::Map::new(),
             };
             body.insert("changed".into(), json!(changed));
+            if let Some(message) = message {
+                body.insert("message".into(), json!(message));
+            }
             (StatusCode::OK, Json(serde_json::Value::Object(body))).into_response()
         }
         Err(err) => ApiError(err).into_response(),
