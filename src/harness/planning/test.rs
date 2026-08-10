@@ -344,13 +344,118 @@ fn workspace_paths_render_and_terminate() {
 #[test]
 fn a_connection_is_checked_against_the_inventory() {
     let e = evidence();
-    assert_eq!(verify_connection(&e, "github").0, PrereqStatus::Satisfied);
+    assert_eq!(verify_connection(&e, "notion").0, PrereqStatus::Satisfied);
     // Case is not a distinction an operator should have to get right.
-    assert_eq!(verify_connection(&e, "GitHub").0, PrereqStatus::Satisfied);
+    assert_eq!(verify_connection(&e, "Notion").0, PrereqStatus::Satisfied);
     assert_eq!(verify_connection(&e, "slack").0, PrereqStatus::Missing);
     let (status, note) = verify_connection(&e, "stripe");
     assert_eq!(status, PrereqStatus::Missing, "undeclared reads as missing");
     assert!(note.contains("Connections tab"), "{note}");
+}
+
+/// **The arm this whole check exists for.** A provider connected *natively* is
+/// stored under the host's own `oauth/{provider}` namespace, which no agent
+/// tool ever reads. Reporting `satisfied` would green-light a card that
+/// dispatches into work it cannot do and fails with no explanation — the exact
+/// silent-wrong-answer this module's tests are here to catch (issue #396).
+///
+/// The note must **acknowledge** the stored connection rather than claim the
+/// provider is not connected: an operator who just completed that OAuth
+/// handshake, told to "connect it", will connect it again and get nowhere.
+#[test]
+fn a_natively_connected_provider_is_missing_not_satisfied() {
+    let mut e = evidence();
+    e.connections.insert(
+        "github".to_string(),
+        (true, vec!["native".to_string()], false),
+    );
+    let (status, note) = verify_connection(&e, "github");
+    assert_eq!(
+        status,
+        PrereqStatus::Missing,
+        "a native-only credential confers no agent capability: {note}"
+    );
+    assert!(
+        note.contains("Composio"),
+        "the note must name the path that does work: {note}"
+    );
+    assert!(
+        note.contains("is connected in this host's catalog"),
+        "the note must acknowledge the credential the operator already stored, \
+         not tell them to connect it again: {note}"
+    );
+
+    // An empty `via` is the same verdict for the same reason — nothing in it
+    // names a path a tool can resolve.
+    e.connections
+        .insert("github".to_string(), (true, Vec::new(), false));
+    assert_eq!(verify_connection(&e, "github").0, PrereqStatus::Missing);
+}
+
+/// The satisfying case, and the only one: a Composio-backed connection is the
+/// single path a tool actually resolves a credential from.
+#[test]
+fn a_composio_backed_connection_is_satisfied() {
+    let mut e = evidence();
+    e.connections.insert(
+        "github".to_string(),
+        (true, vec!["composio".to_string()], false),
+    );
+    let (status, note) = verify_connection(&e, "github");
+    assert_eq!(status, PrereqStatus::Satisfied, "{note}");
+    assert!(note.contains("composio"), "{note}");
+}
+
+/// Both namespaces at once is still satisfied. The check is membership, not
+/// equality — a provider connected natively *and* through Composio has a
+/// credential a tool can reach, and the useless native copy alongside it does
+/// not take that away.
+#[test]
+fn a_connection_via_both_namespaces_is_satisfied() {
+    let mut e = evidence();
+    e.connections.insert(
+        "github".to_string(),
+        (
+            true,
+            vec!["native".to_string(), "composio".to_string()],
+            false,
+        ),
+    );
+    assert_eq!(verify_connection(&e, "github").0, PrereqStatus::Satisfied);
+
+    // And in the other order, because a `via` list has no guaranteed ordering.
+    e.connections.insert(
+        "github".to_string(),
+        (
+            true,
+            vec!["composio".to_string(), "native".to_string()],
+            false,
+        ),
+    );
+    assert_eq!(verify_connection(&e, "github").0, PrereqStatus::Satisfied);
+}
+
+/// `unverified` outranks the `via` distinction in both directions. A probe that
+/// did not answer cannot tell us *how* a provider is connected any more than it
+/// can tell us *whether* — so the verdict is `unknown`, never the new `missing`.
+#[test]
+fn an_unverified_row_is_unknown_whatever_its_via_says() {
+    let mut e = evidence();
+    for via in [
+        Vec::new(),
+        vec!["native".to_string()],
+        vec!["composio".to_string()],
+        vec!["native".to_string(), "composio".to_string()],
+    ] {
+        e.connections
+            .insert("github".to_string(), (true, via.clone(), true));
+        let (status, note) = verify_connection(&e, "github");
+        assert_eq!(
+            status,
+            PrereqStatus::Unknown,
+            "via {via:?} on an unverified row: {note}"
+        );
+    }
 }
 
 /// The failure direction that matters. A provider whose inventory could not be

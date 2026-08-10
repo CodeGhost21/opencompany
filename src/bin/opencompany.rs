@@ -25,9 +25,10 @@ struct Cli {
 enum Command {
     /// Run the Axum HTTP server.
     Serve {
-        /// Address to bind.
-        #[arg(long, default_value = "127.0.0.1:8080")]
-        bind: String,
+        /// Address to bind. Falls back to `OPENCOMPANY_BIND`, then the
+        /// `bind` key of `config.toml`, then `127.0.0.1:8080`.
+        #[arg(long)]
+        bind: Option<String>,
         /// Optional OpenHuman checkout path to report in `/spec`.
         #[arg(long)]
         openhuman_root: Option<PathBuf>,
@@ -864,7 +865,11 @@ async fn main() -> Result<()> {
             if let Some(warning) = opencompany::store::home_divergence_warning(&home, &data_root) {
                 eprintln!("opencompany: {warning}");
             }
-            let workspace_cfg = ConfigFile::load(&data_root)?
+            // Kept whole rather than mapped straight to `.workspace`: the
+            // `bind` key is read off the same file further down (issue #425).
+            let config_file = ConfigFile::load(&data_root)?;
+            let workspace_cfg = config_file
+                .as_ref()
                 .map(|c| c.workspace.resolve())
                 .unwrap_or_default();
             let layout = opencompany::store::DataLayout::new(&data_root);
@@ -900,6 +905,23 @@ async fn main() -> Result<()> {
                 "{}",
                 opencompany::app::journal::pin_keyring(&journal).summary()
             );
+            // Tag every request the embedded openhuman_core makes to the
+            // TinyHumans backend as opencompany's, not the vendored
+            // runtime's own `openhuman` default (issue #376). This must run
+            // here — before any company runtime, agent harness or HTTP
+            // listener exists — because core's `IntegrationClient` reads the
+            // identity into its default headers AT CONSTRUCTION
+            // (`harness/toolbelt.rs`, `harness/composio.rs`,
+            // `harness/search.rs` each build one the first time a company
+            // needs it), so a call after the first client already exists
+            // would not retroactively re-tag it. Same startup-ordering
+            // reasoning as the keyring pin directly above: say it here, once,
+            // rather than leaving it implicit in which line happens to run
+            // first.
+            // The call itself lives in the library so a test can reach it —
+            // this arm cannot be exercised from one.
+            #[cfg(feature = "openhuman")]
+            opencompany::product::install_into_embedded_core();
             // Soft disk-quota alerting. Hard enforcement is the container /
             // StorageClass layer's job (EFS access point, k8s ResourceQuota);
             // here we surface an operator-visible warning when a workspace
@@ -966,6 +988,16 @@ async fn main() -> Result<()> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| AppConfig::default().api_url);
+            // The listener address, across every layer that may name it. Until
+            // issue #425 only the flag reached this struct, so the manager's
+            // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
+            // `doctor`'s report while the host kept serving on the default —
+            // silently, because the host does start and does serve.
+            let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
+                bind,
+                &ProcessEnv,
+                config_file.and_then(|c| c.bind),
+            );
             let state = AppState::new(AppConfig {
                 bind,
                 openhuman_root,
@@ -1122,6 +1154,12 @@ async fn main() -> Result<()> {
                 });
             }
 
+            // Name the address *and* the layer that chose it. An operator who
+            // set `OPENCOMPANY_BIND` and finds the host elsewhere can read the
+            // disagreement off this one line instead of inferring it from a
+            // refused connection. `println!` for the same reason as the lines
+            // above — the default `EnvFilter` would swallow an `info!`.
+            println!("listening on {} (from {bind_source})", state.config().bind);
             opencompany::server::serve(state).await
         }
         Some(Command::Spec { openhuman_root }) => {

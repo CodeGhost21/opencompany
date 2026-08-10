@@ -246,13 +246,20 @@ test("a card dropped into Planning is planned and settled, never left parked", a
 
   const read = async () => (await (await request.get(`${API}/tasks/${id}`)).json()).task;
 
-  // It reached the host and the pass settled it. A card still in `planning`
-  // when this expires is the real failure this test exists to catch: either the
-  // drop never landed, or a pass started and never finished.
+  // The settle is the signal that matters, and the note is its durable
+  // record: every planning outcome writes a `[system]` note and lands the
+  // card in the same atomic `upsert`. Poll for the note rather than the
+  // intermediate `planning` column — a fast brain settles the card before a
+  // poll interval elapses, so `planning` is a transient a pass can skip
+  // entirely, and requiring it to be observed is a race masquerading as an
+  // assertion. The note, by contrast, only exists once the pass has finished.
   await expect
-    .poll(async () => (await read()).column, { timeout: 150_000 })
-    .not.toBe("planning");
+    .poll(async () => (await read()).note ?? "", { timeout: 150_000 })
+    .toContain("[system]");
 
+  // Wherever it landed, it is a documented landing, not the parking lot the
+  // contract forbids: `in_progress` (a plan, nothing blocking) or `todo` (a
+  // missing prerequisite, or the pass itself failed).
   const settled = await read();
   expect(["todo", "in_progress"]).toContain(settled.column);
   // And it says why it moved, rather than moving silently. `[system]` is the

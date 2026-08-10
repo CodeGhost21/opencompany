@@ -215,7 +215,10 @@ fn slug_toolkit(slug: &str) -> String {
 }
 
 #[cfg(feature = "composio")]
-pub use live::{ComposioMetering, authorize_connect_url, composio_tools, list_connection_states};
+pub use live::{
+    ComposioMetering, authorize_connect_url, composio_tools, list_catalog_toolkits,
+    list_connection_states,
+};
 
 #[cfg(feature = "composio")]
 mod live {
@@ -426,6 +429,55 @@ mod live {
                 .or_insert(active);
         }
         Ok(states.into_iter().collect())
+    }
+
+    /// The backend's live Composio toolkit catalog — every slug it will let
+    /// this tenant connect. Backs the console's open-mode provider list
+    /// (issue #397).
+    ///
+    /// This is the same `GET /agent-integrations/composio/toolkits` call the
+    /// `composio_list_toolkits` agent tool makes and the same one OpenHuman's
+    /// Skills grid drives off, so the console offers what the backend actually
+    /// permits instead of a list maintained by hand here.
+    ///
+    /// Deliberately **not** filtered by the tenant allowlist, unlike
+    /// [`list_connection_states`]: the only caller is the open-mode path, where
+    /// the allowlist is empty by definition. A company with a non-empty
+    /// allowlist is offered its own list verbatim and never reaches this
+    /// function — the catalog must not be able to widen a manifest that
+    /// deliberately narrowed.
+    ///
+    /// Entries are the catalog's **connectable** slugs — `enabled == true`,
+    /// mirroring the vendored runtime's own `connectable_toolkit_slugs`, since
+    /// advertising a provider the backend gate will refuse only invites a failed
+    /// sign-in. Backends predating the dynamic catalog send no `catalog[]` at
+    /// all; their plain slug allowlist is used instead. Slugs are trimmed,
+    /// lowercased, de-duplicated and sorted for a stable render order. Any
+    /// upstream error is scrubbed of the tenant bearer before it bubbles.
+    pub async fn list_catalog_toolkits(config: &TenantComposio) -> Result<Vec<String>> {
+        tracing::debug!("[composio] ops list_catalog_toolkits");
+        let (client, secrets) = live_call(config).await?;
+        let resp = match client.list_toolkits().await {
+            Ok(resp) => resp,
+            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+        };
+        let normalize = |slug: &str| slug.trim().to_ascii_lowercase();
+        let mut slugs: std::collections::BTreeSet<String> = resp
+            .catalog
+            .iter()
+            .filter(|entry| entry.enabled.unwrap_or(false))
+            .map(|entry| normalize(&entry.slug))
+            .filter(|slug| !slug.is_empty())
+            .collect();
+        if slugs.is_empty() {
+            slugs = resp
+                .toolkits
+                .iter()
+                .map(|slug| normalize(slug))
+                .filter(|slug| !slug.is_empty())
+                .collect();
+        }
+        Ok(slugs.into_iter().collect())
     }
 
     // ── composio_list_toolkits ──────────────────────────────────────────
@@ -1232,7 +1284,40 @@ mod ops_helper_tests {
         }))
     }
 
+    /// Mock `GET /agent-integrations/composio/toolkits` — the dynamic catalog
+    /// shape (backend #1012): a `toolkits` allowlist plus a `catalog[]` whose
+    /// entries carry an `enabled` gate. `zendesk` is present but not connectable
+    /// and must not be advertised; the casing and whitespace on `HubSpot` must
+    /// normalise.
+    async fn toolkits_handler() -> axum::Json<Value> {
+        axum::Json(json!({
+            "success": true,
+            "data": {
+                "toolkits": ["gmail", "slack"],
+                "catalog": [
+                    { "slug": " HubSpot ", "name": "HubSpot", "enabled": true },
+                    { "slug": "gmail", "name": "Gmail", "enabled": true },
+                    { "slug": "zendesk", "name": "Zendesk", "enabled": false },
+                    { "slug": "gmail", "name": "Gmail (dup)", "enabled": true }
+                ]
+            }
+        }))
+    }
+
+    /// Mock toolkits route for a backend predating the dynamic catalog: the
+    /// plain slug allowlist and no `catalog[]` at all.
+    async fn legacy_toolkits_handler() -> axum::Json<Value> {
+        axum::Json(json!({
+            "success": true,
+            "data": { "toolkits": ["Notion", "gmail", ""] }
+        }))
+    }
+
     async fn spawn_backend() -> String {
+        spawn_backend_with(get(toolkits_handler)).await
+    }
+
+    async fn spawn_backend_with(toolkits: axum::routing::MethodRouter) -> String {
         let app = Router::new()
             .route(
                 "/agent-integrations/composio/authorize",
@@ -1241,7 +1326,8 @@ mod ops_helper_tests {
             .route(
                 "/agent-integrations/composio/connections",
                 get(connections_handler),
-            );
+            )
+            .route("/agent-integrations/composio/toolkits", toolkits);
         let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
             .await
             .unwrap();
@@ -1291,6 +1377,43 @@ mod ops_helper_tests {
             vec![("gmail".to_string(), true), ("slack".to_string(), false)],
             "gmail active (one ACTIVE row), slack pending only, notion filtered out"
         );
+    }
+
+    /// The console's open-mode source (issue #397): the backend's real catalog,
+    /// normalised. Connectable entries only, trimmed + lowercased, de-duplicated,
+    /// sorted.
+    #[tokio::test]
+    async fn list_catalog_toolkits_returns_the_backends_connectable_catalog() {
+        let url = spawn_backend().await;
+        let catalog = list_catalog_toolkits(&config(&url, Vec::new()))
+            .await
+            .expect("catalog fetch");
+        assert_eq!(
+            catalog,
+            vec!["gmail".to_string(), "hubspot".to_string()],
+            "connectable entries only, normalised, de-duplicated and sorted"
+        );
+    }
+
+    /// A backend predating the dynamic catalog sends no `catalog[]`. Its plain
+    /// slug allowlist is used rather than reporting an empty catalog — which the
+    /// console would (correctly) render as a degraded fallback.
+    #[tokio::test]
+    async fn list_catalog_toolkits_falls_back_to_the_plain_allowlist() {
+        let url = spawn_backend_with(get(legacy_toolkits_handler)).await;
+        let catalog = list_catalog_toolkits(&config(&url, Vec::new()))
+            .await
+            .expect("catalog fetch");
+        assert_eq!(catalog, vec!["gmail".to_string(), "notion".to_string()]);
+    }
+
+    /// An unreachable backend is an error, never a quietly-empty catalog — the
+    /// caller has to be able to tell "nothing is permitted" from "I could not
+    /// ask".
+    #[tokio::test]
+    async fn list_catalog_toolkits_surfaces_a_fetch_failure() {
+        let out = list_catalog_toolkits(&config("http://127.0.0.1:1", Vec::new())).await;
+        out.expect_err("an unreachable backend must not read as an empty catalog");
     }
 
     #[tokio::test]

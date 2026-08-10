@@ -49,11 +49,28 @@ export interface ComposioStatus {
   openMode: boolean;
   /**
    * The toolkits to render as provider rows — the manifest list when non-empty,
-   * else a curated starting set. In open mode this is a suggestion, not a
-   * limit: any slug the backend permits can still be authorized, which is what
-   * the "other provider" field is for.
+   * else the backend's live catalog. In open mode this is still not a hard
+   * limit: any slug the backend permits can be authorized, which is what the
+   * "other provider" field is for.
    */
   effectiveToolkits: string[];
+  /**
+   * Where {@link effectiveToolkits} came from (issue #397).
+   *
+   * - `manifest` — the company's own allowlist, offered verbatim. Not a
+   *   degradation: the company chose this list.
+   * - `backend` — Composio's live catalog. Authoritative.
+   * - `fallback` — the catalog could not be fetched, so this is a built-in
+   *   starter list that may be incomplete. Always paired with
+   *   {@link catalogNotice}.
+   *
+   * Rendering a `fallback` the same way as a `backend` list would waste the
+   * distinction: eight providers would look like the whole set, which is the
+   * shape of the bug this issue was reopened for.
+   */
+  catalogSource: "manifest" | "backend" | "fallback";
+  /** Why the list is a fallback, for the operator. `null` unless degraded. */
+  catalogNotice: string | null;
 }
 
 /** A mutating response: the resulting status plus a plain-language note. */

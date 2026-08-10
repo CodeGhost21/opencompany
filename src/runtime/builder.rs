@@ -112,9 +112,13 @@ pub fn effective_grants(manifest: &CompanyManifest) -> Vec<String> {
 /// per-agent slice of [`effective_grants`], used by the harness to decide which
 /// tool families an individual agent receives.
 ///
-/// Gated to the `openhuman` feature: its only caller is `build_roster`, which is
-/// itself feature-gated, so the default build would otherwise flag it dead.
-#[cfg(feature = "openhuman")]
+/// Compiled in **every** build since issue #264. It used to be gated to
+/// `openhuman` because `build_roster` was its only caller, but the agent detail
+/// route (`GET {scope}/team/{agent_id}`) now answers the same question for the
+/// console, and that route ships in the default build. Both callers must read
+/// the *same* function or the console would show an operator a tool list the
+/// harness does not actually grant — which is precisely the verification gap
+/// #264 was filed about.
 pub(crate) fn agent_effective_grants(allow: &[String], agent_tools: &[String]) -> Vec<String> {
     let grants: Vec<String> = if agent_tools.is_empty() {
         allow.to_vec()
