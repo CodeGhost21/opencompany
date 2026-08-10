@@ -633,6 +633,38 @@ async fn emergency_pause_is_idempotent() {
     assert_eq!(body["emergency_paused"], true);
 }
 
+/// The mirror idempotency case: releasing a company that is not stopped is not
+/// an error, and reports that it changed nothing. The early return exists so a
+/// stray release cannot journal a spurious `engaged: false` event against a
+/// company that never stopped — the exact failure the engage-side guard guards
+/// in reverse.
+#[tokio::test]
+async fn emergency_resume_when_not_stopped_is_idempotent() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    // The correct confirmation (the company id) on a company that never stopped.
+    let release = app
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-resume",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "acme" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(release.status(), StatusCode::OK);
+    let body = json_body(release).await;
+    assert_eq!(body["changed"], false);
+    assert_eq!(body["emergency_paused"], false);
+}
+
 /// Unauthenticated callers cannot reach either route — checked before the
 /// confirmation, so a correct phrase is never a substitute for a credential.
 #[tokio::test]
