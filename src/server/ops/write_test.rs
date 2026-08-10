@@ -5642,3 +5642,238 @@ async fn an_admin_is_refused_by_none_of_them() {
         );
     }
 }
+
+/// Issue #552: a published deliverable lives on two surfaces, and the console's
+/// workspace `PUT` is where an operator edits one. Saving that note must record
+/// an **operator version** on the artifact chain, because that edit is exactly
+/// the datum `human_edit_diff` exists to answer — and overwriting only the node
+/// would leave the history claiming the agent's draft shipped unchanged.
+///
+/// The ordering is asserted too: the version must be there when the node write
+/// is refused, since chain-ahead-of-node is the survivable direction and
+/// node-ahead-of-chain is the silent one.
+#[tokio::test]
+async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A note in the tree…
+    let (status, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "the agent's draft"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    // …that is the projection of a published artifact.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(artifact["versions"].as_array().unwrap().len(), 2);
+    assert_eq!(artifact["versions"][1]["body"], "the operator's rewrite");
+    assert_eq!(artifact["versions"][1]["author"], "operator");
+    assert_eq!(
+        artifact["versions"][1]["note"], "operator edit before approval",
+        "the wording the console recognises, shared with the append route"
+    );
+    assert_eq!(
+        artifact["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version must inherit the node, or the NEXT save mirrors nothing"
+    );
+    assert!(
+        artifact["humanEditDiff"].is_object(),
+        "the whole point: a console edit of a deliverable is now diffable"
+    );
+
+    // And the node itself carries the operator's text.
+    let (node, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(body, "the operator's rewrite");
+    assert_eq!(
+        node.updated_by,
+        crate::ports::workspace::WorkspaceOrigin::Operator
+    );
+}
+
+/// Nearly every note in the tree is an ordinary note, not a deliverable.
+/// Saving one must append nothing anywhere — the reverse lookup answering
+/// "no artifact owns this" is the common case, and deliberately silent.
+#[tokio::test]
+async fn saving_an_unpublished_note_appends_no_artifact_version() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A published artifact exists, but points at a DIFFERENT node.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "deliverable",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("some-other-node");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "still just a note"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        1,
+        "an ordinary note's save must not touch an unrelated artifact"
+    );
+}
+
+/// The other direction of the same invariant: appending a version through the
+/// Artifacts tab must push the new body into the deliverable's workspace note,
+/// or the tree keeps serving a draft the history has superseded.
+#[tokio::test]
+async fn appending_an_artifact_version_updates_its_workspace_note() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "v1"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "v1",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts/art-1/versions",
+        Some(json!({"body": "v2, edited in the Artifacts tab"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        appended["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version keeps naming the node it lives in"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note exists");
+    assert_eq!(
+        body, "v2, edited in the Artifacts tab",
+        "the shared tree must not keep serving a superseded draft"
+    );
+}
+
+/// An artifact with no workspace note — a legacy capture, or one recorded
+/// while no tree was wired — appends exactly as it always did, with no node
+/// write attempted and nothing invented for it.
+#[tokio::test]
+async fn appending_to_an_unmirrored_artifact_touches_no_note() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({"taskId": "t-1", "title": "Draft", "body": "v1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/artifacts/{id}/versions"),
+        Some(json!({"body": "v2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(appended["versions"].as_array().unwrap().len(), 2);
+    assert!(
+        appended["versions"][1].get("workspaceNodeId").is_none(),
+        "nothing may invent a node for an artifact that has none"
+    );
+}
