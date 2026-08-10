@@ -831,7 +831,6 @@ mod tests {
         // PATH. `join_paths` picks the platform separator, so compare via a
         // `split_paths` round-trip rather than a hardcoded `:` string.
         let with_home = desktop_path_env(&install_root, Some("/home/dev"), "/usr/bin:/bin");
-        assert_eq!(with_home.len(), "/root/.cache/cargo-install/bin".len() * 0 + 0 + 0 + 0);
         let segments: Vec<_> = std::env::split_paths(&with_home).collect();
         assert_eq!(
             segments,
