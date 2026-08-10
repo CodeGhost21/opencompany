@@ -379,7 +379,7 @@ impl OpenHumanLaunch {
             // inherited from the caller's environment must not leak into a
             // non-CEF run.
             None => command.env_remove("CEF_PATH"),
-        }
+        };
 
         // Prefer the CEF-aware cargo-tauri over any stock install on PATH.
         let install_root = self.tauri_install_root();
