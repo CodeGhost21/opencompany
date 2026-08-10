@@ -272,9 +272,11 @@ export function AppShell({
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
   // Issue #384: bumped on every `workflow_created` / `workflow_updated` /
-  // `workflow_deleted`, so the Workflows view re-reads its picker while the tab
-  // stays open — a graph authored by the orchestrator, by another session or by
-  // a machine credential used to be invisible until a reload.
+  // `workflow_deleted`, and since issue #276 on `workflow_enabled_changed` too,
+  // so the Workflows view re-reads its picker while the tab stays open — a graph
+  // authored by the orchestrator, by another session or by a machine credential
+  // used to be invisible until a reload, and a workflow armed or paused
+  // elsewhere used to keep rendering its old switch.
   //
   // A counter rather than the payload, for the same reason `taskEventTick` is:
   // the view re-reads `GET …/workflows`, so two frames collapsing into one
@@ -935,6 +937,7 @@ export function AppShell({
         <SidebarFooter>
           <SidebarControls
             lifecycleState={feed.status.lifecycle}
+            emergencyPaused={feed.status.emergency_paused}
             companies={companies}
             activeCompany={company}
             onSwitchCompany={onSwitchCompany}

@@ -164,11 +164,26 @@ export type CompanyStreamEvent =
   // (see `project_event`). A console reacts to this frame by re-reading
   // `GET …/workflows`, so the picker's content keeps exactly one source.
   | {
-      type: "workflow_created" | "workflow_updated" | "workflow_deleted";
+      type:
+        | "workflow_created"
+        | "workflow_updated"
+        | "workflow_deleted"
+        | "workflow_enabled_changed";
       seq: number;
       atMillis: number;
       workflowId: string;
       name: string;
+      /**
+       * `workflow_enabled_changed` only (issue #276): the state it moved to,
+       * and whether a person moved it or the host's disarm rule did.
+       *
+       * Declared because the host sends them, not because this console reads
+       * them — the subscriber below takes a counter and re-reads the list, so
+       * the armed state it renders comes from `GET …/workflows` rather than
+       * from a frame it might have missed.
+       */
+      enabled?: boolean;
+      reason?: "operator" | "disarmed";
     }
   // The transient live turn-progress frames (`src/turn_stream.rs`): a tool call
   // just started (status `running`) or finished (status `ok`/`error`). These are
@@ -270,9 +285,10 @@ interface Options {
    */
   onWorkflowRunEvent?: (event: CompanyStreamEvent) => void;
   /**
-   * Called for each workflow **authoring** frame — `workflow_created`,
-   * `workflow_updated`, `workflow_deleted` (issue #384) — so the Workflows view
-   * can re-read its picker live.
+   * Called for each frame that changes what the workflow picker should show —
+   * `workflow_created`, `workflow_updated`, `workflow_deleted` (issue #384) and
+   * `workflow_enabled_changed` (issue #276) — so the Workflows view can re-read
+   * its picker live.
    *
    * Separate from {@link Options.onWorkflowRunEvent} because they answer
    * different questions: that one is what a run *did*, this one is which
@@ -590,6 +606,12 @@ function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers): void 
     case "workflow_created":
     case "workflow_updated":
     case "workflow_deleted":
+    // Issue #276: arming and pausing belong here too. It is not an authoring
+    // change, but it changes what the picker must render, and the question the
+    // subscriber answers — "re-read the list" — is the same one. A workflow
+    // paused by another session, or disarmed by the host on someone else's
+    // edit, used to stay showing as armed until a reload.
+    case "workflow_enabled_changed":
       onWorkflowChanged?.(event);
       break;
     default:

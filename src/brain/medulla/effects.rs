@@ -101,6 +101,20 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Lifecycle changed from {from} to {to}"),
             "lifecycle.changed",
         ),
+        // Issue #86: carried on the same terms as the lifecycle change beside
+        // it. The operator's free-text reason is deliberately NOT sent — the
+        // sidecar gets that an emergency stop happened and who pulled it, which
+        // is what it needs to make sense of a company that suddenly stops
+        // acting, without putting an operator's incident note on the wire.
+        CompanyEvent::EmergencyPauseChanged { engaged, by, .. } => (
+            Role::System,
+            by.id.clone(),
+            format!(
+                "Emergency stop {}",
+                if *engaged { "engaged" } else { "released" }
+            ),
+            "emergency.pause.changed",
+        ),
         CompanyEvent::AgentReply {
             chat_id,
             agent_id,
@@ -237,6 +251,27 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             "workflow".to_string(),
             format!("Deleted workflow {name} ({workflow_id})"),
             "workflow.deleted",
+        ),
+        // Issue #276. Id, name and the state it moved to — no `reason`, because
+        // "the host disarmed this" is a fact about our write path, not something
+        // an agent should be reasoning about or reciting back.
+        CompanyEvent::WorkflowEnabledChanged {
+            workflow_id,
+            name,
+            enabled,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!(
+                "{} workflow {name} ({workflow_id})",
+                if *enabled {
+                    "Switched on"
+                } else {
+                    "Switched off"
+                }
+            ),
+            "workflow.enabled_changed",
         ),
         // Card-only body, for the same reason the steer arm below is action-only:
         // the message text is human free text that no agent consumes in v1

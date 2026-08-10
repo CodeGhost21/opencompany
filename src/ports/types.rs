@@ -341,6 +341,31 @@ pub enum CompanyEvent {
         /// Who performed the transition.
         by: Actor,
     },
+    /// The governance kill switch was pulled or released (issue #86).
+    ///
+    /// Separate from [`LifecycleChanged`](Self::LifecycleChanged) because the
+    /// two states are orthogonal: emergency stop leaves `lifecycle` alone so
+    /// chat keeps working. Folding it into the lifecycle event would make the
+    /// audit trail claim a transition that never happened.
+    ///
+    /// The **durable state**, not just an audit line: the last such event in a
+    /// company's log is what the boot replay reads back to decide whether to
+    /// come up stopped. There is deliberately no `CompanyRecord` field beside
+    /// it, because a second copy of a safety flag is a second thing that can
+    /// disagree with the first.
+    ///
+    /// Written *after* the in-memory flag on engage and *before* it on release,
+    /// so whichever of the two writes lands alone leaves the company stopped.
+    /// See `CompanyRuntime::emergency_pause`.
+    EmergencyPauseChanged {
+        /// `true` when the stop was engaged, `false` when it was released.
+        engaged: bool,
+        /// The operator who did it.
+        by: Actor,
+        /// Their free-text note, when one was given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// An agent replied in a desk/chat. Journaled by the harness/chat layer so
     /// the GraphQL `Chat.history` resolver (WS2c) can read replies back
     /// alongside the operator messages that prompted them.
@@ -589,6 +614,33 @@ pub enum CompanyEvent {
         name: String,
         /// Who removed it, when known. `None` from the current unattributed
         /// surfaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A workflow was switched on or off (issue #276) — from the console's
+    /// `PUT …/workflows/{wid}/enabled` route, or from the disarm rule that
+    /// forces `false` when a create or an edit arms a schedule. Journaled
+    /// best-effort **after** the flag is persisted, so it records a completed
+    /// change. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// **Only a real transition is journaled.** Toggling a workflow to the state
+    /// it already holds writes nothing, so this log answers "when did this stop
+    /// firing, and was it a person or the disarm rule" rather than counting
+    /// clicks.
+    WorkflowEnabledChanged {
+        /// The workflow's id.
+        workflow_id: String,
+        /// Its display name at the moment of the change, so an audit reader need
+        /// not resolve the id against a graph that may since have been edited.
+        name: String,
+        /// The state it moved **to**: `true` armed, `false` paused.
+        enabled: bool,
+        /// Why it moved. See [`WorkflowEnabledReason`].
+        reason: WorkflowEnabledReason,
+        /// Who changed it, when known. `None` from the current unattributed
+        /// surfaces, and always `None` for a [`Disarmed`](WorkflowEnabledReason::Disarmed)
+        /// entry — that one is the host's rule firing, not a person's decision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
@@ -1043,12 +1095,14 @@ impl CompanyEvent {
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
             Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
+            Self::EmergencyPauseChanged { .. } => "EmergencyPauseChanged",
             Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
             Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
+            Self::WorkflowEnabledChanged { .. } => "WorkflowEnabledChanged",
+            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
-            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
         }
     }
 
@@ -1110,21 +1164,22 @@ impl CompanyEvent {
             | Self::TaskSteered { .. }
             | Self::TaskCardChanged { .. }
             | Self::DeskTaskCompleted { .. }
+            | Self::EmergencyPauseChanged { .. }
             | Self::TaskDiscussionPosted { .. }
-            | Self::TaskDiscussionRedacted { .. } => Permanent,
-
-            // Permanent for the third reason, and the sharpest one: something
-            // still *reads* this at boot.
-            // `runtime::delivered_by_unsettled_runs` folds these lines from
-            // sequence 0 to learn what a crashed run already sent, so a re-run
-            // can skip it. The event is written write-behind at dispatch
-            // precisely because the mail has already left the process.
-            //
-            // Pruning it would not lose evidence — it would re-deliver
-            // already-sent reports to real people, which is the exact failure
-            // issue #529 added it to prevent. It looks like machine exhaust and
-            // sits beside the three prunable workflow-run kinds; it is not.
-            Self::WorkflowReportDelivered { .. } => Permanent,
+            | Self::TaskDiscussionRedacted { .. }
+            // Issue #276: an arming change is an audit record of a decision —
+            // by an operator, or by the host's disarm rule. Permanent for the
+            // same reason its create/update/delete siblings above are: it is the
+            // only answer to "when did this stop firing, and who stopped it".
+            | Self::WorkflowEnabledChanged { .. }
+            // Issue #529: permanent, and this one is load-bearing rather than
+            // conventional. It is the durable ledger of reports that already
+            // left the process, written write-behind at dispatch so a re-run
+            // after a crash can skip them. Pruning it would not lose evidence —
+            // it would re-deliver already-sent reports to real people on the
+            // next re-run, which is the exact failure the variant exists to
+            // prevent. See its own docs.
+            | Self::WorkflowReportDelivered { .. } => Permanent,
         }
     }
 }
@@ -2064,6 +2119,25 @@ pub struct OverlayWorkflow {
     pub toml: String,
 }
 
+/// Why a workflow's armed state changed (issue #276). Serialized in
+/// `snake_case` (`operator` / `disarmed`).
+///
+/// The distinction is the point of journaling this at all: "an operator paused
+/// this" and "the host refused to arm a schedule nobody had reviewed" are
+/// different facts, and only the second one explains a workflow that never fired
+/// after it was created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowEnabledReason {
+    /// An explicit `PUT …/workflows/{wid}/enabled`.
+    Operator,
+    /// The disarm rule fired: a create or an edit produced a trigger schedule
+    /// that had not been armed before, so the host wrote `false` rather than
+    /// letting an unreviewed cron go live. Only ever paired with
+    /// `enabled: false` — the rule has no arming direction.
+    Disarmed,
+}
+
 /// An operator-set daily spend cap for one teammate, persisted on the
 /// [`CompanyRecord`] so it wins over the manifest's `budget_usd_daily` without
 /// rewriting `company.toml` and without a redeploy (issue #343).
@@ -2156,6 +2230,12 @@ pub struct OverlayBlob {
     /// loads them as empty — which is exactly "the manifest still decides".
     #[serde(default)]
     pub budgets: Vec<BudgetOverride>,
+    /// The workflow ids the operator has switched off (issue #276). Absent on
+    /// rows written before the pause switch existed, and `#[serde(default)]`
+    /// reads that absence as "nothing is paused" — the pre-#276 behaviour
+    /// exactly.
+    #[serde(default)]
+    pub disabled_workflows: Vec<String>,
     /// The source-template provenance recorded at launch. `None` for companies
     /// provisioned from a raw manifest and for legacy rows written before
     /// provenance existed (the `#[serde(default)]` keeps those rows loading).
@@ -2173,6 +2253,7 @@ impl OverlayBlob {
             desks: record.overlay_desks.clone(),
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
     }
@@ -2196,6 +2277,7 @@ impl OverlayBlob {
                     desks: Vec::new(),
                     workflows: Vec::new(),
                     budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     provenance: None,
                 })
                 .map_err(|_| original),
@@ -2255,6 +2337,37 @@ pub struct CompanyRecord {
     /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
+    /// Workflow ids the operator has switched **off** (issue #276). A workflow
+    /// named here keeps its graph, stays listed and stays runnable by hand, and
+    /// is skipped by
+    /// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler) — the pause
+    /// switch that used to require deleting the workflow outright.
+    ///
+    /// Read through [`Self::workflow_enabled`] and mutate through
+    /// [`Self::set_workflow_enabled`], never directly, so the scheduler gate, the
+    /// two read surfaces and the write path cannot drift.
+    ///
+    /// **A disable list, not an enable list, and that direction is the whole
+    /// design.** Absent means enabled, so every record written before this
+    /// existed keeps firing exactly as it did — the `#[serde(default)]` is a
+    /// no-op migration rather than a silent mass-disable of every saved schedule.
+    ///
+    /// **Not `[workflows].enabled`.** The manifest list is a *declaration* —
+    /// which workflows this company was provisioned with — and
+    /// `merge_enabled_workflows` (`src/runtime/builder.rs`, issue #208) rebuilds
+    /// it at boot from seed ids ∪ surviving overlay ids. Expressing "off" as
+    /// absence from that list would therefore un-express itself on the next
+    /// restart, which for a safety switch is the one failure mode that must not
+    /// exist. This field is the runtime override the console writes, the same
+    /// split [`Self::effective_budget`] draws between a manifest cap and an
+    /// operator's.
+    ///
+    /// Unlike the edit and delete paths, an id here **may name a seed-backed
+    /// workflow**. Pausing does not touch the source tree and can only ever
+    /// remove capability, so it cannot let a runtime write outlive a seed
+    /// rollback the way a record-wins `[tools]` or `[policy]` merge could.
+    #[serde(default)]
+    pub disabled_workflows: Vec<String>,
     /// Where this company's manifest was seeded from — the source template's
     /// stable identity, stamped once at launch and carried across rebuilds.
     /// `None` for companies provisioned from a raw manifest body. The
@@ -2471,6 +2584,44 @@ impl CompanyRecord {
     /// any. See [`BudgetOverride::duplicate_agent_id`].
     pub fn duplicate_budget_agent_id(&self) -> Option<&str> {
         BudgetOverride::duplicate_agent_id(&self.overlay_budgets)
+    }
+
+    /// Whether `wid` is switched on (issue #276) — the single predicate the
+    /// scheduler gate and both read surfaces share.
+    ///
+    /// Enabled is the default: an id this record has never heard of is on, which
+    /// is what makes [`Self::disabled_workflows`] a no-op for every record
+    /// written before the switch existed.
+    pub fn workflow_enabled(&self, wid: &str) -> bool {
+        !self.disabled_workflows.iter().any(|id| id == wid)
+    }
+
+    /// Switches `wid` on or off, returning whether the record actually changed.
+    ///
+    /// Idempotent in both directions, and the `bool` is why: the write path uses
+    /// it to skip the store save and the audit event when an operator toggles a
+    /// workflow to the state it is already in, so the journal records decisions
+    /// rather than clicks.
+    ///
+    /// Deliberately the **only** mutator. The disarm rules in
+    /// `workflow_create.rs` call it with `false` and nothing else ever calls it
+    /// with `true` except the explicit enable route — keeping the "an edit
+    /// disarms, it never re-arms" invariant in one place instead of in every
+    /// caller's discipline.
+    pub fn set_workflow_enabled(&mut self, wid: &str, enabled: bool) -> bool {
+        let held = self.disabled_workflows.iter().any(|id| id == wid);
+        match (enabled, held) {
+            // Already in the requested state.
+            (true, false) | (false, true) => false,
+            (true, true) => {
+                self.disabled_workflows.retain(|id| id != wid);
+                true
+            }
+            (false, false) => {
+                self.disabled_workflows.push(wid.to_string());
+                true
+            }
+        }
     }
 }
 
@@ -3413,6 +3564,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -3686,6 +3838,35 @@ mod test {
             OverlayBlob::parse("[]")
                 .expect("legacy array")
                 .workflows
+                .is_empty()
+        );
+    }
+
+    /// Issue #276: the paused-workflow ids ride the same overlay blob as the
+    /// graph bodies, reconstructed on load by both string-column stores
+    /// (`sqlite` and `mongodb` read `OverlayBlob::parse`). A round trip here
+    /// pins that the field is not dropped in `from_record`/`parse`.
+    #[test]
+    fn overlay_blob_round_trips_disabled_workflows() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.disabled_workflows.push("digest".to_string());
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.disabled_workflows, record.disabled_workflows);
+
+        // A row written before the pause switch existed holds no `disabled_workflows`
+        // key and loads as empty — the pre-#276 behaviour, no migration needed.
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-#276 object")
+                .disabled_workflows
+                .is_empty()
+        );
+        assert!(
+            OverlayBlob::parse("[]")
+                .expect("legacy array")
+                .disabled_workflows
                 .is_empty()
         );
     }

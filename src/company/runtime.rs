@@ -64,6 +64,25 @@ fn task_enters_planning(prev_column: Option<&str>, next_column: &str) -> bool {
     next_column == PLANNING && prev_column != Some(PLANNING)
 }
 
+/// Whether a company should come up with the emergency stop engaged, given what
+/// replaying its event log produced (issue #86).
+///
+/// Free-standing and pure so the fail-safe direction can be pinned by a test
+/// without standing up a runtime — see
+/// [`CompanyRuntime::hydrate_emergency`] for the full argument. The one rule
+/// worth restating here: **`Err` means stopped.** A log that cannot be read
+/// tells us nothing about whether an operator pulled the switch, and of the two
+/// available guesses only one is recoverable by a human noticing.
+fn emergency_from_load(stopped: Result<Option<bool>>) -> bool {
+    match stopped {
+        Ok(Some(engaged)) => engaged,
+        // Nothing known and nothing broken — a company with no such event in its
+        // log was never stopped.
+        Ok(None) => false,
+        Err(_) => true,
+    }
+}
+
 /// Awaits a spawned follow-up cycle and flattens its two failure modes into one
 /// (issue #383).
 ///
@@ -1623,6 +1642,7 @@ impl CompanyRuntime {
             lifecycle,
             pending_approvals: self.journal.pending().len(),
             template_provenance,
+            emergency_paused: self.is_emergency_paused(),
         })
     }
 
@@ -1655,6 +1675,133 @@ impl CompanyRuntime {
         Ok(from)
     }
 
+    // -- Emergency stop (issue #86) -----------------------------------------
+
+    /// Whether the emergency stop is engaged.
+    ///
+    /// Reads the gate's in-memory flag, which is the enforcement path's own
+    /// source of truth — so this can never disagree with what `evaluate` will
+    /// actually do, which a re-read of the event log could.
+    pub fn is_emergency_paused(&self) -> bool {
+        self.approval_gate.is_emergency()
+    }
+
+    /// Seeds the gate's emergency flag at boot from the event-log replay in
+    /// [`replayed_emergency`](crate::policy::gate::replayed_emergency).
+    ///
+    /// **Fails safe.** A company whose log cannot be read comes up *stopped*,
+    /// not running. The alternative — assume `false` on error — means a store
+    /// blip silently un-pauses a company an operator deliberately stopped, and
+    /// nothing would surface that: the console would show a healthy company
+    /// quietly executing the effects the kill switch was pulled to prevent. A
+    /// company wrongly stopped is a visible, one-request problem; a company
+    /// wrongly running is the failure this whole endpoint exists to prevent.
+    ///
+    /// Takes the read *result* rather than doing the read, so this stays
+    /// synchronous and directly testable in every direction. The cases are
+    /// deliberately distinct and must not be collapsed:
+    ///
+    /// * `Ok(Some(true))` — the log says stopped. Come up stopped.
+    /// * `Ok(Some(false))` — the log says running. Come up running.
+    /// * `Ok(None)` — nothing known, and no failure either. Come up running.
+    /// * `Err(_)` — the state could not be read. Come up **stopped**.
+    ///
+    /// Flattening `Ok(None)` and `Err(_)` together is the bug this signature
+    /// exists to make hard to write: they look alike at the call site and mean
+    /// opposite things.
+    pub fn hydrate_emergency(&self, stopped: Result<Option<bool>>) {
+        if let Err(ref err) = stopped {
+            tracing::error!(
+                company = %self.id,
+                error = %err,
+                "could not replay the emergency-stop state at boot; \
+                 failing safe and coming up STOPPED — release it with \
+                 POST /api/v1/companies/{{id}}/emergency-resume once the \
+                 event log is healthy"
+            );
+        }
+        self.approval_gate
+            .set_emergency(emergency_from_load(stopped));
+    }
+
+    /// Engages the emergency stop: every new effect outside
+    /// [`EffectGroup::Other`](crate::ports::types::EffectGroup::Other) is denied
+    /// until an operator releases it.
+    ///
+    /// **Order is load-bearing: the flag flips before the event is appended.**
+    /// Stopping is the safe direction, so enforcement must not wait on I/O that
+    /// can fail. If the append then fails the company is stopped *now* — which is
+    /// what the operator asked for — and the error tells them it may not survive
+    /// a restart. Appending first would leave a window in which a running company
+    /// is executing effects the operator believes they have already stopped.
+    ///
+    /// The flag flip is the gate's atomic `set_emergency`, which returns the
+    /// *previous* value: exactly the caller that observed `false` (a real
+    /// engage) journals the event, so two concurrent presses append one line,
+    /// not two.
+    ///
+    /// Returns `true` when this call engaged the stop, `false` when it was
+    /// already engaged — idempotent, because the second press of a panic button
+    /// must not be an error.
+    pub async fn emergency_pause(&self, by: Actor, reason: Option<String>) -> Result<bool> {
+        // `set_emergency` returns what the switch was *before* this call; a
+        // previous `false` is the only case that is a real transition.
+        if self.approval_gate.set_emergency(true) {
+            return Ok(false);
+        }
+        self.events
+            .append(
+                &self.id,
+                CompanyEvent::EmergencyPauseChanged {
+                    engaged: true,
+                    by,
+                    reason,
+                },
+            )
+            .await?;
+        Ok(true)
+    }
+
+    /// Releases the emergency stop, restoring normal policy evaluation.
+    ///
+    /// **The mirror image of [`emergency_pause`](Self::emergency_pause): the
+    /// release is journaled first, and only a successful append clears the
+    /// flag.** A failed append leaves the company stopped, so the unsafe
+    /// direction is never taken on a best-effort basis. There is no timeout, no
+    /// TTL and no auto-release anywhere in this path — releasing is always an
+    /// explicit act by an identified operator, recorded as one.
+    ///
+    /// Releasing is inherently racy in the *opposite* direction from pausing:
+    /// two concurrent releases can both observe `true` before either appends,
+    /// so the event-log replay (which takes the last event) settles it. The
+    /// in-memory flip at the end is the gate's atomic `set_emergency`, and the
+    /// returned previous value lets the caller answer with the real outcome —
+    /// `true` for the release that actually cleared the switch, `false` for a
+    /// second release that raced it.
+    ///
+    /// Returns `true` when this call released the stop, `false` when it did
+    /// not (it was not engaged, or a concurrent release already cleared it).
+    pub async fn emergency_resume(&self, by: Actor, reason: Option<String>) -> Result<bool> {
+        if !self.approval_gate.is_emergency() {
+            return Ok(false);
+        }
+
+        self.events
+            .append(
+                &self.id,
+                CompanyEvent::EmergencyPauseChanged {
+                    engaged: false,
+                    by,
+                    reason,
+                },
+            )
+            .await?;
+        // Only now, with the release durably recorded, does enforcement stop.
+        // A restart between the append and this line comes up running, which
+        // matches what the log says the operator decided.
+        Ok(self.approval_gate.set_emergency(false))
+    }
+
     /// Rejects operation on a company that is not accepting work.
     ///
     /// Returns [`OpenCompanyError::LifecycleConflict`] when the loaded record's
@@ -1681,7 +1828,33 @@ impl std::fmt::Debug for CompanyRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{task_enters_in_progress, task_enters_planning};
+    use super::{emergency_from_load, task_enters_in_progress, task_enters_planning};
+
+    /// Issue #86: the kill switch's boot decision, including the direction it
+    /// fails in.
+    ///
+    /// The `Err` arm is the whole point. An unreadable log must not un-pause a
+    /// company an operator deliberately stopped: a company wrongly stopped is a
+    /// visible problem someone fixes with one request, while a company wrongly
+    /// running is exactly the outcome the endpoint exists to prevent, and
+    /// nothing would surface it.
+    #[test]
+    fn an_unreadable_record_comes_up_stopped() {
+        assert!(emergency_from_load(Err(
+            crate::error::OpenCompanyError::CompanyNotFound("acme".into())
+        )));
+    }
+
+    /// The other three arms, which must stay distinct from the error case.
+    #[test]
+    fn a_readable_record_is_taken_at_its_word() {
+        // Stopped stays stopped across the restart.
+        assert!(emergency_from_load(Ok(Some(true))));
+        // Running stays running — the switch is not sticky by accident.
+        assert!(!emergency_from_load(Ok(Some(false))));
+        // Nothing known is not the same as a read failure.
+        assert!(!emergency_from_load(Ok(None)));
+    }
 
     /// Issue #337: the planning edge, on the same terms as the dispatch one.
     /// Entering the column fires; resting in it does not.
