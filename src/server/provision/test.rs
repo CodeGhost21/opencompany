@@ -761,6 +761,67 @@ async fn emergency_transitions_are_journaled_with_the_actor() {
 }
 
 #[tokio::test]
+async fn emergency_stop_survives_a_cold_boot_and_release_does_not_stick() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    // Engage the stop over the route.
+    let paused = app
+        .clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "EMERGENCY-PAUSE", "reason": "pre-restart" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(paused.status(), StatusCode::OK);
+
+    // A fresh boot on the same home — a second CompanyRuntime with no handover,
+    // so the flag must come from the journal, not from live memory — comes up
+    // stopped.
+    let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
+    let rebooted = RuntimeBuilder::new(home.clone(), manifest)
+        .with_id(CompanyId::new("acme"))
+        .build()
+        .await
+        .unwrap();
+    assert!(
+        rebooted.is_emergency_paused(),
+        "a company stopped before a restart must boot stopped"
+    );
+
+    // Release the stop on the live runtime, then boot cold once more: the
+    // switch must not be sticky.
+    let resumed = app
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-resume",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "acme" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), StatusCode::OK);
+
+    let released = RuntimeBuilder::new(home, manifest)
+        .with_id(CompanyId::new("acme"))
+        .build()
+        .await
+        .unwrap();
+    assert!(
+        !released.is_emergency_paused(),
+        "a company released before a restart must boot running"
+    );
+}
+
+#[tokio::test]
 async fn suspend_requires_platform_scope_and_blocks_chat() {
     let home_dir = home();
     let home = home_dir.path().to_path_buf();
