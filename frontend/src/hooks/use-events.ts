@@ -54,6 +54,25 @@ export type CompanyStreamEvent =
       /** Absent on a removed card, which is in no column. */
       column?: string;
     }
+  // A workspace node was written (issue #327) — created, overwritten, moved or
+  // deleted. `task_card_changed`'s counterpart for the note tree, and missing
+  // for the same reason: the Workspace tab could only learn about a write by
+  // refetching on refresh or refocus, which is a long time to be wrong now that
+  // agents create notes and published deliverables land in the tree.
+  //
+  // Deliberately thin, like its board sibling: an id and what happened. There
+  // is **no node name and no body** on purpose — a note's text lives on
+  // `GET …/workspace`, and the view reacts to this frame by re-reading that, so
+  // the tree's content has exactly one source.
+  | {
+      type: "workspace_changed";
+      seq: number;
+      atMillis: number;
+      nodeId: string;
+      /** `opened` | `updated` | `removed`, widened so an unknown word from a
+       *  newer host is not a type error. */
+      change: string;
+    }
   // A dispatched card's run finished (issue #185). The host has projected this
   // since #185; the console named no type for it, so it fell through to
   // `default:` and was dropped — the same "the view does not subscribe" half of
@@ -272,6 +291,22 @@ interface Options {
    */
   onTaskEvent?: (event: CompanyStreamEvent) => void;
   /**
+   * Called for each `workspace_changed` frame (issue #327) so the Workspace
+   * view can re-read the tree — and the open note — live.
+   *
+   * Unlike {@link Options.onTaskEvent}, this one takes the **payload**, not
+   * just a counter. The view's reaction depends on *which* node moved: the tree
+   * is always refetched, but the open note is only refetched when the frame
+   * names it, and a `removed` frame naming the open note has to close the pane
+   * rather than refetch a note that is gone. A counter cannot say any of that.
+   *
+   * The frame-loss trap that forced the workflow canvas to fold an event
+   * *window* does not apply, because the tree refetch is unconditional: a
+   * dropped frame costs at most one stale render of the open note, never wrong
+   * tree state.
+   */
+  onWorkspaceEvent?: (event: CompanyStreamEvent) => void;
+  /**
    * Called for each live turn-progress frame (`tool_call`, `tool_result`) so the
    * chat can render the tool timeline as the turn runs, then reconcile against
    * the folded steps on the final reply.
@@ -325,7 +360,7 @@ interface Options {
  * Derived from `Options` rather than restated so the two cannot drift, and so
  * each callback keeps the documentation written against it above.
  */
-type Subscribers = Omit<Options, "pendingApprovals">;
+export type Subscribers = Omit<Options, "pendingApprovals">;
 
 /**
  * Opens an `EventSource` on `{scope}/events` for the active company and turns
@@ -343,6 +378,7 @@ export function useEvents(
     pendingApprovals,
     onAgentReply,
     onTaskEvent,
+    onWorkspaceEvent,
     onTurnEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
@@ -358,6 +394,10 @@ export function useEvents(
   useEffect(() => {
     onTaskEventRef.current = onTaskEvent;
   }, [onTaskEvent]);
+  const onWorkspaceEventRef = useRef(onWorkspaceEvent);
+  useEffect(() => {
+    onWorkspaceEventRef.current = onWorkspaceEvent;
+  }, [onWorkspaceEvent]);
   const onTurnEventRef = useRef(onTurnEvent);
   useEffect(() => {
     onTurnEventRef.current = onTurnEvent;
@@ -414,6 +454,7 @@ export function useEvents(
           handleEvent(event, {
             onAgentReply: onAgentReplyRef.current,
             onTaskEvent: onTaskEventRef.current,
+            onWorkspaceEvent: onWorkspaceEventRef.current,
             onTurnEvent: onTurnEventRef.current,
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
             onWorkflowChanged: onWorkflowChangedRef.current,
@@ -441,11 +482,20 @@ export function useEvents(
   }, [client, company]);
 }
 
-/** Routes one parsed event to its toast / transcript side effect. */
-function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers): void {
+/**
+ * Routes one parsed event to its toast / transcript side effect.
+ *
+ * Exported for tests. This function has been bitten three times by a frame the
+ * host was already sending falling through to `default:` and vanishing with
+ * nothing to debug (#464 for the board, #371 for the canvas, #384 for the
+ * picker), so which subscriber a type reaches is worth pinning directly rather
+ * than only through a mounted hook.
+ */
+export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers): void {
   const {
     onAgentReply,
     onTaskEvent,
+    onWorkspaceEvent,
     onTurnEvent,
     onWorkflowRunEvent,
     onWorkflowChanged,
@@ -489,6 +539,15 @@ function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers): void 
     case "task_card_changed":
     case "desk_task_completed":
       onTaskEvent?.(event);
+      break;
+    // Issue #327, and **no toast** for the same reason the board frames above
+    // raise none — more strongly, if anything. A workspace write is not an
+    // attention signal: an autosaving editor fires one per settled keystroke
+    // burst, and every published deliverable adds more. Toasting those would
+    // train the operator to dismiss the toasts that do matter. The note
+    // appearing, changing or vanishing in the tree IS the notification.
+    case "workspace_changed":
+      onWorkspaceEvent?.(event);
       break;
     case "agent_reply":
       onAgentReply?.({

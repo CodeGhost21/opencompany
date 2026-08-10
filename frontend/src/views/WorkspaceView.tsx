@@ -71,9 +71,42 @@ import {
 } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
+/**
+ * The latest workspace write off the SSE feed (issue #327), as the shell hands
+ * it down.
+ *
+ * `tick` is what makes this a stream of *events* rather than a piece of state:
+ * two frames naming the same node in one React batch would otherwise collapse
+ * into one object React considers unchanged, and the second write would never
+ * be reacted to.
+ */
+export interface WorkspaceEvent {
+  /** Monotonic, bumped per frame. */
+  tick: number;
+  /** The node that moved. */
+  nodeId: string;
+  /** `opened` | `updated` | `removed`, widened for a newer host's vocabulary. */
+  change: string;
+}
+
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * The latest write anywhere in this company's tree (issue #327). `null` until
+   * one arrives, and on a host with no `/events` route — where this view keeps
+   * exactly its old refresh-and-refocus behaviour.
+   */
+  event?: WorkspaceEvent | null;
+  /**
+   * A node to open on arrival (issue #552), from the `#/workspace/<nodeId>`
+   * hash segment the Artifacts tab's "Open in workspace" link sets.
+   *
+   * Unvalidated, as `useHashView` documents: an id that names nothing resolves
+   * against the host and simply reports that the note could not be opened,
+   * which is the same thing a stale bookmark does.
+   */
+  initialNodeId?: string | null;
 }
 
 /** How long typing settles before the editor pushes a save to the host. */
@@ -173,7 +206,7 @@ function message(e: unknown, fallback: string): string {
  * (#326), and there is no live push, so a write that lands while the tab is open
  * appears on refresh/refocus rather than instantly (#327).
  */
-export function WorkspaceView({ client, company }: Props) {
+export function WorkspaceView({ client, company, event, initialNodeId }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
   const scope = useLocalScope();
   const [nodes, setNodes] = useState<FsNode[]>([]);
@@ -364,9 +397,9 @@ export function WorkspaceView({ client, company }: Props) {
 
   /* ---- refresh on refocus ---- */
 
-  // No live push (#327): a note written by an agent or another browser is
-  // invisible until we ask again. Coming back to the tab is the moment an
-  // operator most expects to see current state, so refetch quietly there.
+  // The fallback half, kept: a host with no `/events` route, or a dropped
+  // stream, leaves this view exactly as it behaved before #327. Coming back to
+  // the tab is the moment an operator most expects to see current state.
   useEffect(() => {
     const refresh = () => {
       if (document.visibilityState === "visible") void loadTree({ silent: true });
@@ -378,6 +411,58 @@ export function WorkspaceView({ client, company }: Props) {
       document.removeEventListener("visibilitychange", refresh);
     };
   }, [loadTree]);
+
+  /* ---- live writes (#327) ---- */
+
+  // A note written by an agent, by the publish drain, or by another browser
+  // used to be invisible until the operator refreshed or refocused. Now the
+  // host announces every workspace write and this reacts to it.
+  //
+  // Three rules, and the middle one is the one with teeth:
+  //
+  //  1. **Always refetch the tree, silently.** The frame carries no name and no
+  //     body by design, so the tree read is where content comes from — and a
+  //     silent refetch means a note appearing elsewhere never flickers the
+  //     explorer or steals the operator's place.
+  //  2. **Never clobber an in-progress edit.** The open note is refetched only
+  //     in read mode. In edit mode the operator has a dirty buffer and an
+  //     autosave in flight; replacing the body underneath them would discard
+  //     typing that no refetch can get back. They see the change when they
+  //     switch back to Read, which already refetches.
+  //  3. **A deleted open note closes the pane** rather than being refetched —
+  //     re-reading it would only 404 and leave an error where a note was.
+  useEffect(() => {
+    if (!event) return;
+    void loadTree({ silent: true });
+    if (!openId || event.nodeId !== openId) return;
+    if (event.change === "removed") {
+      setOpenId(null);
+      setOpenFile(null);
+      setDraft(null);
+      setFileError(null);
+      setSaveState("idle");
+      return;
+    }
+    if (mode === "read") void loadFile(openId);
+    // `event.tick` is the dependency that makes a repeat write on the same node
+    // re-run this; `mode` and `openId` are read, not watched, so switching to
+    // Read does not replay the last frame.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [event?.tick]);
+
+  /* ---- deep link into one note (#552) ---- */
+
+  // The Artifacts tab's "Open in workspace" link sets `#/workspace/<nodeId>`,
+  // and the shell hands that segment down. Opened once per id: `open()` sets
+  // `openId`, and re-running on every render would fight an operator who then
+  // clicked a different note.
+  const landedOn = useRef<string | null>(null);
+  useEffect(() => {
+    if (!initialNodeId || landedOn.current === initialNodeId) return;
+    landedOn.current = initialNodeId;
+    void open(initialNodeId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initialNodeId]);
 
   /* ---- migration off the retired localStorage scratchpad ---- */
 
