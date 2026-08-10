@@ -50,7 +50,7 @@ use crate::AppState;
 use crate::company::workspace_links::file_with_backlinks;
 use crate::error::OpenCompanyError;
 use crate::ports::generate_id;
-use crate::ports::workspace::{NodeKind, WorkspaceNode};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -224,6 +224,9 @@ async fn create_node(
         kind: body.kind,
         parent_id: body.parent_id,
         updated_at_millis: crate::ports::now_millis(),
+        // These routes are the console's, and the console is the operator.
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
     };
     company
         .runtime
@@ -245,7 +248,12 @@ async fn write_file(
     let node = company
         .runtime
         .workspace()
-        .write(company.id(), &node_id, &body.content)
+        .write(
+            company.id(),
+            &node_id,
+            &body.content,
+            WorkspaceOrigin::Operator,
+        )
         .await?;
     Ok(Json(WriteAck {
         updated_at: node.updated_at_millis,
