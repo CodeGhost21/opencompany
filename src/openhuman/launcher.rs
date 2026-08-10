@@ -963,16 +963,32 @@ mod tests {
                 .map(|v| v.to_string_lossy().into_owned())
         };
 
-        // PATH leads with the vendored install-root bin.
+        // PATH leads with the vendored install-root bin. Split on the
+        // platform separator so the assertions hold on Windows too.
         let path = get("PATH").unwrap();
         let install_root = launch.tauri_install_root();
-        assert!(
-            path.starts_with(&format!("{}/bin:", install_root.display())),
+        let segments: Vec<_> = std::env::split_paths(&path).collect();
+        assert_eq!(
+            segments.first(),
+            Some(&install_root.join("bin")),
             "PATH should prefer the vendored cargo-tauri bin: {path}"
         );
         // The ~/.cargo/bin segment is present iff HOME was set.
-        let home_set = std::env::var("HOME").is_ok();
-        assert_eq!(path.contains("/.cargo/bin"), home_set);
+        match std::env::var("HOME") {
+            Ok(home) => {
+                let cargo_bin = PathBuf::from(&home).join(".cargo").join("bin");
+                assert!(
+                    segments.contains(&cargo_bin),
+                    "PATH should carry {cargo_bin:?} when HOME is set: {path}"
+                );
+            }
+            Err(_) => {
+                assert!(
+                    !segments.iter().any(|s| s.ends_with(".cargo")),
+                    "PATH should not carry an inferred ~/.cargo/bin when HOME is unset: {path}"
+                );
+            }
+        }
 
         // .env vars landed, and the CEF_PATH it names overrode any preflight value.
         assert_eq!(get("FOO").as_deref(), Some("bar"));
