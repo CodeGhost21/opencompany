@@ -1220,8 +1220,13 @@ async fn main() -> Result<()> {
                 launch = launch.release();
             }
 
+            // validate() rejects passthrough args in Desktop mode; run it before
+            // the dry-run branch so `--dry-run -- --arg` reports the same error
+            // as an actual launch instead of printing an unlaunchable command.
+            launch.validate()?;
+
             if dry_run {
-                println!("{}", launch.command_preview().join(" "));
+                println!("{}", launch.dry_run_preview());
                 return Ok(());
             }
 
