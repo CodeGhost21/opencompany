@@ -127,7 +127,7 @@ export function TourController({
       // is over, there is nothing left to resume.
       writeTourState(scope, skipped ? { skipped: true } : { completed: true });
     },
-    [company],
+    [company, scope],
   );
 
   const handleSkip = useCallback(() => {
