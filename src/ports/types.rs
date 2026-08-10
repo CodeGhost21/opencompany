@@ -1129,8 +1129,10 @@ impl CompanyEvent {
             | Self::TaskSteered { .. }
             | Self::TaskCardChanged { .. }
             | Self::DeskTaskCompleted { .. }
+            | Self::EmergencyPauseChanged { .. }
             | Self::TaskDiscussionPosted { .. }
-            | Self::TaskDiscussionRedacted { .. } => Permanent,
+            | Self::TaskDiscussionRedacted { .. }
+            | Self::WorkflowReportDelivered { .. } => Permanent,
         }
     }
 }
