@@ -3,10 +3,14 @@
 // The console has no per-user preferences field on the backend yet
 // (`UserRecord` carries none), so — exactly like the workspace surface
 // (`lib/workspace.ts`) — we persist "has seen the
-// tour" in localStorage, keyed per company. A backend `UserRecord` flag for
+// tour" in localStorage, keyed per (connection, company) so two hosts serving a
+// company of the same name do not share one operator's progress. A backend `UserRecord` flag for
 // cross-device memory is a named follow-up, out of this v1's scope.
 
-const KEY = (company: string | null): string => `oc-tour:${company ?? "single"}`;
+import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+
+const KEY = (scope: LocalScope): string =>
+  scopedKeyAdoptingLegacy("oc-tour", scope, `oc-tour:${scope.company ?? "single"}`);
 
 export interface TourState {
   completed?: boolean;
@@ -43,26 +47,26 @@ const RESUME_TTL_MS = 15 * 60 * 1000;
 /** Fired by `restartTour` so a mounted controller can replay from the top. */
 export const RESTART_EVENT = "oc-tour:restart";
 
-export function readTourState(company: string | null): TourState {
+export function readTourState(scope: LocalScope): TourState {
   try {
-    const raw = localStorage.getItem(KEY(company));
+    const raw = localStorage.getItem(KEY(scope));
     return raw ? (JSON.parse(raw) as TourState) : {};
   } catch {
     return {};
   }
 }
 
-export function writeTourState(company: string | null, next: TourState): void {
+export function writeTourState(scope: LocalScope, next: TourState): void {
   try {
-    localStorage.setItem(KEY(company), JSON.stringify({ ...next, seenAt: Date.now() }));
+    localStorage.setItem(KEY(scope), JSON.stringify({ ...next, seenAt: Date.now() }));
   } catch {
     /* private mode / quota — the tour simply re-offers on next load */
   }
 }
 
 /** Has the operator already finished or skipped the tour for this company? */
-export function tourSeen(company: string | null): boolean {
-  const s = readTourState(company);
+export function tourSeen(scope: LocalScope): boolean {
+  const s = readTourState(scope);
   return Boolean(s.completed || s.skipped);
 }
 
@@ -70,22 +74,22 @@ export function tourSeen(company: string | null): boolean {
  * Record that the tour was on `view` when the page handed off to a third party,
  * so the next mount resumes there instead of re-offering the tour from step 1.
  *
- * Read-modify-write, and in the **same per-company key** as the seen flags: a
+ * Read-modify-write, and in the **same per-(connection, company) key** as the seen flags: a
  * marker written under one company must never resume that company's tour inside
- * another (the contamination the controller's company-switch teardown guards
+ * another, and neither must one written against a different host (the contamination the controller's company-switch teardown guards
  * against).
  */
-export function markTourResume(company: string | null, view: string): void {
-  const current = readTourState(company);
-  writeTourState(company, { ...current, pendingResume: { view, at: Date.now() } });
+export function markTourResume(scope: LocalScope, view: string): void {
+  const current = readTourState(scope);
+  writeTourState(scope, { ...current, pendingResume: { view, at: Date.now() } });
 }
 
 /**
  * The view to resume on, or `null` when there is no marker or it has aged out.
  * A stale marker is treated as absent — the caller clears it either way.
  */
-export function readTourResume(company: string | null): string | null {
-  const { pendingResume } = readTourState(company);
+export function readTourResume(scope: LocalScope): string | null {
+  const { pendingResume } = readTourState(scope);
   if (!pendingResume) return null;
   if (Date.now() - pendingResume.at > RESUME_TTL_MS) return null;
   return pendingResume.view;
@@ -112,23 +116,23 @@ export function setActiveTourStop(view: string | null): void {
  * A **no-op when no tour is running** — that is what lets a caller arm
  * unconditionally without first asking whether it is inside onboarding.
  */
-export function armTourResume(company: string | null): void {
+export function armTourResume(scope: LocalScope): void {
   if (activeStopView === null) return;
-  markTourResume(company, activeStopView);
+  markTourResume(scope, activeStopView);
 }
 
 /** Drop the resume marker, keeping the completed/skipped flags intact. */
-export function clearTourResume(company: string | null): void {
-  const current = readTourState(company);
+export function clearTourResume(scope: LocalScope): void {
+  const current = readTourState(scope);
   if (!current.pendingResume) return;
   const { pendingResume: _dropped, ...rest } = current;
-  writeTourState(company, rest);
+  writeTourState(scope, rest);
 }
 
 /** Clear the seen flag and ask any mounted controller to replay from step 1. */
-export function restartTour(company: string | null): void {
+export function restartTour(scope: LocalScope): void {
   try {
-    localStorage.removeItem(KEY(company));
+    localStorage.removeItem(KEY(scope));
   } catch {
     /* ignore */
   }

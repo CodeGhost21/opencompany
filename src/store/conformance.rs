@@ -24,7 +24,7 @@ use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
-use crate::ports::sessions::{SessionRecord, SessionStore};
+use crate::ports::sessions::{SessionKind, SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
 use crate::ports::tasks::{TaskRecord, TaskStore};
@@ -1151,6 +1151,8 @@ pub async fn assert_session_store(sessions: Arc<dyn SessionStore>) {
         created_at_millis: 1,
         expires_at_millis: expires,
         user_agent: None,
+        kind: SessionKind::Browser,
+        label: None,
     };
 
     sessions

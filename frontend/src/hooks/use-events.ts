@@ -375,60 +375,52 @@ export function useEvents(
     prevPending.current = pendingApprovals;
   }, [pendingApprovals]);
 
-  // The SSE subscription. Re-opens when the company (or client) changes.
+  // The event subscription. Re-opens when the company (or client) changes.
   useEffect(() => {
-    // EventSource can only speak same-origin cookies; the URL is built from the
-    // client's base + scope so it lands on the right company under either
-    // deployment shape.
+    // Which wire carries this is the client's business (browser `EventSource`
+    // same-origin, the desktop's own core otherwise). What arrives is the same
+    // stream of frames either way, so everything below is unchanged.
     const url = `${client.baseUrl}${client.scopeFor(company)}/events`;
-    let source: EventSource;
+    let unsubscribe: () => void;
     try {
-      source = new EventSource(url, { withCredentials: true });
+      unsubscribe = client.subscribeToEvents(company, {
+        onOpen: () => {
+          console.debug("[events] connected", { url });
+        },
+        onMessage: (data) => {
+          let event: CompanyStreamEvent;
+          try {
+            event = JSON.parse(data) as CompanyStreamEvent;
+          } catch (err) {
+            console.debug("[events] dropping unparseable event", err);
+            return;
+          }
+          handleEvent(event, {
+            onAgentReply: onAgentReplyRef.current,
+            onTaskEvent: onTaskEventRef.current,
+            onTurnEvent: onTurnEventRef.current,
+            onWorkflowRunEvent: onWorkflowRunEventRef.current,
+            onWorkflowChanged: onWorkflowChangedRef.current,
+            onApprovalEvent: onApprovalEventRef.current,
+          });
+        },
+        onError: ({ reconnecting }) => {
+          // A dead stream and a reconnecting one are both survivable: the poll
+          // remains the source of truth, so this logs rather than retrying.
+          console.debug("[events] stream error", { url, reconnecting });
+        },
+      });
     } catch (err) {
-      // A malformed URL or an environment without EventSource: nothing to do,
-      // the poll remains the source of truth.
-      console.debug("[events] EventSource unavailable, falling back to poll", err);
+      // No streaming in this environment, or a malformed URL. Nothing to do —
+      // the poll already covers it.
+      console.debug("[events] stream unavailable, falling back to poll", err);
       return;
     }
     console.debug("[events] connecting", { url });
 
-    source.onopen = () => {
-      console.debug("[events] connected", { url });
-    };
-
-    source.onmessage = (msg) => {
-      let event: CompanyStreamEvent;
-      try {
-        event = JSON.parse(msg.data) as CompanyStreamEvent;
-      } catch (err) {
-        console.debug("[events] dropping unparseable event", err);
-        return;
-      }
-      handleEvent(event, {
-        onAgentReply: onAgentReplyRef.current,
-        onTaskEvent: onTaskEventRef.current,
-        onTurnEvent: onTurnEventRef.current,
-        onWorkflowRunEvent: onWorkflowRunEventRef.current,
-        onWorkflowChanged: onWorkflowChangedRef.current,
-        onApprovalEvent: onApprovalEventRef.current,
-      });
-    };
-
-    source.onerror = () => {
-      // On a 404 / wrong content-type the browser closes the stream and does not
-      // reconnect (readyState === CLOSED); on a transient drop it reconnects on
-      // its own. Either way we log and lean on the poll — no manual retry loop.
-      const closed = source.readyState === EventSource.CLOSED;
-      console.debug("[events] stream error", {
-        url,
-        reconnecting: !closed,
-      });
-      if (closed) source.close();
-    };
-
     return () => {
       console.debug("[events] disconnecting", { url });
-      source.close();
+      unsubscribe();
     };
   }, [client, company]);
 }
