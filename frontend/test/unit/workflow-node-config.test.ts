@@ -212,6 +212,26 @@ describe("configFieldProblem — blur-time JSON check", () => {
     // A non-JSON control has no blur rule of its own.
     expect(configFieldProblem(slugSpec, "anything")).toBeNull();
   });
+
+  it("rejects a valid-JSON value whose shape the engine key can't take", () => {
+    const headersSpec = configFieldSpecs("http_request").find((s) => s.key === "headers")!;
+    const bodySpec = configFieldSpecs("http_request").find((s) => s.key === "body")!;
+
+    // `args`/`headers` must be objects — arrays and scalars are valid JSON but wrong.
+    for (const bad of ["[]", "42", "true", '"a string"', "null"]) {
+      expect(configFieldProblem(argsSpec, bad)).toMatch(/must be a JSON object/);
+      expect(configFieldProblem(headersSpec, bad)).toMatch(/must be a JSON object/);
+    }
+
+    // A body may be an object OR a bare string, but not an array/number/boolean.
+    expect(configFieldProblem(bodySpec, '"raw text"')).toBeNull();
+    expect(configFieldProblem(bodySpec, '{ "hello": "world" }')).toBeNull();
+    for (const bad of ["[]", "42", "true", "null"]) {
+      expect(configFieldProblem(bodySpec, bad)).toMatch(
+        /must be a JSON object or a JSON string/,
+      );
+    }
+  });
 });
 
 describe("configDraftProblem — submit-time gate", () => {
@@ -242,6 +262,21 @@ describe("configDraftProblem — submit-time gate", () => {
     expect(
       configDraftProblem("switch", "n1", { field: "", expression: "=item.x" }),
     ).toBeNull();
+  });
+
+  it("rejects a switch that supplies both a field and an expression", () => {
+    expect(
+      configDraftProblem("switch", "n1", { field: "status", expression: "=item.x" }),
+    ).toMatch(/field or an expression, not both/);
+  });
+
+  it("rejects an http_request json field whose shape is wrong at submit", () => {
+    expect(
+      configDraftProblem("http_request", "n1", { method: "GET", url: "u", headers: "[]" }),
+    ).toMatch(/must be a JSON object/);
+    expect(
+      configDraftProblem("http_request", "n1", { method: "GET", url: "u", body: "42" }),
+    ).toMatch(/must be a JSON object or a JSON string/);
   });
 
   it("requires an output_parser schema to parse when present", () => {

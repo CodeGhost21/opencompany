@@ -43,6 +43,12 @@ export interface ConfigFieldSpec {
   options?: readonly { value: string; label: string }[];
   /** A `select` whose chosen value serializes as a JSON boolean (`auto_fix`). */
   boolean?: boolean;
+  /**
+   * For a `json` field, the value shape the engine key accepts. Absent = any
+   * valid JSON. `object` rejects arrays/scalars (e.g. `args`, `headers`);
+   * `object-or-string` also allows a bare JSON string (e.g. an HTTP `body`).
+   */
+  jsonShape?: "object" | "object-or-string";
 }
 
 /**
@@ -63,6 +69,7 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       key: "args",
       label: "Arguments",
       control: "json",
+      jsonShape: "object",
       placeholder: '{ "query": "=item.topic" }',
       hint: "A JSON object of arguments. `=`-expressions resolve per input item at run time.",
     },
@@ -93,6 +100,7 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       key: "headers",
       label: "Headers",
       control: "json",
+      jsonShape: "object",
       placeholder: '{ "Authorization": "Bearer …" }',
       hint: "A JSON object of request headers.",
     },
@@ -100,6 +108,7 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       key: "body",
       label: "Body",
       control: "json",
+      jsonShape: "object-or-string",
       placeholder: '{ "hello": "world" }',
       hint: "A JSON object sent as the body, or a JSON string like `\"raw text\"`.",
     },
@@ -280,13 +289,39 @@ export function configFieldProblem(spec: ConfigFieldSpec, value: string): string
   const raw = value.trim();
   if (raw === "") return null;
   if (spec.control === "json") {
+    let parsed: unknown;
     try {
-      JSON.parse(raw);
+      parsed = JSON.parse(raw);
     } catch {
       return `${spec.label} must be valid JSON.`;
     }
+    return jsonShapeProblem(spec, parsed);
   }
   return null;
+}
+
+/** A plain JSON object — not an array, not `null`, not a scalar. */
+function isJsonObject(value: unknown): boolean {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Whether a parsed `json` field's VALUE fits the shape the engine key wants.
+ * `null` when fine (or when the field declares no shape, i.e. any JSON goes).
+ * Catches `[]`/numbers/booleans slipping into an `args`/`headers` object, and
+ * anything but an object-or-string for an HTTP `body`.
+ */
+function jsonShapeProblem(spec: ConfigFieldSpec, parsed: unknown): string | null {
+  switch (spec.jsonShape) {
+    case "object":
+      return isJsonObject(parsed) ? null : `${spec.label} must be a JSON object.`;
+    case "object-or-string":
+      return isJsonObject(parsed) || typeof parsed === "string"
+        ? null
+        : `${spec.label} must be a JSON object or a JSON string.`;
+    default:
+      return null;
+  }
 }
 
 /** The submit-time message for a missing required field. */
@@ -333,6 +368,9 @@ export function configDraftProblem(
     const expression = (draft.expression ?? "").trim();
     if (!field && !expression) {
       return "A switch needs a field or an expression to branch on.";
+    }
+    if (field && expression) {
+      return "A switch can use a field or an expression, not both.";
     }
   }
   if (kind === "sub_workflow") {
