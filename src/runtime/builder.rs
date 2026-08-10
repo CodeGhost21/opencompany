@@ -831,6 +831,30 @@ impl RuntimeBuilder {
             seed_workspace(ops.workspace.as_ref(), &id, seed_dir).await?;
         }
 
+        // Issue #551: give every manifest agent its `Agents/<id>/` folder in the
+        // shared tree, so anything it produces has a named home both the
+        // operator and the other agents can navigate to.
+        //
+        // Gated on `handover.is_none()` and nothing else, deliberately:
+        //
+        //  * NOT on `seed_dir` — a provisioned tenant and the desktop build have
+        //    no company bundle to seed from, and their agents need folders just
+        //    as much.
+        //  * NOT on `is_empty` — that gate exists so an operator's deletions
+        //    stick against re-seeding, which is a different question. A roster
+        //    grows between boots, and a workspace that already has notes in it
+        //    still needs a folder for the teammate added last week.
+        //
+        // It is idempotent, so running it on every boot costs one tree read.
+        if handover.is_none() {
+            crate::company::workspace_agents::ensure_agent_folders(
+                ops.workspace.as_ref(),
+                &id,
+                self.manifest.agents.iter().map(|agent| agent.id.as_str()),
+            )
+            .await?;
+        }
+
         let consent = self.consent;
         // Inherited on a rebuild so the in-memory filing rate limiter survives.
         // A fresh limiter would make a rebuild loop a rate-limit bypass.
@@ -1931,7 +1955,7 @@ async fn seed_workspace(
 
     use crate::company::workspace_seed::{NodeKind as SeedKind, walk_workspace};
     use crate::ports::now_millis;
-    use crate::ports::workspace::{NodeKind, WorkspaceNode};
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 
     let nodes = walk_workspace(&seed_dir.join("workspace"))?;
     let mut path_to_id: HashMap<PathBuf, String> = HashMap::new();
@@ -1955,6 +1979,10 @@ async fn seed_workspace(
             kind,
             parent_id,
             updated_at_millis: now_millis(),
+            // Shipped with the company bundle: authored by neither the operator
+            // nor an agent, and the console says exactly that (issue #326).
+            created_by: WorkspaceOrigin::Seed,
+            updated_by: WorkspaceOrigin::Seed,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);
@@ -2775,6 +2803,78 @@ mod test {
         assert!(!tree.iter().any(|n| n.name == "voice.md"));
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
+    }
+
+    /// Issue #551: boot gives every manifest agent a home in the shared tree.
+    ///
+    /// Also pins the two gates the seeding block above does NOT share: this
+    /// runs with **no** `seed_dir` (the provisioned-tenant and desktop shape),
+    /// and it runs again on a workspace that is no longer empty, picking up the
+    /// teammate the manifest gained in between.
+    #[tokio::test]
+    async fn boot_provisions_an_agents_folder_per_manifest_agent() {
+        use crate::company::workspace_agents::AGENTS_ROOT;
+        use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
+
+        let home_dir = tmp_home("oc-agents-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let roster = |agents: &str| {
+            parse(&format!(
+                "[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n{agents}"
+            ))
+        };
+
+        let runtime = RuntimeBuilder::new(
+            home.clone(),
+            roster("[[agent]]\nid=\"ceo\"\nrole=\"Chief Executive\"\n"),
+        )
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+        let tree = runtime.workspace().tree(&id).await.unwrap();
+        let root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+            .expect("the Agents root is provisioned with no seed dir");
+        assert_eq!(root.kind, NodeKind::Folder);
+        assert_eq!(root.created_by, WorkspaceOrigin::Seed);
+        let ceo = tree.iter().find(|n| n.name == "ceo").expect("Agents/ceo");
+        assert_eq!(ceo.parent_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(
+            ceo.created_by,
+            WorkspaceOrigin::Agent {
+                id: "ceo".to_string()
+            }
+        );
+
+        // A manifest that gains a teammate: the workspace is no longer empty,
+        // so an `is_empty` gate would have skipped this rebuild entirely.
+        drop(runtime);
+        let runtime = RuntimeBuilder::new(
+            home,
+            roster(
+                "[[agent]]\nid=\"ceo\"\nrole=\"Chief Executive\"\n\
+                 [[agent]]\nid=\"cmo\"\nrole=\"Chief Marketing\"\n",
+            ),
+        )
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+        let tree = runtime.workspace().tree(&id).await.unwrap();
+        assert!(
+            tree.iter().any(|n| n.name == "cmo"),
+            "a teammate added between boots got no folder"
+        );
+        assert_eq!(
+            tree.iter()
+                .filter(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+                .count(),
+            1,
+            "the second boot minted a rival Agents root"
+        );
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

@@ -126,15 +126,17 @@ destroying the diff.
 ### WorkspaceStore
 
 The Obsidian-style note tree (`src/ports/workspace.rs`), seeded from the
-company's `workspace/**` on first use.
+company's `workspace/**` on first use and thereafter written by both the
+operator (console/REST) and the company's agents (`workspace_create` /
+`workspace_write`).
 
 ```rust
 pub trait WorkspaceStore: Send + Sync {
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>>;
     async fn read(&self, company: &CompanyId, id: &str)
         -> Result<Option<(WorkspaceNode, String)>>;
-    async fn write(&self, company: &CompanyId, id: &str, content: &str)
-        -> Result<WorkspaceNode>;
+    async fn write(&self, company: &CompanyId, id: &str, content: &str,
+                   author: WorkspaceOrigin) -> Result<WorkspaceNode>;
     async fn create(&self, /* parent, name, kind, content */) -> Result<WorkspaceNode>;
     async fn rename_move(&self, /* id, new_name, new_parent */) -> Result<WorkspaceNode>;
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
@@ -144,6 +146,26 @@ pub trait WorkspaceStore: Send + Sync {
 
 Nodes are folders or files (`NodeKind`); `[[wikilink]]` backlinks are derived
 at read time by the GraphQL layer.
+
+**Authorship (#326).** Every `WorkspaceNode` carries `created_by` and
+`updated_by`, both a `WorkspaceOrigin` ∈ `seed | operator | agent{id}`. `write`
+takes the author and stamps `updated_by`; `create` receives a fully-formed node
+whose caller sets both. `rename_move` deliberately touches **neither**, so an
+operator reorganising the tree cannot mask who wrote the body that is stored.
+Backends persist the node as opaque JSON and both fields are
+`#[serde(default)]`, so a node written before the fields existed loads as
+`operator` — no column, no migration. `assert_workspace_store` pins the
+round-trip, the write stamp, and the rename non-stamp across all three
+backends.
+
+**`Agents/<agent-id>/` (#551).** `company::workspace_agents::ensure_agent_folders`
+adopt-or-creates a reserved `Agents` root plus one folder per roster agent, from
+two seams: `RuntimeBuilder::build` (boot) and `HarnessPool::ensure` (every
+roster rebuild, so console `add_member` and orchestrator `add_agent` are
+covered). It is idempotent and fail-closed — any name collision warns and skips
+rather than creating a duplicate that would make the path ambiguous. The folder
+is an organizational and attribution unit only; agents may create and write
+**anywhere** in their company's tree.
 
 ### FactStore
 

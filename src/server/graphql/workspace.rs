@@ -8,7 +8,41 @@ use async_graphql::{ID, SimpleObject};
 use super::iso8601;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::workspace_links::file_with_backlinks;
-use crate::ports::workspace::{NodeKind, WorkspaceNode};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+
+/// Who authored a workspace node. Mirrors [`WorkspaceOrigin`] (issue #326).
+///
+/// Flattened into `kind` + optional `agentId` rather than exposed as a GraphQL
+/// union: `agentId` is non-null exactly when `kind` is `agent`, and a union of
+/// two empty types plus one single-field type buys a client nothing but three
+/// inline fragments. The Rust type keeps the invariant; this is its projection.
+#[derive(SimpleObject, Clone)]
+#[graphql(name = "WorkspaceOrigin")]
+pub struct WorkspaceOriginGql {
+    /// `seed`, `operator` or `agent`.
+    pub kind: String,
+    /// The agent's roster id — set only when `kind` is `agent`.
+    pub agent_id: Option<String>,
+}
+
+impl From<WorkspaceOrigin> for WorkspaceOriginGql {
+    fn from(origin: WorkspaceOrigin) -> Self {
+        match origin {
+            WorkspaceOrigin::Seed => Self {
+                kind: "seed".to_string(),
+                agent_id: None,
+            },
+            WorkspaceOrigin::Operator => Self {
+                kind: "operator".to_string(),
+                agent_id: None,
+            },
+            WorkspaceOrigin::Agent { id } => Self {
+                kind: "agent".to_string(),
+                agent_id: Some(id),
+            },
+        }
+    }
+}
 
 /// One node (folder or file) in the workspace tree. Mirrors [`WorkspaceNode`].
 #[derive(SimpleObject, Clone)]
@@ -24,6 +58,10 @@ pub struct FsNodeGql {
     pub parent_id: Option<ID>,
     /// When it was last updated, ISO-8601 UTC.
     pub updated_at: String,
+    /// Who created the node.
+    pub created_by: WorkspaceOriginGql,
+    /// Who last wrote the node's content (a rename or move does not change it).
+    pub updated_by: WorkspaceOriginGql,
 }
 
 impl From<WorkspaceNode> for FsNodeGql {
@@ -38,6 +76,8 @@ impl From<WorkspaceNode> for FsNodeGql {
             kind: kind.to_string(),
             parent_id: node.parent_id.map(ID),
             updated_at: iso8601(node.updated_at_millis),
+            created_by: node.created_by.into(),
+            updated_by: node.updated_by.into(),
         }
     }
 }
@@ -54,6 +94,10 @@ pub struct WorkspaceFileGql {
     pub content: String,
     /// When it was last updated, ISO-8601 UTC.
     pub updated_at: String,
+    /// Who created this file.
+    pub created_by: WorkspaceOriginGql,
+    /// Who last wrote the content above.
+    pub updated_by: WorkspaceOriginGql,
     /// Other files whose content links to this one via `[[name]]`.
     pub backlinks: Vec<FsNodeGql>,
 }
@@ -87,6 +131,8 @@ pub(crate) async fn resolve_file(
         name: node.name,
         content,
         updated_at: iso8601(node.updated_at_millis),
+        created_by: node.created_by.into(),
+        updated_by: node.updated_by.into(),
         backlinks: backlinks.into_iter().map(FsNodeGql::from).collect(),
     }))
 }

@@ -982,6 +982,40 @@ impl HarnessPool {
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
         fresh_company.overlay_budgets = overlay_budgets;
+
+        // Issue #551: provision `Agents/<id>/` for the roster this rebuild is
+        // about to build, manifest teammates and overlay teammates alike.
+        //
+        // This is the second of the feature's two seams. The first
+        // ([`RuntimeBuilder::build`]) covers boot; this one covers everything
+        // that changes the roster afterwards — a manifest edit, the console's
+        // `add_member`, the orchestrator's `add_agent` — because all three land
+        // here as a moved overlay fingerprint, on the slow path, just before
+        // the roster is rebuilt. Putting it here rather than in each of those
+        // writers is what keeps them from having to know the workspace exists.
+        //
+        // Only when a workspace store is actually wired: with none, no agent
+        // has workspace tools either, so there is nothing for a folder to be
+        // the home of.
+        if let Some(workspace) = &fresh_deps.workspace {
+            crate::company::workspace_agents::ensure_agent_folders(
+                workspace.as_ref(),
+                &company.id,
+                fresh_company
+                    .manifest
+                    .agents
+                    .iter()
+                    .map(|agent| agent.id.as_str())
+                    .chain(
+                        fresh_company
+                            .overlay_agents
+                            .iter()
+                            .map(|agent| agent.id.as_str()),
+                    ),
+            )
+            .await?;
+        }
+
         let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
 
         let mut agents = self.agents.write().await;
@@ -2361,6 +2395,77 @@ description = "Builds the product."
         assert_eq!(
             roster[0].role, "Chief Executive",
             "the manifest role survives, not the overlay's"
+        );
+    }
+
+    /// Issue #551, the second provisioning seam.
+    ///
+    /// Everything that changes a roster after boot — a manifest edit, the
+    /// console's `add_member`, the orchestrator's `add_agent` — reaches the
+    /// harness the same way: a moved overlay fingerprint, then a roster
+    /// rebuild. Hanging provisioning off that rebuild is what covers all three
+    /// without any of those writers learning that a workspace exists.
+    #[tokio::test]
+    async fn ensure_provisions_an_agents_folder_for_a_teammate_added_at_runtime() {
+        use crate::company::workspace_agents::AGENTS_ROOT;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws: Arc<dyn crate::ports::WorkspaceStore> =
+            Arc::new(crate::store::FsOps::new(dir.path()));
+        let mut fx = fixture();
+        fx.deps.workspace = Some(ws.clone());
+
+        let mut rec = record();
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &fx.deps).await.expect("first ensure");
+
+        let names = |nodes: &[crate::ports::WorkspaceNode]| {
+            let mut out: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
+            out.sort();
+            out
+        };
+        let tree = ws.tree(&rec.id).await.expect("tree");
+        assert_eq!(
+            names(&tree),
+            vec![
+                AGENTS_ROOT.to_string(),
+                "ceo".to_string(),
+                "engineer".to_string()
+            ],
+            "both manifest teammates get a folder"
+        );
+
+        // The runtime-added teammate. The overlay fingerprint moves, so this
+        // `ensure` takes the rebuild path rather than the cached fast path.
+        rec.overlay_agents.push(OverlayAgent {
+            id: "designer".into(),
+            name: "Dana".into(),
+            role: "Designer".into(),
+            description: None,
+        });
+        pool.ensure(&rec, &fx.deps).await.expect("second ensure");
+
+        let tree = ws.tree(&rec.id).await.expect("tree");
+        assert!(
+            tree.iter().any(|n| n.name == "designer"),
+            "the overlay teammate got no folder: {:?}",
+            names(&tree)
+        );
+        assert_eq!(
+            tree.iter()
+                .filter(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+                .count(),
+            1,
+            "the rebuild minted a rival Agents root"
+        );
+        assert_eq!(
+            tree.iter()
+                .find(|n| n.name == "designer")
+                .unwrap()
+                .created_by,
+            crate::ports::WorkspaceOrigin::Agent {
+                id: "designer".to_string()
+            },
         );
     }
 

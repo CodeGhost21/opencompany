@@ -36,7 +36,7 @@ use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::CompanyId;
 use crate::ports::usage::{UsageMeter, UsageSample, retention_cutoff};
 use crate::ports::users::{InviteRecord, UserRecord, UserStore};
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::store::fs::{append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic};
 use crate::store::paths::Bundle;
 
@@ -717,7 +717,13 @@ impl WorkspaceStore for FsOps {
         Ok(Some((node, content)))
     }
 
-    async fn write(&self, company: &CompanyId, id: &str, content: &str) -> Result<WorkspaceNode> {
+    async fn write(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        content: &str,
+        author: WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
         let path = self.bundle(company).workspace_index_json();
         let lock = path_lock(&path);
         let _guard = lock.lock().await;
@@ -731,6 +737,9 @@ impl WorkspaceStore for FsOps {
             ));
         }
         node.updated_at_millis = now_millis();
+        // Authorship rides the same stamp as the timestamp: "when the body last
+        // changed" and "who changed it" are one fact and must never drift apart.
+        node.updated_by = author;
         let node = node.clone();
         let file = self.physical_path(company, &index, id)?;
         if let Some(parent) = file.parent() {
@@ -1184,6 +1193,8 @@ mod test {
                 kind: NodeKind::Folder,
                 parent_id: None,
                 updated_at_millis: now,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
             },
             None,
         )
@@ -1198,6 +1209,8 @@ mod test {
                 kind: NodeKind::File,
                 parent_id: Some("f1".into()),
                 updated_at_millis: now,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
             },
             Some("# Voice"),
         )

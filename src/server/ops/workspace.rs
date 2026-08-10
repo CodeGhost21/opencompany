@@ -29,9 +29,6 @@
 //!
 //! ## Known limits (issue #177 — documented, not worked around)
 //!
-//! * **No authorship.** [`WorkspaceNode`] carries no author/origin field, so a
-//!   note an agent wrote is indistinguishable from one the operator typed.
-//!   Tracked by issue #326.
 //! * **No live push.** A write that lands while the tab is open is only visible
 //!   on a refetch (refresh button / window focus). Tracked by issue #327.
 //! * **No CAS on the console write path.** Agent writes require an
@@ -50,7 +47,7 @@ use crate::AppState;
 use crate::company::workspace_links::file_with_backlinks;
 use crate::error::OpenCompanyError;
 use crate::ports::generate_id;
-use crate::ports::workspace::{NodeKind, WorkspaceNode};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
@@ -79,6 +76,15 @@ struct FsNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     updated_at: u64,
+    /// Who created the node, and who last wrote its body (issue #326).
+    ///
+    /// Always serialized, unlike `parentId` / `content` above: the console
+    /// renders an authorship badge off these, and an absent field there would
+    /// be indistinguishable from "unknown" when the honest answer is
+    /// `operator`. The port already defaults a legacy node to `operator`, so
+    /// this is never null.
+    created_by: WorkspaceOrigin,
+    updated_by: WorkspaceOrigin,
 }
 
 impl FsNode {
@@ -90,6 +96,8 @@ impl FsNode {
             parent_id: node.parent_id,
             content,
             updated_at: node.updated_at_millis,
+            created_by: node.created_by,
+            updated_by: node.updated_by,
         }
     }
 }
@@ -106,6 +114,9 @@ struct WorkspaceFileBody {
     name: String,
     content: String,
     updated_at: u64,
+    /// Who created this note, and who last wrote the body above (issue #326).
+    created_by: WorkspaceOrigin,
+    updated_by: WorkspaceOrigin,
     /// Other files whose content links to this one via `[[name]]`.
     backlinks: Vec<FsNode>,
 }
@@ -207,6 +218,8 @@ async fn read_file(
         name: node.name,
         content,
         updated_at: node.updated_at_millis,
+        created_by: node.created_by,
+        updated_by: node.updated_by,
         backlinks: backlinks
             .into_iter()
             .map(|node| FsNode::from_node(node, None))
@@ -224,6 +237,9 @@ async fn create_node(
         kind: body.kind,
         parent_id: body.parent_id,
         updated_at_millis: crate::ports::now_millis(),
+        // These routes are the console's, and the console is the operator.
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
     };
     company
         .runtime
@@ -245,7 +261,12 @@ async fn write_file(
     let node = company
         .runtime
         .workspace()
-        .write(company.id(), &node_id, &body.content)
+        .write(
+            company.id(),
+            &node_id,
+            &body.content,
+            WorkspaceOrigin::Operator,
+        )
         .await?;
     Ok(Json(WriteAck {
         updated_at: node.updated_at_millis,

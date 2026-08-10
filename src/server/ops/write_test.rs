@@ -32,6 +32,22 @@ fn manifest() -> CompanyManifest {
     .unwrap()
 }
 
+/// The sorted node names in a workspace tree body.
+///
+/// A freshly-built company is no longer an empty tree: boot provisions the
+/// reserved `Agents/` root and one folder per manifest agent (issue #551), so
+/// the tests below name what they expect rather than counting to zero.
+fn provisioned_names(tree: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = tree
+        .as_array()
+        .expect("the tree read is an array")
+        .iter()
+        .map(|node| node["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
 async fn state_with_company(home: &std::path::Path) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
@@ -1206,11 +1222,18 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
-    // A workspace with nothing seeded into it reads as an empty tree, not a 404
-    // and not a fixture.
+    // A workspace with nothing seeded into it reads as a real tree, not a 404
+    // and not a fixture. It is not *empty*, though: boot provisions the
+    // reserved `Agents/` root plus one folder per manifest agent (issue #551),
+    // and the manifest here has one agent — so `Agents` and `Agents/ceo`.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(tree.as_array().unwrap().len(), 0);
+    assert_eq!(
+        provisioned_names(&tree),
+        vec!["Agents", "ceo"],
+        "a fresh company starts with just its agent folders"
+    );
+    let provisioned = tree.as_array().unwrap().len();
 
     let (_, folder) = send(
         &state,
@@ -1254,7 +1277,7 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     let tree = tree.as_array().unwrap();
-    assert_eq!(tree.len(), 3);
+    assert_eq!(tree.len(), provisioned + 3);
     for node in tree {
         assert!(
             node.get("content").is_none(),
@@ -1269,6 +1292,25 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     assert_eq!(listed["name"], "voice.md");
     assert_eq!(listed["kind"], "file");
     assert_eq!(listed["parentId"], json!(folder_id));
+    // Authorship rides every node of the tree read (issue #326). These routes
+    // are the console's, so the console is the operator.
+    assert_eq!(listed["createdBy"], json!({"kind": "operator"}));
+    assert_eq!(listed["updatedBy"], json!({"kind": "operator"}));
+    // …and the provisioner's own nodes say what they are, so the console can
+    // tell "the runtime laid this down" from "somebody wrote this".
+    let agents_root = tree
+        .iter()
+        .find(|node| node["name"] == json!("Agents"))
+        .expect("the Agents root is in the tree");
+    assert_eq!(agents_root["createdBy"], json!({"kind": "seed"}));
+    let ceo_folder = tree
+        .iter()
+        .find(|node| node["name"] == json!("ceo"))
+        .expect("Agents/ceo is in the tree");
+    assert_eq!(
+        ceo_folder["createdBy"],
+        json!({"kind": "agent", "id": "ceo"})
+    );
 
     // The file read carries the body and the inbound backlink, computed server
     // side — the console derives neither.
@@ -1288,6 +1330,8 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
             .contains("Warm and concise")
     );
     assert!(file["updatedAt"].is_number());
+    assert_eq!(file["createdBy"], json!({"kind": "operator"}));
+    assert_eq!(file["updatedBy"], json!({"kind": "operator"}));
     let backlinks = file["backlinks"].as_array().unwrap();
     assert_eq!(backlinks.len(), 1);
     assert_eq!(backlinks[0]["id"], json!(brief_id));
@@ -1388,7 +1432,8 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     let note_id = note["id"].as_str().unwrap().to_string();
 
-    // B's own workspace is empty — A's note is not in it.
+    // B's own workspace holds only its own provisioned agent folders — A's
+    // note is not in it.
     let (status, tree_b) = send_auth(
         &state,
         "GET",
@@ -1398,7 +1443,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(tree_b.as_array().unwrap().len(), 0);
+    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "ceo"]);
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(

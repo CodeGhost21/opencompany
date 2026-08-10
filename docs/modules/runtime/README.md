@@ -129,9 +129,21 @@ The workspace store seeds a new company from its `companies/<name>/workspace/**`
 template on first use (`WorkspaceStore::is_empty` gates the seed); skills read
 the company's `skills/<id>/SKILL.md` plus the repo-level shared registry.
 
+Boot also provisions the reserved `Agents/<agent-id>/` folders (issue #551) via
+`company::workspace_agents::ensure_agent_folders`. That call is gated on "this
+is not a rebuild" and on **nothing else** — deliberately not on `seed_dir`,
+since a provisioned tenant and the desktop build have no company bundle to seed
+from and their agents need folders regardless, and deliberately not on
+`is_empty`, since that gate exists to make operator deletions stick against
+re-seeding and a roster that gained a teammate last week still needs a folder
+for them. It is idempotent, so it costs one tree read per boot. The second
+provisioning seam is `HarnessPool::ensure`, which covers every roster change
+after boot.
+
 The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
-(`workspace`), so agents read the operator's note tree through the tools in
-`harness::workspace_tools` (issue #237) rather than being blind to it. One
-handle, three writers — console REST, GraphQL, and a granted agent — so an
-operator edit is what the next turn reads, with no rebuild. `None` fails
-closed: no workspace tools are wired.
+(`workspace`), so agents read and write the shared note tree through the tools
+in `harness::workspace_tools` (issues #237, #551) rather than being blind to it.
+One handle, three writers — console REST, GraphQL, and a granted agent — so an
+operator edit is what the next turn reads, with no rebuild, and an agent's note
+is in the tab the operator is already looking at. Each write records its author
+(issue #326). `None` fails closed: no workspace tools are wired.

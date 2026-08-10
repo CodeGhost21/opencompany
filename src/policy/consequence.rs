@@ -211,14 +211,23 @@ const DECLARED: &[Declared] = &[
     d("http_request", EffectGroup::Other, Reach::Consequence),
     d("curl", EffectGroup::Other, Reach::Consequence),
     d("web_fetch", EffectGroup::Other, Reach::Consequence),
-    // ---- The company workspace: operator-owned guidance --------------------
+    // ---- The company workspace: the shared note tree ------------------------
     // Reads are free (issue #237). `workspace_write` overwrites guidance the
     // operator wrote, which is why `is_external_effect` has always refused to
     // exempt it — and why it is now also refused a standing grant. That
     // contradiction (park every time / grant for a week) is issue #444's
     // headline, resolved in the direction the parking side already argued.
+    //
+    // `workspace_create` (issue #551) takes the identical classification, and
+    // gets it for the same reason rather than by copying: it adds a node to the
+    // tree every other agent and the operator read, unconfined by any prefix,
+    // so it reaches past this turn exactly as an overwrite does. Anything
+    // weaker would also be incoherent — a standing grant to *add* notes beside
+    // a per-call gate on *editing* them buys an agent the ability to fill the
+    // tree without ever asking.
     d("workspace_list", EffectGroup::Other, Reach::Nothing),
     d("workspace_read", EffectGroup::Other, Reach::Nothing),
+    d("workspace_create", EffectGroup::Other, Reach::Consequence),
     d("workspace_write", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
@@ -588,6 +597,7 @@ mod tests {
             "http_request",
             "curl",
             "web_fetch",
+            "workspace_create",
             "workspace_write",
             "git_operations",
             "run_workflow",
@@ -866,7 +876,13 @@ mod tests {
     /// name of `file_write` already is the whole of what it can do.
     #[test]
     fn a_tool_whose_name_says_everything_has_no_scope() {
-        for tool in ["file_write", "memory_store", "shell", "workspace_write"] {
+        for tool in [
+            "file_write",
+            "memory_store",
+            "shell",
+            "workspace_write",
+            "workspace_create",
+        ] {
             assert_eq!(
                 standing_scope_of(tool, &json!({ "tool": "GITHUB_LIST_BRANCHES" })),
                 None,
@@ -910,6 +926,7 @@ mod tests {
             search::WEB_SEARCH_TOOL,
             workspace_tools::WORKSPACE_LIST_TOOL,
             workspace_tools::WORKSPACE_READ_TOOL,
+            workspace_tools::WORKSPACE_CREATE_TOOL,
             workspace_tools::WORKSPACE_WRITE_TOOL,
             crate::harness::composio_catalog::LIST_TOOLS_TOOL,
             crate::harness::composio_catalog::LIST_TOOLKITS_TOOL,
