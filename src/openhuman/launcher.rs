@@ -642,7 +642,7 @@ mod tests {
         );
         assert!(installed_from_vendored(&yes, vendored));
         let no = "[[..]]\nname = \"tauri-cli\"\nsource = \"registry+https://crates.io\"\n";
-        assert!(!installed_from_vendored(&no, vendored));
+        assert!(!installed_from_vendored(no, vendored));
     }
 
     #[test]
