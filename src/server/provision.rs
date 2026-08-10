@@ -17,8 +17,8 @@
 //! [`WebhookSink`](crate::server::webhook::WebhookSink); the default build
 //! records deliveries in memory.
 
-use axum::extract::{Path, State};
 use axum::extract::rejection::JsonRejection;
+use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
@@ -426,15 +426,17 @@ async fn emergency_pause(
         .await
     {
         Ok(changed) => emergency_response(&runtime, changed, None).await,
-        Err(err) => emergency_response(
-            &runtime,
-            false,
-            Some(format!(
-                "the emergency stop is active in memory but its journal \
+        Err(err) => {
+            emergency_response(
+                &runtime,
+                false,
+                Some(format!(
+                    "the emergency stop is active in memory but its journal \
                  write failed and will not survive a restart: {err}"
-            )),
-        )
-        .await,
+                )),
+            )
+            .await
+        }
     }
 }
 
@@ -481,15 +483,17 @@ async fn emergency_resume(
         .await
     {
         Ok(changed) => emergency_response(&runtime, changed, None).await,
-        Err(err) => emergency_response(
-            &runtime,
-            false,
-            Some(format!(
-                "the emergency stop is still engaged in memory but its journal \
+        Err(err) => {
+            emergency_response(
+                &runtime,
+                false,
+                Some(format!(
+                    "the emergency stop is still engaged in memory but its journal \
                  write failed and will not survive a restart: {err}"
-            )),
-        )
-        .await,
+                )),
+            )
+            .await
+        }
     }
 }
 

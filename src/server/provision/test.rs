@@ -556,11 +556,7 @@ async fn emergency_routes_refuse_without_the_right_confirmation() {
         .header("content-type", "application/json")
         .body(Body::empty())
         .unwrap();
-    let empty_json = app
-        .clone()
-        .oneshot(empty_json)
-        .await
-        .unwrap();
+    let empty_json = app.clone().oneshot(empty_json).await.unwrap();
     assert_eq!(empty_json.status(), StatusCode::BAD_REQUEST);
     assert_eq!(json_body(empty_json).await["code"], "confirmation_required");
 

@@ -214,8 +214,8 @@ mod tests {
             "lifecycle": "running",
             "pending_approvals": 3,
         });
-        let status: CompanyStatus = serde_json::from_value(payload)
-            .expect("a pre-stop status payload still deserializes");
+        let status: CompanyStatus =
+            serde_json::from_value(payload).expect("a pre-stop status payload still deserializes");
         assert!(!status.emergency_paused);
     }
 }

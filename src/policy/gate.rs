@@ -944,10 +944,7 @@ mod test {
             .park(&company(), effect("filing.submit", EffectGroup::Sign))
             .await
             .unwrap_err();
-        assert!(matches!(
-            err,
-            crate::OpenCompanyError::EmergencyStop(_)
-        ));
+        assert!(matches!(err, crate::OpenCompanyError::EmergencyStop(_)));
         assert!(gate.parked_ids().is_empty());
 
         // Chat still parks while stopped — the veto is the *same* one `evaluate`
