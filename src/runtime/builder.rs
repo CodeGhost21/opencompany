@@ -197,6 +197,8 @@ pub struct RuntimeBuilder {
     home: PathBuf,
     id: CompanyId,
     manifest: CompanyManifest,
+    /// Install-wide default MCP servers (issue #527), from resolved config.
+    default_mcp_servers: Vec<crate::company::McpServer>,
     brain: Option<Arc<dyn Brain>>,
     brain_mode: Option<BrainMode>,
     credential: Option<SecretValue>,
@@ -287,6 +289,7 @@ impl RuntimeBuilder {
             home: home.into(),
             id,
             manifest,
+            default_mcp_servers: Vec::new(),
             brain: None,
             brain_mode: None,
             credential: None,
@@ -346,6 +349,15 @@ impl RuntimeBuilder {
     ///
     /// An explicit brain wins over hosted-brain selection: setting this bypasses
     /// [`with_brain_mode`](Self::with_brain_mode) entirely.
+    /// Sets the install-wide default MCP servers (issue #527) — the normalized
+    /// `[[default_mcp_server]]` list from the instance `config.toml`. They merge
+    /// underneath this company's manifest servers, so a company that declares a
+    /// server of the same name keeps its own.
+    pub fn with_default_mcp_servers(mut self, servers: Vec<crate::company::McpServer>) -> Self {
+        self.default_mcp_servers = servers;
+        self
+    }
+
     pub fn with_brain(mut self, brain: Arc<dyn Brain>) -> Self {
         self.brain = Some(brain);
         self
@@ -1370,6 +1382,7 @@ impl RuntimeBuilder {
                             // to no MCP servers rather than bricking boot.
                             let mcp_servers = crate::company::mcp::resolve_effective(
                                 &id,
+                                &self.default_mcp_servers,
                                 &self.manifest.mcp_servers,
                                 secrets.as_ref(),
                             )
@@ -1420,6 +1433,9 @@ impl RuntimeBuilder {
                                 None
                             };
                             let deps = HarnessDeps {
+                                // Carried so live re-resolution merges the same
+                                // three layers boot did (issue #527).
+                                default_mcp_servers: self.default_mcp_servers.clone(),
                                 // A per-tenant provider that re-resolves the
                                 // effective inference config on every turn, so a
                                 // console BYOK switch takes effect next turn with
@@ -1770,6 +1786,9 @@ impl RuntimeBuilder {
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        // Install-wide MCP defaults (issue #527) — set before anything resolves
+        // the effective server set, so the first resolution already sees them.
+        runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
 
         // Issue #290: adopt the outgoing runtime's serialising mutexes. Two
         // runtimes for one company each holding their own `serial` would let two

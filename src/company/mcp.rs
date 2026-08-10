@@ -2,14 +2,22 @@
 //! merge/validation and the async secret-resolution used to materialize a
 //! company's *effective* MCP servers (issue #50).
 //!
-//! A company's effective MCP servers are the union of two sources:
+//! A company's effective MCP servers are the union of three sources, merged
+//! lowest-precedence first by [`effective_mcp_servers`]:
 //!
-//! 1. **Manifest** — the `[[mcp_server]]` entries committed in `company.toml`
-//!    ([`McpServer`]). Declarative intent; never a credential.
-//! 2. **Runtime** — servers the operator adds through the console, persisted as
+//! 1. **Default** — the install-wide `[[default_mcp_server]]` entries in the
+//!    instance `config.toml`, shipped enabled by a packaged Open Company so a
+//!    fresh install has working tools with no user setup (issue #527). They
+//!    apply to *every* company on the install and are normalized once, at the
+//!    config boundary, by [`normalize_default_servers`].
+//! 2. **Manifest** — the `[[mcp_server]]` entries committed in `company.toml`
+//!    ([`McpServer`]). Declarative intent; never a credential. A manifest entry
+//!    shadows a default of the same name: the company said something specific.
+//! 3. **Runtime** — servers the operator adds through the console, persisted as
 //!    a single JSON index in the [`SecretStore`](crate::ports::SecretStore)
 //!    under [`RUNTIME_INDEX_KEY`]. A runtime entry with the *same name* as a
-//!    manifest server is an **override** (enable/disable, tool allow-list).
+//!    manifest **or default** server is an **override** (enable/disable, tool
+//!    allow-list) — the body wins, the lower layer keeps the provenance badge.
 //!
 //! Credentials live apart from the declarations: a server's outbound token is
 //! written to its own per-server key ([`auth_key`]) — never inline in the index
@@ -49,8 +57,8 @@ pub fn health_key(name: &str) -> String {
 }
 
 /// Where an effective server declaration came from — drives the console's source
-/// badge and the delete-guard (a manifest server cannot be deleted, only
-/// disabled/overridden).
+/// badge and the delete-guard (a manifest or default server cannot be deleted,
+/// only disabled/overridden).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum McpSource {
@@ -58,6 +66,12 @@ pub enum McpSource {
     Manifest,
     /// Added at runtime through the console.
     Runtime,
+    /// Shipped enabled by the packaged install: a `[[default_mcp_server]]` entry
+    /// in the instance `config.toml` (issue #527). Present for every company on
+    /// the install, which is what makes it a distinct provenance rather than a
+    /// flavour of [`Self::Manifest`] — nobody wrote it into *this* company, and
+    /// the console must not label it as operator-added.
+    Default,
 }
 
 /// Resolved outbound auth material for one MCP server.
@@ -247,35 +261,66 @@ impl McpServerDecl {
     }
 }
 
-/// Merges the manifest servers with the runtime index into the effective set.
+/// Merges the install defaults, the manifest servers and the runtime index into
+/// the effective set.
 ///
-/// A runtime entry overrides a manifest server of the same name (its
-/// enable/disable + tool lists win) but keeps the [`McpSource::Manifest`] badge
-/// so the console still shows it as manifest-declared (and refuses to delete
-/// it). Runtime-only entries append as [`McpSource::Runtime`]. Order is manifest
-/// first (in declared order), then any runtime-only additions.
+/// Three layers, lowest to highest: **default** (install-wide, issue #527) →
+/// **manifest** (this company's `company.toml`) → **runtime** (console edits).
+/// A higher layer overriding a lower one replaces the body — its
+/// enable/disable + tool lists win — but the declaration keeps the **lowest**
+/// layer's badge, so the console still shows where the server came from and
+/// still refuses to delete it. That is the rule the manifest/runtime pair
+/// already followed; defaults join it rather than introducing a second one.
+///
+/// A name in both the defaults and the manifest resolves to the manifest: a
+/// company that declares a server has said something specific about it, and the
+/// install-wide default is the fallback it overrides.
+///
+/// Order is manifest first (in declared order), then defaults the manifest did
+/// not shadow, then runtime-only additions. Manifest stays first so an install
+/// with no defaults configured produces a byte-identical list to before.
 ///
 /// Auth is left [`AuthMaterial::None`]; [`resolve_effective`] fills it.
-pub fn effective_mcp_servers(manifest: &[McpServer], runtime: &[McpServer]) -> Vec<McpServerDecl> {
+pub fn effective_mcp_servers(
+    defaults: &[McpServer],
+    manifest: &[McpServer],
+    runtime: &[McpServer],
+) -> Vec<McpServerDecl> {
     let mut out: Vec<McpServerDecl> = Vec::new();
+
+    // The body that actually applies for `name`: the runtime override when the
+    // console has one, else the layer's own declaration. Shared by the manifest
+    // and default passes so the override rule cannot drift between them.
+    let with_override = |own: &McpServer, name: &str, source: McpSource| match runtime
+        .iter()
+        .find(|r| r.name.trim() == name)
+    {
+        Some(override_entry) => McpServerDecl::from_server(override_entry, source),
+        None => McpServerDecl::from_server(own, source),
+    };
 
     for m in manifest {
         let name = m.name.trim();
         if name.is_empty() {
             continue;
         }
-        // A runtime override for this manifest name replaces the body but keeps
-        // the manifest provenance.
-        let decl = match runtime.iter().find(|r| r.name.trim() == name) {
-            Some(override_entry) => McpServerDecl::from_server(override_entry, McpSource::Manifest),
-            None => McpServerDecl::from_server(m, McpSource::Manifest),
-        };
-        out.push(decl);
+        out.push(with_override(m, name, McpSource::Manifest));
+    }
+
+    for d in defaults {
+        let name = d.name.trim();
+        if name.is_empty() || manifest.iter().any(|m| m.name.trim() == name) {
+            continue;
+        }
+        out.push(with_override(d, name, McpSource::Default));
     }
 
     for r in runtime {
         let name = r.name.trim();
-        if name.is_empty() || manifest.iter().any(|m| m.name.trim() == name) {
+        if name.is_empty()
+            || manifest.iter().any(|m| m.name.trim() == name)
+            || defaults.iter().any(|d| d.name.trim() == name)
+        {
             continue;
         }
         out.push(McpServerDecl::from_server(r, McpSource::Runtime));
@@ -551,20 +596,30 @@ pub async fn save_health(
 
 /// The company's effective MCP servers with credentials resolved.
 ///
-/// Merges manifest ∪ runtime index, then fills each decl's [`AuthMaterial`] from
-/// its stored secret. This is the single seam the harness builder and the ops
-/// discovery route both use so agent-facing resolution and console discovery
-/// stay identical.
+/// Merges defaults ∪ manifest ∪ runtime index, then fills each decl's
+/// [`AuthMaterial`] from its stored secret. This is the single seam the harness
+/// builder and the ops discovery route both use so agent-facing resolution and
+/// console discovery stay identical.
+///
+/// `defaults` is the install-wide `[[default_mcp_server]]` list (issue #527),
+/// reached at call sites as
+/// [`CompanyRuntime::default_mcp_servers`](crate::company::runtime::CompanyRuntime::default_mcp_servers).
+/// An install that configures none passes an empty slice, which leaves
+/// resolution byte-identical to the two-layer behaviour.
 pub async fn resolve_effective(
     company: &CompanyId,
+    defaults: &[McpServer],
     manifest: &[McpServer],
     secrets: &dyn SecretStore,
 ) -> Result<Vec<McpServerDecl>> {
     let runtime = load_runtime_index(company, secrets).await?;
-    let mut decls = effective_mcp_servers(manifest, &runtime);
+    let mut decls = effective_mcp_servers(defaults, manifest, &runtime);
     for decl in &mut decls {
         // A manifest server may name a custom auth_secret key; runtime servers
-        // always use the canonical per-server key.
+        // always use the canonical per-server key. Defaults never carry one —
+        // `normalize_default_servers` rejects any entry with a credential-shaped
+        // field — so they fall through to the canonical key, which is where the
+        // console writes a token the operator adds for a default server later.
         let override_key = manifest
             .iter()
             .find(|m| m.name.trim() == decl.name)
@@ -645,6 +700,114 @@ fn is_http_url(url: &str) -> bool {
     lower.starts_with("http://") || lower.starts_with("https://")
 }
 
+/// True when `url`'s query string carries something credential-shaped.
+///
+/// Distinct from [`has_userinfo`], which catches the `user:pass@host` form. A
+/// token in a query parameter is the other way a credential reaches a URL, and
+/// it is the shape a default is most likely to arrive in — an operator copying
+/// a "your MCP URL" string out of a vendor dashboard.
+fn has_query_credential(url: &str) -> bool {
+    let Some(query) = url.split_once('?').map(|(_, q)| q) else {
+        return false;
+    };
+    query.split('&').any(|pair| {
+        let key = pair
+            .split('=')
+            .next()
+            .unwrap_or("")
+            .trim()
+            .to_ascii_lowercase();
+        let key = key.replace(['-', '_'], "");
+        matches!(
+            key.as_str(),
+            "apikey" | "token" | "accesstoken" | "secret" | "password" | "auth" | "authorization"
+        )
+    })
+}
+
+/// Normalizes the install-wide `[[default_mcp_server]]` list (issue #527) into
+/// the entries that may actually ship, dropping each one that cannot.
+///
+/// # Why entries are dropped rather than the list rejected
+///
+/// These servers auto-enable on every company of the install with no user
+/// action, so one malformed row must not cost an operator the rows that are
+/// fine — and it must not abort boot either, which would turn a typo in a
+/// packaged config into an install that does not start. Every rejection is
+/// returned alongside the survivors so the caller can log it: a default that
+/// silently fails to ship looks exactly like one nobody configured.
+///
+/// # Why a credential is refused rather than stripped
+///
+/// A default is handed to every agent on the install unprompted, so it must be
+/// safe unattended: public, and carrying no secret. An entry with a token in its
+/// endpoint's query string, or an `auth_secret` naming a key, is **rejected, not
+/// scrubbed** — scrubbing would ship a server whose auth silently no longer
+/// works, which is worse than not shipping it, because it fails at an agent's
+/// first tool call instead of here. A server that needs auth is added per
+/// company at runtime, where its token goes to that company's own secret store.
+///
+/// [`McpServer`] is a typed struct with no free-form fields, so the two above
+/// are the whole surface: an inline `token = "…"` in the TOML cannot reach a
+/// field and is dropped by deserialization. That is why this does not carry the
+/// dynamic "is any key credential-shaped?" scan a schemaless config would need —
+/// the type already provides it.
+///
+/// The shared rules (name, `http(s)` endpoint, no stdio `command`, no
+/// `user:pass@` userinfo) come from [`validate_one`], so defaults and every
+/// other declaration path stay on one validator.
+pub fn normalize_default_servers(raw: &[McpServer]) -> (Vec<McpServer>, Vec<String>) {
+    let mut kept: Vec<McpServer> = Vec::new();
+    let mut problems: Vec<String> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    for (index, server) in raw.iter().enumerate() {
+        let name = server.name.trim();
+        let label = if name.is_empty() {
+            format!("default mcp server #{}", index + 1)
+        } else {
+            format!("default mcp server `{name}`")
+        };
+
+        let shared = validate_one(&label, server);
+        if !shared.is_empty() {
+            problems.extend(shared);
+            continue;
+        }
+
+        if has_query_credential(&server.endpoint) {
+            problems.push(format!(
+                "{label} has a credential in its `endpoint` query string — a default ships to every company unattended and must carry no secret. Add it per company from the console instead."
+            ));
+            continue;
+        }
+
+        if server
+            .auth_secret
+            .as_deref()
+            .is_some_and(|k| !k.trim().is_empty())
+        {
+            problems.push(format!(
+                "{label} names an `auth_secret` — a default must not depend on a credential. Declare it in the company's `company.toml`, or add it from the console, where the token is stored per company."
+            ));
+            continue;
+        }
+
+        // A duplicate name would put two rows in the list claiming one slug, and
+        // which won would depend on merge order rather than on this config.
+        if !seen.insert(name.to_string()) {
+            problems.push(format!(
+                "{label} repeats a `name` used earlier in the list — keeping the first."
+            ));
+            continue;
+        }
+
+        kept.push(server.clone());
+    }
+
+    (kept, problems)
+}
+
 /// Whether an endpoint's authority carries a `user[:pass]@` userinfo section.
 /// Uses the same cheap authority-splitting as [`crate::harness::mcp_probe::scrub`]
 /// so a `?email=a@b` query never trips it.
@@ -723,7 +886,7 @@ mod tests {
     fn effective_unions_manifest_and_runtime() {
         let manifest = vec![server("notion", "https://notion.example/mcp")];
         let runtime = vec![server("linear", "https://linear.example/mcp")];
-        let eff = effective_mcp_servers(&manifest, &runtime);
+        let eff = effective_mcp_servers(&[], &manifest, &runtime);
         let names: Vec<&str> = eff.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, vec!["notion", "linear"]);
         assert_eq!(eff[0].source, McpSource::Manifest);
@@ -736,11 +899,194 @@ mod tests {
         let mut override_entry = server("notion", "https://notion.example/mcp");
         override_entry.enabled = false;
         override_entry.allowed_tools = vec!["search".into()];
-        let eff = effective_mcp_servers(&manifest, &[override_entry]);
+        let eff = effective_mcp_servers(&[], &manifest, &[override_entry]);
         assert_eq!(eff.len(), 1, "override does not duplicate the server");
         assert_eq!(eff[0].source, McpSource::Manifest, "still manifest-badged");
         assert!(!eff[0].enabled, "override wins the enabled flag");
         assert_eq!(eff[0].allowed_tools, vec!["search".to_string()]);
+    }
+
+    // ---- install defaults, the third merge layer (issue #527) -------------
+
+    #[test]
+    fn a_default_ships_enabled_with_its_own_badge() {
+        // The acceptance criterion: a fresh install has the server active with
+        // no user action and no company.toml edit.
+        let defaults = vec![server("deepwiki", "https://deepwiki.example/mcp")];
+        let eff = effective_mcp_servers(&defaults, &[], &[]);
+        assert_eq!(eff.len(), 1);
+        assert_eq!(eff[0].name, "deepwiki");
+        assert!(eff[0].enabled, "a default is active without user action");
+        assert_eq!(
+            eff[0].source,
+            McpSource::Default,
+            "not Manifest — nobody wrote it into this company"
+        );
+    }
+
+    #[test]
+    fn no_defaults_leaves_the_two_layer_result_untouched() {
+        // The compatibility property every existing install depends on: an
+        // install that configures no defaults resolves exactly as before.
+        let manifest = vec![server("notion", "https://notion.example/mcp")];
+        let runtime = vec![server("linear", "https://linear.example/mcp")];
+        let eff = effective_mcp_servers(&[], &manifest, &runtime);
+        let names: Vec<&str> = eff.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["notion", "linear"]);
+        assert_eq!(eff[0].source, McpSource::Manifest);
+        assert_eq!(eff[1].source, McpSource::Runtime);
+    }
+
+    #[test]
+    fn the_manifest_shadows_a_default_of_the_same_name() {
+        // A company that declares the server has said something specific about
+        // it; the install-wide default is the fallback it overrides.
+        let defaults = vec![server("shared", "https://default.example/mcp")];
+        let manifest = vec![server("shared", "https://manifest.example/mcp")];
+        let eff = effective_mcp_servers(&defaults, &manifest, &[]);
+        assert_eq!(eff.len(), 1, "one row, not two claiming the same slug");
+        assert_eq!(eff[0].endpoint, "https://manifest.example/mcp");
+        assert_eq!(eff[0].source, McpSource::Manifest);
+    }
+
+    #[test]
+    fn a_runtime_override_disables_a_default_but_keeps_its_badge() {
+        // This is how an operator turns a shipped default off. It must persist
+        // as an override rather than a deletion, because the declaration lives
+        // in the install config where the console cannot reach it.
+        let defaults = vec![server("deepwiki", "https://deepwiki.example/mcp")];
+        let mut off = server("deepwiki", "https://deepwiki.example/mcp");
+        off.enabled = false;
+        let eff = effective_mcp_servers(&defaults, &[], &[off]);
+        assert_eq!(eff.len(), 1, "the override does not duplicate the server");
+        assert!(!eff[0].enabled, "the operator's disable wins");
+        assert_eq!(
+            eff[0].source,
+            McpSource::Default,
+            "still default-badged, so the console still refuses to delete it"
+        );
+    }
+
+    #[test]
+    fn ordering_puts_manifest_first_then_defaults_then_runtime_only() {
+        let defaults = vec![server("d", "https://d.example/mcp")];
+        let manifest = vec![server("m", "https://m.example/mcp")];
+        let runtime = vec![server("r", "https://r.example/mcp")];
+        let eff = effective_mcp_servers(&defaults, &manifest, &runtime);
+        let names: Vec<&str> = eff.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["m", "d", "r"]);
+        assert_eq!(eff[2].source, McpSource::Runtime);
+    }
+
+    // ---- normalizing the configured defaults (issue #527) -----------------
+
+    #[test]
+    fn an_empty_default_list_is_authoritative() {
+        // "Ship no defaults" — never "fall back to a built-in set". There is no
+        // compiled-in list to fall back to, and adding one later must not
+        // change this.
+        let (kept, problems) = normalize_default_servers(&[]);
+        assert!(kept.is_empty());
+        assert!(problems.is_empty());
+    }
+
+    #[test]
+    fn one_bad_entry_does_not_cost_the_good_ones() {
+        let raw = vec![
+            server("good", "https://good.example/mcp"),
+            server("", "https://nameless.example/mcp"),
+            server("alsogood", "https://also.example/mcp"),
+        ];
+        let (kept, problems) = normalize_default_servers(&raw);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["good", "alsogood"]);
+        assert_eq!(problems.len(), 1, "and the drop is explained, not silent");
+    }
+
+    #[test]
+    fn a_credential_in_the_endpoint_query_string_is_refused_not_scrubbed() {
+        // Refused, because scrubbing would ship a server whose auth silently no
+        // longer works — failing at an agent's first tool call instead of here.
+        let raw = vec![
+            server("qs", "https://api.example.com/mcp?apiKey=leaked"),
+            server(
+                "qs2",
+                "https://api.example.com/mcp?projectId=p&token=leaked",
+            ),
+            server("qs3", "https://api.example.com/mcp?access_token=leaked"),
+            server("fine", "https://api.example.com/mcp?projectId=p"),
+        ];
+        let (kept, problems) = normalize_default_servers(&raw);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["fine"], "a benign query parameter is kept");
+        assert_eq!(problems.len(), 3);
+    }
+
+    #[test]
+    fn a_default_may_not_depend_on_a_credential_key() {
+        // A default is handed to every agent on the install unprompted, so it
+        // has to work unattended. One that needs auth belongs per company.
+        let mut needs_auth = server("private", "https://private.example/mcp");
+        needs_auth.auth_secret = Some("mcp/private/auth".to_string());
+        let (kept, problems) = normalize_default_servers(&[needs_auth]);
+        assert!(kept.is_empty());
+        assert_eq!(problems.len(), 1);
+        assert!(problems[0].contains("auth_secret"));
+    }
+
+    #[test]
+    fn a_non_http_or_stdio_default_is_refused_by_the_shared_validator() {
+        // Delegated to `validate_one`, so defaults and every other declaration
+        // path enforce the hosted-v1 transport boundary identically.
+        let mut stdio = server("stdio", "");
+        stdio.command = Some("npx some-mcp-server".to_string());
+        let raw = vec![
+            stdio,
+            server("ftp", "ftp://files.example/mcp"),
+            server("ok", "http://localhost:9000/mcp"),
+        ];
+        let (kept, problems) = normalize_default_servers(&raw);
+        let names: Vec<&str> = kept.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["ok"]);
+        assert!(!problems.is_empty());
+    }
+
+    #[test]
+    fn a_userinfo_credential_in_a_default_endpoint_is_refused() {
+        let raw = vec![server("ui", "https://user:pass@host.example/mcp")];
+        let (kept, problems) = normalize_default_servers(&raw);
+        assert!(kept.is_empty(), "the user:pass@host form never ships");
+        assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn a_duplicated_default_name_keeps_the_first() {
+        // Two rows claiming one slug would let merge order decide which won.
+        let raw = vec![
+            server("dup", "https://first.example/mcp"),
+            server("dup", "https://second.example/mcp"),
+        ];
+        let (kept, problems) = normalize_default_servers(&raw);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].endpoint, "https://first.example/mcp");
+        assert_eq!(problems.len(), 1);
+    }
+
+    #[test]
+    fn a_clean_default_survives_with_its_fields_intact() {
+        let mut full = server("full", "https://full.example/mcp");
+        full.description = Some("a documentation server".to_string());
+        full.allowed_tools = vec!["read".to_string()];
+        full.timeout_secs = 45;
+        let (kept, problems) = normalize_default_servers(&[full]);
+        assert!(problems.is_empty());
+        assert_eq!(kept.len(), 1);
+        assert_eq!(
+            kept[0].description.as_deref(),
+            Some("a documentation server")
+        );
+        assert_eq!(kept[0].allowed_tools, vec!["read".to_string()]);
+        assert_eq!(kept[0].timeout_secs, 45);
     }
 
     // ---- validation -------------------------------------------------------
@@ -830,7 +1176,9 @@ mod tests {
             .await
             .unwrap();
 
-        let decls = resolve_effective(&company, &[], &secrets).await.unwrap();
+        let decls = resolve_effective(&company, &[], &[], &secrets)
+            .await
+            .unwrap();
         assert_eq!(decls.len(), 1);
         assert_eq!(decls[0].auth, AuthMaterial::Bearer("sk-secret-123".into()));
         assert_eq!(decls[0].source, McpSource::Runtime);
@@ -887,7 +1235,9 @@ mod tests {
         .await
         .unwrap();
 
-        let decls = resolve_effective(&company, &[], &secrets).await.unwrap();
+        let decls = resolve_effective(&company, &[], &[], &secrets)
+            .await
+            .unwrap();
         assert_eq!(
             decls[0].auth,
             AuthMaterial::QueryParam {

@@ -278,6 +278,7 @@ async fn harness(
         // this fixture installs no skills at all, so an empty library is the
         // whole truth here and leaves the search path under test untouched.
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,

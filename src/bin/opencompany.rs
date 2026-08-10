@@ -277,6 +277,10 @@ fn company_builder(
         state.config(),
     )
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
+    // Install-wide MCP defaults (issue #527): every company built on this
+    // instance gets them, which is what makes a fresh install useful with no
+    // per-company setup. Already normalized when the config resolved.
+    .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
     .with_skills_registry(state.shared_skill_registry()?)
     .with_id(company_id.clone());
@@ -1048,6 +1052,27 @@ async fn main() -> Result<()> {
             // injected `OPENCOMPANY_BIND` (and any `config.toml` `bind`) moved
             // `doctor`'s report while the host kept serving on the default —
             // silently, because the host does start and does serve.
+            // Install-wide MCP defaults (issue #527). Normalized here, at the
+            // boundary that reads the file, so a rejected entry is named at boot
+            // where somebody is looking — rather than silently thinning the list
+            // on every company's first agent turn. A bad entry is a warning, not
+            // a boot failure: these are additive convenience, and refusing to
+            // start over one malformed default would turn a cosmetic packaging
+            // error into an outage.
+            //
+            // Read before `resolve_serve_bind` below, which consumes
+            // `config_file`.
+            let default_mcp_servers = {
+                let raw = config_file
+                    .as_ref()
+                    .map(|c| c.default_mcp_servers.clone())
+                    .unwrap_or_default();
+                let (kept, problems) = opencompany::company::mcp::normalize_default_servers(&raw);
+                for problem in &problems {
+                    tracing::warn!(target: "opencompany::config", "{problem}");
+                }
+                kept
+            };
             let (bind, bind_source) = opencompany::app::config::resolve_serve_bind(
                 bind,
                 &ProcessEnv,
@@ -1055,6 +1080,7 @@ async fn main() -> Result<()> {
             );
             let state = AppState::new(AppConfig {
                 bind,
+                default_mcp_servers,
                 openhuman_root,
                 api_url,
                 tinyplace_api_url,

@@ -58,7 +58,11 @@ struct McpServerDto {
     name: String,
     endpoint: String,
     description: Option<String>,
-    /// `manifest` (committed) or `runtime` (console-added).
+    /// `manifest` (committed), `runtime` (console-added), or `default`
+    /// (shipped by the install — issue #527). The console renders this as the
+    /// source badge, so the three stay distinguishable: a shipped default is
+    /// not something this operator added, and must not be labelled as if it
+    /// were.
     source: McpSource,
     enabled: bool,
     allowed_tools: Vec<String>,
@@ -237,9 +241,14 @@ fn dto_from_decl(decl: &mcp::McpServerDecl, health: Option<McpHealth>) -> McpSer
 async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
     let runtime = company.runtime.as_ref();
     let manifest = manifest_servers(runtime).await?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
     let mut out = Vec::with_capacity(decls.len());
     for decl in &decls {
         let health = load_health(runtime.id(), &decl.name, runtime.secrets().as_ref())
@@ -410,6 +419,20 @@ async fn delete_server(
             "`{name}` is declared in company.toml — disable it instead of deleting."
         ))));
     }
+    // Same guard, same reason, for an install-wide default (issue #527): the
+    // declaration lives in the instance `config.toml`, not in this company's
+    // runtime index, so deleting the index row would not remove it — the next
+    // resolution would merge it straight back and the delete would read as
+    // broken. Disabling writes an override that *does* persist.
+    if runtime
+        .default_mcp_servers()
+        .iter()
+        .any(|d| d.name.trim() == name)
+    {
+        return Err(ApiError(OpenCompanyError::Conflict(format!(
+            "`{name}` ships as an install default — disable it instead of deleting."
+        ))));
+    }
 
     let mut index = load_runtime_index(runtime.id(), runtime.secrets().as_ref())
         .await
@@ -451,9 +474,14 @@ async fn mutation_response(
     let test = probe_and_persist(runtime, name).await;
 
     let manifest = manifest_servers(runtime).await?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
     let decl = decls.iter().find(|d| d.name == name).ok_or_else(|| {
         ApiError(OpenCompanyError::InvalidRequest(format!(
             "`{name}` not found"
@@ -477,9 +505,14 @@ async fn mutation_response(
 #[cfg(feature = "openhuman")]
 async fn probe_and_persist(runtime: &CompanyRuntime, name: &str) -> Option<McpHealth> {
     let manifest = manifest_servers(runtime).await.ok()?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .ok()?;
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .ok()?;
     let decl = decls.iter().find(|d| d.name == name)?;
     // `probe_server` already scrubs its message; persist that scrubbed health.
     let health = crate::harness::mcp_probe::probe_server(decl).await;
@@ -529,7 +562,14 @@ async fn discover_tools(
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
-    let decls = match resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref()).await {
+    let decls = match resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    {
         Ok(d) => d,
         Err(err) => return ApiError(err).into_response(),
     };
@@ -598,7 +638,14 @@ async fn test_server(company: ScopedCompany, Path(NamePath { name }): Path<NameP
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
-    let decls = match resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref()).await {
+    let decls = match resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    {
         Ok(d) => d,
         Err(err) => return ApiError(err).into_response(),
     };
@@ -652,9 +699,14 @@ async fn start_oauth(
 
     // Resolve the effective server so OAuth uses the same endpoint agents will.
     let manifest = manifest_servers(runtime).await?;
-    let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
+    let decls = resolve_effective(
+        runtime.id(),
+        runtime.default_mcp_servers(),
+        &manifest,
+        runtime.secrets().as_ref(),
+    )
+    .await
+    .map_err(ApiError)?;
     let decl = decls
         .iter()
         .find(|d| d.name == name)

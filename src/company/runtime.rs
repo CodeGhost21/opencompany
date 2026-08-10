@@ -146,6 +146,12 @@ pub struct CompanyRuntime {
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
     pub(crate) secrets: Arc<dyn SecretStore>,
+    /// Install-wide default MCP servers (issue #527), already normalized by
+    /// `company::mcp::normalize_default_servers` at the config boundary. Lives
+    /// beside `secrets` because every reader needs both: the pair is what
+    /// `company::mcp::resolve_effective` takes. Empty for an install that
+    /// configures no defaults, which is the common case.
+    pub(crate) default_mcp_servers: Vec<crate::company::McpServer>,
     /// Per-teammate email (inbound + outbound), backing the inbox surface.
     pub(crate) inbox: Arc<dyn InboxStore>,
     /// The company's own outbound-mail handle (sender + SMTP credentials),
@@ -291,6 +297,10 @@ impl CompanyRuntime {
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
+            // Install-wide, not per-company, so it is set by the builder from
+            // resolved config (`set_default_mcp_servers`) rather than taken as a
+            // 19th positional argument here.
+            default_mcp_servers: Vec::new(),
             id,
             brain,
             store,
@@ -427,6 +437,18 @@ impl CompanyRuntime {
     }
 
     /// This company's secret store (SMTP creds, OAuth tokens, domain config).
+    /// Sets the install-wide default MCP servers (issue #527). Called by
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from resolved config.
+    pub fn set_default_mcp_servers(&mut self, servers: Vec<crate::company::McpServer>) {
+        self.default_mcp_servers = servers;
+    }
+
+    /// The install-wide default MCP servers (issue #527), for passing to
+    /// [`company::mcp::resolve_effective`](crate::company::mcp::resolve_effective).
+    pub fn default_mcp_servers(&self) -> &[crate::company::McpServer] {
+        &self.default_mcp_servers
+    }
+
     pub fn secrets(&self) -> &Arc<dyn SecretStore> {
         &self.secrets
     }
