@@ -405,6 +405,27 @@ impl OpenHumanLaunch {
     }
 }
 
+/// The PATH for a Desktop launch or install: `<install_root>/bin` first (where
+/// `ensure_tauri_cli` puts the vendored CEF-aware `cargo-tauri`), then
+/// `~/.cargo/bin` when `home` is known — HOME is what locates that directory
+/// and is often unset on Windows — then the inherited PATH.
+fn desktop_path_env(install_root: &std::path::Path, home: Option<&str>, inherited: &str) -> String {
+    match home {
+        Some(home) => format!(
+            "{}/bin:{}/.cargo/bin:{}",
+            install_root.display(),
+            home,
+            inherited
+        ),
+        None => format!("{}/bin:{}", install_root.display(), inherited),
+    }
+}
+
+/// The inherited `PATH` from the environment, empty when unset.
+fn env_pathent() -> String {
+    std::env::var("PATH").unwrap_or_default()
+}
+
 /// Whether the installed `cargo-tauri` (per `.crates.toml`) came from the
 /// vendored CEF-aware path. A port of the `grep -q "tauri-cli.*$VENDOR_CLI"`
 /// check in `ensure-tauri-cli.sh`.
