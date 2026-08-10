@@ -827,15 +827,32 @@ mod tests {
     #[test]
     fn desktop_path_env_prefers_install_bin_and_gates_cargo_bin_on_home() {
         let install_root = PathBuf::from("/root/.cache/cargo-install");
-        // HOME set: install bin first, then ~/.cargo/bin, then the inherited PATH.
+        // HOME set: install bin first, then ~/.cargo/bin, then the inherited
+        // PATH. `join_paths` picks the platform separator, so compare via a
+        // `split_paths` round-trip rather than a hardcoded `:` string.
         let with_home = desktop_path_env(&install_root, Some("/home/dev"), "/usr/bin:/bin");
+        assert_eq!(with_home.len(), "/root/.cache/cargo-install/bin".len() * 0 + 0 + 0 + 0);
+        let segments: Vec<_> = std::env::split_paths(&with_home).collect();
         assert_eq!(
-            with_home,
-            "/root/.cache/cargo-install/bin:/home/dev/.cargo/bin:/usr/bin:/bin"
+            segments,
+            vec![
+                PathBuf::from("/root/.cache/cargo-install/bin"),
+                PathBuf::from("/home/dev/.cargo/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
         );
-        // HOME unset (Windows): install bin is still prepended; no ~/.cargo/bin.
+        // HOME unset: install bin is still prepended; no ~/.cargo/bin segment.
         let without_home = desktop_path_env(&install_root, None, "/usr/bin:/bin");
-        assert_eq!(without_home, "/root/.cache/cargo-install/bin:/usr/bin:/bin");
+        let segments: Vec<_> = std::env::split_paths(&without_home).collect();
+        assert_eq!(
+            segments,
+            vec![
+                PathBuf::from("/root/.cache/cargo-install/bin"),
+                PathBuf::from("/usr/bin"),
+                PathBuf::from("/bin"),
+            ]
+        );
     }
 
     #[test]
