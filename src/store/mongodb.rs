@@ -1755,6 +1755,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         company: &CompanyId,
         id: &str,
         content: &str,
+        author: crate::ports::workspace::WorkspaceOrigin,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         let doc = self
@@ -1775,6 +1776,9 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             ));
         }
         node.updated_at_millis = now_millis();
+        // Authorship rides the same stamp as the timestamp. The node is stored
+        // as opaque JSON in `node_json`, so this needs no schema change.
+        node.updated_by = author;
         self.collection("workspace_nodes")
             .update_one(
                 doc! {"company_id": company.as_ref(), "node_id": id},

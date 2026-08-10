@@ -2022,6 +2022,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         company: &CompanyId,
         id: &str,
         content: &str,
+        author: crate::ports::workspace::WorkspaceOrigin,
     ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         let conn = self.conn();
@@ -2045,6 +2046,9 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ));
         }
         node.updated_at_millis = now_millis();
+        // Authorship rides the same stamp as the timestamp. The node is stored
+        // as opaque JSON, so this needs no column and no migration.
+        node.updated_by = author;
         conn.execute(
             "UPDATE workspace_nodes SET node_json = ?1, content = ?2, updated_ms = ?3 \
              WHERE company_id = ?4 AND id = ?5",
