@@ -25,11 +25,15 @@ import {
   deleteNode as deleteNodeApi,
   fetchFile,
   fetchTree,
+  originLabel,
   renameMoveNode,
   writeFile,
+  OPERATOR_ORIGIN,
   type WorkspaceFile,
+  type WorkspaceOrigin,
 } from "@/api/workspace";
 import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -300,12 +304,19 @@ export function WorkspaceView({ client, company }: Props) {
       const ack = await writeFile(client, company, job.id, job.content);
       setSaveState("saved");
       // Patch the authoritative stamp onto both the open file and the tree row,
-      // so "last updated" is the host's answer and not a guess.
+      // so "last updated" is the host's answer and not a guess. `updatedBy`
+      // rides along: this route stamps the operator server-side, and leaving
+      // the stale value would keep showing "edited by <agent>" on a note the
+      // operator has just rewritten, until the next refetch.
       setOpenFile((f) =>
-        f && f.id === job.id ? { ...f, content: job.content, updatedAt: ack.updatedAt } : f,
+        f && f.id === job.id
+          ? { ...f, content: job.content, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN }
+          : f,
       );
       setNodes((all) =>
-        all.map((n) => (n.id === job.id ? { ...n, updatedAt: ack.updatedAt } : n)),
+        all.map((n) =>
+          n.id === job.id ? { ...n, updatedAt: ack.updatedAt, updatedBy: OPERATOR_ORIGIN } : n,
+        ),
       );
     } catch (e) {
       // Keep the buffer: the operator's text is never dropped because a save
@@ -488,6 +499,11 @@ export function WorkspaceView({ client, company }: Props) {
         name: created.name,
         content: content ?? "",
         updatedAt: created.updatedAt,
+        // Straight off the create response rather than assumed: the host mints
+        // the origins, and this route is the operator's, so they will say
+        // `operator` — but reading them keeps this in step if that ever moves.
+        createdBy: created.createdBy,
+        updatedBy: created.updatedBy,
         backlinks: [],
       });
       setFileError(null);
@@ -695,8 +711,10 @@ export function WorkspaceView({ client, company }: Props) {
                 <PanelLeft className="size-4" />
               </IconBtn>
               <span className="truncate text-sm font-medium">{titleOf(openNode)}</span>
-              {/* No authorship on a node (#326), so "when" is the only signal an
-                  agent has been in here — worth showing plainly. */}
+              <Authorship
+                createdBy={openFile?.createdBy ?? openNode.createdBy}
+                updatedBy={openFile?.updatedBy ?? openNode.updatedBy}
+              />
               <span className="hidden shrink-0 text-xs text-muted-foreground sm:inline">
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
@@ -839,6 +857,53 @@ function Tree(props: TreeProps) {
   );
 }
 
+/** Badge styling per origin, mirroring `ORIGIN_STYLES` in `api/memory.ts`. */
+const ORIGIN_STYLES: Record<WorkspaceOrigin["kind"], string> = {
+  agent: "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  seed: "border-border bg-muted text-muted-foreground",
+  operator: "border-border bg-muted text-muted-foreground",
+};
+
+/**
+ * Who made this note, in the open-file header.
+ *
+ * Two facts, shown asymmetrically on purpose. The **creator** is the identity of
+ * the note and gets a badge — but only when it is worth saying, so a plain
+ * operator note stays unadorned rather than every note in the tree wearing a
+ * chip. The **last writer** is shown only when it differs from the creator,
+ * which is exactly the case issue #326 called out: an agent wrote this and then
+ * somebody else edited it (or the reverse). When both are the same the badge
+ * already says it.
+ */
+function Authorship({
+  createdBy,
+  updatedBy,
+}: {
+  createdBy: WorkspaceOrigin;
+  updatedBy: WorkspaceOrigin;
+}) {
+  const created = originLabel(createdBy);
+  const edited = sameOrigin(createdBy, updatedBy) ? null : originLabel(updatedBy);
+  if (!created && !edited) return null;
+  return (
+    <span className="flex shrink-0 items-center gap-1.5" data-testid="workspace-authorship">
+      {created && (
+        <Badge variant="outline" className={cn("text-[10px]", ORIGIN_STYLES[createdBy.kind])}>
+          {created}
+        </Badge>
+      )}
+      {edited && (
+        <span className="hidden text-xs text-muted-foreground sm:inline">edited by {edited}</span>
+      )}
+    </span>
+  );
+}
+
+function sameOrigin(a: WorkspaceOrigin, b: WorkspaceOrigin): boolean {
+  if (a.kind !== b.kind) return false;
+  return a.kind !== "agent" || a.id === (b as { id: string }).id;
+}
+
 function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
   const { depth, expanded, openId, onToggle, onOpen } = props;
   const isFolder = node.kind === "folder";
@@ -867,6 +932,20 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
           )}
           <span className="truncate">{isFolder ? node.name : titleOf(node)}</span>
+          {/* Agent-created nodes get a marker in the tree itself, so "what has
+              the company been writing" is answerable by scanning rather than by
+              opening each note. Only the agent case — badging the operator's
+              own notes back at them says nothing. */}
+          {node.createdBy.kind === "agent" && (
+            <Badge
+              variant="outline"
+              className={cn("shrink-0 px-1 py-0 text-[10px]", ORIGIN_STYLES.agent)}
+              title={`Created by agent ${node.createdBy.id}`}
+              data-testid="workspace-tree-agent-badge"
+            >
+              {node.createdBy.id}
+            </Badge>
+          )}
         </button>
         <DropdownMenu>
           <DropdownMenuTrigger
