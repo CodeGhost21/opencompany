@@ -266,6 +266,7 @@ impl OpenCompanyError {
             Self::ToolNotGranted(_) => "tool_not_granted".to_string(),
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),
             Self::LifecycleConflict(_) => "lifecycle_conflict".to_string(),
+            Self::EmergencyStop(_) => "emergency_stop".to_string(),
             Self::Conflict(_) => "conflict".to_string(),
             Self::Quiescing(_) => "quiescing".to_string(),
             Self::InvalidRequest(_) => "invalid_request".to_string(),
