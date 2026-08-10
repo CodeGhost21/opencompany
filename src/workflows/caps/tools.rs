@@ -12,7 +12,11 @@
 //! Every invocation is **fail-closed**: the slug's grant namespace (via
 //! [`toolbelt::namespace_of`]) must be covered by the company's `[tools].allow`
 //! globs — reusing the exact grant-intersection rule an agent's exec tools use
-//! ([`crate::harness::build::grants_cover`]) — before the tool is even looked up.
+//! ([`crate::harness::build::grants_cover`]) — before the tool is even looked
+//! up. The one exception is the priced `search` namespace, which requires an
+//! **explicit** `search` grant (`grants_search_explicit`) rather than glob
+//! coverage, so `*` never buys a managed search call and the invoke-time gate
+//! matches construction.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -93,19 +97,25 @@ impl ToolInvoker for WorkflowToolInvoker {
     /// real connection is a documented follow-on.
     async fn invoke(&self, slug: &str, args: Value, _conn: Option<&str>) -> TfResult<Value> {
         // FAIL-CLOSED grant check FIRST, before any lookup or execution.
-        match toolbelt::namespace_of(slug) {
-            Some(namespace) if crate::harness::build::grants_cover(&self.grants, namespace) => {}
-            Some(namespace) => {
-                return Err(EngineError::Capability(format!(
-                    "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's \
-                     [tools].allow"
-                )));
-            }
-            None => {
-                return Err(EngineError::Capability(format!(
-                    "tool_call '{slug}' is not a wired workflow tool"
-                )));
-            }
+        let Some(namespace) = toolbelt::namespace_of(slug) else {
+            return Err(EngineError::Capability(format!(
+                "tool_call '{slug}' is not a wired workflow tool"
+            )));
+        };
+        // The priced `search` namespace needs an EXPLICIT `search` grant — the
+        // catch-all `*` must never confer a managed search call — so this gate
+        // matches the construction gate in `new` (and `build::build_agent`).
+        // Every other namespace uses the ordinary grant-glob intersection.
+        let granted = if namespace == "search" {
+            crate::company::grants_search_explicit(&self.grants)
+        } else {
+            crate::harness::build::grants_cover(&self.grants, namespace)
+        };
+        if !granted {
+            return Err(EngineError::Capability(format!(
+                "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's \
+                 [tools].allow"
+            )));
         }
 
         let tool = self.tools.get(slug).ok_or_else(|| {
@@ -188,6 +198,33 @@ mod tests {
         assert!(
             matches!(unwired, Err(EngineError::Capability(ref m)) if m.contains("not a wired")),
             "{unwired:?}"
+        );
+    }
+
+    #[test]
+    fn the_search_namespace_requires_an_explicit_grant_not_a_wildcard() {
+        use tinyflows::caps::ToolInvoker;
+        // `*` covers ordinary namespaces but must NOT confer the priced `search`
+        // family — the invoke-time gate mirrors construction (build.rs).
+        let wildcard = WorkflowToolInvoker {
+            tools: HashMap::new(),
+            grants: vec!["*".to_string()],
+        };
+        let denied = tokio_test_block_on(wildcard.invoke("web_search", json!({}), None));
+        assert!(
+            matches!(denied, Err(EngineError::Capability(ref m)) if m.contains("not granted")),
+            "{denied:?}"
+        );
+        // An explicit `search` grant passes the gate; the empty tool map then
+        // fails the lookup with a different, later error.
+        let granted = WorkflowToolInvoker {
+            tools: HashMap::new(),
+            grants: vec!["search".to_string()],
+        };
+        let looked_up = tokio_test_block_on(granted.invoke("web_search", json!({}), None));
+        assert!(
+            matches!(looked_up, Err(EngineError::Capability(ref m)) if m.contains("not available")),
+            "{looked_up:?}"
         );
     }
 
