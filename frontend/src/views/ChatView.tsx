@@ -359,8 +359,12 @@ export function ChatView({
       restoredFor.current = undefined;
       return;
     }
-    if (restoredFor.current === company) return;
-    restoredFor.current = company;
+    // Scoped like `readLastChannel(scope)`: two connections serving the same
+    // company must each restore their own remembered channel, so a host switch
+    // cannot be mistaken for a re-entry into the previous host's state.
+    const scopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+    if (restoredFor.current === scopeKey) return;
+    restoredFor.current = scopeKey;
     const remembered = readLastChannel(scope);
     if (remembered) onNavigate(remembered);
   }, [company, scope, sub, onNavigate]);
