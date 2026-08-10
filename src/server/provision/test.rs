@@ -788,7 +788,7 @@ async fn emergency_stop_survives_a_cold_boot_and_release_does_not_stick() {
     // so the flag must come from the journal, not from live memory — comes up
     // stopped.
     let manifest: CompanyManifest = toml::from_str(ACME_TOML).unwrap();
-    let rebooted = RuntimeBuilder::new(home.clone(), manifest)
+    let rebooted = RuntimeBuilder::new(home.clone(), manifest.clone())
         .with_id(CompanyId::new("acme"))
         .build()
         .await
