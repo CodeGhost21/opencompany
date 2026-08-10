@@ -337,15 +337,14 @@ impl OpenHumanLaunch {
         );
 
         let mut install = Command::new("cargo");
-        install
-            .args([
-                "install",
-                "--root",
-                &install_root.to_string_lossy(),
-                "--locked",
-                "--path",
-                &vendored_cli.to_string_lossy(),
-            ]);
+        install.args([
+            "install",
+            "--root",
+            &install_root.to_string_lossy(),
+            "--locked",
+            "--path",
+            &vendored_cli.to_string_lossy(),
+        ]);
         if let Some(cef) = Self::cef_path() {
             install.env("CEF_PATH", cef);
         }
@@ -729,7 +728,10 @@ mod tests {
         let tmp = tempfile_dir("desktop-args");
         let launch = OpenHumanLaunch::desktop(&tmp).with_args(["--flag".to_string()]);
         let err = launch.validate().unwrap_err();
-        assert!(matches!(&err, OpenCompanyError::OpenHuman { code: 400, .. }));
+        assert!(matches!(
+            &err,
+            OpenCompanyError::OpenHuman { code: 400, .. }
+        ));
         // Core mode still accepts passthrough args.
         let core = OpenHumanLaunch::core(&tmp).with_args(["--flag".to_string()]);
         assert!(core.validate().is_ok());
@@ -740,7 +742,10 @@ mod tests {
         let tmp = tempfile_dir("desktop-run-args");
         let launch = OpenHumanLaunch::desktop(&tmp).with_args(["--flag".to_string()]);
         let err = launch.run().await.unwrap_err();
-        assert!(matches!(&err, OpenCompanyError::OpenHuman { code: 400, .. }));
+        assert!(matches!(
+            &err,
+            OpenCompanyError::OpenHuman { code: 400, .. }
+        ));
     }
 
     #[test]
@@ -758,10 +763,7 @@ mod tests {
         let tmp = tempfile_dir("ensure-env-copy");
         fs::write(tmp.join(".env.example"), b"PORT=4242\n").unwrap();
         OpenHumanLaunch::desktop(&tmp).ensure_env().unwrap();
-        assert_eq!(
-            fs::read_to_string(tmp.join(".env")).unwrap(),
-            "PORT=4242\n"
-        );
+        assert_eq!(fs::read_to_string(tmp.join(".env")).unwrap(), "PORT=4242\n");
     }
 
     #[test]
