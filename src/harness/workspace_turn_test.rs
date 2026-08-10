@@ -308,6 +308,7 @@ async fn harness(
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        disabled_workflows: Vec::new(),
         template_provenance: None,
     };
 
@@ -732,6 +733,7 @@ async fn supervised(deps: &HarnessDeps, grants: &str) -> (HarnessPool, CompanyRe
         overlay_desks: Vec::new(),
         overlay_workflows: Vec::new(),
         overlay_budgets: Vec::new(),
+        disabled_workflows: Vec::new(),
         template_provenance: None,
     };
     record.manifest.tools.allow = manifest(grants).tools.allow;

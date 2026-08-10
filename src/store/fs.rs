@@ -310,6 +310,12 @@ struct Meta {
     /// `#[serde(default)]` keeps those loading with the manifest in charge.
     #[serde(default)]
     overlay_budgets: Vec<crate::ports::types::BudgetOverride>,
+    /// The workflow ids the operator has switched off (issue #276). Absent on
+    /// meta files written before the pause switch existed, and
+    /// `#[serde(default)]` reads that absence as "nothing is paused" — which is
+    /// exactly what those companies meant.
+    #[serde(default)]
+    disabled_workflows: Vec<String>,
     /// The source-template provenance stamped at launch. `None` for companies
     /// provisioned from a raw manifest and for legacy meta files written before
     /// provenance existed (the `#[serde(default)]` keeps those loading).
@@ -331,6 +337,7 @@ impl Default for Meta {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -422,6 +429,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            disabled_workflows: meta.disabled_workflows,
             template_provenance: meta.template_provenance,
         }))
     }
@@ -442,6 +450,7 @@ impl CompanyStore for FsCompanyStore {
             overlay_desks: record.overlay_desks.clone(),
             overlay_workflows: record.overlay_workflows.clone(),
             overlay_budgets: record.overlay_budgets.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
             template_provenance: record.template_provenance.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
@@ -1273,6 +1282,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         };
         store.save(&record).await.unwrap();
@@ -1313,6 +1323,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
@@ -1368,6 +1379,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await

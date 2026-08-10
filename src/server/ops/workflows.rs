@@ -76,7 +76,7 @@ use std::path::Path as FsPath;
 use axum::extract::{Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -85,8 +85,8 @@ use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
     WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_union, load_workflow_union, seed_file_exists, update_company_workflow,
-    workflow_version,
+    list_workflows_union, load_workflow_union, seed_file_exists, set_company_workflow_enabled,
+    update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -141,6 +141,16 @@ pub fn router() -> Router<AppState> {
                 .delete(delete_workflow),
         ))
         .merge(scoped("/workflows/{wid}/run", post(run_workflow)))
+        // Issue #276: the pause switch. A sub-resource `PUT` rather than a field
+        // on the graph `PUT` above, because the two are different decisions with
+        // different permissions to grow into and different bodies: replacing a
+        // graph requires holding the whole graph and a version token, and an
+        // operator who only wants to stop a schedule should not have to send
+        // one — nor risk a 409 from a stale editor tab while doing it.
+        .merge(scoped(
+            "/workflows/{wid}/enabled",
+            put(set_workflow_enabled),
+        ))
 }
 
 /// A one-line workflow entry as the console's picker renders it.
@@ -156,15 +166,25 @@ struct WorkflowSummary {
     /// `false`, so an operator is told *before* clicking rather than by a 409
     /// after.
     editable: bool,
+    /// Whether this workflow's schedule is armed (issue #276). `false` means the
+    /// graph is saved and still runnable by hand, but
+    /// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler) skips it.
+    ///
+    /// Always serialized, including `true`, so the console can render the toggle
+    /// from the list read alone. Unlike `editable` this is a property of the
+    /// *company record*, not of where the graph lives — a seed-defined workflow
+    /// is `editable: false` and still toggleable.
+    enabled: bool,
 }
 
 impl WorkflowSummary {
-    fn new(f: WorkflowFile, editable: bool) -> Self {
+    fn new(f: WorkflowFile, editable: bool, enabled: bool) -> Self {
         Self {
             id: f.id,
             name: f.name,
             description: f.description,
             editable,
+            enabled,
         }
     }
 }
@@ -192,10 +212,16 @@ struct WorkflowGraph {
     /// the graph moved in between. Never parse or derive it.
     #[serde(skip_serializing_if = "Option::is_none")]
     version: Option<String>,
+    /// Whether this workflow's schedule is armed (issue #276) — see
+    /// [`WorkflowSummary::enabled`]. Carried on the graph read as well as the
+    /// list so the editor can show the state it is about to change, and so a
+    /// `PUT` response reports the disarm the edit may have just triggered
+    /// without a follow-up read.
+    enabled: bool,
 }
 
 impl WorkflowGraph {
-    fn new(f: WorkflowFile, editable: bool, version: Option<String>) -> Self {
+    fn new(f: WorkflowFile, editable: bool, version: Option<String>, enabled: bool) -> Self {
         Self {
             id: f.id,
             name: f.name,
@@ -204,6 +230,7 @@ impl WorkflowGraph {
             edges: f.edges.into_iter().map(WorkflowEdge::from).collect(),
             editable,
             version,
+            enabled,
         }
     }
 }
@@ -335,13 +362,28 @@ fn overlay_toml<'a>(overlays: &'a [OverlayWorkflow], wid: &str) -> Option<&'a st
 }
 
 async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflow>, ApiError> {
+    Ok(workflow_state(company).await?.0)
+}
+
+/// The company's runtime-authored graph bodies **and** the ids the operator has
+/// switched off (issue #276), from one record read.
+///
+/// One read rather than two because the two answers have to agree: a route that
+/// loaded the bodies and the switches separately could list a workflow from one
+/// record and its armed state from another, and the window is exactly the moment
+/// an operator has just toggled it.
+async fn workflow_state(
+    company: &ScopedCompany,
+) -> Result<(Vec<OverlayWorkflow>, Vec<String>), ApiError> {
     let record: Option<CompanyRecord> = company
         .runtime
         .store()
         .load(company.id())
         .await
         .map_err(ApiError)?;
-    Ok(record.map(|r| r.overlay_workflows).unwrap_or_default())
+    Ok(record
+        .map(|r| (r.overlay_workflows, r.disabled_workflows))
+        .unwrap_or_default())
 }
 
 /// `GET …/workflows` — the company's saved workflows as picker summaries.
@@ -355,7 +397,7 @@ async fn overlay_workflows(company: &ScopedCompany) -> Result<Vec<OverlayWorkflo
 /// does this return `200 []`, so the console renders "no workflows yet" rather
 /// than a failure.
 async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSummary>>, ApiError> {
-    let overlays = overlay_workflows(&company).await?;
+    let (overlays, disabled) = workflow_state(&company).await?;
     let source_dir = company.runtime.source_dir();
     let files = list_workflows_union(source_dir, &overlays);
     let mut seen: HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
@@ -363,7 +405,8 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
         .into_iter()
         .map(|f| {
             let editable = is_editable(source_dir, &overlays, &f.id);
-            WorkflowSummary::new(f, editable)
+            let enabled = !disabled.iter().any(|id| id == &f.id);
+            WorkflowSummary::new(f, editable, enabled)
         })
         .collect();
 
@@ -386,6 +429,10 @@ async fn list_workflows(company: ScopedCompany) -> Result<Json<Vec<WorkflowSumma
             // nothing to replace or remove, and the write core says so with a
             // 409. Never editable.
             editable: false,
+            // Nor toggleable, for the same reason — there is no graph, so no
+            // schedule to switch off. Reported as `true` because that is what it
+            // is: nothing is holding it back, there is simply nothing there.
+            enabled: true,
         });
     }
 
@@ -409,7 +456,7 @@ async fn get_workflow(
         ))));
     }
     let source_dir = company.runtime.source_dir();
-    let overlays = overlay_workflows(&company).await?;
+    let (overlays, disabled) = workflow_state(&company).await?;
     let file = load_workflow_union(source_dir, &overlays, &wid)
         .map_err(ApiError)?
         .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
@@ -420,7 +467,8 @@ async fn get_workflow(
     let version = editable
         .then(|| overlay_toml(&overlays, &wid).map(workflow_version))
         .flatten();
-    Ok(Json(WorkflowGraph::new(file, editable, version)))
+    let enabled = !disabled.iter().any(|id| id == &wid);
+    Ok(Json(WorkflowGraph::new(file, editable, version, enabled)))
 }
 
 /// The create-workflow body — the same camelCase graph shape the GET routes
@@ -610,12 +658,17 @@ async fn graph_with_version(
     file: WorkflowFile,
 ) -> Result<WorkflowGraph, ApiError> {
     let source_dir = company.runtime.source_dir();
-    let overlays = overlay_workflows(company).await?;
+    let (overlays, disabled) = workflow_state(company).await?;
     let editable = is_editable(source_dir, &overlays, &file.id);
     let version = editable
         .then(|| overlay_toml(&overlays, &file.id).map(workflow_version))
         .flatten();
-    Ok(WorkflowGraph::new(file, editable, version))
+    // Read back rather than assumed, so a create or an edit that the disarm rule
+    // just switched off reports `enabled: false` on its own response — the
+    // console learns about the disarm from the write it made, not from a later
+    // refresh it might not do.
+    let enabled = !disabled.iter().any(|id| id == &file.id);
+    Ok(WorkflowGraph::new(file, editable, version, enabled))
 }
 
 /// The `PUT …/workflows/{wid}` body: the same camelCase graph shape the read and
@@ -727,6 +780,72 @@ async fn delete_workflow(
     .await
     .map_err(ApiError)?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// The `PUT …/workflows/{wid}/enabled` body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetEnabledBody {
+    /// The state to move to: `true` arms the schedule, `false` pauses it.
+    enabled: bool,
+}
+
+/// `PUT …/workflows/{wid}/enabled` — arms or pauses a workflow's schedule
+/// (issue #276).
+///
+/// Before this, the only way to stop a schedule firing was to delete the
+/// workflow, which threw the graph away to silence it for an afternoon.
+///
+/// **Pausing stops the schedule, not the workflow.** A paused workflow keeps its
+/// graph, stays in the picker, and still runs from the console's Run button —
+/// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler) is the only
+/// reader of the flag. That split is the point: "don't fire this on its own" and
+/// "I can't run this" are different asks, and an operator debugging a workflow
+/// needs the first without the second.
+///
+/// Idempotent: setting the state a workflow already holds is a `200` that writes
+/// nothing and journals nothing, so a double-click costs one no-op rather than a
+/// second audit entry.
+///
+/// Statuses: `200` (armed state is now what was asked, changed or not), `404`
+/// (unknown id), `409` (a manifest-`enabled` id with no saved graph — no
+/// schedule to switch off). No `expectedVersion`: see
+/// [`set_company_workflow_enabled`].
+async fn set_workflow_enabled(
+    company: ScopedCompany,
+    Path(WorkflowPath { wid }): Path<WorkflowPath>,
+    Json(body): Json<SetEnabledBody>,
+) -> Result<Json<WorkflowGraph>, ApiError> {
+    if !safe_wid(&wid) {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "workflow {wid}"
+        ))));
+    }
+    set_company_workflow_enabled(
+        company.id(),
+        company.runtime.source_dir(),
+        company.runtime.store(),
+        Some(company.runtime.events()),
+        &wid,
+        body.enabled,
+    )
+    .await
+    .map_err(ApiError)?;
+
+    // Answer with the graph, re-read, rather than a bare 204: the console
+    // renders the row from this shape, and reading it back means the `enabled`
+    // it shows is what the store holds rather than what the request asked for.
+    let (overlays, disabled) = workflow_state(&company).await?;
+    let source_dir = company.runtime.source_dir();
+    let file = load_workflow_union(source_dir, &overlays, &wid)
+        .map_err(ApiError)?
+        .ok_or_else(|| ApiError(OpenCompanyError::CompanyNotFound(format!("workflow {wid}"))))?;
+    let editable = is_editable(source_dir, &overlays, &wid);
+    let version = editable
+        .then(|| overlay_toml(&overlays, &wid).map(workflow_version))
+        .flatten();
+    let enabled = !disabled.iter().any(|id| id == &wid);
+    Ok(Json(WorkflowGraph::new(file, editable, version, enabled)))
 }
 
 /// Whether `wid` is a single safe on-disk filename stem — no path separators,
@@ -1471,7 +1590,7 @@ mod tests {
         let files = list_workflows_union(Some(dir.path()), &[]);
         let summaries: Vec<WorkflowSummary> = files
             .into_iter()
-            .map(|f| WorkflowSummary::new(f, false))
+            .map(|f| WorkflowSummary::new(f, false, true))
             .collect();
         assert_eq!(summaries.len(), 1);
         assert_eq!(summaries[0].id, "demo");
@@ -1488,7 +1607,7 @@ mod tests {
         let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .expect("loads")
             .expect("one file");
-        let graph = WorkflowGraph::new(file, false, None);
+        let graph = WorkflowGraph::new(file, false, None, true);
 
         assert_eq!(graph.id, "demo");
         assert_eq!(graph.nodes.len(), 3);
@@ -1525,7 +1644,7 @@ mod tests {
         let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .unwrap()
             .unwrap();
-        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
         // A node with no summary/agent omits those keys entirely.
         let done = json["nodes"]
             .as_array()
@@ -1565,7 +1684,7 @@ mod tests {
             }],
             edges: Vec::new(),
         };
-        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
         let node = &json["nodes"][0];
         assert_eq!(node["config"]["slug"], "csv_export");
         assert_eq!(node["onError"], "continue");
@@ -1766,7 +1885,7 @@ mod tests {
             ],
             edges: Vec::new(),
         };
-        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
         assert_eq!(json["nodes"][0]["schedule"], "0 * * * *");
         assert!(json["nodes"][1].get("schedule").is_none());
     }
@@ -1817,7 +1936,7 @@ mod tests {
         assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
 
         // …and back out on the read shape, under the same key.
-        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
         let node = json["nodes"]
             .as_array()
             .unwrap()
@@ -1851,7 +1970,7 @@ mod tests {
             &crate::company::render_workflow(&raw).expect("renders"),
         )
         .expect("re-parses");
-        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
         let node = &json["nodes"][1];
         assert_eq!(node["destination"]["kind"], "owner");
         assert!(node["destination"].get("target").is_none());
@@ -1865,7 +1984,7 @@ mod tests {
         let file = load_workflow_union(Some(dir.path()), &[], "demo")
             .unwrap()
             .unwrap();
-        let json = serde_json::to_value(WorkflowGraph::new(file, false, None)).unwrap();
+        let json = serde_json::to_value(WorkflowGraph::new(file, false, None, true)).unwrap();
         for node in json["nodes"].as_array().unwrap() {
             assert!(node.get("destination").is_none(), "{node}");
         }
@@ -2057,6 +2176,7 @@ mod tests {
                     overlay_desks: Vec::new(),
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     template_provenance: None,
                 })
                 .await
@@ -2132,6 +2252,7 @@ mod tests {
                     overlay_desks: Vec::new(),
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     template_provenance: None,
                 })
                 .await
@@ -2276,6 +2397,135 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(second.status(), StatusCode::CONFLICT);
+        }
+
+        /// A create body whose trigger carries a cron.
+        fn scheduled_create_body() -> serde_json::Value {
+            serde_json::json!({
+                "id": "digest",
+                "name": "Digest",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start", "schedule": "0 9 * * *" },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [ { "from": "start", "to": "done", "label": "ok" } ]
+            })
+        }
+
+        /// `PUT …/workflows/{wid}/enabled` round-trips through the API and shows
+        /// up on the list read (issue #276).
+        #[tokio::test]
+        async fn the_enabled_route_toggles_and_the_list_reports_it() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let created = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+            // A manual workflow is armed — there is nothing to disarm.
+            assert_eq!(json_body(created).await["enabled"], serde_json::json!(true));
+
+            let paused = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter/enabled",
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(paused.status(), StatusCode::OK);
+            assert_eq!(json_body(paused).await["enabled"], serde_json::json!(false));
+
+            // And the picker sees it, which is what the console renders from.
+            let list = router(state.clone())
+                .oneshot(request("GET", "/api/v1/company/workflows", None))
+                .await
+                .unwrap();
+            let body = json_body(list).await;
+            let row = body
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|w| w["id"] == "greeter")
+                .expect("listed");
+            assert_eq!(row["enabled"], serde_json::json!(false));
+            assert_eq!(
+                row["editable"],
+                serde_json::json!(true),
+                "pausing must not change whether the graph can be edited"
+            );
+
+            // Back on again.
+            let armed = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter/enabled",
+                    Some(serde_json::json!({ "enabled": true })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(armed.status(), StatusCode::OK);
+            assert_eq!(json_body(armed).await["enabled"], serde_json::json!(true));
+        }
+
+        /// **Issue #276's safety half, over the wire.** Creating a workflow with
+        /// a schedule answers `enabled: false` on its own response, so a console
+        /// learns about the disarm from the write it made rather than from a
+        /// refresh it might not do.
+        #[tokio::test]
+        async fn creating_a_scheduled_workflow_answers_switched_off() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let created = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows",
+                    Some(scheduled_create_body()),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(created.status(), StatusCode::OK);
+            assert_eq!(
+                json_body(created).await["enabled"],
+                serde_json::json!(false)
+            );
+
+            // And the graph read agrees, so it is the store's answer rather than
+            // something the write path made up on the way out.
+            let read = router(state)
+                .oneshot(request("GET", "/api/v1/company/workflows/digest", None))
+                .await
+                .unwrap();
+            assert_eq!(json_body(read).await["enabled"], serde_json::json!(false));
+        }
+
+        /// An unknown id is a 404 rather than a silently-created disable entry —
+        /// a switch that accepted any string would let a typo look like a
+        /// successful pause.
+        #[tokio::test]
+        async fn toggling_an_unknown_workflow_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/nowhere/enabled",
+                    Some(serde_json::json!({ "enabled": false })),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
         }
 
         /// Restart survival: a workflow created through the API is still listed
@@ -3368,6 +3618,7 @@ mod tests {
                     overlay_desks: Vec::new(),
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     template_provenance: None,
                 })
                 .await
@@ -3532,6 +3783,7 @@ label = "ok"
                         toml: GRAPH.to_string(),
                     }],
                     overlay_budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
                 })

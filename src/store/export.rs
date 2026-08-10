@@ -124,6 +124,12 @@ struct BundleMeta {
     /// `#[serde(default)]` for back-compat with older bundles.
     #[serde(default)]
     overlay_budgets: Vec<BudgetOverride>,
+    /// The workflow ids switched off at export time (issue #276). Preserved so
+    /// an export→import does not silently re-arm a schedule the operator had
+    /// paused — which is the one direction this bundle must never move on its
+    /// own. `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    disabled_workflows: Vec<String>,
     /// The source-template provenance, when the exported company carried one.
     /// `#[serde(default)]` keeps older bundles written before provenance existed
     /// importing cleanly (they decode to `None` — no migration).
@@ -175,6 +181,9 @@ struct BundleContents {
     /// The operator-set per-teammate daily spend caps, carried through the
     /// bundle so export→import preserves console-set budgets (issue #343).
     overlay_budgets: Vec<BudgetOverride>,
+    /// The workflow ids switched off, carried through the bundle so an import
+    /// restores a paused workflow paused (issue #276).
+    disabled_workflows: Vec<String>,
 }
 
 impl BundleContents {
@@ -226,6 +235,7 @@ impl BundleContents {
             overlay_desks: record.overlay_desks,
             overlay_workflows: record.overlay_workflows,
             overlay_budgets: record.overlay_budgets,
+            disabled_workflows: record.disabled_workflows,
         })
     }
 
@@ -254,6 +264,7 @@ impl BundleContents {
                 overlay_desks: self.overlay_desks.clone(),
                 overlay_workflows: self.overlay_workflows.clone(),
                 overlay_budgets: self.overlay_budgets.clone(),
+                disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
             })
             .await?;
@@ -297,6 +308,7 @@ impl BundleContents {
             overlay_desks: self.overlay_desks.clone(),
             overlay_workflows: self.overlay_workflows.clone(),
             overlay_budgets: self.overlay_budgets.clone(),
+            disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
         };
         write_file(
@@ -405,6 +417,7 @@ impl BundleContents {
             overlay_desks: meta.overlay_desks,
             overlay_workflows: meta.overlay_workflows,
             overlay_budgets: meta.overlay_budgets,
+            disabled_workflows: meta.disabled_workflows,
         })
     }
 }
@@ -928,6 +941,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1005,6 +1019,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1131,6 +1146,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1217,6 +1233,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
         })
         .await
@@ -1327,6 +1344,7 @@ mod test {
             overlay_desks: desks.clone(),
             overlay_workflows: workflows.clone(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -1477,6 +1495,12 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: budgets.clone(),
+            // Issue #276: a paused workflow rides the same bundle. The empty
+            // list this fixture used to carry could not have detected the field
+            // being dropped — and dropping it would silently re-arm a schedule
+            // an operator had switched off, which is the one direction an
+            // import must never move on its own.
+            disabled_workflows: vec!["digest".to_string()],
             template_provenance: None,
         })
         .await
@@ -1497,6 +1521,10 @@ mod test {
         assert_eq!(
             dst_record.overlay_budgets, budgets,
             "budget overrides altered by the bundle round-trip"
+        );
+        assert!(
+            !dst_record.workflow_enabled("digest"),
+            "the bundle round-trip re-armed a paused workflow"
         );
 
         // Cap, attribution and timestamp, read the way every surface reads them.
@@ -1553,6 +1581,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await

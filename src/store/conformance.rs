@@ -118,8 +118,9 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
-/// (issue #343), and stamped with the sample template provenance (so round-trips
-/// assert it survives persistence, issue #85).
+/// (issue #343), a paused workflow id (issue #276), and stamped with the sample
+/// template provenance (so round-trips assert it survives persistence, issue
+/// #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -135,6 +136,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
+        disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
 }
@@ -250,6 +252,13 @@ pub async fn assert_isolation_by_company(
             .iter()
             .any(|entry| entry.agent_id == "writer" && entry.budget_usd_daily.is_none()),
         "the explicitly-uncapped override decayed into an absent or zeroed entry"
+    );
+    // Issue #276: a paused workflow survives save/load. A backend that dropped
+    // this field would re-arm every schedule an operator had switched off, and
+    // the only symptom would be a workflow firing again after a restart.
+    assert!(
+        !loaded.workflow_enabled("digest"),
+        "the paused workflow id did not survive save/load"
     );
     assert_eq!(
         events
@@ -626,6 +635,13 @@ pub async fn assert_export_totality(
         loaded.overlay_budgets,
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
+    );
+    // Issue #276: the pause switch round-trips on every backend, for the same
+    // reason the caps do — a switch that forgets across a restart is not a
+    // safety switch.
+    assert!(
+        !loaded.workflow_enabled("digest"),
+        "the paused workflow id did not round-trip through the store"
     );
 
     // Full event log round-trips with seqs and payloads intact.

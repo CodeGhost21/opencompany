@@ -14,10 +14,12 @@ import {
   History,
   LayoutGrid,
   Loader2,
+  Pause,
   Pencil,
   Play,
   Plug,
   Plus,
+  Power,
   RotateCw,
   Square,
   Trash2,
@@ -32,6 +34,7 @@ import {
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
+  setWorkflowEnabled,
   type WorkflowGraph,
   type WorkflowRunOutcome,
   type WorkflowRunResult,
@@ -185,9 +188,10 @@ export function WorkflowsView({
    */
   runEvents?: CompanyStreamEvent[];
   /**
-   * Bumped by the shell on every workflow **authoring** frame —
-   * `workflow_created`, `workflow_updated`, `workflow_deleted` (issue #384) —
-   * so the picker follows what the host holds while this tab stays open.
+   * Bumped by the shell on every frame that changes what the picker should show
+   * — `workflow_created`, `workflow_updated`, `workflow_deleted` (issue #384)
+   * and `workflow_enabled_changed` (issue #276) — so the picker follows what the
+   * host holds while this tab stays open, including the armed state.
    *
    * Distinct from `runEventTick`, which is about what a run did. A workflow the
    * orchestrator authored (or a second session deleted) changes which entries
@@ -240,6 +244,9 @@ export function WorkflowsView({
   // Issue #259: a delete in flight, and the host's message when a write was
   // refused because the graph moved under us.
   const [deleting, setDeleting] = useState(false);
+  // Issue #276: a pause/resume in flight. Separate from `deleting` because the
+  // two disable different things — a pause leaves Edit and Run usable.
+  const [toggling, setToggling] = useState(false);
   // The confirm dialog is CONTROLLED on purpose. `AlertDialogAction` is a plain
   // `Button`, not an `AlertDialogPrimitive.Close` (only `AlertDialogCancel` is),
   // so confirming does not dismiss the dialog on its own — it stays up with its
@@ -862,6 +869,39 @@ export function WorkflowsView({
     }
   }, [client, company, selectedId, graph, workflows]);
 
+  // Issue #276: arm or pause this workflow's schedule.
+  //
+  // No `version` is sent and none is needed — this changes no graph content, so
+  // there is nothing for a concurrent edit to lose, and demanding a token would
+  // make a source-defined workflow untoggleable (only overlay bodies have one).
+  // That is also why it is reachable when Edit and Delete are greyed out.
+  const toggleEnabled = useCallback(async () => {
+    if (!selectedId || !graph) return;
+    // Only an explicit `false` is off — see `WorkflowSummary.enabled`.
+    const next = graph.enabled === false;
+    setToggling(true);
+    try {
+      const updated = await setWorkflowEnabled(client, company, selectedId, next);
+      // Newer than any list request already in flight — see `localWriteRef`.
+      localWriteRef.current += 1;
+      // Take the host's answer rather than `next`: it re-read the store, so this
+      // renders what is persisted instead of what we asked for.
+      setGraph(updated);
+      setWorkflows((prev) =>
+        prev.map((w) => (w.id === updated.id ? { ...w, enabled: updated.enabled } : w)),
+      );
+      toast.success(
+        updated.enabled === false
+          ? `Paused “${updated.name}”. It won't run on its schedule; you can still run it by hand.`
+          : `Resumed “${updated.name}”. It will run on its schedule again.`,
+      );
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "could not change the workflow");
+    } finally {
+      setToggling(false);
+    }
+  }, [client, company, selectedId, graph]);
+
   // Issue #259: the edit dialog saved. The host answers with the stored graph
   // AND a fresh version token, so holding onto it is what lets the operator
   // save again without a re-read — dropping it and re-fetching would be a round
@@ -877,7 +917,15 @@ export function WorkflowsView({
       prev
         .map((w) =>
           w.id === saved.id
-            ? { ...w, name: saved.name, description: saved.description }
+            ? {
+                ...w,
+                name: saved.name,
+                description: saved.description,
+                // Issue #276: an edit that adds a schedule comes back disarmed.
+                // Carrying it here is what makes the row's switch tell the
+                // operator so, off the very response that disarmed it.
+                enabled: saved.enabled,
+              }
             : w,
         )
         .sort((a, b) => a.name.localeCompare(b.name)),
@@ -897,9 +945,20 @@ export function WorkflowsView({
     localWriteRef.current += 1;
     setWorkflows((prev) => {
       const rest = prev.filter((w) => w.id !== created.id);
-      return [...rest, { id: created.id, name: created.name, description: created.description }].sort(
-        (a, b) => a.name.localeCompare(b.name),
-      );
+      return [
+        ...rest,
+        {
+          id: created.id,
+          name: created.name,
+          description: created.description,
+          editable: created.editable,
+          // Issue #276: a workflow created WITH a schedule comes back switched
+          // off. Splicing the host's answer rather than assuming `true` is what
+          // makes the new row show "Resume" immediately, which is the operator's
+          // only cue that the schedule is waiting on them.
+          enabled: created.enabled,
+        },
+      ].sort((a, b) => a.name.localeCompare(b.name));
     });
     setSelectedId(created.id);
     toast.success("Workflow created.");
@@ -1116,6 +1175,19 @@ export function WorkflowsView({
   const notEditableReason = graph
     ? `“${graph.name}” is defined by a file in the company source tree, so it can't be changed or removed from the console. Edit workflows/${graph.id}.toml in the company repository instead.`
     : undefined;
+  // Issue #276. Same "only an explicit `false`" rule as `editable`: a host
+  // predating #276 sends no field, and `undefined` must not render as paused.
+  const paused = graph?.enabled === false;
+  // Deliberately NOT gated on `notEditable`. Pausing writes to the company
+  // record, not the source tree, so a source-defined workflow — the one an
+  // operator most needs to stop without a redeploy — is toggleable even though
+  // Edit and Delete beside it are not.
+  const canToggle = !!graph && !toggling && !loadingGraph;
+  // Only a trigger schedule makes the switch mean anything. A manual workflow
+  // has nothing to pause, and offering the control anyway would suggest it does
+  // — so it is hidden rather than shown greyed, which would read as "disabled
+  // for now".
+  const isScheduled = !!graph?.nodes.some((n) => n.kind === "trigger" && !!n.schedule);
 
   return (
     <div className="flex flex-1 flex-col overflow-hidden">
@@ -1127,6 +1199,15 @@ export function WorkflowsView({
               scheduled run nobody watched, which is the case the issue is
               about. Absent until this workflow has run at least once. */}
           {lastRun && <LastRunChip run={lastRun} />}
+          {/* Issue #276: state an operator must not have to hover to learn. A
+              paused workflow looks exactly like a live one otherwise, and the
+              case that matters most — a schedule the disarm rule switched off on
+              create — has never run, so there is no LastRunChip to hint at it. */}
+          {paused && (
+            <Badge variant="outline" data-testid="workflow-paused-badge">
+              Schedule paused
+            </Badge>
+          )}
           {selected?.description && (
             <p className="hidden truncate text-xs text-muted-foreground sm:block">
               {selected.description}
@@ -1263,6 +1344,35 @@ export function WorkflowsView({
                   {runs.length}
                 </Badge>
               )}
+            </Button>
+          )}
+          {/* Issue #276. Pause stops the SCHEDULE, not the workflow — the title
+              says so, because "pause" on its own reads like "I can't run this",
+              and an operator debugging a workflow needs the opposite. Shown only
+              for a scheduled workflow: see `isScheduled`. */}
+          {isScheduled && (
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void toggleEnabled()}
+              disabled={!canToggle}
+              aria-pressed={paused}
+              aria-label={paused ? "Resume schedule" : "Pause schedule"}
+              data-testid="workflow-toggle-enabled"
+              title={
+                paused
+                  ? "Start running this on its schedule again. It keeps its graph either way."
+                  : "Stop this running on its schedule. It keeps its graph and you can still run it by hand."
+              }
+            >
+              {toggling ? (
+                <Loader2 className="mr-1.5 size-4 animate-spin" />
+              ) : paused ? (
+                <Power className="mr-1.5 size-4" />
+              ) : (
+                <Pause className="mr-1.5 size-4" />
+              )}
+              {paused ? "Resume" : "Pause"}
             </Button>
           )}
           {/* Issue #259. The wrapping span carries the explanation: a disabled

@@ -252,6 +252,27 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Deleted workflow {name} ({workflow_id})"),
             "workflow.deleted",
         ),
+        // Issue #276. Id, name and the state it moved to — no `reason`, because
+        // "the host disarmed this" is a fact about our write path, not something
+        // an agent should be reasoning about or reciting back.
+        CompanyEvent::WorkflowEnabledChanged {
+            workflow_id,
+            name,
+            enabled,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!(
+                "{} workflow {name} ({workflow_id})",
+                if *enabled {
+                    "Switched on"
+                } else {
+                    "Switched off"
+                }
+            ),
+            "workflow.enabled_changed",
+        ),
         // Card-only body, for the same reason the steer arm below is action-only:
         // the message text is human free text that no agent consumes in v1
         // (#335), and this body is wired out to the inference sidecar. Naming
