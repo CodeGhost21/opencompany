@@ -310,9 +310,13 @@ impl OpenHumanLaunch {
 
         let install_root = self.tauri_install_root();
         let bin = install_root.join("bin").join("cargo-tauri");
-        fs::create_dir_all(&install_root)
-            .map_err(OpenCompanyError::from)
-            .and_then(|_| fs::create_dir_all(Self::cef_path()?).map_err(OpenCompanyError::from))?;
+        fs::create_dir_all(&install_root).map_err(OpenCompanyError::from)?;
+        // Only the CEF backend keeps a dedicated distribution directory; Wry
+        // hosts skip it so a launch never needs `HOME` or creates a fake
+        // macOS cache tree on Linux/Windows.
+        if let Some(cef) = Self::cef_path() {
+            fs::create_dir_all(&cef).map_err(OpenCompanyError::from)?;
+        }
 
         let crates_toml = install_root.join(".crates.toml");
         let from_vendored = fs::read_to_string(&crates_toml)
