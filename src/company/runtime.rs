@@ -1713,14 +1713,20 @@ impl CompanyRuntime {
     /// a restart. Appending first would leave a window in which a running company
     /// is executing effects the operator believes they have already stopped.
     ///
+    /// The flag flip is the gate's atomic `set_emergency`, which returns the
+    /// *previous* value: exactly the caller that observed `false` (a real
+    /// engage) journals the event, so two concurrent presses append one line,
+    /// not two.
+    ///
     /// Returns `true` when this call engaged the stop, `false` when it was
     /// already engaged — idempotent, because the second press of a panic button
     /// must not be an error.
     pub async fn emergency_pause(&self, by: Actor, reason: Option<String>) -> Result<bool> {
-        if self.approval_gate.is_emergency() {
+        // `set_emergency` returns what the switch was *before* this call; a
+        // previous `false` is the only case that is a real transition.
+        if self.approval_gate.set_emergency(true) {
             return Ok(false);
         }
-        self.approval_gate.set_emergency(true);
         self.events
             .append(
                 &self.id,
