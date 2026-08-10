@@ -406,6 +406,146 @@ pub async fn assert_monotonic_event_seq(events: Arc<dyn EventLog>) {
     assert_eq!(tail[0].seq, EventSeq::new(3));
 }
 
+/// Asserts the [`EventLog`] retention contract (issue #275): the default
+/// policy is inert, permanent kinds survive any policy, sequences are never
+/// renumbered or reused, and a pruned log still reads and appends correctly.
+///
+/// Deliberately says nothing about the age bound. `append` stamps `at_millis`
+/// from the wall clock, so a backend test cannot place an event in the past
+/// without a clock seam none of the three backends has. Age selection is a
+/// property of [`plan_prune`](crate::ports::events::plan_prune), which is pure
+/// and unit-tested against synthetic timestamps in `ports::events`; what a
+/// *backend* has to prove is that it removes exactly the entries that function
+/// names, which is what this covers.
+pub async fn assert_event_retention(events: Arc<dyn EventLog>) {
+    use crate::ports::events::RetentionPolicy;
+
+    let acme = CompanyId::new("acme");
+
+    let run_started = |n: u64| CompanyEvent::WorkflowRunStarted {
+        workflow_id: "wf".to_string(),
+        run_id: format!("run-{n}"),
+        scheduled: false,
+    };
+    let audit = |n: u64| CompanyEvent::LifecycleChanged {
+        from: "running".to_string(),
+        to: format!("paused-{n}"),
+        by: crate::ports::types::Actor {
+            kind: crate::ports::types::ActorKind::Operator,
+            id: "operator".to_string(),
+        },
+    };
+
+    // Interleave prunable run outcomes with permanent audit entries so the
+    // pass has to discriminate rather than truncate a prefix.
+    for n in 0..5u64 {
+        events.append(&acme, run_started(n)).await.unwrap();
+        events.append(&acme, audit(n)).await.unwrap();
+    }
+    let before = events
+        .read_from(&acme, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(before.len(), 10, "fixture seeded 10 events");
+
+    // 1. The default policy is a no-op. Retention is opt-in.
+    let report = events
+        .prune(&acme, &RetentionPolicy::default())
+        .await
+        .unwrap();
+    assert_eq!(report.removed, 0, "default policy removed something");
+    assert_eq!(report.scanned, 10);
+    let after_noop = events
+        .read_from(&acme, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    assert_eq!(after_noop, before, "no-op prune changed the log");
+
+    // 2. A count bound removes only prunable kinds, keeping the newest.
+    let report = events
+        .prune(&acme, &RetentionPolicy::with_max_entries_per_kind(2))
+        .await
+        .unwrap();
+    // 5 run-starts at seqs 0,2,4,6,8; the bound keeps the newest 2 (seqs 8, 6)
+    // and discards the other 3. The permanent audit rows are never candidates,
+    // and the seq watermark (9) is an audit row anyway.
+    assert_eq!(
+        report.removed, 3,
+        "count bound should discard the 3 oldest of 5 run-starts"
+    );
+
+    let kept = events
+        .read_from(&acme, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    let lifecycles = kept
+        .iter()
+        .filter(|e| e.event.kind() == "LifecycleChanged")
+        .count();
+    assert_eq!(lifecycles, 5, "a permanent kind was pruned");
+    let runs: Vec<String> = kept
+        .iter()
+        .filter_map(|e| match &e.event {
+            CompanyEvent::WorkflowRunStarted { run_id, .. } => Some(run_id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        runs,
+        vec!["run-3".to_string(), "run-4".to_string()],
+        "count bound did not keep the newest run outcomes"
+    );
+
+    // 3. Sequences are not renumbered: every surviving entry keeps the number
+    //    it was assigned, so a stored cross-reference still resolves.
+    for ev in &kept {
+        let original = before
+            .iter()
+            .find(|b| b.seq == ev.seq)
+            .expect("surviving seq was never issued");
+        assert_eq!(&original.event, &ev.event, "seq {:?} renumbered", ev.seq);
+    }
+    assert_eq!(
+        report.oldest_retained,
+        kept.first().map(|e| e.seq),
+        "report disagrees with the log about the oldest survivor"
+    );
+
+    // 4. `read_from` tolerates the gaps a prune leaves: a cursor parked on a
+    //    removed sequence resumes at the next survivor rather than erroring.
+    let removed_seq = before
+        .iter()
+        .map(|e| e.seq)
+        .find(|seq| !kept.iter().any(|k| k.seq == *seq))
+        .expect("something was removed");
+    let resumed = events
+        .read_from(&acme, removed_seq, usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        resumed.first().is_some_and(|e| e.seq > removed_seq),
+        "read_from did not resume past a pruned sequence"
+    );
+
+    // 5. The next append must not reuse a sequence a survivor still holds.
+    //    This is the invariant that makes pruning safe for the fs and sqlite
+    //    backends, which derive the next sequence from the highest present.
+    let highest_before = kept.iter().map(|e| e.seq).max().unwrap();
+    let next = events.append(&acme, audit(99)).await.unwrap();
+    assert!(
+        next > highest_before,
+        "append reused sequence {next:?} after a prune (highest surviving was {highest_before:?})"
+    );
+    let reread = events
+        .read_from(&acme, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    let mut seqs: Vec<EventSeq> = reread.iter().map(|e| e.seq).collect();
+    let unique = seqs.len();
+    seqs.dedup();
+    assert_eq!(unique, seqs.len(), "duplicate sequences after prune+append");
+}
+
 /// Everything written through the ports reads back through the ports,
 /// byte-identically — the totality precondition an export relies on.
 pub async fn assert_export_totality(
