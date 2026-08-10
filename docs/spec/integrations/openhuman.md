@@ -85,13 +85,15 @@ The Tauri app is a natural prosumer install path: OpenHuman as the shell,
 OpenCompany as the company runtime behind it. Whether the prosumer UI ships
 as an OpenHuman mode or a separate frontend is an open product question
 ([product/prosumer.md](../product/prosumer.md)); the runtime API is the same
-either way. Launching the desktop host from an OpenCompany checkout is wired
-through `opencompany open-human --mode desktop` (add `--release` for a
-bundle): it delegates to OpenHuman's `pnpm` scripts so the CEF runtime, Vite
-dev server, macOS signing identity, and `.env` are set up exactly as OpenHuman
-expects — raw `cargo run --bin OpenHuman` is not sufficient (blank window or
-a `cef::library_loader` panic). CEF is used on macOS; `wry` (WebKitGTK /
-WebView2) is selected on Linux and Windows.
+either way. Launching the desktop host from an OpenCompany checkout is wired through
+`opencompany open-human --mode desktop` (add `--release` for a bundle): it
+calls `cargo tauri dev`/`build` directly and ports OpenHuman's own script
+preflight into Rust — installing the vendored CEF-aware `tauri-cli`, pinning
+`CEF_PATH`, loading `<root>/.env`, and on macOS seeding the Chromium keychain
+and `APPLE_SIGNING_IDENTITY` — so the CEF runtime, Vite dev server, and signing
+are set up exactly as OpenHuman expects, without shelling out to pnpm. Tauri's
+`beforeDevCommand` still drives the Vite dev server. CEF on macOS; `wry`
+(WebKitGTK / WebView2) on Linux and Windows.
 
 ## Upstreaming policy
 
