@@ -348,17 +348,20 @@ impl OpenHumanLaunch {
         if let Some(cef) = Self::cef_path() {
             install.env("CEF_PATH", cef);
         }
-        // Put the install root's bin and ~/.cargo/bin first so the install
-        // itself resolves a CEF-aware toolchain if it shells out.
-        if let Ok(home) = std::env::var("HOME") {
-            let path = format!(
+        // Put the install root's bin first so the install itself resolves a
+        // CEF-aware toolchain if it shells out; `~/.cargo/bin` is appended
+        // only when HOME is set, since HOME is what locates that directory.
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        let path = match std::env::var("HOME") {
+            Ok(home) => format!(
                 "{}/bin:{}/.cargo/bin:{}",
                 install_root.display(),
                 home,
-                std::env::var("PATH").unwrap_or_default()
-            );
-            install.env("PATH", path);
-        }
+                inherited
+            ),
+            Err(_) => format!("{}/bin:{}", install_root.display(), inherited),
+        };
+        install.env("PATH", path);
         let status = install.status().await?;
         if !status.success() {
             return Err(OpenCompanyError::OpenHuman {
