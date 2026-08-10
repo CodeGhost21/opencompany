@@ -925,6 +925,35 @@ mod test {
     /// A denial for a parked approval is still a denial while stopped — the
     /// switch must not turn "deny" into "approve" by accident.
     #[tokio::test]
+    async fn emergency_refuses_to_park_new_side_effecting_effects() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None));
+        gate.set_emergency(true);
+
+        // A side-effecting effect cannot be queued for approval while stopped —
+        // the harness approval route parks without consulting `evaluate`, so
+        // without this veto a gated effect could be released after the stop.
+        let err = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap_err();
+        assert!(matches!(
+            err,
+            crate::OpenCompanyError::EmergencyStop(_)
+        ));
+        assert!(gate.parked_ids().is_empty());
+
+        // Chat still parks while stopped — the veto is the *same* one `evaluate`
+        // applies, so an `EffectGroup::Other` effect is not caught by it.
+        let id = gate
+            .park(&company(), effect("chat.reply", EffectGroup::Other))
+            .await
+            .expect("an Other-group effect parks while stopped");
+        assert_eq!(gate.parked_ids(), vec![id]);
+    }
+
+    /// A denial for a parked approval is still a denial while stopped — the
+    /// switch must not turn "deny" into "approve" by accident.
+    #[tokio::test]
     async fn emergency_does_not_change_a_denied_resolution() {
         let gate = ManifestApprovalGate::new(policy("supervised", None));
         let id = gate
