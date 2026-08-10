@@ -93,9 +93,7 @@ impl OpenHumanLaunch {
         let port = std::env::var("OPENHUMAN_DEV_PORT").unwrap_or_else(|_| "1420".to_string());
         match (self.release, DesktopBackend::for_host()) {
             (false, DesktopBackend::Cef) => {
-                let config = format!(
-                    "{{\"build\":{{\"devUrl\":\"http://localhost:{port}\"}}}}"
-                );
+                let config = format!("{{\"build\":{{\"devUrl\":\"http://localhost:{port}\"}}}}");
                 vec!["dev".into(), "--config".into(), config]
             }
             (false, DesktopBackend::Wry) => {
@@ -116,7 +114,12 @@ impl OpenHumanLaunch {
                 "OpenHuman".into(),
             ],
             (true, DesktopBackend::Wry) => {
-                vec!["build".into(), "--".into(), "--bin".into(), "OpenHuman".into()]
+                vec![
+                    "build".into(),
+                    "--".into(),
+                    "--bin".into(),
+                    "OpenHuman".into(),
+                ]
             }
         }
     }
@@ -275,9 +278,7 @@ impl OpenHumanLaunch {
         let bin = install_root.join("bin").join("cargo-tauri");
         fs::create_dir_all(&install_root)
             .map_err(OpenCompanyError::from)
-            .and_then(|_| {
-                fs::create_dir_all(Self::cef_path()?).map_err(OpenCompanyError::from)
-            })?;
+            .and_then(|_| fs::create_dir_all(Self::cef_path()?).map_err(OpenCompanyError::from))?;
 
         let crates_toml = install_root.join(".crates.toml");
         let from_vendored = fs::read_to_string(&crates_toml)
@@ -323,8 +324,7 @@ impl OpenHumanLaunch {
         if !status.success() {
             return Err(OpenCompanyError::OpenHuman {
                 code: 500,
-                message: "cargo install of the vendored CEF-aware tauri-cli failed"
-                    .into(),
+                message: "cargo install of the vendored CEF-aware tauri-cli failed".into(),
             });
         }
         Ok(())
@@ -422,10 +422,7 @@ fn any_file_newer_than(dir: &std::path::Path, threshold: SystemTime) -> bool {
 /// strip one surrounding pair of quotes from the value.
 fn load_dotenv(path: &std::path::Path) -> Result<Vec<(String, String)>> {
     let content = fs::read_to_string(path).map_err(OpenCompanyError::from)?;
-    Ok(content
-        .lines()
-        .filter_map(parse_env_line)
-        .collect())
+    Ok(content.lines().filter_map(parse_env_line).collect())
 }
 
 /// Parse one `.env` line into `(key, value)`, or `None` for blanks/comments.
@@ -471,7 +468,10 @@ fn setup_chromium_safe_storage() {
     use std::process::Command as StdCommand;
     let svc = "Chromium Safe Storage";
     let acct = "Chromium";
-    let keychain = format!("{}/Library/Keychains/login.keychain-db", std::env::var("HOME").unwrap_or_default());
+    let keychain = format!(
+        "{}/Library/Keychains/login.keychain-db",
+        std::env::var("HOME").unwrap_or_default()
+    );
     let exists = StdCommand::new("security")
         .args(["find-generic-password", "-s", svc, "-a", acct, &keychain])
         .output()
@@ -503,7 +503,17 @@ fn setup_chromium_safe_storage() {
             .map(|s| s.trim().to_string())
             .unwrap_or_default();
         let _ = StdCommand::new("security")
-            .args(["add-generic-password", "-s", svc, "-a", acct, "-w", &key, "-A", &keychain])
+            .args([
+                "add-generic-password",
+                "-s",
+                svc,
+                "-a",
+                acct,
+                "-w",
+                &key,
+                "-A",
+                &keychain,
+            ])
             .status();
     }
 }
@@ -616,13 +626,18 @@ mod tests {
         );
         assert_eq!(parse_env_line("# a comment"), None);
         assert_eq!(parse_env_line("   "), None);
-        assert_eq!(parse_env_line("FOO=bar # inline"), Some(("FOO".into(), "bar".into())));
+        assert_eq!(
+            parse_env_line("FOO=bar # inline"),
+            Some(("FOO".into(), "bar".into()))
+        );
         assert_eq!(parse_env_line("=novalue"), None);
     }
 
     #[test]
     fn installed_from_vendored_detects_origin() {
-        let vendored = std::path::Path::new("/repo/vendor/openhuman/app/src-tauri/vendor/tauri-cef/crates/tauri-cli");
+        let vendored = std::path::Path::new(
+            "/repo/vendor/openhuman/app/src-tauri/vendor/tauri-cef/crates/tauri-cli",
+        );
         let yes = format!(
             "[[..]]\nname = \"tauri-cli\"\nversion = \"0.0.0\"\nsource = \"{}\"\n",
             vendored.display()
