@@ -1210,29 +1210,7 @@ async fn main() -> Result<()> {
             release,
             dry_run,
             args,
-        }) => {
-            let mut launch = match LaunchMode::from(mode) {
-                LaunchMode::Core => OpenHumanLaunch::core(root),
-                LaunchMode::Desktop => OpenHumanLaunch::desktop(root),
-            }
-            .with_args(args);
-            if release {
-                launch = launch.release();
-            }
-
-            // validate() rejects passthrough args in Desktop mode; run it before
-            // the dry-run branch so `--dry-run -- --arg` reports the same error
-            // as an actual launch instead of printing an unlaunchable command.
-            launch.validate()?;
-
-            if dry_run {
-                println!("{}", launch.dry_run_preview());
-                return Ok(());
-            }
-
-            let status = launch.run().await?;
-            std::process::exit(status.code().unwrap_or(1));
-        }
+        }) => run_openhuman(root, mode, release, dry_run, args).await,
         None => {
             println!("opencompany {}", opencompany::VERSION);
             Ok(())
