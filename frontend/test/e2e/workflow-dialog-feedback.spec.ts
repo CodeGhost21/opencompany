@@ -260,6 +260,16 @@ test("a valid workflow still saves", async ({ page }) => {
   await dialog.getByLabel("Send report to").click();
   await page.getByRole("option", { name: /^Owner/ }).click();
 
+  // Connect the trigger to the output. Two rows are not a workflow until an
+  // edge joins them: an `output` no `trigger` can reach never fires, and the
+  // host's reachability check (issue #540) now rejects that graph as unsound.
+  // This edge is what makes the draft a genuinely-valid workflow that saves.
+  await dialog.getByRole("button", { name: "Add edge" }).click();
+  await dialog.getByLabel("Edge from").click();
+  await page.getByRole("option", { name: "start", exact: true }).click();
+  await dialog.getByLabel("Edge to").click();
+  await page.getByRole("option", { name: "done", exact: true }).click();
+
   await dialog.getByRole("button", { name: "Create workflow" }).click();
   await expect(dialog).toBeHidden({ timeout: 30_000 });
 });
