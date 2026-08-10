@@ -231,6 +231,39 @@ pub(crate) fn restart_required(what: &str) -> axum::response::Response {
         .into_response()
 }
 
+/// A `409 inference_required` response for a workflow-run attempt on a company
+/// that has *never* configured an inference source — `workflow_runner()` is
+/// `None` because there is no brain to run yet, not because this deployment
+/// lacks execution and not because a saved config is stranded behind a boot
+/// decision (issue #514).
+///
+/// Deliberately neither of the sibling responses:
+///   - not the `not_wired` 404: the console's bare-catch treats that as a
+///     permanent capability gap and degrades to a read-only view — the wrong
+///     answer for a state the operator clears by configuring a provider (which
+///     triggers issue #290's rebuild-in-place; no restart needed);
+///   - not `restart_required`: nothing was ever saved to the strand, so there is
+///     no configuration for a restart to pick up.
+///
+/// The `code` is a contract the console keys its own copy on; the `error` prose
+/// is the fallback a curl user sees. It never says "deployment" or "not wired" —
+/// the deployment is fine.
+pub(crate) fn inference_required(what: &str) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({
+            "error": format!(
+                "{what} needs an inference source, and none is configured for this \
+                 company. Set a provider in Settings → Inference, then run again."
+            ),
+            "code": "inference_required",
+        })),
+    )
+        .into_response()
+}
+
 /// Resolves the sole registered company (single-company alias).
 pub(crate) fn resolve_sole(state: &AppState) -> Result<Arc<CompanyRuntime>, ApiError> {
     state.registry().sole().ok_or_else(|| {

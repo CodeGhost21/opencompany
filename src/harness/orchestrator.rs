@@ -808,6 +808,18 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::FeedbackFiled { .. } => "feedback filed".to_string(),
         CompanyEvent::PaymentReceived { amount_usd, .. } => format!("payment ${amount_usd:.2}"),
         CompanyEvent::LifecycleChanged { from, to, .. } => format!("lifecycle {from} → {to}"),
+        // Issue #86. Structural only, on exactly the terms the arms around it
+        // set: the engaged/released word is fixed vocabulary, and BOTH of the
+        // event's other fields are dropped. `reason` is the operator's free-text
+        // incident note — the single most sensitive thing on this event and the
+        // clearest example of what an insight one-liner must not quote — and
+        // `by` is a user id, dropped for the same reason every arm here drops
+        // it. That the company was stopped is the insight; who typed what about
+        // it is not.
+        CompanyEvent::EmergencyPauseChanged { engaged, .. } => format!(
+            "emergency stop {}",
+            if *engaged { "engaged" } else { "released" }
+        ),
         CompanyEvent::MemoryFactDeleted { .. } => "memory fact deleted".to_string(),
         // Issue #364. The emoji is carried — a reaction with the emoji taken out
         // says nothing at all — and it is the one part of a reaction that cannot
@@ -846,6 +858,31 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowDeleted {
             workflow_id, name, ..
         } => format!("workflow deleted: {name} ({workflow_id})"),
+        // Issue #276. This one-liner is folded into the orchestrator's
+        // recent-activity context, so it is read by a model — and the arms
+        // around it drop free text and actor ids for that reason. Name and id
+        // only, exactly like the create/update/delete arms above.
+        //
+        // `by` and `reason` are both dropped. `by` is an actor id, per the rule
+        // this whole function follows. `reason` is dropped on a different
+        // ground: whether the host's disarm rule or a person flipped the switch
+        // is a fact about our write path, and an orchestrator reasoning about
+        // "the host refused to arm this" would be reasoning about plumbing. The
+        // operator-facing answer to that question is the journal and the SSE
+        // frame, which do carry it.
+        CompanyEvent::WorkflowEnabledChanged {
+            workflow_id,
+            name,
+            enabled,
+            ..
+        } => format!(
+            "workflow {}: {name} ({workflow_id})",
+            if *enabled {
+                "switched on"
+            } else {
+                "switched off"
+            }
+        ),
         CompanyEvent::TaskSteered {
             task_id, action, ..
         } => format!("task steered ({action}): {task_id}"),
@@ -2275,6 +2312,45 @@ mod tests {
         }
     }
 
+    /// Issue #276: both directions of the arming summary, including the name
+    /// and id, and neither the actor nor the reason.
+    #[test]
+    fn an_arming_change_summarizes_in_both_directions_without_the_actor_or_the_reason() {
+        let event = |enabled, reason| CompanyEvent::WorkflowEnabledChanged {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            enabled,
+            reason,
+            by: Some(crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "u_secret".to_string(),
+            }),
+        };
+
+        let off = summarize_event(&event(
+            false,
+            crate::ports::types::WorkflowEnabledReason::Disarmed,
+        ));
+        assert!(off.contains("switched off"), "{off}");
+        assert!(off.contains("Daily digest"), "{off}");
+        assert!(off.contains("digest"), "{off}");
+
+        let on = summarize_event(&event(
+            true,
+            crate::ports::types::WorkflowEnabledReason::Operator,
+        ));
+        assert!(on.contains("switched on"), "{on}");
+        assert!(on.contains("Daily digest"), "{on}");
+
+        // The actor id never reaches the insight surface, and neither does the
+        // rule-vs-person distinction — see the arm's comment.
+        for summary in [&off, &on] {
+            assert!(!summary.contains("u_secret"), "{summary}");
+            assert!(!summary.contains("disarm"), "{summary}");
+            assert!(!summary.contains("operator"), "{summary}");
+        }
+    }
+
     /// **Issue #248, the insight-surface twin of the sidecar guard.** This
     /// one-liner is folded into the orchestrator's recent-activity context, so
     /// it is read by a model rather than by the tenant. A delivery row's
@@ -3274,6 +3350,7 @@ name = "Morning"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -3790,6 +3867,7 @@ name = "Morning"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }

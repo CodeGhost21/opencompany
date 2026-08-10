@@ -100,14 +100,44 @@
 //!   `reconcile_schedule_triggers_on_boot` because a bound cron job lives in a
 //!   second durable store (`cron.db`) that can drift from `flows.db`; we persist
 //!   no registration at all, so that class of bug cannot arise here.
-//! * **No disarm-on-edit.** OpenHuman forces `enabled = false` when an edit turns
-//!   a manual trigger into an automatic one, so a schedule cannot go live
-//!   unreviewed. That rule has no lever here yet: our scheduler deliberately does
-//!   not gate on `[workflows].enabled` at all (see `workflow_scheduler.rs`), so
-//!   writing `false` would stop nothing. Note this makes update no riskier than
-//!   create, which already persists a live schedule the same way. Reversing the
-//!   scheduler decision and adopting the disarm rule for create and update
-//!   together is one follow-up, not two.
+//!
+//! # Arming, and the disarm rule (issue #276)
+//!
+//! A workflow's armed state is
+//! [`CompanyRecord::disabled_workflows`](crate::ports::types::CompanyRecord::disabled_workflows),
+//! read by [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler) and by
+//! nothing else that decides whether work happens. Three write paths touch it,
+//! and **two of them can only ever disarm**:
+//!
+//! | Path | Writes |
+//! | --- | --- |
+//! | [`create_company_workflow`] | `false`, when the new graph carries a trigger schedule |
+//! | [`update_company_workflow`] | `false`, when the edit adds a schedule to a graph that had none |
+//! | [`set_company_workflow_enabled`] | whatever the operator asked for |
+//!
+//! **A schedule is armed only by a person saying so.** That is the rule, and it
+//! is one-directional on purpose: an edit that *removes* a schedule does not
+//! re-arm anything, re-saving an already-scheduled graph does not re-arm it, and
+//! neither does deleting and recreating around it. A rule that could arm would
+//! be a rule that could arm by accident.
+//!
+//! This is OpenHuman's "B29 Rule 1" — its `flows_update` forces `enabled =
+//! false` when an edit turns a manual or absent trigger into an automatic one,
+//! after a flow of its own started running on an unreviewed 8am schedule — with
+//! one deliberate widening. **Create is covered too.** OpenHuman disarms only on
+//! edit; here [`create_company_workflow`] is *also* the orchestrator's
+//! `create_workflow` tool, so leaving create armed would mean an agent can put a
+//! cron into production by authoring one, and an operator who wanted around the
+//! rule would only have to write the graph fresh instead of editing it. Issue
+//! #276 says it directly: a rule that does not cover create and update together
+//! just moves the hole.
+//!
+//! **Changing an existing cron does not disarm.** `0 8 * * *` → `0 3 * * *` on
+//! an already-armed workflow stays armed. The operator accepted automatic firing
+//! for this workflow and is now correcting *when*; disarming there would put a
+//! re-enable click behind every typo fix, which is how an operator learns to
+//! click through the re-arm without reading it. The decision that was reviewed
+//! is "automatic at all", and that one has not changed.
 
 use std::collections::HashSet;
 use std::path::Path;
@@ -122,7 +152,9 @@ use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
 use crate::ports::events::EventLog;
 use crate::ports::store::company_write_lock;
-use crate::ports::types::{CompanyEvent, CompanyId, CompanyRecord, OverlayWorkflow};
+use crate::ports::types::{
+    CompanyEvent, CompanyId, CompanyRecord, OverlayWorkflow, WorkflowEnabledReason,
+};
 use crate::server::ops::language;
 
 /// Max nodes a freshly authored graph may declare. A larger graph is refused
@@ -281,6 +313,19 @@ pub(crate) async fn create_company_workflow(
     {
         record.manifest.workflows.enabled.push(file.id.clone());
     }
+    // Issue #276: a graph authored with a cron lands **switched off**. It is
+    // saved, listed and runnable by hand; it just does not fire until someone
+    // arms it. Written in the same save as the body and the enabled id, so a
+    // freshly created schedule is never briefly live — there is no window
+    // between "the scheduler can see this" and "the scheduler is told not to run
+    // it", because a tick reads one record or the other, never a half of both.
+    //
+    // Note which surface this binds hardest: this function is also the
+    // orchestrator's `create_workflow` tool, so an agent cannot arm a cron.
+    let disarmed = file.trigger_schedule().is_some();
+    if disarmed {
+        record.set_workflow_enabled(&file.id, false);
+    }
     store.save(&record).await?;
 
     // Drop the write lock before journaling: the audit event is best-effort and
@@ -309,7 +354,64 @@ pub(crate) async fn create_company_workflow(
         );
     }
 
+    // Issue #276: say so, and say it was the rule rather than a person. A
+    // scheduled workflow that never fires is otherwise indistinguishable from a
+    // broken one, and this is the line that tells an operator to go arm it.
+    if disarmed {
+        journal_enabled_change(
+            company,
+            events,
+            &file.id,
+            &file.name,
+            false,
+            WorkflowEnabledReason::Disarmed,
+        )
+        .await;
+        tracing::info!(
+            company = %company,
+            workflow = %file.id,
+            "workflow created with a schedule and left switched off pending review"
+        );
+    }
+
     Ok(file)
+}
+
+/// Journals a best-effort [`WorkflowEnabledChanged`](CompanyEvent::WorkflowEnabledChanged).
+///
+/// Best-effort in the same sense as every other write-path audit event here: the
+/// flag is already persisted by the time this runs, so a journal failure is
+/// logged and never rolls the change back. Shared by the three write paths so
+/// the disarm rule and the operator toggle produce the same audit shape.
+async fn journal_enabled_change(
+    company: &CompanyId,
+    events: Option<&Arc<dyn EventLog>>,
+    wid: &str,
+    name: &str,
+    enabled: bool,
+    reason: WorkflowEnabledReason,
+) {
+    if let Some(log) = events
+        && let Err(err) = log
+            .append(
+                company,
+                CompanyEvent::WorkflowEnabledChanged {
+                    workflow_id: wid.to_string(),
+                    name: name.to_string(),
+                    enabled,
+                    reason,
+                    by: None,
+                },
+            )
+            .await
+    {
+        tracing::warn!(
+            company = %company,
+            workflow = %wid,
+            error = %err,
+            "workflow enablement changed but audit journal append failed"
+        );
+    }
 }
 
 /// The validation that is a pure function of the draft — safe id, size caps,
@@ -473,6 +575,12 @@ fn check_expected_version(expected: Option<&str>, current_toml: &str) -> Result<
 /// reshuffle on an edit) and `[workflows].enabled` is left exactly as it was: a
 /// workflow that was enabled stays enabled across an edit, and one that somehow
 /// wasn't is not silently armed by saving it.
+///
+/// Issue #276 adds the disarm: if the stored graph had no trigger schedule and
+/// the replacement does, the workflow is switched **off** in the same save, so a
+/// cron introduced by an edit cannot fire before anyone has looked at it. See
+/// the module docs for why an edit never arms in the other direction and why a
+/// changed-but-already-present cron is left alone.
 pub(crate) async fn update_company_workflow(
     company: &CompanyId,
     source_dir: Option<&Path>,
@@ -567,11 +675,32 @@ pub(crate) async fn update_company_workflow(
         other => other,
     })?;
 
+    // Issue #276: did this edit arm a schedule that was not armed before?
+    // Measured against the body being REPLACED, read under the same lock as the
+    // write — not against anything the caller supplied, which is what makes the
+    // rule impossible to talk out of with a crafted request.
+    //
+    // A stored body that no longer parses counts as "had no schedule", so an
+    // edit that repairs a corrupt graph into a scheduled one disarms. That is
+    // the conservative reading of an unreadable prior state, and it is the right
+    // one: nobody can have reviewed a schedule the host could not read.
+    let armed_before = parse_workflow(&record.overlay_workflows[index].toml)
+        .ok()
+        .and_then(|previous| previous.trigger_schedule().map(str::to_string))
+        .is_some();
+    let disarmed = file.trigger_schedule().is_some() && !armed_before;
+
     // Replace in place: same slot, same order, so the picker doesn't reshuffle.
     record.overlay_workflows[index] = OverlayWorkflow {
         id: file.id.clone(),
         toml: toml_src,
     };
+    if disarmed {
+        // Same save as the new body, for the same reason create writes both at
+        // once: a tick reads one record or the other, so the newly scheduled
+        // graph is never visible to the scheduler while still armed.
+        record.set_workflow_enabled(&file.id, false);
+    }
     store.save(&record).await?;
 
     drop(_lock);
@@ -597,7 +726,144 @@ pub(crate) async fn update_company_workflow(
         );
     }
 
+    if disarmed {
+        journal_enabled_change(
+            company,
+            events,
+            &file.id,
+            &file.name,
+            false,
+            WorkflowEnabledReason::Disarmed,
+        )
+        .await;
+        tracing::info!(
+            company = %company,
+            workflow = %file.id,
+            "edit added a schedule; workflow switched off pending review"
+        );
+    }
+
     Ok(file)
+}
+
+/// Switches a workflow on or off without touching its graph (issue #276).
+///
+/// Returns `true` when the record actually changed, `false` when the workflow
+/// was already in the requested state — the caller reports `200` either way, so
+/// a double-click is a no-op rather than a second journal entry.
+///
+/// # What may be toggled, and why it is a wider set than edit and delete
+///
+/// Any id the company actually answers for with a **graph** — a seed file or an
+/// overlay body. Membership is decided by whether a body *exists*, not by
+/// whether it parses: a stored graph the host can no longer read still toggles
+/// (journalling under its id), because it is exactly the kind an operator most
+/// wants stopped and refusing would leave them nothing to do about it. That is
+/// deliberately broader than [`update_company_workflow`] and
+/// [`delete_company_workflow`], which are overlay-only:
+///
+/// * A **seed-backed** workflow can be paused. Editing or deleting one is
+///   refused because the read path would keep serving the seed and a boot
+///   rebuild would resurrect the change — neither applies here. The switch lives
+///   on the record, the source tree is untouched, and pausing can only ever
+///   *remove* capability, so it cannot let a runtime write outlive a seed
+///   rollback the way a record-wins `[tools]` or `[policy]` merge could. An
+///   operator who cannot stop a committed cron without a redeploy has no pause
+///   switch at all, which is issue #276(a) verbatim.
+/// * A **bodiless** manifest-`enabled` id is refused with a
+///   [`Conflict`](OpenCompanyError::Conflict), same as edit and delete: it is a
+///   name with no graph, so there is no schedule to stop.
+/// * An **unknown** id is a [`CompanyNotFound`](OpenCompanyError::CompanyNotFound)
+///   (404).
+///
+/// # No version token, deliberately
+///
+/// `PUT`/`DELETE` take an `expectedVersion` because two consoles editing one
+/// graph can silently lose an edit. A switch has no such hazard: it carries no
+/// content to overwrite, both operators can see the resulting state, and
+/// last-write-wins is what a light switch already means. Requiring a token would
+/// also make a seed-backed workflow untoggleable, since only overlay bodies have
+/// one.
+pub(crate) async fn set_company_workflow_enabled(
+    company: &CompanyId,
+    source_dir: Option<&Path>,
+    store: &Arc<dyn CompanyStore>,
+    events: Option<&Arc<dyn EventLog>>,
+    wid: &str,
+    enabled: bool,
+) -> Result<bool> {
+    if !is_safe_workflow_id(wid) {
+        return Err(OpenCompanyError::InvalidRequest(
+            language::WORKFLOW_ID_INVALID.to_string(),
+        ));
+    }
+
+    let write_lock = company_write_lock(company);
+    let _lock = write_lock.lock().await;
+
+    let mut record = store
+        .load(company)
+        .await?
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
+
+    // Does this company answer for `wid` with a graph at all? Asked as "is there
+    // a body" rather than "does it parse", because the two are different states
+    // and only one of them is the operator's fault.
+    //
+    // `load_workflow_union` returns `Err` for a body that exists but no longer
+    // parses, and `Ok(None)` only when there is nothing there. Collapsing both
+    // into "not found" — which an earlier revision did, with `.ok().flatten()` —
+    // sent a corrupt-graph id down the bodiless branch and told the operator it
+    // "was provisioned by name only". That is false for a workflow they created,
+    // and it leaves them with no way to pause it and no accurate reason why.
+    let has_body =
+        seed_file_exists(source_dir, wid) || record.overlay_workflows.iter().any(|w| w.id == wid);
+    if !has_body {
+        if record.manifest.workflows.enabled.iter().any(|id| id == wid) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "Workflow `{wid}` is enabled for this company but has no saved graph, so there is \
+                 no schedule to switch off — it was provisioned by name only."
+            )));
+        }
+        return Err(OpenCompanyError::CompanyNotFound(format!("workflow {wid}")));
+    }
+
+    // The display name for the journal, read before anything changes. A body
+    // that no longer parses still toggles — the same call
+    // [`delete_company_workflow`] makes, and for the same reason: a graph the
+    // host cannot read is exactly the kind an operator most wants to stop, and
+    // refusing would leave them nothing to do about it. It just journals under
+    // its id.
+    let name = crate::company::load_workflow_union(source_dir, &record.overlay_workflows, wid)
+        .ok()
+        .flatten()
+        .map(|file| file.name)
+        .unwrap_or_else(|| wid.to_string());
+
+    if !record.set_workflow_enabled(wid, enabled) {
+        return Ok(false);
+    }
+    store.save(&record).await?;
+
+    drop(_lock);
+
+    journal_enabled_change(
+        company,
+        events,
+        wid,
+        &name,
+        enabled,
+        WorkflowEnabledReason::Operator,
+    )
+    .await;
+    tracing::info!(
+        company = %company,
+        workflow = %wid,
+        enabled,
+        "workflow switched by an operator"
+    );
+
+    Ok(true)
 }
 
 /// Removes a workflow: its overlay body **and** its id in
@@ -851,6 +1117,7 @@ to = "done"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         }
     }
@@ -1431,8 +1698,18 @@ to = "done"
         // Replaced, not appended — an edit must never fork the graph in two.
         assert_eq!(record.overlay_workflows.len(), 1);
         assert_eq!(record.overlay_workflows[0].id, "greeter");
-        // Still enabled: an edit leaves the arming decision alone.
+        // The manifest declaration is untouched — it says which workflows this
+        // company has, not which of them are armed.
         assert_eq!(record.manifest.workflows.enabled, vec!["greeter"]);
+        // …but this edit added a cron to a manual graph, so issue #276's disarm
+        // rule switched it off in the same save. The draft above is exactly the
+        // manual→automatic transition the rule exists for, which is why this
+        // assertion lives on the general update test rather than only on the
+        // dedicated one.
+        assert!(
+            !record.workflow_enabled("greeter"),
+            "an edit that adds a schedule must leave the workflow switched off"
+        );
 
         // What the union read path serves is what we returned.
         let reloaded = load_workflow_union(None, &record.overlay_workflows, "greeter")
@@ -1441,7 +1718,7 @@ to = "done"
         assert_eq!(reloaded, file);
 
         let events = log.events.lock().unwrap();
-        assert_eq!(events.len(), 1);
+        assert_eq!(events.len(), 2, "the edit, then the disarm it triggered");
         match &events[0] {
             CompanyEvent::WorkflowUpdated {
                 workflow_id, name, ..
@@ -1450,6 +1727,19 @@ to = "done"
                 assert_eq!(name, "Greeter");
             }
             other => panic!("expected WorkflowUpdated, got {other:?}"),
+        }
+        match &events[1] {
+            CompanyEvent::WorkflowEnabledChanged {
+                workflow_id,
+                enabled,
+                reason,
+                ..
+            } => {
+                assert_eq!(workflow_id, "greeter");
+                assert!(!enabled);
+                assert_eq!(*reason, WorkflowEnabledReason::Disarmed);
+            }
+            other => panic!("expected WorkflowEnabledChanged, got {other:?}"),
         }
     }
 
@@ -1903,6 +2193,526 @@ to = "done"
             a.chars()
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "{a}"
+        );
+    }
+
+    // --- issue #276: arming, disarming, and the switch -----------------------
+
+    /// A draft whose trigger fires on `cron`.
+    fn scheduled_draft(id: &str, name: &str, cron: &str) -> RawWorkflow {
+        let mut draft = valid_draft(id, name);
+        draft.nodes[0].schedule = Some(cron.to_string());
+        draft
+    }
+
+    /// A graph authored with a cron lands switched OFF.
+    ///
+    /// The half of the disarm rule OpenHuman does not have, and the one that
+    /// matters most here: this function is also the orchestrator's
+    /// `create_workflow` tool, so this assertion is what stops an agent putting a
+    /// cron into production by writing one.
+    async fn create_scheduled(
+        company: &CompanyId,
+        dir: &std::path::Path,
+        store: &Arc<dyn CompanyStore>,
+        log: &Arc<dyn EventLog>,
+        id: &str,
+        name: &str,
+        cron: &str,
+    ) -> WorkflowFile {
+        create_company_workflow(
+            company,
+            Some(dir),
+            store,
+            Some(log),
+            scheduled_draft(id, name, cron),
+        )
+        .await
+        .expect("creates")
+    }
+
+    #[tokio::test]
+    async fn creating_a_scheduled_workflow_leaves_it_switched_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        create_scheduled(
+            &company,
+            dir.path(),
+            &store,
+            &log_dyn,
+            "digest",
+            "Digest",
+            "0 9 * * *",
+        )
+        .await;
+
+        let saved = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            !saved.workflow_enabled("digest"),
+            "a created schedule must not be armed"
+        );
+        // Still a normal, complete workflow otherwise — pausing stops the
+        // schedule, not the workflow.
+        assert_eq!(saved.overlay_workflows.len(), 1);
+        assert!(
+            saved
+                .manifest
+                .workflows
+                .enabled
+                .contains(&"digest".to_string()),
+            "the manifest declaration is untouched by the arming decision"
+        );
+
+        // Journaled, and journaled as the rule rather than as a person.
+        let events = log.events.lock().unwrap();
+        let disarm = events
+            .iter()
+            .find(|e| matches!(e, CompanyEvent::WorkflowEnabledChanged { .. }))
+            .expect("a disarm is journaled");
+        match disarm {
+            CompanyEvent::WorkflowEnabledChanged {
+                workflow_id,
+                enabled,
+                reason,
+                by,
+                ..
+            } => {
+                assert_eq!(workflow_id, "digest");
+                assert!(!enabled);
+                assert_eq!(*reason, WorkflowEnabledReason::Disarmed);
+                assert!(by.is_none(), "the rule is not a person");
+            }
+            other => panic!("expected WorkflowEnabledChanged, got {other:?}"),
+        }
+    }
+
+    /// A graph authored WITHOUT a cron is armed, because there is nothing to
+    /// arm. The disarm rule must not make every manual workflow look paused in
+    /// the console.
+    #[tokio::test]
+    async fn creating_a_manual_workflow_leaves_it_switched_on() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("creates");
+
+        let saved = store.load(&company).await.unwrap().unwrap();
+        assert!(saved.workflow_enabled("greeter"));
+        assert!(
+            saved.disabled_workflows.is_empty(),
+            "a manual workflow must not be listed as paused"
+        );
+        assert!(
+            !log.events
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WorkflowEnabledChanged { .. })),
+            "nothing changed, so nothing is journaled"
+        );
+    }
+
+    /// **The safety-relevant half of issue #276.** An edit that turns a manual
+    /// workflow into a scheduled one switches it off, so a cron introduced by an
+    /// edit cannot fire before anyone has looked at it.
+    #[tokio::test]
+    async fn an_edit_that_adds_a_schedule_switches_the_workflow_off() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("creates");
+        assert!(
+            store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("greeter"),
+            "armed before the edit, so the assertion below is about the edit"
+        );
+
+        update_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            scheduled_draft("greeter", "Greeter", "0 8 * * *"),
+            None,
+        )
+        .await
+        .expect("updates");
+
+        let saved = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            !saved.workflow_enabled("greeter"),
+            "an edit that adds a schedule must disarm it"
+        );
+    }
+
+    /// Correcting an already-armed workflow's cron leaves it armed.
+    ///
+    /// The deliberate limit of the rule: the reviewed decision is "automatic at
+    /// all", and that one has not changed. Disarming here would put a re-enable
+    /// click behind every typo fix.
+    #[tokio::test]
+    async fn changing_an_existing_schedule_does_not_disarm() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        create_scheduled(
+            &company,
+            dir.path(),
+            &store,
+            &log_dyn,
+            "digest",
+            "Digest",
+            "0 9 * * *",
+        )
+        .await;
+        // The operator reviews it and arms it.
+        set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            "digest",
+            true,
+        )
+        .await
+        .expect("arms");
+
+        update_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            scheduled_draft("digest", "Digest", "0 3 * * *"),
+            None,
+        )
+        .await
+        .expect("updates");
+
+        assert!(
+            store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("digest"),
+            "a cron correction must not disarm an already-armed workflow"
+        );
+    }
+
+    /// An edit never arms. A paused workflow stays paused across a re-save, even
+    /// one that removes the schedule entirely — the rule has no arming
+    /// direction, which is what stops it arming by accident.
+    #[tokio::test]
+    async fn an_edit_never_re_arms_a_paused_workflow() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        create_scheduled(
+            &company,
+            dir.path(),
+            &store,
+            &log_dyn,
+            "digest",
+            "Digest",
+            "0 9 * * *",
+        )
+        .await;
+
+        // Re-save with the schedule removed: still paused.
+        update_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            valid_draft("digest", "Digest"),
+            None,
+        )
+        .await
+        .expect("updates");
+
+        assert!(
+            !store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("digest"),
+            "removing a schedule must not re-arm the workflow"
+        );
+    }
+
+    /// The operator switch round-trips, journals once, and is idempotent.
+    #[tokio::test]
+    async fn the_operator_switch_toggles_and_is_idempotent() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        create_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("creates");
+        let before = log.events.lock().unwrap().len();
+
+        let changed = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            "greeter",
+            false,
+        )
+        .await
+        .expect("pauses");
+        assert!(changed, "the first toggle changes the record");
+        assert!(
+            !store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("greeter")
+        );
+
+        // Setting the state it already holds writes nothing and journals nothing
+        // — a double-click is a no-op, not a second audit entry.
+        let changed = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            Some(&log_dyn),
+            "greeter",
+            false,
+        )
+        .await
+        .expect("no-ops");
+        assert!(!changed);
+        assert_eq!(
+            log.events.lock().unwrap().len(),
+            before + 1,
+            "only the real transition is journaled"
+        );
+
+        // And back on, journaled as an operator decision rather than the rule.
+        assert!(
+            set_company_workflow_enabled(
+                &company,
+                Some(dir.path()),
+                &store,
+                Some(&log_dyn),
+                "greeter",
+                true,
+            )
+            .await
+            .expect("arms")
+        );
+        let events = log.events.lock().unwrap();
+        match events.last().expect("an event") {
+            CompanyEvent::WorkflowEnabledChanged {
+                enabled, reason, ..
+            } => {
+                assert!(enabled);
+                assert_eq!(*reason, WorkflowEnabledReason::Operator);
+            }
+            other => panic!("expected WorkflowEnabledChanged, got {other:?}"),
+        }
+    }
+
+    /// An id with no graph anywhere is a 404, and a manifest-`enabled` id with no
+    /// body is a 409 — there is no schedule to switch off in either case.
+    #[tokio::test]
+    async fn toggling_an_id_with_no_graph_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let mut seed = record(&company, manifest_with_assistant());
+        seed.manifest.workflows.enabled.push("ghost".to_string());
+        let store = store_of(MemStore::seeded(seed));
+
+        let err = set_company_workflow_enabled(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            "nowhere",
+            false,
+        )
+        .await
+        .expect_err("unknown id");
+        assert!(
+            matches!(err, OpenCompanyError::CompanyNotFound(_)),
+            "{err:?}"
+        );
+
+        let err =
+            set_company_workflow_enabled(&company, Some(dir.path()), &store, None, "ghost", false)
+                .await
+                .expect_err("bodiless id");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    }
+
+    /// A stored graph that no longer parses is pausable, and is NOT reported as
+    /// "provisioned by name only".
+    ///
+    /// The bodiless-409 message says the id was provisioned by name — true for a
+    /// manifest entry with no graph, and false for a workflow whose saved body
+    /// simply broke. An earlier revision collapsed both into one branch by
+    /// swallowing `load_workflow_union`'s error, so a corrupt graph read back as
+    /// the wrong explanation with no way to act on it.
+    #[tokio::test]
+    async fn a_workflow_whose_stored_graph_no_longer_parses_can_still_be_paused() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let mut seed = record(&company, manifest_with_assistant());
+        seed.overlay_workflows.push(OverlayWorkflow {
+            id: "broken".to_string(),
+            toml: "id = \"broken\"\nname = \"Broken\"\n".to_string(), // no nodes: fails validation
+        });
+        seed.manifest.workflows.enabled.push("broken".to_string());
+        let store = store_of(MemStore::seeded(seed));
+        let log = Arc::new(MemLog::default());
+        let log_dyn: Arc<dyn EventLog> = log.clone();
+
+        assert!(
+            set_company_workflow_enabled(
+                &company,
+                Some(dir.path()),
+                &store,
+                Some(&log_dyn),
+                "broken",
+                false,
+            )
+            .await
+            .expect("an unreadable graph is still pausable")
+        );
+        assert!(
+            !store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("broken")
+        );
+        // Journals under the id, since there is no readable name to use.
+        match log.events.lock().unwrap().last().expect("an event") {
+            CompanyEvent::WorkflowEnabledChanged { name, .. } => assert_eq!(name, "broken"),
+            other => panic!("expected WorkflowEnabledChanged, got {other:?}"),
+        }
+    }
+
+    /// A **seed-defined** workflow can be paused, even though `PUT`/`DELETE`
+    /// refuse it with a 409.
+    ///
+    /// This is the deliberate asymmetry, and the reason for it: an edit or a
+    /// delete would be undone by the read path's seed precedence and by the boot
+    /// rebuild, so refusing them is honesty about what the reader will do.
+    /// Pausing writes to the record, leaves the source tree alone, and only ever
+    /// removes capability — and without it an operator cannot stop a committed
+    /// cron without a redeploy, which is issue #276(a) with extra steps.
+    #[tokio::test]
+    async fn a_seed_defined_workflow_can_be_paused_even_though_it_cannot_be_edited() {
+        let dir = tempfile::tempdir().unwrap();
+        let workflows = dir.path().join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("seeded.toml"), SEED_TOML).unwrap();
+
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+
+        // Edit is refused, as it has been since #259 …
+        let err = update_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            None,
+            valid_draft("seeded", "Seeded flow"),
+            None,
+        )
+        .await
+        .expect_err("a seed-defined graph cannot be replaced");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+
+        // … and the switch still works.
+        assert!(
+            set_company_workflow_enabled(
+                &company,
+                Some(dir.path()),
+                &store,
+                None,
+                "seeded",
+                false,
+            )
+            .await
+            .expect("pauses a seed-defined workflow")
+        );
+        let saved = store.load(&company).await.unwrap().unwrap();
+        assert!(!saved.workflow_enabled("seeded"));
+        assert!(
+            saved.overlay_workflows.is_empty(),
+            "pausing must not materialize an overlay body for a seed graph"
         );
     }
 }

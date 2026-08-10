@@ -607,6 +607,7 @@ pub fn data_dir_from_env() -> PathBuf {
     data_dir_from(
         std::env::var_os("OPENCOMPANY_DATA_DIR"),
         std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
     )
 }
 
@@ -617,11 +618,17 @@ pub fn data_dir_from_env() -> PathBuf {
 fn data_dir_from(
     data_dir: Option<std::ffi::OsString>,
     home: Option<std::ffi::OsString>,
+    // Windows sets this rather than `HOME`. Without it the fallback below is a
+    // RELATIVE path resolved against the working directory — see
+    // `store::paths::resolve_home_from`, which has the same branch for the same
+    // reason. The two must agree, or a Windows host would put its bundles and
+    // its workspace in different places.
+    user_profile: Option<std::ffi::OsString>,
 ) -> PathBuf {
     let non_empty = |v: Option<std::ffi::OsString>| v.filter(|value| !value.is_empty());
     match non_empty(data_dir) {
         Some(dir) => PathBuf::from(dir),
-        None => match non_empty(home) {
+        None => match non_empty(home).or_else(|| non_empty(user_profile)) {
             Some(home) => PathBuf::from(home).join(".opencompany"),
             None => PathBuf::from(".opencompany"),
         },
@@ -666,19 +673,35 @@ mod test {
         use std::ffi::OsString;
         // An empty OPENCOMPANY_DATA_DIR falls back to $HOME/.opencompany, not cwd.
         assert_eq!(
-            data_dir_from(Some(OsString::from("")), Some(OsString::from("/home/u"))),
+            data_dir_from(
+                Some(OsString::from("")),
+                Some(OsString::from("/home/u")),
+                None
+            ),
             PathBuf::from("/home/u/.opencompany")
         );
         // A set value is used verbatim.
         assert_eq!(
             data_dir_from(
                 Some(OsString::from("/data")),
-                Some(OsString::from("/home/u"))
+                Some(OsString::from("/home/u")),
+                None
             ),
             PathBuf::from("/data")
         );
         // Neither set → the relative default.
-        assert_eq!(data_dir_from(None, None), PathBuf::from(".opencompany"));
+        assert_eq!(
+            data_dir_from(None, None, None),
+            PathBuf::from(".opencompany")
+        );
+        // Windows: `USERPROFILE` stands in, so the data dir does not become a
+        // relative path resolved against the working directory. Must agree with
+        // `store::paths::resolve_home_from`, or a Windows host would split its
+        // bundles from its workspace.
+        assert_eq!(
+            data_dir_from(None, None, Some(OsString::from("C:\\Users\\ada"))),
+            PathBuf::from("C:\\Users\\ada").join(".opencompany")
+        );
     }
 
     #[test]

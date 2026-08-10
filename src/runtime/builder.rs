@@ -1274,6 +1274,17 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
             .unwrap_or_default();
+        // Issue #276: the workflows the operator switched off. This is the field
+        // that makes the pause switch durable, and it is carried across the
+        // rebuild for a sharper reason than the two above: `merge_enabled_workflows`
+        // below re-derives `[workflows].enabled` from the seed ∪ overlay ids, so
+        // that list re-arms everything on every boot by design. If the disable
+        // set were dropped here, a paused workflow would resume firing at the
+        // next restart — the one failure mode a safety switch may not have.
+        let disabled_workflows = existing
+            .as_ref()
+            .map(|r| r.disabled_workflows.clone())
+            .unwrap_or_default();
         // Issue #208: `[workflows].enabled` is the one manifest field a runtime
         // write mutates (`create_company_workflow` pushes the new id alongside
         // the overlay body, in the same save). Rebuilding the record from the
@@ -1597,6 +1608,7 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
+                                disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
@@ -1720,6 +1732,7 @@ impl RuntimeBuilder {
                 overlay_desks,
                 overlay_workflows,
                 overlay_budgets,
+                disabled_workflows,
                 template_provenance,
             })
             .await?;
@@ -1877,6 +1890,27 @@ impl RuntimeBuilder {
                 self.host_base_url.as_deref(),
             )
             .await;
+        }
+
+        // Issue #86: seed the kill switch from the event log, so a company
+        // stopped before a restart comes back up stopped.
+        //
+        // A rebuild inherits the live gate (see the `handover` arm above), and
+        // with it the flag already in memory — so only a cold boot, which has no
+        // live flag to inherit, replays. Re-seeding on a rebuild would be
+        // harmless today and would quietly become wrong the moment anything
+        // engages the stop without journaling it first, which is exactly what
+        // `emergency_pause` does in the window before its append lands.
+        //
+        // The read is deliberately NOT `?`-propagated: `hydrate_emergency` turns
+        // an unreadable log into a stopped company, which is a strictly better
+        // outcome than refusing to boot — an operator can release a stop, but
+        // cannot reach a company that never came up.
+        if handover.is_none() {
+            let engaged = crate::policy::gate::replayed_emergency(runtime.events(), runtime.id())
+                .await
+                .map(Some);
+            runtime.hydrate_emergency(engaged);
         }
 
         Ok(runtime)
@@ -2433,6 +2467,8 @@ mod test {
                     created_at_millis: 1,
                     expires_at_millis: 10,
                     user_agent: None,
+                    kind: crate::ports::SessionKind::Browser,
+                    label: None,
                 },
             )
             .await
@@ -3318,6 +3354,80 @@ mod test {
             .expect("the built economy degrades offline, which it may only do with a replayer");
     }
 
+    /// **Issue #276's durability claim, at the path that actually threatens it.**
+    ///
+    /// `merge_enabled_workflows` re-derives `[workflows].enabled` from seed ∪
+    /// overlay ids on every build — it re-arms that list by design. The pause
+    /// switch is a separate field precisely so a rebuild cannot undo it, and
+    /// this is the test that says so: disable a workflow, build again over the
+    /// same store, and it must still be disabled.
+    ///
+    /// The store round-trip tests cover save→load; this covers build→save, which
+    /// is a different write and the one that would silently re-arm every paused
+    /// schedule on restart.
+    #[tokio::test]
+    async fn a_rebuild_keeps_a_paused_workflow_paused() {
+        use crate::ports::types::OverlayWorkflow;
+        use crate::store::FsCompanyStore;
+
+        let home_dir = tmp_home("oc-paused-rebuild-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("pause-co");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Pause Co"
+
+            [[agent]]
+            id = "assistant"
+            role = "Assistant"
+            "#,
+        );
+
+        // First build materializes the record.
+        RuntimeBuilder::new(home.clone(), manifest.clone())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        // An overlay workflow, switched off — the state an operator would have
+        // left behind by clicking Pause.
+        let store = FsCompanyStore::new(home.clone());
+        let mut record = store.load(&id).await.unwrap().unwrap();
+        record.overlay_workflows.push(OverlayWorkflow {
+            id: "digest".to_string(),
+            toml: "id = \"digest\"\nname = \"Digest\"\n[[node]]\nid = \"start\"\nkind = \"trigger\"\nname = \"Start\"\n"
+                .to_string(),
+        });
+        record.set_workflow_enabled("digest", false);
+        store.save(&record).await.unwrap();
+
+        // Rebuild, exactly as a restart does.
+        RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+
+        let rebuilt = store.load(&id).await.unwrap().unwrap();
+        assert!(
+            !rebuilt.workflow_enabled("digest"),
+            "the rebuild re-armed a paused workflow — `disabled_workflows` was not carried forward"
+        );
+        // And the merge it has to survive did run: the id is back in the
+        // manifest's declaration list, which is exactly why that list could not
+        // have been the switch.
+        assert!(
+            rebuilt
+                .manifest
+                .workflows
+                .enabled
+                .contains(&"digest".to_string()),
+            "merge_enabled_workflows did not run, so this test proves nothing"
+        );
+    }
+
     /// Spawns an in-process OpenAI-compatible stub that answers every
     /// chat-completion with `marker`, so a harness turn can run without a real
     /// inference backend. Mirrors the provider-test helper of the same name.
@@ -3404,6 +3514,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await

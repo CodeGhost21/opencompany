@@ -77,6 +77,7 @@ import { InboxView } from "@/views/InboxView";
 import { MemoryView } from "@/views/MemoryView";
 import { FeedbackView } from "@/views/FeedbackView";
 import { SettingsSection } from "@/views/SettingsSection";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 // React Flow is heavy and only used here — load it on demand.
 const WorkflowsView = lazy(() =>
@@ -226,6 +227,8 @@ export function AppShell({
   onSwitchCompany,
   onBackToPicker,
 }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const [view, sub, navigate] = useHashView<View>(VIEWS, "overview");
   // Most call sites only ever change the top-level view.
   const setView = useCallback((next: View, nextSub?: string) => navigate(next, nextSub), [navigate]);
@@ -269,9 +272,11 @@ export function AppShell({
   // not the payload, so the view owns what it refetches.
   const [workflowRunTick, setWorkflowRunTick] = useState(0);
   // Issue #384: bumped on every `workflow_created` / `workflow_updated` /
-  // `workflow_deleted`, so the Workflows view re-reads its picker while the tab
-  // stays open — a graph authored by the orchestrator, by another session or by
-  // a machine credential used to be invisible until a reload.
+  // `workflow_deleted`, and since issue #276 on `workflow_enabled_changed` too,
+  // so the Workflows view re-reads its picker while the tab stays open — a graph
+  // authored by the orchestrator, by another session or by a machine credential
+  // used to be invisible until a reload, and a workflow armed or paused
+  // elsewhere used to keep rendering its old switch.
   //
   // A counter rather than the payload, for the same reason `taskEventTick` is:
   // the view re-reads `GET …/workflows`, so two frames collapsing into one
@@ -537,9 +542,9 @@ export function AppShell({
       // the operator was reading instead of whichever sorts first (issue #412).
       // The ref above cannot do it: it dies with this mount, and a reload is
       // exactly one of the trips that has to survive.
-      writeLastChannel(company, channelId);
+      writeLastChannel(scope, channelId);
     },
-    [company],
+    [scope],
   );
 
   const setThreadMessages = (
@@ -932,6 +937,7 @@ export function AppShell({
         <SidebarFooter>
           <SidebarControls
             lifecycleState={feed.status.lifecycle}
+            emergencyPaused={feed.status.emergency_paused}
             companies={companies}
             activeCompany={company}
             onSwitchCompany={onSwitchCompany}

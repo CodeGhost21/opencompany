@@ -28,6 +28,15 @@ export interface CompanyStatus {
    * a company provisioned from a raw manifest rather than a template.
    */
   template_provenance?: TemplateProvenance | null;
+  /**
+   * Whether the governance kill switch is engaged (issue #86): new effects
+   * outside the `Other` group are being denied.
+   *
+   * Deliberately independent of `lifecycle`, which stays `"running"` — chat
+   * still works while a company is stopped. Anything showing company state must
+   * read this too, or it will report a stopped company as perfectly healthy.
+   */
+  emergency_paused?: boolean;
 }
 
 /** What kind of processing step this is (drives the timeline icon). */

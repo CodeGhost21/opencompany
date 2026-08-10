@@ -41,7 +41,7 @@ pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;
 pub use context::ContextStore;
 pub use economy::AgentEconomy;
-pub use events::EventLog;
+pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
 pub use ids::{generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
@@ -52,7 +52,7 @@ pub use runs::{
     reap_orphaned_runs,
 };
 pub use secrets::SecretStore;
-pub use sessions::{SessionRecord, SessionStore};
+pub use sessions::{SessionKind, SessionRecord, SessionStore};
 pub use skills_state::{SkillSource, SkillState, SkillStateStore};
 pub use store::CompanyStore;
 pub use tasks::{TaskRecord, TaskStore};

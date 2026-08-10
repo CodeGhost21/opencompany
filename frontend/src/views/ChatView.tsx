@@ -43,6 +43,7 @@ import { MembersPane } from "./chat/MembersPane";
 import { MessageComposer } from "./chat/MessageComposer";
 import { MessageTimeline } from "./chat/MessageTimeline";
 import { ThreadPanel } from "./chat/ThreadPanel";
+import { useLocalScope } from "@/connections/ConnectionContext";
 import {
   buildChannels,
   buildTimeline,
@@ -160,6 +161,8 @@ export function ChatView({
   decidingApprovals,
   decidedApprovals,
 }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [loadingTeam, setLoadingTeam] = useState(true);
   const [fromHost, setFromHost] = useState(false);
@@ -356,11 +359,15 @@ export function ChatView({
       restoredFor.current = undefined;
       return;
     }
-    if (restoredFor.current === company) return;
-    restoredFor.current = company;
-    const remembered = readLastChannel(company);
+    // Scoped like `readLastChannel(scope)`: two connections serving the same
+    // company must each restore their own remembered channel, so a host switch
+    // cannot be mistaken for a re-entry into the previous host's state.
+    const scopeKey = `${scope.connection}::${scope.company ?? "single"}`;
+    if (restoredFor.current === scopeKey) return;
+    restoredFor.current = scopeKey;
+    const remembered = readLastChannel(scope);
     if (remembered) onNavigate(remembered);
-  }, [company, sub, onNavigate]);
+  }, [company, scope, sub, onNavigate]);
 
   // No channels exist until the host has answered. Resolving against a
   // half-built list is exactly the first-paint swap issue #370 describes.

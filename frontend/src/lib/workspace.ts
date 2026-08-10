@@ -13,6 +13,8 @@
 
 export type { FsNode } from "@/api/workspace";
 
+import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
+
 import type { FsNode } from "@/api/workspace";
 
 /* ---- queries ---- */
@@ -83,7 +85,11 @@ export function ensureMdExt(name: string): string {
 
 /* ---- migration off the retired localStorage scratchpad ---- */
 
-const KEY = (company: string | null) => `oc-workspace:${company ?? "single"}`;
+/** Where the pre-connection console kept this company's scratchpad. */
+const legacyWorkspaceKey = (scope: LocalScope) => `oc-workspace:${scope.company ?? "single"}`;
+
+const KEY = (scope: LocalScope) =>
+  scopedKeyAdoptingLegacy("oc-workspace", scope, legacyWorkspaceKey(scope));
 
 /**
  * Ids the *bundled seed* used. These four nodes were app source shipped to
@@ -102,10 +108,10 @@ const SEED_ID_PREFIX = "seed-";
  * there is nothing worth rescuing — either the key is absent, unparseable, or
  * holds nothing but the seed.
  */
-export function readLegacyLocalNodes(company: string | null): FsNode[] {
+export function readLegacyLocalNodes(scope: LocalScope): FsNode[] {
   let raw: string | null = null;
   try {
-    raw = localStorage.getItem(KEY(company));
+    raw = localStorage.getItem(KEY(scope));
   } catch {
     return [];
   }
@@ -128,18 +134,27 @@ export function readLegacyLocalNodes(company: string | null): FsNode[] {
 }
 
 /** Whether the legacy key exists at all (so a seed-only key can be swept). */
-export function hasLegacyLocal(company: string | null): boolean {
+export function hasLegacyLocal(scope: LocalScope): boolean {
   try {
-    return localStorage.getItem(KEY(company)) !== null;
+    return localStorage.getItem(KEY(scope)) !== null;
   } catch {
     return false;
   }
 }
 
-/** Drop the retired scratchpad for this company. */
-export function clearLegacyLocal(company: string | null): void {
+/**
+ * Drop the retired scratchpad for this company.
+ *
+ * Removes the **origin** as well as this connection's adopted copy. Unlike the
+ * other adopted keys — where two connections each inheriting the old tour
+ * progress is the intended reading — this one is *consumed* by the import. Left
+ * behind, the next connection to look would adopt it and offer the same notes
+ * again, and the operator would import them twice with nothing saying so.
+ */
+export function clearLegacyLocal(scope: LocalScope): void {
   try {
-    localStorage.removeItem(KEY(company));
+    localStorage.removeItem(KEY(scope));
+    localStorage.removeItem(legacyWorkspaceKey(scope));
   } catch {
     /* storage unavailable — nothing to clear */
   }

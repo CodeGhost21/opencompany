@@ -36,7 +36,7 @@ use crate::Result;
 use crate::company::CompanyManifest;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::EventLog;
+use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::login_codes::LoginCodeRecord;
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
@@ -301,6 +301,7 @@ impl SqliteStore {
     }
 
     fn from_conn(conn: Connection) -> Result<Self> {
+        Self::apply_pragmas(&conn)?;
         conn.execute_batch(MIGRATIONS).map_err(sql_err)?;
         // `CREATE TABLE IF NOT EXISTS` is a no-op on a database that predates a
         // column, so additive columns need their own idempotent step.
@@ -314,6 +315,43 @@ impl SqliteStore {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
         })
+    }
+
+    /// Connection settings applied before the first migration statement runs.
+    ///
+    /// Ordering is load-bearing: `journal_mode` cannot change inside a
+    /// transaction, and [`MIGRATIONS`] is an `execute_batch` that opens one. Set
+    /// here, not in `open`, so the in-memory constructor takes the identical
+    /// path — a divergence between the two would mean the test suite exercises
+    /// settings production never gets.
+    ///
+    /// `journal_mode=WAL` is a no-op on an in-memory database (SQLite answers
+    /// `memory` and reports no error), which is why this is safe to share.
+    ///
+    /// What each one is actually for, given this store holds exactly ONE
+    /// `Connection` behind a `StdMutex`:
+    ///
+    /// - `synchronous=NORMAL` is the real win, and only sound under WAL: it
+    ///   drops the per-commit fsync to a per-checkpoint one. A desktop instance
+    ///   commits an event per turn step, and `FULL` makes each of those a disk
+    ///   flush. Under WAL the failure mode it trades away is losing the last
+    ///   commits to an OS/power loss, not corruption.
+    /// - `busy_timeout` buys nothing against our own single connection — it is
+    ///   the guard for a SECOND one: an operator with the `sqlite3` CLI open
+    ///   against the same file, or a second process that got past the home lock.
+    ///   Five seconds of blocking beats an immediate `SQLITE_BUSY` surfacing as
+    ///   a 500.
+    /// - `foreign_keys=ON` is stated rather than assumed. SQLite defaults it
+    ///   OFF per-connection, so any future `REFERENCES` clause in [`MIGRATIONS`]
+    ///   would be inert decoration, and would stay inert silently.
+    fn apply_pragmas(conn: &Connection) -> Result<()> {
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA busy_timeout=5000;
+             PRAGMA foreign_keys=ON;",
+        )
+        .map_err(sql_err)
     }
 
     fn conn(&self) -> MutexGuard<'_, Connection> {
@@ -374,6 +412,7 @@ impl CompanyStore for SqliteStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
     }
@@ -533,6 +572,48 @@ impl EventLog for SqliteStore {
             }
         });
         Box::pin(stream)
+    }
+
+    async fn prune(&self, id: &CompanyId, policy: &RetentionPolicy) -> Result<PruneReport> {
+        // Whole-log read rather than a `DELETE … WHERE at_ms < ?`: the policy's
+        // per-kind bound is a property of the decoded event, and routing every
+        // backend through `plan_prune` is what keeps fs, sqlite and mongodb
+        // from drifting on the one operation that cannot be undone. Journals
+        // are bounded by this very feature, so the read is affordable.
+        let all = self.read_from(id, EventSeq::new(0), usize::MAX).await?;
+        let doomed = plan_prune(&all, policy);
+
+        let mut report = PruneReport {
+            scanned: all.len(),
+            removed: 0,
+            oldest_retained: all.iter().map(|e| e.seq).min(),
+        };
+        if doomed.is_empty() {
+            return Ok(report);
+        }
+
+        {
+            let mut conn = self.conn();
+            let tx = conn.transaction().map_err(sql_err)?;
+            {
+                let mut stmt = tx
+                    .prepare("DELETE FROM events WHERE company_id = ?1 AND seq = ?2")
+                    .map_err(sql_err)?;
+                for seq in &doomed {
+                    stmt.execute(params![id.as_ref(), seq.value() as i64])
+                        .map_err(sql_err)?;
+                }
+            }
+            tx.commit().map_err(sql_err)?;
+        }
+
+        report.removed = doomed.len();
+        report.oldest_retained = all
+            .iter()
+            .map(|e| e.seq)
+            .filter(|seq| doomed.binary_search(seq).is_err())
+            .min();
+        Ok(report)
     }
 }
 
@@ -2134,6 +2215,39 @@ mod test {
         Arc::new(SqliteStore::open_in_memory().expect("open in-memory sqlite"))
     }
 
+    /// [`SqliteStore::apply_pragmas`] settles for the connection the ports use.
+    ///
+    /// Asserted against a FILE-backed database on purpose. Every other test here
+    /// runs in memory, where `journal_mode=WAL` legitimately answers `memory` —
+    /// so an in-memory assertion could not distinguish "WAL was applied" from
+    /// "the pragma was never issued", which is the regression worth catching.
+    /// `synchronous=NORMAL` is only sound under WAL, so the two are checked
+    /// together rather than separately.
+    #[tokio::test]
+    async fn file_backed_store_runs_in_wal_with_relaxed_sync() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = SqliteStore::open(dir.path().join("opencompany.db")).expect("open sqlite file");
+
+        let conn = store.conn();
+        let journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .expect("read journal_mode");
+        // SQLite reports the mode lowercased regardless of how it was set.
+        assert_eq!(journal.to_ascii_lowercase(), "wal");
+
+        // 1 == NORMAL. The numeric form is what `PRAGMA synchronous` reads back;
+        // there is no symbolic getter.
+        let synchronous: i64 = conn
+            .query_row("PRAGMA synchronous", [], |row| row.get(0))
+            .expect("read synchronous");
+        assert_eq!(synchronous, 1, "expected synchronous=NORMAL");
+
+        let foreign_keys: i64 = conn
+            .query_row("PRAGMA foreign_keys", [], |row| row.get(0))
+            .expect("read foreign_keys");
+        assert_eq!(foreign_keys, 1, "expected foreign_keys=ON");
+    }
+
     #[tokio::test]
     async fn conformance_isolation_by_company() {
         let s = store();
@@ -2150,6 +2264,12 @@ mod test {
     async fn conformance_monotonic_event_seq() {
         let s = store();
         conformance::assert_monotonic_event_seq(s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_event_retention() {
+        let s = store();
+        conformance::assert_event_retention(s).await;
     }
 
     #[tokio::test]
@@ -2332,6 +2452,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await

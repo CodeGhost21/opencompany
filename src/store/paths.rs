@@ -87,6 +87,7 @@ pub fn resolve_home(flag: Option<PathBuf>) -> Result<PathBuf> {
         std::env::var_os(DATA_DIR_ENV),
         std::env::var_os(REMOVED_HOME_ENV),
         std::env::var_os("HOME"),
+        std::env::var_os("USERPROFILE"),
     )
 }
 
@@ -97,6 +98,7 @@ fn resolve_home_from(
     data_dir: Option<OsString>,
     removed_home: Option<OsString>,
     unix_home: Option<OsString>,
+    windows_profile: Option<OsString>,
 ) -> Result<PathBuf> {
     let set = |value: Option<OsString>| value.filter(|value| !value.is_empty());
 
@@ -114,7 +116,17 @@ fn resolve_home_from(
     if let Some(dir) = set(data_dir) {
         return Ok(PathBuf::from(dir));
     }
-    Ok(match set(unix_home) {
+    // `USERPROFILE` after `HOME`, because Windows does not set `HOME` but some
+    // shells there (git-bash, MSYS) set both — and a user who has `HOME` set
+    // means it.
+    //
+    // Without this branch the fallback on Windows is the RELATIVE
+    // `.opencompany`, which resolves against the process working directory: for
+    // a double-clicked application that is wherever the launcher happened to
+    // put it, quite possibly `C:\Program Files`, and quite possibly
+    // unwritable. A relative data root is also silently *different* per launch,
+    // which is worse than failing — two runs would use two stores.
+    Ok(match set(unix_home).or_else(|| set(windows_profile)) {
         Some(home) => PathBuf::from(home).join(".opencompany"),
         None => PathBuf::from(".opencompany"),
     })
@@ -435,10 +447,11 @@ fn restrict_dir(_dir: &Path) -> Result<()> {
 
 /// Restricts a file to owner read/write only (`0600`) on unix.
 ///
-/// Used for identity key material (`keys/agent.ed25519`). A no-op on non-unix
-/// targets, which rely on directory isolation instead. Gated to the sole
-/// consumer (the `tinyplace` signer) so the default build has no dead code.
-#[cfg(all(unix, feature = "tinyplace"))]
+/// Used for identity key material (`keys/agent.ed25519`, and the runner's own
+/// key). A no-op on non-unix targets, which rely on directory isolation
+/// instead. Gated to its consumers — the `identity` signer — so the default
+/// build has no dead code.
+#[cfg(all(unix, feature = "identity"))]
 pub(crate) fn restrict_file(path: &Path) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
 
@@ -449,7 +462,7 @@ pub(crate) fn restrict_file(path: &Path) -> Result<()> {
     })
 }
 
-#[cfg(all(not(unix), feature = "tinyplace"))]
+#[cfg(all(not(unix), feature = "identity"))]
 pub(crate) fn restrict_file(_path: &Path) -> Result<()> {
     Ok(())
 }
@@ -498,6 +511,7 @@ mod test {
             data_dir.map(OsString::from),
             None,
             home.map(OsString::from),
+            None,
         )
     }
 
@@ -583,6 +597,41 @@ mod test {
         );
     }
 
+    /// Windows has no `HOME`, and the fallback below it is a RELATIVE path.
+    ///
+    /// A double-clicked desktop app resolves a relative root against whatever
+    /// working directory the launcher gave it — plausibly `C:\Program Files`,
+    /// plausibly unwritable, and plausibly *different* between launches. That
+    /// last one is the dangerous part: two runs would quietly use two stores.
+    #[test]
+    fn a_windows_profile_stands_in_for_a_missing_home() {
+        let win = |home: Option<&str>, profile: Option<&str>| {
+            resolve_home_from(
+                None,
+                None,
+                None,
+                home.map(OsString::from),
+                profile.map(OsString::from),
+            )
+            .unwrap()
+        };
+
+        assert_eq!(
+            win(None, Some("C:\\Users\\ada")),
+            PathBuf::from("C:\\Users\\ada").join(".opencompany")
+        );
+        // `HOME` wins where both are set: git-bash and MSYS set both, and a
+        // user who has `HOME` set means it.
+        assert_eq!(
+            win(Some("/home/ada"), Some("C:\\Users\\ada")),
+            PathBuf::from("/home/ada/.opencompany")
+        );
+        // An empty profile is not a location.
+        assert_eq!(win(None, Some("")), PathBuf::from(".opencompany"));
+        // Neither: the documented relative default, unchanged.
+        assert_eq!(win(None, None), PathBuf::from(".opencompany"));
+    }
+
     #[test]
     fn the_removed_home_variable_fails_loudly() {
         let err = resolve_home_from(
@@ -590,6 +639,7 @@ mod test {
             None,
             Some(OsString::from("/custom/home")),
             Some(OsString::from("/home/u")),
+            None,
         )
         .expect_err("OPENCOMPANY_HOME must not be silently ignored");
         let message = err.to_string();
@@ -607,12 +657,13 @@ mod test {
                 None,
                 Some(OsString::from("/custom/home")),
                 None,
+                None,
             )
             .is_err()
         );
 
         // An empty value is not "set" and stays silent.
-        assert!(resolve_home_from(None, None, Some(OsString::new()), None).is_ok());
+        assert!(resolve_home_from(None, None, Some(OsString::new()), None, None).is_ok());
     }
 
     #[test]

@@ -830,6 +830,28 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["name"] = json!(name);
             o
         }
+        // Issue #276: a workflow armed or paused, so a console holding the
+        // Workflows tab open re-renders the toggle instead of showing a stale
+        // one — and so an operator watching the stream sees the disarm rule fire
+        // on someone else's edit. `reason` rides along because it is a closed
+        // enum of our own words with no operator content in it, and it is the
+        // difference between "a colleague paused this" and "the host refused to
+        // arm it"; `by` is dropped, same deny-by-default actor omission as every
+        // arm above.
+        CompanyEvent::WorkflowEnabledChanged {
+            workflow_id,
+            name,
+            enabled,
+            reason,
+            ..
+        } => {
+            let mut o = envelope("workflow_enabled_changed");
+            o["workflowId"] = json!(workflow_id);
+            o["name"] = json!(name);
+            o["enabled"] = json!(enabled);
+            o["reason"] = json!(reason);
+            o
+        }
         // Issue #111: surface an accepted operator steer so the console's
         // in-flight strip can refresh live. Only the task id + action word go on
         // the wire — the actor (`by`) and the operator's redirect `instruction`
@@ -2064,6 +2086,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await
@@ -2186,6 +2209,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         };
         FsCompanyStore::new(home.to_path_buf())
@@ -2300,6 +2324,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
             .await

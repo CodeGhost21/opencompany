@@ -1260,6 +1260,11 @@ fn cycle_task_id(
             // park it describes. Treating it as a trigger would make a cycle
             // that parks twice disqualify its own second stamp.
             CompanyEvent::LifecycleChanged { .. }
+            // Issue #86: a record of an operator's governance decision, on the
+            // same terms as the lifecycle change above it. The stop is enforced
+            // in the approval gate, not by starting or claiming a cycle, so it
+            // names no card and competes with none.
+            | CompanyEvent::EmergencyPauseChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
@@ -1275,6 +1280,7 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowCreated { .. }
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
+            | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             // Issue #371: a run's start and its per-node finishes are records of
             // a workflow walking its graph, not stimuli for a new cycle. They
@@ -1383,6 +1389,11 @@ fn cycle_thread_id(
             // Records of something that already happened, not stimuli for new
             // work: they name no thread and compete with none.
             CompanyEvent::LifecycleChanged { .. }
+            // Issue #86: a record of an operator's governance decision, on the
+            // same terms as the lifecycle change above it. The stop is enforced
+            // in the approval gate, not by starting or claiming a cycle, so it
+            // names no card and competes with none.
+            | CompanyEvent::EmergencyPauseChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
@@ -1398,6 +1409,7 @@ fn cycle_thread_id(
             | CompanyEvent::WorkflowCreated { .. }
             | CompanyEvent::WorkflowUpdated { .. }
             | CompanyEvent::WorkflowDeleted { .. }
+            | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
