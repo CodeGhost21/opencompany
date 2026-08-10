@@ -90,7 +90,14 @@ impl OpenHumanLaunch {
     /// verbatim from OpenHuman's own `dev:app`/`dev:wry`/`macos:build:release`/
     /// `tauri:build:ui` pnpm scripts so the host matches what OpenHuman expects.
     fn desktop_tauri_args(&self) -> Vec<String> {
-        let port = std::env::var("OPENHUMAN_DEV_PORT").unwrap_or_else(|_| "1420".to_string());
+        // OPENHUMAN_DEV_PORT becomes a numeric devUrl in the --config JSON; a
+        // non-numeric value would emit usable-but-wrong JSON, and quotes or
+        // backslashes would make it malformed. Parse as u16 and fall back to
+        // Tauri/Vite's default 1420.
+        let port = std::env::var("OPENHUMAN_DEV_PORT")
+            .ok()
+            .and_then(|p| p.trim().parse::<u16>().ok())
+            .unwrap_or(1420);
         match (self.release, DesktopBackend::for_host()) {
             (false, DesktopBackend::Cef) => {
                 let config = format!("{{\"build\":{{\"devUrl\":\"http://localhost:{port}\"}}}}");
