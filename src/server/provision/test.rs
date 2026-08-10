@@ -544,6 +544,26 @@ async fn emergency_routes_refuse_without_the_right_confirmation() {
     assert_eq!(bare.status(), StatusCode::BAD_REQUEST);
     assert_eq!(json_body(bare).await["code"], "confirmation_required");
 
+    // A declared JSON body that is empty (or malformed) must reach the handler
+    // and read as "no step-up supplied" — the same envelope, not an opaque
+    // `Json` rejection. (With `Option<Json<_>>` this request would have been
+    // rejected by the extractor before the handler got to answer; the
+    // error-aware arm keeps the panic button able to say *what* to send.)
+    let empty_json = Request::builder()
+        .method("POST")
+        .uri("/api/v1/companies/acme/emergency-pause")
+        .header("authorization", format!("Bearer {PLATFORM_SECRET}"))
+        .header("content-type", "application/json")
+        .body(Body::empty())
+        .unwrap();
+    let empty_json = app
+        .clone()
+        .oneshot(empty_json)
+        .await
+        .unwrap();
+    assert_eq!(empty_json.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(empty_json).await["code"], "confirmation_required");
+
     // Wrong phrase → 400.
     let wrong = app
         .clone()
