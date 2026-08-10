@@ -57,12 +57,18 @@
 //! name — the same fallback the GraphQL `Company.workflows` resolver uses — so a
 //! provisioned tenant's picker isn't empty.
 //!
-//! Execution is dependency-inverted behind the [`WorkflowRunner`] port: when no
-//! runner is wired (the default build, or a runtime built without a harness) the
-//! run route reports `not_wired` — the same 404 seam the DNS/SMTP surfaces use —
-//! so the default build stays inert. The read routes need no runner: they only
-//! parse the saved graphs, so the console can list and render workflows even on
-//! a build that cannot execute them.
+//! Execution is dependency-inverted behind the [`WorkflowRunner`] port. When no
+//! runner is wired the run route classifies *why* (see
+//! [`runner_gap_for`](crate::server::ops::inference::runner_gap_for)) and answers
+//! with one of three responses, because the operator's next step differs: the
+//! default build or a runtime built without a harness reports `not_wired` (the
+//! same 404 seam the DNS/SMTP surfaces use) so it stays inert; a company holding
+//! a saved config a restart would pick up reports `restart_required` (409, issue
+//! #266); and a company that never configured inference reports
+//! `inference_required` (409, issue #514) so the console points the operator at
+//! Settings instead of degrading to read-only. The read routes need no runner:
+//! they only parse the saved graphs, so the console can list and render
+//! workflows even on a build that cannot execute them.
 
 use std::collections::HashSet;
 use std::path::Path as FsPath;
@@ -878,20 +884,29 @@ async fn run_workflow(
     Path(WorkflowPath { wid }): Path<WorkflowPath>,
     body: Option<Json<RunWorkflowBody>>,
 ) -> Result<RunWorkflowOk, Response> {
-    // No runner wired. Two very different causes look identical from here, and
-    // `not_wired` only describes the first (issue #266):
+    // No runner wired. THREE very different causes look identical from here —
+    // `workflow_runner() == None` — and each points the operator at a different
+    // next step (issues #266, #514):
     //   1. this build/deployment has no workflow execution at all — nothing the
     //      operator can do, so "not wired in this deployment" is the truth;
     //   2. this *boot* has none, because the company started with no inference
-    //      source. The runner is populated from the harness arm at build time, so
-    //      configuring inference afterwards leaves it `None` until a restart —
-    //      and a `not_wired` 404 sends the operator hunting a deployment problem
-    //      that does not exist.
+    //      source but one is saved now. The runner is populated from the harness
+    //      arm at build time, so configuring inference afterwards leaves it
+    //      `None` until a restart — reported as `restart_required` (#266);
+    //   3. nothing was ever configured, but this host can run the harness. The
+    //      fix is to configure an inference source (which rebuilds in place,
+    //      #290) — reported as `inference_required`, not the `not_wired` 404 that
+    //      would send the operator hunting a deployment problem that does not
+    //      exist (#514).
     let Some(runner) = company.runtime.workflow_runner() else {
-        if super::inference::restart_pending_for(company.runtime.as_ref()).await {
-            return Err(super::restart_required("workflow execution"));
-        }
-        return Err(super::not_wired("workflow execution"));
+        use super::inference::RunnerGap;
+        return Err(
+            match super::inference::runner_gap_for(company.runtime.as_ref()).await {
+                RunnerGap::RestartPending => super::restart_required("workflow execution"),
+                RunnerGap::InferenceRequired => super::inference_required("workflow execution"),
+                RunnerGap::NotWired => super::not_wired("workflow execution"),
+            },
+        );
     };
 
     // `wid` becomes a filename — reject anything that could escape `workflows/`.
