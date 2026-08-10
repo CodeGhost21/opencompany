@@ -320,6 +320,18 @@ jobs:
       - name: Test the runner lane
         run: cargo test --locked --features runner --lib runner
 
+      # The ACP surface, for the same reason and with the same shape. Both
+      # modules document themselves in terms of a feature that did not exist
+      # until now, so they compiled into every build and were run by no lane —
+      # and served by no route either, since nothing mounts them yet.
+      # Two invocations, not one: `--lib` selects the target and the bare
+      # argument is the filter, so a second filter would be read as a flag
+      # rather than as another module — and would silently narrow to nothing.
+      - name: Test the ACP surface
+        run: |
+          cargo test --locked --features acp --lib server::acp
+          cargo test --locked --features acp --lib harness::acp_run_turn
+
       - name: Assert every integration target actually runs
         run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
 
