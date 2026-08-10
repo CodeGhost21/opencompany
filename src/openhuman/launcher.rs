@@ -351,8 +351,8 @@ impl OpenHumanLaunch {
         // Put the install root's bin first so the install itself resolves a
         // CEF-aware toolchain if it shells out; `~/.cargo/bin` is appended
         // only when HOME is set, since HOME is what locates that directory.
-        let home = std::env::var("HOME").ok();
-        let path = desktop_path_env(&install_root, home.as_deref(), &env_pathent());
+        let inherited = std::env::var("PATH").unwrap_or_default();
+        let path = desktop_path_env(&install_root, std::env::var("HOME").ok().as_deref(), &inherited);
         install.env("PATH", path);
         let status = install.status().await?;
         if !status.success() {
