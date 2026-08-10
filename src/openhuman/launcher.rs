@@ -816,7 +816,10 @@ mod tests {
         // source written *after* the binary is strictly newer than it, which
         // correctly reports stale and flips the assertion.
         let bin_mtime = SystemTime::now() + std::time::Duration::from_secs(3600);
-        fs::File::open(&bin).unwrap().set_modified(bin_mtime).unwrap();
+        fs::File::open(&bin)
+            .unwrap()
+            .set_modified(bin_mtime)
+            .unwrap();
         // Binary is pinned newer than the source → fresh.
         assert!(tauri_cli_is_fresh(&bin, &src));
 
