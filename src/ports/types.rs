@@ -1077,6 +1077,7 @@ impl CompanyEvent {
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
+            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
         }
     }
 
@@ -1103,6 +1104,13 @@ impl CompanyEvent {
     /// `OperatorMessage`, `AgentReply` and `TaskDiscussionPosted` are addressed
     /// by sequence from thread parents, reactions, and #358's redaction
     /// tombstone, so pruning one dangles a pointer nothing can repair.
+    ///
+    /// And a third reason, sharper than either: **something still reads it.**
+    /// `WorkflowReportDelivered` is folded at boot by
+    /// `runtime::delivered_by_unsettled_runs` to learn what a crashed run
+    /// already sent. Pruning it re-delivers already-sent reports to real
+    /// people. When classifying a new variant, ask not only "is this evidence"
+    /// and "does anything point at it", but "does anything read it back".
     pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
         use crate::ports::events::RetentionClass::{Permanent, Prunable};
         match self {
