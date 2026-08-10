@@ -308,7 +308,8 @@ mod tests {
         assert_eq!(kind("strategist"), Some(NodeKind::Agent));
         assert_eq!(kind("gate"), Some(NodeKind::Condition));
         assert_eq!(kind("research"), Some(NodeKind::ToolCall));
-        assert_eq!(kind("publish"), Some(NodeKind::HttpRequest));
+        // `publish` is an agent assembly step (#530) — there is no CMS to POST to.
+        assert_eq!(kind("publish"), Some(NodeKind::Agent));
         // `output` lowers to a pass-through `transform`.
         assert_eq!(kind("done"), Some(NodeKind::Transform));
     }
@@ -368,11 +369,13 @@ mod tests {
 
     // --- P1: config overlay + error/retry/approval + error routing ---------
 
-    /// A snapshot pinning that the shipped campaign pipeline (which uses none of
-    /// the P1 fields) translates byte-identically to the pre-P1 output: every
-    /// node's config equals exactly what the old kind-only mapping produced.
+    /// A snapshot pinning the shipped campaign pipeline's translated config. Most
+    /// nodes carry only kind-derived config; the `research` `tool_call` binds the
+    /// metered `web_search` slug + args and an `on_error = "continue"` policy
+    /// (#530), and `publish` is an `agent` assembly step (there is no CMS to POST
+    /// to), so each carries exactly the config those choices imply.
     #[test]
-    fn campaign_translation_is_byte_identical_to_legacy() {
+    fn campaign_translation_lowers_to_the_expected_engine_config() {
         let file = parse_workflow(CAMPAIGN).expect("campaign parses");
         let graph = translate(&file);
         let config = |id: &str| {
@@ -389,8 +392,21 @@ mod tests {
             json!({ "agent_ref": "brand_strategist", "prompt": "Turns the brief into an angle + outline." })
         );
         assert_eq!(config("gate"), json!({}));
-        assert_eq!(config("research"), json!({ "slug": "research" }));
-        assert_eq!(config("publish"), json!({}));
+        assert_eq!(
+            config("research"),
+            json!({
+                "slug": "web_search",
+                "args": { "query": "=item.text", "max_results": 5 },
+                "on_error": "continue"
+            })
+        );
+        assert_eq!(
+            config("publish"),
+            json!({
+                "agent_ref": "copywriter",
+                "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off."
+            })
+        );
         assert_eq!(config("done"), json!({}));
     }
 

@@ -1565,6 +1565,13 @@ impl RuntimeBuilder {
                                         approvals: gate.clone(),
                                         journal: journal.clone(),
                                     }),
+                                    // Issue #529: the same journal the runner
+                                    // writes its start/per-node trail to, so a
+                                    // dispatch's write-behind delivery record
+                                    // lands in the one log the boot-time fold
+                                    // reads back. One company owns one journal;
+                                    // this is that handle.
+                                    events: events.clone(),
                                 }),
                                 // Issue #237: the SAME workspace handle the
                                 // console's REST/GraphQL surface writes through

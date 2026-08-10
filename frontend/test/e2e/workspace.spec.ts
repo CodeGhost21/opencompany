@@ -233,10 +233,15 @@ test("the retired local scratchpad is offered for import, its seed discarded", a
 
   await openWorkspace(page);
 
-  // The banner offers only the user's nodes — the seed is not counted.
+  // The banner offers only the user's nodes — the seed is not counted — and
+  // names them per kind (#507). It used to say "3 notes" for this very
+  // fixture, then import them and toast "Imported 2 notes and 1 folder": the
+  // prompt and the receipt disagreed about the same three nodes. Asserting
+  // both strings in one test is what holds them together.
   const banner = page.getByTestId("workspace-migration-banner");
   await expect(banner).toBeVisible({ timeout: 30_000 });
-  await expect(banner).toContainText("3 notes");
+  await expect(banner).toContainText("2 notes and 1 folder");
+  await expect(banner).toContainText("are not in the company workspace yet");
 
   await page.getByTestId("workspace-migration-import").click();
 

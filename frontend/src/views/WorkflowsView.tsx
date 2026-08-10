@@ -16,6 +16,7 @@ import {
   Loader2,
   Pencil,
   Play,
+  Plug,
   Plus,
   RotateCw,
   Square,
@@ -52,7 +53,7 @@ import {
 } from "@/components/ui/alert-dialog";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
+import { Button, buttonVariants } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -64,6 +65,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { WorkflowNode } from "@/components/workflow-node";
 import { WorkflowCreateDialog } from "@/views/WorkflowCreateDialog";
+import { cn } from "@/lib/utils";
 import type { NodeRunState } from "@/lib/workflow-sample";
 // Issue #303: the canvas arithmetic, the run-state folds and the three drawers
 // moved out when this file passed 1800 lines and was about to grow an index and
@@ -79,6 +81,7 @@ import {
 import { LastRunChip, RunHistoryPanel } from "@/views/workflows/RunHistoryPanel";
 import { WorkflowIndex, type IndexMode } from "@/views/workflows/WorkflowIndex";
 import { CopilotPanel } from "@/views/workflows/CopilotPanel";
+import { classifyRunError } from "@/views/workflows/run-error";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
 
@@ -282,6 +285,17 @@ export function WorkflowsView({
   // button must be disabled during the request too, and a rejected request
   // never produces a run id.
   const [starting, setStarting] = useState(false);
+  // Issue #528 / #514: a run the host REFUSED for a reason the operator can act
+  // on — no inference source configured, or a saved one a restart owes. Like a
+  // version conflict, this is not a toast: the fix is a few clicks away in
+  // Settings, so it earns a persistent banner keyed on the structured `code`.
+  const [runRefusal, setRunRefusal] = useState<{ code: string; message: string } | null>(null);
+  // Issue #528: whether a NON-scheduled `workflow_run_started` frame for the
+  // workflow on screen has arrived since the last dispatch — i.e. our own run
+  // reached the engine before the connection could drop. A ref, not state,
+  // because the `run()` catch reads it synchronously and it must not itself
+  // trigger a render. Reset at the top of every `run()`.
+  const sawOwnRunStartRef = useRef(false);
   // The run whose cancel came back 404, if any.
   //
   // Deliberately a run id rather than a boolean. A 404 is ambiguous — either
@@ -695,6 +709,10 @@ export function WorkflowsView({
   const run = useCallback(async () => {
     if (!selectedId) return;
     setStarting(true);
+    // Clear the last refusal and the own-run-start watch before this attempt, so
+    // neither leaks into the new run's triage (issue #528).
+    setRunRefusal(null);
+    sawOwnRunStartRef.current = false;
     // Issue #371: clear the previous run's marks and paint the opening frontier
     // immediately, so the canvas responds to the click rather than waiting on
     // the first frame. The `workflow_run_started` frame re-sets the same thing
@@ -705,20 +723,25 @@ export function WorkflowsView({
     // can never disagree.
     const asked = request.trim();
     try {
-      // Issue #383: ask to detach. The host answers as soon as the run has an
-      // id, so the console stops holding a request open for the whole run — the
-      // thing a proxy's idle timeout severs.
+      // Issue #528: run SYNCHRONOUSLY — no `detach`. The run's full `output` is
+      // carried ONLY by this settled 200 body; the journal, SSE, and runs list
+      // are structural (per-node status, no agent text), and there is no
+      // run-detail route to fetch it back. So `RunResultPanel` — the only surface
+      // that renders what a run produced — can mount only when this body reaches
+      // the `setResult` branch below. The cost of asking synchronously is just
+      // that the body must arrive: since #383 the host runs the sync path on a
+      // spawned server task, so the run itself survives a dropped connection —
+      // the connection carries the answer, it does not carry the run.
       const res = await runWorkflow(
         client,
         company,
         selectedId,
         asked ? { request: asked } : {},
-        { detach: true },
       );
       setRanWith(asked);
-      // Discriminate on the SHAPE, never on what we asked for. A host predating
-      // #383 ignores `detach` and answers with the settled run — a perfectly
-      // good answer, just a different one.
+      // The `isDetached` branch is kept verbatim as a compatibility seam: a host
+      // that answers with an acceptance for any reason still reads correctly —
+      // discriminate on the SHAPE, never on what we asked for.
       if (isDetached(res)) {
         setActiveRunId(res.runId);
         setAwaitingRunId(res.runId);
@@ -732,16 +755,37 @@ export function WorkflowsView({
       // chip and the panel reflect it immediately.
       setRunsTick((n) => n + 1);
     } catch (e) {
-      toast.error(e instanceof Error ? e.message : "could not run the workflow");
-      // A run that failed is journaled too (#228), and is the outcome most
-      // worth finding again later — so refresh the history on this path as well.
-      setRunsTick((n) => n + 1);
-      // Drop the optimistic frontier so a failed run does not leave a node
-      // pulsing "running" forever. The fold owns anything actually reported.
-      setOptimistic(null);
-      // Nothing was accepted, so nothing is in flight to guard against or to
-      // offer a Cancel for.
-      setActiveRunId(null);
+      // Issue #528 / #514: triage on the STRUCTURED shape, not the message.
+      const kind = classifyRunError(e, sawOwnRunStartRef.current);
+      if (kind === "refusal-inference" && e instanceof ApiError) {
+        // The host refused the run for a reason the operator clears from
+        // Settings. Raise the persistent banner keyed on the code and swallow the
+        // toast — a vanishing raw-string toast is a dead end for a fixable state.
+        // Nothing ran, so drop the optimistic frontier and the in-flight guard.
+        setRunRefusal({ code: e.code, message: e.message });
+        setOptimistic(null);
+        setActiveRunId(null);
+      } else if (kind === "connection-lost") {
+        // The request's connection dropped, but we saw the run start, and the
+        // host's spawned task (#383) keeps walking the graph. Keep the optimistic
+        // canvas and the Stop button (adopted from the live fold), tell the
+        // operator where the outcome will surface, and lean on the history poll.
+        toast.info(
+          "The run continues on the host — watch the canvas; the outcome lands in History.",
+        );
+        setRunsTick((n) => n + 1);
+      } else {
+        toast.error(e instanceof Error ? e.message : "could not run the workflow");
+        // A run that failed is journaled too (#228), and is the outcome most
+        // worth finding again later — so refresh the history on this path as well.
+        setRunsTick((n) => n + 1);
+        // Drop the optimistic frontier so a failed run does not leave a node
+        // pulsing "running" forever. The fold owns anything actually reported.
+        setOptimistic(null);
+        // Nothing was accepted, so nothing is in flight to guard against or to
+        // offer a Cancel for.
+        setActiveRunId(null);
+      }
     } finally {
       setStarting(false);
     }
@@ -882,6 +926,23 @@ export function WorkflowsView({
     setOptimistic(null);
   }, [liveRun]);
 
+  // Issue #528: adopt the live run's id while the synchronous POST is still in
+  // flight.
+  //
+  // The always-detach path (#383) used to seed `activeRunId` straight from the
+  // acceptance body, which is what put the mid-run Stop button on screen. Running
+  // synchronously (so the settled body can carry the output) removed that seed,
+  // so restore it from the live fold: while the request is open and the fold has
+  // adopted OUR own — non-scheduled — run, take its id. A concurrent cron fire is
+  // `scheduled` and must never be adopted here. Recording that we saw our own
+  // start frame is also what lets the run() catch tell a survivable dropped
+  // connection ("the run continues on the host") from a run that never began.
+  useEffect(() => {
+    if (!starting || !liveRun || !liveRun.active || liveRun.scheduled) return;
+    sawOwnRunStartRef.current = true;
+    if (activeRunId === null) setActiveRunId(liveRun.runId);
+  }, [starting, liveRun, activeRunId]);
+
   // Issue #383: release the Run guard when the run we started actually settles,
   // as reported by the live frames. This is the fast path.
   useEffect(() => {
@@ -925,10 +986,19 @@ export function WorkflowsView({
   // journals, but this view is no longer the place watching it, and leaving a
   // Cancel button pointed at another workflow's run would be worse than losing
   // the affordance.
+  //
+  // Issue #528: it must also drop the run RESULT and any run refusal. Now that a
+  // synchronous run populates `result` on every modern host, a stale run-output
+  // drawer (or a "no inference" banner) would otherwise outlive the switch and
+  // read as belonging to the newly-selected workflow. The graph fetch clears
+  // `result` too, but making it explicit here keeps both switch axes honest even
+  // if the graph load is skipped or in flight.
   useEffect(() => {
     setOptimistic(null);
     setOverlayRun(null);
     setActiveRunId(null);
+    setResult(null);
+    setRunRefusal(null);
   }, [selectedId, company]);
 
   // Issue #339: `?run=<runId>` — open the canvas showing that past run.
@@ -1296,6 +1366,34 @@ export function WorkflowsView({
                 <RotateCw className="mr-1.5 size-4" />
                 Reload
               </Button>
+            </AlertDescription>
+          </Alert>
+        </div>
+      )}
+
+      {/* Issue #528 / #514: the host refused the run for a reason the operator
+          can clear from Settings. Persistent (not a toast) and mirroring the
+          conflict banner's layout, with the fix one click away. Keyed on the
+          structured `code`, never the prose. */}
+      {runRefusal && (
+        <div className="px-4 pt-3">
+          <Alert variant="destructive" data-testid="workflow-run-inference-alert">
+            <AlertDescription className="flex flex-wrap items-center justify-between gap-2">
+              <span>
+                {runRefusal.code === "inference_required"
+                  ? "This company has no inference provider configured, so workflows can't run. Set a provider under Settings → Connections → Inference, then run again."
+                  : runRefusal.message}
+              </span>
+              {runRefusal.code === "inference_required" && (
+                <a
+                  href="#/settings/connections"
+                  className={cn(buttonVariants({ variant: "outline", size: "sm" }))}
+                  data-testid="workflow-run-inference-cta"
+                >
+                  <Plug className="mr-1.5 size-4" />
+                  Set up inference
+                </a>
+              )}
             </AlertDescription>
           </Alert>
         </div>

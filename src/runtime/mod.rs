@@ -110,7 +110,9 @@ pub use run_supervisor::{RunGuard, RunSupervisor};
 pub use scheduler::{Clock, CompanyScheduler, FakeClock, SystemClock};
 pub use tools::StubToolProvider;
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
-pub use workflow_outcome::{record_run_finished, sweep_interrupted_runs};
+pub use workflow_outcome::{
+    delivered_by_unsettled_runs, record_run_finished, sweep_interrupted_runs,
+};
 pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub use workflow_spawn::WorkflowSpawn;

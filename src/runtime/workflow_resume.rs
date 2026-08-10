@@ -77,12 +77,29 @@
 //! input itself makes: the card stays self-contained, so the guard survives a
 //! restart exactly like the resume does.
 //!
+//! # The durable ledger behind the card (issue #529)
+//!
+//! The card ledger above guards **one approval lineage**: it rides the trigger
+//! input, so it only reaches a continuation an approval starts. It does nothing
+//! for a run that *crashed* — its deliveries never made it onto any card,
+//! because the run never paused — nor for a workflow re-run or re-triggered
+//! *independently* of the paused lineage. Issue #529 backs the card ledger with
+//! a durable one: every dispatch that leaves the process journals a
+//! [`WorkflowReportDelivered`](crate::ports::types::CompanyEvent::WorkflowReportDelivered)
+//! write-behind, and the runner folds those stranded deliveries
+//! ([`delivered_by_unsettled_runs`](crate::runtime::delivered_by_unsettled_runs))
+//! into the same `already_delivered` list this lineage ledger feeds — unioned,
+//! deduped by node. The two share [`DeliveredReport`] as their identity, so a
+//! crash-then-re-run skips what a crashed run already sent for the same reason a
+//! resume skips what the paused run sent.
+//!
 //! **The honest limit.** The ledger is per `output` node, not per recipient. An
 //! `owner` destination that fanned out to three admins and failed on the third
 //! is recorded as delivered, and the continuation will not retry that third
 //! address. Re-mailing two people to reach one is the worse outcome, so this is
 //! deliberate rather than an oversight — a partial fan-out is repaired from the
-//! run history, not by a resume.
+//! run history, not by a resume. The durable #529 ledger keeps the same per-node
+//! identity, so this limit is unchanged across a crash.
 //!
 //! # At-most-once, deny, and expiry
 //!

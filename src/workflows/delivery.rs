@@ -138,12 +138,12 @@ use crate::company::WorkflowFile;
 use crate::company::runtime::CompanyMail;
 use crate::company::{WorkflowDestinationDef, WorkflowNodeKind};
 use crate::ports::types::{
-    Actor, ActorKind, ApprovalId, CompanyId, CompanyRecord, Effect, EffectGroup, OutboundMessage,
-    Verdict,
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, Effect, EffectGroup,
+    OutboundMessage, Verdict,
 };
 use crate::ports::{
     ApprovalGate, ChannelAdapter, DeliveryReason, DeliveryReport, DeliveryStatus, EmailRecord,
-    InboxStore, UserRole, UserStatus, UserStore, generate_id, now_millis,
+    EventLog, InboxStore, UserRole, UserStatus, UserStore, generate_id, now_millis,
 };
 use crate::runtime::cycle::EMAIL_SEND_KIND;
 use crate::runtime::journal::RuntimeJournal;
@@ -189,6 +189,21 @@ pub struct WorkflowDeliveryDeps {
     /// closed to the pre-#227 behaviour: the report is `skipped`, never a
     /// `pending` row no queue is backing.
     pub parking: Option<DeliveryParking>,
+    /// The company's event journal, for the write-behind delivery record
+    /// (issue #529). Every dispatch that actually leaves the process — a `Sent`
+    /// send, or a `Pending` park whose card sends on approval — appends one
+    /// [`CompanyEvent::WorkflowReportDelivered`], so a run that crashes before
+    /// its [`WorkflowRunFinished`](CompanyEvent::WorkflowRunFinished) is written
+    /// still leaves a durable ledger a re-run can consult and skip.
+    ///
+    /// Non-optional and the same handle the runner reads for its progress trail,
+    /// unlike [`parking`](Self::parking): the write-behind is the whole point of
+    /// this field, and the only construction site is the production builder,
+    /// where the journal always exists. The append is best-effort — a failure
+    /// warns and is swallowed, never failing a delivery whose work already
+    /// happened, the same stance as
+    /// [`record_run_finished`](crate::runtime::record_run_finished).
+    pub events: Arc<dyn EventLog>,
 }
 
 /// The approval queue's two halves, bundled so a delivery can only ever hold
@@ -243,11 +258,21 @@ impl std::fmt::Debug for WorkflowDeliveryDeps {
 /// [`DeliveryReason::AlreadyDelivered`] and **nothing is dispatched** — it is
 /// empty on every run nobody resumed, so an ordinary run is untouched. See
 /// [`crate::runtime::workflow_resume`] for why a continuation reaches these
-/// nodes again at all.
+/// nodes again at all. Issue #529 widens the same guard across a *crash*: the
+/// caller unions this per-lineage ledger with a durable one folded from the
+/// journal, so an independently re-run workflow skips what a crashed run already
+/// sent.
+///
+/// `run_id` is the run this dispatch belongs to — it rides every
+/// [`CompanyEvent::WorkflowReportDelivered`] this call appends (issue #529), so
+/// the durable delivery record correlates with the run's start and per-node
+/// trail exactly as [`WorkflowRunFinished`](CompanyEvent::WorkflowRunFinished)
+/// does.
 pub async fn deliver_outputs(
     delivery: Option<&WorkflowDeliveryDeps>,
     record: &CompanyRecord,
     workflow: &WorkflowFile,
+    run_id: &str,
     output: &Value,
     already_delivered: &[DeliveredReport],
 ) -> Vec<DeliveryReport> {
@@ -334,6 +359,14 @@ pub async fn deliver_outputs(
             continue;
         };
 
+        // Issue #529: journal WRITE-BEHIND — after `deliver_one` has dispatched,
+        // not before. Every row it just pushed for this node whose outcome
+        // actually left the process (`Sent`, or a `Pending` park whose durable
+        // card sends on approval) gets one `WorkflowReportDelivered` line, so a
+        // crash before the run's finish still leaves a ledger a re-run can skip.
+        // The skip/failed rows above never reach here, and none of them left the
+        // process anyway.
+        let before = reports.len();
         deliver_one(
             delivery,
             record,
@@ -344,9 +377,63 @@ pub async fn deliver_outputs(
             &mut reports,
         )
         .await;
+        for report in &reports[before..] {
+            journal_delivered(&delivery.events, &record.id, &workflow.id, run_id, report).await;
+        }
     }
 
     reports
+}
+
+/// Appends one [`CompanyEvent::WorkflowReportDelivered`] for a delivery row that
+/// left the process (issue #529).
+///
+/// Only `Sent` and `Pending` are journaled, and the reasoning is the crash story
+/// the whole event exists for. A `Sent` row's mail is out of the process; a
+/// `Pending` row is a durable, journal-backed approval card that sends on
+/// approval — both count as delivered, exactly as issue #438's ledger counts
+/// them (see [`crate::runtime::workflow_resume`]). `Skipped` / `Denied` /
+/// `Failed` journal nothing: nothing left the process, so a re-run is free to
+/// retry them.
+///
+/// Best-effort, like every write on this path: a failure is logged loud and
+/// swallowed. Losing the record risks one duplicate on a later re-run — the
+/// accepted cost of write-behind — and is never worth failing a delivery whose
+/// send already happened.
+async fn journal_delivered(
+    events: &Arc<dyn EventLog>,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    report: &DeliveryReport,
+) {
+    if !matches!(
+        report.status,
+        DeliveryStatus::Sent | DeliveryStatus::Pending
+    ) {
+        return;
+    }
+    let event = CompanyEvent::WorkflowReportDelivered {
+        workflow_id: workflow_id.to_string(),
+        run_id: run_id.to_string(),
+        node: report.node.clone(),
+        kind: report.kind.clone(),
+        target: report.target.clone(),
+    };
+    if let Err(err) = events.append(company, event).await {
+        // Swallowed on purpose: the report already went out. Losing this record
+        // means a re-run might send it a second time, which is the write-behind
+        // trade-off — a loud line, never a failed delivery.
+        tracing::warn!(
+            %company,
+            workflow = %workflow_id,
+            %run_id,
+            node = %report.node,
+            %err,
+            "workflow delivery: the delivered-report record could not be journaled; the report \
+             itself was sent, but a later re-run may not know it already went out"
+        );
+    }
 }
 
 /// Dispatches one node's destination, appending every attempt's row to
@@ -1175,6 +1262,10 @@ allow = [{allow}]
         /// queue an agent's does.
         gate: Option<Arc<ManifestApprovalGate>>,
         journal: Option<Arc<RuntimeJournal>>,
+        /// The real on-disk event journal the write-behind delivery record
+        /// (issue #529) lands in — held so a test can read back the
+        /// [`CompanyEvent::WorkflowReportDelivered`] lines a dispatch appended.
+        events: Arc<dyn EventLog>,
     }
 
     impl Harness {
@@ -1188,8 +1279,13 @@ allow = [{allow}]
             } else {
                 Vec::new()
             };
+            // A real filesystem journal, like the outcome tests use: the write
+            // side must actually land on disk and read back, so the delivered
+            // ledger is exercised end to end rather than against a double.
+            let events: Arc<dyn EventLog> = Arc::new(crate::store::FsEventLog::new(dir));
             Self {
                 deps: WorkflowDeliveryDeps {
+                    events: events.clone(),
                     mail: with_mail.then(|| CompanyMail {
                         sender: Arc::new(mail.clone()),
                         smtp: smtp_creds(),
@@ -1206,6 +1302,7 @@ allow = [{allow}]
                 company: CompanyId::new("acme"),
                 gate: None,
                 journal: None,
+                events,
             }
         }
 
@@ -1306,6 +1403,64 @@ allow = [{allow}]
                 .await
                 .expect("inbox readable")
         }
+
+        /// Every `WorkflowReportDelivered` the write-behind path journaled
+        /// (issue #529) — what a re-run's fold would later read back.
+        async fn journaled_deliveries(&self) -> Vec<CompanyEvent> {
+            self.events
+                .read_from(
+                    &self.company,
+                    crate::ports::types::EventSeq::new(0),
+                    usize::MAX,
+                )
+                .await
+                .expect("journal readable")
+                .into_iter()
+                .map(|s| s.event)
+                .filter(|e| matches!(e, CompanyEvent::WorkflowReportDelivered { .. }))
+                .collect()
+        }
+
+        /// Swaps the delivery bundle's event journal for one whose every append
+        /// **fails**, for the "a journal failure does not fail delivery" case.
+        fn with_failing_events(mut self) -> Self {
+            self.deps.events = Arc::new(FailingEventLog);
+            self
+        }
+    }
+
+    /// An [`EventLog`] whose `append` always errors — the write-behind delivery
+    /// record's failure path (issue #529). Reads yield nothing; the point is the
+    /// append, and that a delivery survives it.
+    struct FailingEventLog;
+
+    #[async_trait]
+    impl EventLog for FailingEventLog {
+        async fn append(
+            &self,
+            _company: &CompanyId,
+            _event: CompanyEvent,
+        ) -> crate::Result<crate::ports::types::EventSeq> {
+            Err(OpenCompanyError::Config(
+                "event journal is unwritable".into(),
+            ))
+        }
+
+        async fn read_from(
+            &self,
+            _company: &CompanyId,
+            _seq: crate::ports::types::EventSeq,
+            _limit: usize,
+        ) -> crate::Result<Vec<crate::ports::types::StoredEvent>> {
+            Ok(Vec::new())
+        }
+
+        fn subscribe(
+            &self,
+            _company: &CompanyId,
+        ) -> futures::stream::BoxStream<'static, crate::ports::types::StoredEvent> {
+            Box::pin(futures::stream::empty())
+        }
     }
 
     // --- owner ---------------------------------------------------------------
@@ -1323,6 +1478,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1382,6 +1538,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1404,6 +1561,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1429,6 +1587,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1452,6 +1611,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1476,6 +1636,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["email.send"]),
             &graph("email", Some("ada@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1507,6 +1668,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["docs.*", "web"]),
             &graph("email", Some("ada@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1536,6 +1698,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1571,6 +1734,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1617,6 +1781,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1677,6 +1842,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1727,6 +1893,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1755,6 +1922,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("ada@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1782,6 +1950,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["docs.*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1807,6 +1976,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1842,6 +2012,7 @@ allow = [{allow}]
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("ada@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1891,6 +2062,7 @@ mode = "full"
             Some(&h.deps),
             &rec,
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1933,6 +2105,7 @@ mode = "full"
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("stranger@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1954,6 +2127,7 @@ mode = "full"
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("ada@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -1980,6 +2154,7 @@ mode = "full"
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some("ada@example.com")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2035,6 +2210,7 @@ mode = "full"
             Some(&h.deps),
             &record(&["*"]),
             &graph("email", Some(ADDRESS)),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2072,6 +2248,7 @@ mode = "full"
             Some(&h.deps),
             &record(&[]),
             &graph("channel", Some(OPERATOR_CHANNEL)),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2096,6 +2273,7 @@ mode = "full"
             Some(&h.deps),
             &record(&["*"]),
             &graph("channel", Some("telegram")),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2139,6 +2317,7 @@ mode = "full"
             Some(&h.deps),
             &record(&["*"]),
             &graph("owner", None),
+            "run-1",
             &output,
             &[],
         )
@@ -2178,6 +2357,7 @@ to = "done"
             Some(&h.deps),
             &record(&["*"]),
             &plain,
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2194,6 +2374,7 @@ to = "done"
             None,
             &record(&["*"]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2233,6 +2414,7 @@ to = "done"
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &already("done", "owner"),
         )
@@ -2265,6 +2447,7 @@ to = "done"
             Some(&h.deps),
             &record(&["email"]),
             &cold,
+            "run-1",
             &reached_output(),
             &already("done", "email"),
         )
@@ -2297,6 +2480,7 @@ to = "done"
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &already("some_other_node", "owner"),
         )
@@ -2320,6 +2504,7 @@ to = "done"
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &reached_output(),
             &[],
         )
@@ -2343,6 +2528,7 @@ to = "done"
             Some(&h.deps),
             &record(&[]),
             &graph("owner", None),
+            "run-1",
             &unreached,
             &already("done", "owner"),
         )
@@ -2393,5 +2579,163 @@ to = "done"
         assert!(cut.ends_with(TRUNCATION_MARKER));
         // Untouched when it fits.
         assert_eq!(truncate_chars("short", 10), "short");
+    }
+
+    // --- issue #529: the write-behind delivery record ------------------------
+
+    /// A `Sent` dispatch journals exactly one `WorkflowReportDelivered`, shaped
+    /// from the row — the durable record a crashed run leaves so a re-run can
+    /// skip it.
+    #[tokio::test]
+    async fn a_sent_delivery_journals_one_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true);
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&[]),
+            &graph("channel", Some("operator")),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        assert_eq!(reports[0].status, DeliveryStatus::Sent, "{reports:?}");
+
+        let journaled = h.journaled_deliveries().await;
+        assert_eq!(
+            journaled.len(),
+            1,
+            "exactly one record per dispatch: {journaled:?}"
+        );
+        let CompanyEvent::WorkflowReportDelivered {
+            workflow_id,
+            run_id,
+            node,
+            kind,
+            target,
+        } = &journaled[0]
+        else {
+            panic!("expected a WorkflowReportDelivered, got {:?}", journaled[0]);
+        };
+        assert_eq!(workflow_id, "report_flow");
+        assert_eq!(run_id, "run-1");
+        assert_eq!(node, "done");
+        assert_eq!(kind, "channel");
+        assert_eq!(target.as_deref(), Some("operator"));
+    }
+
+    /// A `Pending` park journals a record too: the card is durable and approving
+    /// it sends, so a re-run must treat the report as already delivered —
+    /// exactly as issue #438's in-lineage ledger counts a `Pending` row.
+    #[tokio::test]
+    async fn a_pending_park_journals_a_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), true, true).with_parking(dir.path(), "full");
+        h.receive_from("someone-else@example.com").await;
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&["*"]),
+            &graph("email", Some("stranger@example.com")),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        assert_eq!(reports[0].status, DeliveryStatus::Pending, "{reports:?}");
+
+        let journaled = h.journaled_deliveries().await;
+        assert_eq!(
+            journaled.len(),
+            1,
+            "a park is a delivery for the ledger: {journaled:?}"
+        );
+        let CompanyEvent::WorkflowReportDelivered { node, kind, .. } = &journaled[0] else {
+            panic!("expected a WorkflowReportDelivered");
+        };
+        assert_eq!(node, "done");
+        assert_eq!(kind, "email");
+    }
+
+    /// A row that did NOT leave the process journals nothing. A `Failed` channel
+    /// (unwired target) leaves no record, so a re-run is free to retry it.
+    #[tokio::test]
+    async fn a_failed_delivery_journals_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        // No channel wired, so a `channel` destination fails.
+        let h = Harness::new(dir.path(), false, false);
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&[]),
+            &graph("channel", Some("operator")),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+        assert_eq!(reports[0].status, DeliveryStatus::Failed, "{reports:?}");
+        assert!(
+            h.journaled_deliveries().await.is_empty(),
+            "a failed dispatch left the process nothing to record"
+        );
+    }
+
+    /// An `AlreadyDelivered` skip journals nothing — the report is on the ledger
+    /// precisely because it already went out, so recording it again would double
+    /// the very thing the ledger exists to prevent.
+    #[tokio::test]
+    async fn an_already_delivered_skip_journals_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true);
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&[]),
+            &graph("channel", Some("operator")),
+            "run-1",
+            &reached_output(),
+            &[DeliveredReport {
+                node: "done".to_string(),
+                kind: "channel".to_string(),
+            }],
+        )
+        .await;
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped, "{reports:?}");
+        assert_eq!(reports[0].reason, DeliveryReason::AlreadyDelivered);
+        assert!(
+            h.journaled_deliveries().await.is_empty(),
+            "a report skipped because it already went out is not re-recorded"
+        );
+    }
+
+    /// A journal that cannot be written does not fail the delivery: the report
+    /// still sends and its row is still `Sent`. Losing the record risks one
+    /// duplicate on a later re-run — the accepted write-behind cost, never a
+    /// failed send.
+    #[tokio::test]
+    async fn a_journal_failure_does_not_fail_a_delivery() {
+        let dir = tempfile::tempdir().unwrap();
+        let h = Harness::new(dir.path(), false, true).with_failing_events();
+
+        let reports = deliver_outputs(
+            Some(&h.deps),
+            &record(&[]),
+            &graph("channel", Some("operator")),
+            "run-1",
+            &reached_output(),
+            &[],
+        )
+        .await;
+
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(
+            reports[0].status,
+            DeliveryStatus::Sent,
+            "an unwritable journal must not fail a send that succeeded: {reports:?}"
+        );
+        // And the report really did reach the transport.
+        assert_eq!(h.channel.sent().len(), 1);
     }
 }

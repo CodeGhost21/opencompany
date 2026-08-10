@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -101,6 +101,29 @@ export function importSummary(files: number, folders: number): string {
   return parts.join(" and ");
 }
 
+/**
+ * The migration banner's sentence, for a pending scratchpad of `files` notes
+ * and `folders` folders (issue #507).
+ *
+ * Shares [`importSummary`] with the post-import receipt rather than counting
+ * again, because the banner and the receipt describe the *same* nodes one
+ * moment apart: when they counted separately they drifted, and the banner
+ * offered "3 notes" that the receipt then reported as "2 notes and 1 folder"
+ * — the pre-import prompt left over-reporting after #500 fixed the receipt.
+ *
+ * The verb agrees with the **total node count**, not with the leading number
+ * of the summary. "1 note and 1 folder" is two things and takes "are"; the
+ * summary's own first word is "1". Passing `files + folders` is what keeps
+ * that right for a mixed scratchpad.
+ */
+export function migrationBannerText(files: number, folders: number): string {
+  const total = files + folders;
+  return (
+    `${importSummary(files, folders)} from this browser's old scratchpad ` +
+    `${total === 1 ? "is" : "are"} not in the company workspace yet.`
+  );
+}
+
 /** What the editor's status line is currently reporting. */
 type SaveState = "idle" | "saving" | "saved" | "error";
 
@@ -165,6 +188,13 @@ export function WorkspaceView({ client, company }: Props) {
   const [showExplorer, setShowExplorer] = useState(true);
   const [legacy, setLegacy] = useState<FsNode[]>([]);
   const [importing, setImporting] = useState(false);
+  // The pending scratchpad partitioned by kind, once, for every surface that
+  // describes or imports it: the banner's sentence, the import loops, and the
+  // receipt. #500 partitioned inside `importLegacy` so the loops and the
+  // receipt could not disagree; the banner counted the flat list separately
+  // and drifted anyway (#507). One partition is what makes them agree.
+  const legacyFolders = useMemo(() => legacy.filter((n) => n.kind === "folder"), [legacy]);
+  const legacyFiles = useMemo(() => legacy.filter((n) => n.kind === "file"), [legacy]);
   const uploadRef = useRef<HTMLInputElement>(null);
 
   // Generation tokens so a response from a previous company scope (or from a
@@ -352,10 +382,6 @@ export function WorkspaceView({ client, company }: Props) {
 
   async function importLegacy() {
     setImporting(true);
-    // Partitioned once, so the loops below and the receipt that reports them
-    // can never disagree about what was imported (#500).
-    const folders = legacy.filter((n) => n.kind === "folder");
-    const files = legacy.filter((n) => n.kind === "file");
     try {
       const root = await createNode(client, company, {
         name: IMPORT_FOLDER_NAME,
@@ -366,7 +392,7 @@ export function WorkspaceView({ client, company }: Props) {
       const remap = new Map<string, string>();
       const parentFor = (node: FsNode) =>
         node.parentId ? (remap.get(node.parentId) ?? root.id) : root.id;
-      for (const folder of folders) {
+      for (const folder of legacyFolders) {
         const created = await createNode(client, company, {
           name: folder.name,
           kind: "folder",
@@ -374,7 +400,7 @@ export function WorkspaceView({ client, company }: Props) {
         });
         remap.set(folder.id, created.id);
       }
-      for (const file of files) {
+      for (const file of legacyFiles) {
         await createNode(client, company, {
           name: ensureMdExt(file.name),
           kind: "file",
@@ -384,7 +410,7 @@ export function WorkspaceView({ client, company }: Props) {
       }
       clearLegacyLocal(company);
       setLegacy([]);
-      toast.success(`Imported ${importSummary(files.length, folders.length)}.`);
+      toast.success(`Imported ${importSummary(legacyFiles.length, legacyFolders.length)}.`);
       await loadTree({ silent: true });
     } catch (e) {
       // The key is left intact on failure, so the banner comes back and nothing
@@ -643,8 +669,7 @@ export function WorkspaceView({ client, company }: Props) {
           <Alert className="m-3 mb-0 w-auto" data-testid="workspace-migration-banner">
             <AlertDescription className="flex flex-wrap items-center gap-3">
               <span className="flex-1">
-                {legacy.length} note{legacy.length === 1 ? "" : "s"} from this browser's old
-                scratchpad {legacy.length === 1 ? "is" : "are"} not in the company workspace yet.
+                {migrationBannerText(legacyFiles.length, legacyFolders.length)}
               </span>
               <Button
                 size="sm"
