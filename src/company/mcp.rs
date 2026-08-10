@@ -711,18 +711,53 @@ fn has_query_credential(url: &str) -> bool {
         return false;
     };
     query.split('&').any(|pair| {
-        let key = pair
-            .split('=')
-            .next()
-            .unwrap_or("")
-            .trim()
-            .to_ascii_lowercase();
-        let key = key.replace(['-', '_'], "");
+        // Decode before matching: `api%4Bey` is `apiKey`, and matching the raw
+        // key would let an encoded credential name past the block to ship a
+        // token-bearing default to every company (CWE-200).
+        let key = percent_decode(pair.split('=').next().unwrap_or(""));
+        let key = key.trim().to_ascii_lowercase().replace(['-', '_'], "");
         matches!(
             key.as_str(),
             "apikey" | "token" | "accesstoken" | "secret" | "password" | "auth" | "authorization"
         )
     })
+}
+
+/// Percent-decodes `s`, turning each `%XX` escape into its byte.
+///
+/// Inline rather than pulled from the `url` crate because this module compiles
+/// in the default build, where `url` is gated behind the `mcp` feature. Only
+/// used for the query-key scan above, so `+` is left literal (it has no
+/// meaning in a parameter *name*) and a malformed or truncated escape is
+/// passed through untouched rather than rejected.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(hi), Some(lo)) = (hex_value(bytes[i + 1]), hex_value(bytes[i + 2])) {
+                out.push(hi << 4 | lo);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    // Every `%XX` decodes to fewer bytes than it occupies, so lossy UTF-8
+    // repair here can only shorten the input — never invent characters.
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// The nibble a hex digit encodes.
+fn hex_value(digit: u8) -> Option<u8> {
+    match digit {
+        b'0'..=b'9' => Some(digit - b'0'),
+        b'a'..=b'f' => Some(digit - b'a' + 10),
+        b'A'..=b'F' => Some(digit - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Normalizes the install-wide `[[default_mcp_server]]` list (issue #527) into
