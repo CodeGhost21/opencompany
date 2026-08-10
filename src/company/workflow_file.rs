@@ -132,6 +132,30 @@ pub struct WorkflowFile {
     pub edges: Vec<WorkflowEdgeDef>,
 }
 
+impl WorkflowFile {
+    /// The cron this graph fires on, if any — the first `trigger` node carrying
+    /// a `schedule`.
+    ///
+    /// This is the single definition of "is this workflow automatic", shared by
+    /// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler), which uses
+    /// it to decide what to fire, and by the disarm rule in `workflow_create.rs`,
+    /// which uses it to decide what must not fire unreviewed. Two copies of this
+    /// predicate that disagreed would mean a workflow the host considers manual
+    /// and the scheduler considers armed — silently the exact hole issue #276
+    /// exists to close.
+    ///
+    /// Reads the **trigger** only. A `schedule` on any other node kind is inert
+    /// (validation permits the field on the node struct; only a trigger's is
+    /// load-bearing), so honouring one elsewhere would arm a workflow the canvas
+    /// does not show as scheduled.
+    pub fn trigger_schedule(&self) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find(|node| node.kind == WorkflowNodeKind::Trigger && node.schedule.is_some())
+            .and_then(|node| node.schedule.as_deref())
+    }
+}
+
 /// A single node in a workflow graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowNodeDef {

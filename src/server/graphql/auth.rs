@@ -7,6 +7,31 @@
 //! into a principal; the REST extractors ([`PlatformOrOperatorAuth`],
 //! [`PlatformScope`]) map its output onto their existing `Option<PlatformClaims>`
 //! shape so their behavior is byte-for-byte unchanged.
+//!
+//! ## Why a human session has two carriers
+//!
+//! A session cookie is `SameSite=Lax`, which means the browser will not attach
+//! it to a cross-site request no matter what CORS says — and a desktop webview
+//! is cross-site with every server it talks to. Adding an allowed origin does
+//! not fix that; the cookie is simply never sent.
+//!
+//! So a non-browser client had no way to authenticate *as a person* at all. The
+//! only header credential is the platform bearer, and
+//! [`ScopedCompany`](crate::server::ops::scope::ScopedCompany) maps that to
+//! `actor: None` — every write it makes lands in the journal with nobody's name
+//! on it. A desktop built on the platform bearer would be permanently
+//! anonymous, which
+//! [`AdminScopedCompany`](crate::server::ops::scope::AdminScopedCompany) argues
+//! at length is unacceptable.
+//!
+//! Hence the header carrier: the same token, the same TTL, the same revocation,
+//! resolving to the same `GqlAuth::User`. Only the envelope differs.
+//!
+//! **The header is accepted, but nothing here issues one.** A session token
+//! reaches a client only as `Set-Cookie`, where `HttpOnly` keeps it away from
+//! JavaScript. Handing the raw token to a browser would defeat that, so no
+//! route does; the device-pairing flow is the intended issuer for clients that
+//! need the header form.
 
 use async_graphql::ErrorExtensions;
 use axum::http::HeaderMap;
@@ -38,12 +63,40 @@ pub struct UserPrincipal {
     pub must_change_password: bool,
     /// The session's token hash, so logout can revoke exactly this session.
     pub session_token_hash: String,
+    /// Whether a browser or a paired device presented this session.
+    ///
+    /// ## Why this is a field and not a `GqlAuth::Device` variant
+    ///
+    /// A device is the *same person* with the same rights, reached from a
+    /// different machine — so the default must be that everything a browser
+    /// session may do, a device may do. A new enum variant inverts that: every
+    /// one of the ~15 `GqlAuth::` match sites would have to name devices
+    /// explicitly, and each site the author forgets or wildcards is a decision
+    /// made by accident.
+    ///
+    /// The direction of that accident is what settles it. As a field, a device
+    /// is a `GqlAuth::User`, so
+    /// [`PlatformScope`](crate::server::platform_auth)'s existing
+    /// `GqlAuth::User(_) => forbidden()` already refuses it — **fail-closed,
+    /// with no new code**. As a variant, a forgotten arm somewhere on the
+    /// platform plane fails *open*, and it would fail open silently.
+    ///
+    /// Routes that genuinely need to treat a device differently — refusing to
+    /// let one change the account password, say — ask [`Self::is_device`]. That
+    /// is an opt-in restriction on a small number of routes, rather than an
+    /// opt-in permission on all of them.
+    pub credential: crate::ports::SessionKind,
 }
 
 impl UserPrincipal {
     /// Whether this user may invite, revoke, and remove other users.
     pub fn may_administer(&self) -> bool {
         self.role.may_administer()
+    }
+
+    /// Whether a paired device, rather than a browser, presented this session.
+    pub fn is_device(&self) -> bool {
+        self.credential.is_device()
     }
 }
 
@@ -90,20 +143,25 @@ pub fn resolve_claims(headers: &HeaderMap, state: &AppState) -> Result<GqlAuth, 
     Ok(GqlAuth::Platform(claims))
 }
 
-/// Resolves the full principal: a valid session cookie wins, else the machine
+/// Resolves the full principal: a valid session wins, else the machine
 /// credentials from [`resolve_claims`].
 ///
 /// `company` is the addressed company when the caller knows it (the REST
 /// routes, from the path or the sole registered company). Pass `None` when it
 /// is not knowable at resolution time — the GraphQL handler's company argument
-/// lives in the request body — and the cookie *name* selects it. With several
-/// session cookies present and no addressed company (only reachable in local
-/// dev, where one origin serves many companies) no user is resolved, because
-/// guessing which one the request meant would be worse than degrading.
+/// lives in the request body — and the carrier selects it: the cookie *name*,
+/// or the company embedded in the header value. With several session cookies
+/// present and no addressed company (only reachable in local dev, where one
+/// origin serves many companies) no user is resolved, because guessing which
+/// one the request meant would be worse than degrading.
 ///
-/// A present-but-invalid session cookie falls through to the bearer path rather
-/// than failing the request: a stale cookie must not brick an operator sharing
-/// the origin.
+/// A present-but-invalid session falls through to the bearer path rather than
+/// failing the request: a stale cookie must not brick an operator sharing the
+/// origin.
+///
+/// **This is the only function that can produce a human principal**, and every
+/// route meaning to serve people must resolve through it rather than
+/// [`resolve_claims`].
 pub async fn resolve_principal(
     headers: &HeaderMap,
     state: &AppState,
@@ -115,25 +173,52 @@ pub async fn resolve_principal(
     resolve_claims(headers, state)
 }
 
-/// Resolves a session cookie to a live user, or `None`.
+/// Resolves a session — from either carrier — to a live user, or `None`.
 ///
-/// Returns `None` — never an error — for every failure: no cookie, unknown
-/// token, expired session, vanished user, suspended user. Callers fall back to
-/// machine credentials.
+/// Returns `None` — never an error — for every failure: no session presented,
+/// unknown token, expired session, vanished user, suspended user. Callers fall
+/// back to machine credentials.
 async fn resolve_session(
     headers: &HeaderMap,
     state: &AppState,
     company: Option<&CompanyId>,
 ) -> Option<UserPrincipal> {
-    use crate::server::users::cookie::{company_from_cookie_name, parse_cookies};
+    let (company, token) = session_carrier(headers, company)?;
+    authenticate_session(state, company, &token).await
+}
+
+/// Extracts the company and raw token a request presents a session with.
+///
+/// The header wins over the cookie when both are present and usable. A desktop
+/// client sends only the header and a browser sends only the cookie, so the
+/// order matters in exactly one case — a webview that has somehow acquired
+/// both — where the explicit carrier should beat the ambient one.
+///
+/// A header naming a company other than the addressed one falls through to the
+/// cookie rather than failing the request, matching the existing policy for a
+/// present-but-invalid cookie: a credential for somewhere else must not brick a
+/// request that had a valid one all along.
+fn session_carrier(
+    headers: &HeaderMap,
+    company: Option<&CompanyId>,
+) -> Option<(CompanyId, String)> {
+    use crate::server::users::cookie::{
+        company_from_cookie_name, parse_cookies, session_from_header,
+    };
+
+    if let Some((named, token)) = session_from_header(headers)
+        && company.is_none_or(|addressed| *addressed == named)
+    {
+        return Some((named, token));
+    }
 
     let cookies = parse_cookies(headers);
     // Resolve which company's cookie to read: the addressed one when known,
     // else the sole session cookie present.
-    let (company, token) = match company {
+    match company {
         Some(id) => {
             let name = crate::server::users::cookie::session_cookie_name(id)?;
-            (id.clone(), cookies.get(&name)?.clone())
+            Some((id.clone(), cookies.get(&name)?.clone()))
         }
         None => {
             let mut sessions = cookies
@@ -146,12 +231,24 @@ async fn resolve_session(
             if sessions.len() != 1 {
                 return None;
             }
-            sessions.remove(0)
+            Some(sessions.remove(0))
         }
-    };
+    }
+}
 
+/// Turns a `(company, raw token)` pair into a live [`UserPrincipal`].
+///
+/// The single authentication path for every carrier. Kept separate from
+/// [`session_carrier`] so that adding a carrier cannot accidentally add a
+/// *weaker* check alongside it — liveness, the re-read, and the status gate
+/// below are reached by construction rather than by each caller remembering.
+async fn authenticate_session(
+    state: &AppState,
+    company: CompanyId,
+    token: &str,
+) -> Option<UserPrincipal> {
     let runtime = state.registry().get(&company)?;
-    let token_hash = crate::server::users::token::sha256_hex(&token);
+    let token_hash = crate::server::users::token::sha256_hex(token);
     // Lookup is *by* hash and scoped to the company: a session minted for
     // another company simply is not in this partition.
     let session = runtime
@@ -181,6 +278,11 @@ async fn resolve_session(
         role: user.role,
         must_change_password: user.must_change_password,
         session_token_hash: token_hash,
+        // From the stored record, not from the carrier. A browser session
+        // replayed as a header is still a browser session, and a device that
+        // somehow arrived in a cookie is still a device — what the credential
+        // *is* was decided when it was minted.
+        credential: session.kind,
     })
 }
 

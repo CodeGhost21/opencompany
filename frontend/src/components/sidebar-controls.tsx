@@ -56,6 +56,12 @@ export const RESTING_ROW =
 interface Props {
   /** The company's lifecycle, shown as a dot + label. */
   lifecycleState: string;
+  /**
+   * Issue #86: whether the governance kill switch is engaged. Overrides the
+   * lifecycle label, because a stopped company still reports `running` and this
+   * row is the one piece of company state on screen behind every view.
+   */
+  emergencyPaused?: boolean;
   /** Every company this operator can reach, for the switcher. */
   companies: CompanyStatus[];
   activeCompany: string | null;
@@ -78,6 +84,7 @@ interface Props {
  */
 export function SidebarControls({
   lifecycleState,
+  emergencyPaused,
   companies,
   activeCompany,
   onSwitchCompany,
@@ -85,7 +92,7 @@ export function SidebarControls({
   view,
   onNavigate,
 }: Props) {
-  const { label, tone } = lifecycle(lifecycleState);
+  const { label, tone } = lifecycle(lifecycleState, emergencyPaused);
 
   return (
     <SidebarMenu>

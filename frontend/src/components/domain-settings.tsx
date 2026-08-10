@@ -22,6 +22,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { cn } from "@/lib/utils";
+import { useLocalScope } from "@/connections/ConnectionContext";
 import {
   type DnsRecord,
   dnsRecords,
@@ -43,12 +44,13 @@ const SECURITY_LABELS: Record<SmtpSecurity, string> = {
 };
 
 /** Custom domain (with DNS records) and SMTP credentials for the company. */
-export function DomainSettings({ company }: Props) {
-  const [settings, setSettings] = useState<MailSettings>(() => loadMailSettings(company));
+export function DomainSettings({ company: _company }: Props) {
+  const scope = useLocalScope();
+  const [settings, setSettings] = useState<MailSettings>(() => loadMailSettings(scope));
 
   useEffect(() => {
-    saveMailSettings(company, settings);
-  }, [company, settings]);
+    saveMailSettings(scope, settings);
+  }, [scope, settings]);
 
   return (
     <>

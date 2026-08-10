@@ -48,6 +48,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -2327,6 +2328,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -2575,6 +2577,7 @@ async fn state_with_source_dir(
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await
@@ -2894,6 +2897,7 @@ async fn state_with_telegram_at(
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
             template_provenance: None,
         })
         .await

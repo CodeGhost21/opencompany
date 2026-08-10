@@ -25,6 +25,11 @@ pub struct AppConfig {
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// An operator-set display name for this instance
+    /// (`OPENCOMPANY_INSTANCE_NAME`), surfaced by `/spec` so a client holding
+    /// several connections can show something friendlier than a URL. Purely
+    /// cosmetic and untrusted — it never selects, authorizes, or routes.
+    pub instance_name: Option<String>,
     /// Which brain the runtime drives.
     pub brain_mode: BrainMode,
     /// tiny.place economy API base URL.
@@ -85,6 +90,7 @@ impl Default for AppConfig {
             bind: "127.0.0.1:8080".to_string(),
             openhuman_root: None,
             api_url: crate::app::config::DEFAULT_API_URL.to_string(),
+            instance_name: None,
             brain_mode: BrainMode::Hosted,
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
             public_url: None,
@@ -350,6 +356,13 @@ pub struct AppState {
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
+    /// This host's stable public identity, minted on first boot and cached for
+    /// the process. Lazy because it is a disk read that only `/spec` needs, and
+    /// `AppState::new` is deliberately IO-free.
+    instance_id: Arc<OnceLock<String>>,
+    /// Which storage backend is serving the durable ports. Reported by `/spec`
+    /// as a kind only — never a path or a connection string.
+    storage_kind: crate::store::StorageKind,
     /// Host-global replay-protection cache shared across every inbound A2A
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
@@ -411,6 +424,8 @@ impl AppState {
             memory_overlay: None,
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
+            instance_id: Arc::new(OnceLock::new()),
+            storage_kind: crate::store::StorageKind::default(),
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
             hub_identity: None,
@@ -486,6 +501,21 @@ impl AppState {
     /// The opened storage backend's handles, if a non-fs backend is selected.
     pub fn stores(&self) -> Option<&crate::store::StorageHandles> {
         self.stores.as_ref()
+    }
+
+    /// Records which storage backend was opened, for `/spec` to report.
+    pub fn with_storage_kind(mut self, kind: crate::store::StorageKind) -> Self {
+        self.storage_kind = kind;
+        self
+    }
+
+    /// This host's stable public identity, minted on first use.
+    ///
+    /// See [`crate::app::instance`] for why it is random rather than derived
+    /// from anything about the deployment.
+    pub fn instance_id(&self) -> &str {
+        self.instance_id
+            .get_or_init(|| crate::app::instance::load_or_create(&self.home))
     }
 
     /// Installs the memory engine overlay selected by `OPENCOMPANY_MEMORY`.
@@ -758,7 +788,29 @@ impl AppState {
                 .map(|path| path.display().to_string()),
             api_url: self.config.api_url.clone(),
             cycles_available: self.config.cycles_available(),
+            instance_id: self.instance_id().to_string(),
+            display_name: self.config.instance_name.clone(),
+            capabilities: self.capabilities(),
+            storage: self.storage_kind.as_str(),
         }
+    }
+
+    /// What this host can do, as flat feature names a client can test for.
+    ///
+    /// Additive and open-ended by design. A client reading an **older** host's
+    /// `/spec` finds no `capabilities` field at all, and must treat that as
+    /// "assume nothing beyond REST" — which is why every entry here names a
+    /// capability rather than a version number. Growing the list must never
+    /// break a client that has not heard of the new entry.
+    fn capabilities(&self) -> Vec<&'static str> {
+        let mut out = vec!["rest", "graphql", "sse", "approvals", "devices"];
+        if self.hub_identity.is_some() {
+            out.push("hub-identity");
+        }
+        if self.config.platform_auth.is_some() {
+            out.push("platform-auth");
+        }
+        out
     }
 }
 
@@ -782,6 +834,20 @@ pub struct AppSpec {
     /// Whether hosted cognition can run (hosted brain plus a credential this
     /// instance can obtain, from either tier). No secret bytes are surfaced.
     pub cycles_available: bool,
+    /// This host's stable identity, so a client holding several connections can
+    /// tell one server from another across URL changes. Random, not derived —
+    /// see [`crate::app::instance`].
+    pub instance_id: String,
+    /// An operator-set name for this instance (`OPENCOMPANY_INSTANCE_NAME`),
+    /// shown in a client's connection list. Untrusted, display-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Flat, additive feature names. Absent on a host predating this field,
+    /// which a client must read as "REST only".
+    pub capabilities: Vec<&'static str>,
+    /// The storage backend kind. Deliberately the kind alone: `/spec` is
+    /// unauthenticated, so a path or connection string here would be a gift.
+    pub storage: &'static str,
 }
 
 #[cfg(test)]

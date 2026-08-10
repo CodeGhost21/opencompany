@@ -4,8 +4,21 @@
 
 import type { ApprovalSummary, FeedbackCategory } from "../api/types";
 
-/** A company's lifecycle state, in plain language, with a status tone. */
-export function lifecycle(state: string): { label: string; tone: "live" | "idle" | "stopped" } {
+/**
+ * A company's lifecycle state, in plain language, with a status tone.
+ *
+ * `emergencyPaused` (issue #86) outranks every lifecycle value, because the
+ * kill switch is orthogonal to lifecycle: a stopped company still reports
+ * `running`, so a caller that passed only `state` would render "Live" over a
+ * company that is refusing to do anything. Routing it through here rather than
+ * through each indicator means every existing surface — the sidebar row, the
+ * switcher, the picker — reports it without its own branch.
+ */
+export function lifecycle(
+  state: string,
+  emergencyPaused = false,
+): { label: string; tone: "live" | "idle" | "stopped" } {
+  if (emergencyPaused) return { label: "Emergency stop", tone: "stopped" };
   switch (state) {
     case "running":
       return { label: "Live", tone: "live" };

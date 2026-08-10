@@ -10,12 +10,15 @@ const TONE_STYLES: Record<string, { dot: string; text: string }> = {
 /** A small lifecycle indicator: a colored dot + plain-language label. */
 export function StatusPill({
   lifecycle: state,
+  emergencyPaused,
   className,
 }: {
   lifecycle: string;
+  /** Issue #86: the kill switch, which outranks the lifecycle value. */
+  emergencyPaused?: boolean;
   className?: string;
 }) {
-  const { label, tone } = lifecycle(state);
+  const { label, tone } = lifecycle(state, emergencyPaused);
   const style = TONE_STYLES[tone];
   return (
     <span

@@ -21,6 +21,19 @@ export interface WorkflowSummary {
    * explicit `false` as a refusal.
    */
   editable?: boolean;
+  /**
+   * Whether this workflow's schedule is armed (issue #276). `false` means the
+   * graph is saved and still runnable by hand, but the scheduler skips it.
+   *
+   * Independent of {@link WorkflowSummary.editable}: a seed-defined workflow is
+   * `editable: false` and still toggleable, because pausing writes to the
+   * company record rather than to the source tree.
+   *
+   * **Optional on the type, not on the wire**, same rule as `editable`: a host
+   * predating #276 sends no such field, and `undefined` must not render as
+   * paused — treat only an explicit `false` as off.
+   */
+  enabled?: boolean;
 }
 
 /** A single graph node. `kind` is one of the tinyflows node kinds. */
@@ -105,6 +118,8 @@ export interface WorkflowGraph {
   edges: WorkflowEdge[];
   /** See {@link WorkflowSummary.editable}. Same "only `false` means no" rule. */
   editable?: boolean;
+  /** See {@link WorkflowSummary.enabled}. Same "only `false` means off" rule. */
+  enabled?: boolean;
   /**
    * The opaque optimistic-concurrency token for this graph (issue #259),
    * present only when `editable`.
@@ -468,6 +483,37 @@ export function deleteWorkflow(
     : "";
   return client.del<void>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}${query}`,
+  );
+}
+
+/**
+ * Arms or pauses a workflow's schedule without touching its graph (issue #276).
+ *
+ * **Pausing stops the schedule, not the workflow.** A paused workflow keeps its
+ * graph, stays in the picker, and still runs from the Run button — only the
+ * scheduler consults the flag. Resolves with the workflow's graph as the host
+ * now holds it, so a caller renders the state the store agreed to rather than
+ * the one it asked for.
+ *
+ * Unlike {@link updateWorkflow} and {@link deleteWorkflow} this takes **no**
+ * `expectedVersion`: a switch has no content to overwrite, and requiring a token
+ * would make a seed-defined workflow untoggleable since only overlay bodies have
+ * one. It is also a wider set than those two — a `409` here means only "this id
+ * has no saved graph, so there is no schedule to switch off"; an unknown id is
+ * `404`.
+ *
+ * Idempotent: setting the state a workflow already holds is a `200` that changes
+ * nothing.
+ */
+export function setWorkflowEnabled(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+  enabled: boolean,
+): Promise<WorkflowGraph> {
+  return client.put<WorkflowGraph>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/enabled`,
+    { enabled },
   );
 }
 

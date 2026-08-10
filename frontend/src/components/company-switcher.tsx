@@ -82,7 +82,11 @@ export function CompanySwitcher({ active, companies, onSwitch, onBackToPicker }:
                 onClick={() => onSwitch(c.id)}
                 className="gap-2"
               >
-                <StatusPill lifecycle={c.lifecycle} className="border-0 bg-transparent px-0" />
+                <StatusPill
+                  lifecycle={c.lifecycle}
+                  emergencyPaused={c.emergency_paused}
+                  className="border-0 bg-transparent px-0"
+                />
                 <span className={cn("flex-1 truncate", c.id === active.id && "font-medium")}>
                   {c.name}
                 </span>
