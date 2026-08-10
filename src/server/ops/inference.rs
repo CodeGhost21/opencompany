@@ -1077,7 +1077,10 @@ mod tests {
 
         // The classifier degrades an unreadable config to NotWired...
         assert!(
-            matches!(super::runner_gap_for(&runtime).await, super::RunnerGap::NotWired),
+            matches!(
+                super::runner_gap_for(&runtime).await,
+                super::RunnerGap::NotWired
+            ),
             "a resolve error must classify as NotWired, not InferenceRequired",
         );
 
