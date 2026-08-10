@@ -3836,6 +3836,8 @@ mod test {
                 .is_empty()
         );
     }
+
+    /// A manifest with two teammates, one capped at $5/day and one uncapped —
     /// the two starting positions every budget-override case builds on.
     const BUDGET_ROSTER: &str = "[company]\nname = \"Acme\"\n\
          [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\nbudget_usd_daily = 5.0\n\
