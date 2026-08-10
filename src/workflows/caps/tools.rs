@@ -43,6 +43,21 @@ use openhuman_core::openhuman as oh;
 use crate::harness::search::{SearchBackend, SearchMetering};
 use crate::harness::toolbelt::{self, CapabilityFilter};
 
+/// The grant namespaces a workflow `tool_call` can actually reach — the exec
+/// belt (`shell` / `code` / `web`) plus the metered `search` family, exactly what
+/// [`WorkflowToolInvoker::new`] wires.
+///
+/// It is deliberately a STRICT subset of
+/// [`GATEABLE_NAMESPACES`](crate::company::GATEABLE_NAMESPACES): `media` and
+/// `composio` map to a namespace via [`toolbelt::namespace_of`] but are
+/// agent-turn tool families this invoker never builds, and `subagent` is not a
+/// toolbelt tool at all. A slug in one of those namespaces would pass
+/// [`invoke`](WorkflowToolInvoker::invoke)'s grant gate and then ALWAYS miss the
+/// tool lookup. Author-time validation (`validate_tool_call_node`) rejects any
+/// slug whose namespace falls outside this set, so a save can't green-light a
+/// slug the run would always fail to look up — keep the two in lockstep.
+pub(crate) const WORKFLOW_TOOL_NAMESPACES: [&str; 4] = ["shell", "code", "web", "search"];
+
 /// A [`ToolInvoker`] over the Cell A toolbelt (plus the metered `search` family),
 /// scoped to a per-company workflow workspace and gated by the company's
 /// `[tools].allow` grants.
@@ -107,6 +122,10 @@ impl WorkflowToolInvoker {
                 ),
             }
         }
+        // The namespaces wired above (shell / code / web / search) are the
+        // canonical [`WORKFLOW_TOOL_NAMESPACES`] set author-time validation gates
+        // tool_call slugs against — a family added here must be added there too.
+        //
         // Apply the capability-tier filter (identity in production) just as the
         // agent builder does, so the workflow surface never exceeds the agent one.
         let tools = toolbelt::filter_by_capabilities(tools, filter);
