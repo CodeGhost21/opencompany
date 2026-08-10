@@ -932,6 +932,7 @@ export function AppShell({
         <SidebarFooter>
           <SidebarControls
             lifecycleState={feed.status.lifecycle}
+            emergencyPaused={feed.status.emergency_paused}
             companies={companies}
             activeCompany={company}
             onSwitchCompany={onSwitchCompany}
