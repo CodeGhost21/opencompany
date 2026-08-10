@@ -399,20 +399,33 @@ fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) ->
 /// warning-free with and without the feature.
 fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()> {
     // (a) UNGATED — a tool_call must name a non-empty `slug` string in `config`.
-    let slug = node
+    let raw_slug = node
         .config
         .as_ref()
         .and_then(toml::Value::as_table)
         .and_then(|table| table.get("slug"))
-        .and_then(toml::Value::as_str)
-        .map(str::trim)
-        .filter(|slug| !slug.is_empty());
-    let Some(slug) = slug else {
+        .and_then(toml::Value::as_str);
+    // Absent, or empty / whitespace-only, names no tool at all.
+    let Some(slug) = raw_slug.filter(|slug| !slug.trim().is_empty()) else {
         return Err(OpenCompanyError::InvalidRequest(format!(
             "node `{}` is a tool_call but names no `slug` — set `config.slug` to the tool to run.",
             node.id
         )));
     };
+    // The slug is stored and looked up at run time EXACTLY as written —
+    // `render_workflow` persists the raw config, and `WorkflowToolInvoker` indexes
+    // tools by literal `name()`. So a padded slug like `" csv_export "` would sail
+    // through a trim-normalized check here yet be persisted (and looked up) padded,
+    // halting the run on the very lookup this save-time gate promised to prevent.
+    // Reject the padding rather than silently trimming, so the validated string
+    // and the persisted/runtime string are the same literal.
+    if slug != slug.trim() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "node `{}` has a tool_call `slug` with leading or trailing whitespace (`{slug}`) — \
+             set `config.slug` to the exact tool name.",
+            node.id
+        )));
+    }
 
     #[cfg(feature = "openhuman")]
     {
@@ -2211,5 +2224,33 @@ to = "done"
             err.to_string().contains("not a wired workflow tool"),
             "{err}"
         );
+    }
+
+    /// A slug padded with leading/trailing whitespace is rejected outright rather
+    /// than silently trimmed: the persisted config and the run-time lookup are
+    /// literal, so a padded slug that "passed" a trim-normalized check would halt
+    /// the run on the very lookup this save-time gate promised to catch.
+    /// (Regression, #540.)
+    #[tokio::test]
+    async fn tool_call_with_a_whitespace_padded_slug_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some(" csv_export ")),
+        )
+        .await
+        .expect_err("padded slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("whitespace"), "{err}");
     }
 }
