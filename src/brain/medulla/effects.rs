@@ -186,6 +186,18 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
         // same reason they stay off the operator SSE projection: this body is
         // sent to the inference sidecar, and a board write is not a place to
         // hand it operator-authored text nobody asked to send.
+        // Issue #327: the tree's counterpart to the board announcement below,
+        // and on exactly its terms — written for completeness, not for a live
+        // path, since a workspace write starts no cycle and a brain therefore
+        // never sees one here. Structural only: the node's NAME is deliberately
+        // absent, because it is operator-authored free text and this body goes
+        // to the inference sidecar.
+        CompanyEvent::WorkspaceChanged { node_id, change } => (
+            Role::System,
+            "workspace".to_string(),
+            format!("Workspace node {node_id} {change}"),
+            "workspace.changed",
+        ),
         CompanyEvent::TaskCardChanged {
             task_id,
             change,

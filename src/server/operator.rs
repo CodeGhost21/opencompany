@@ -696,6 +696,23 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
         // *something moved*, not to carry the board. The console reacts by
         // re-reading the board it already knows how to read, which keeps the
         // card's content on exactly one route instead of two.
+        // Issue #327: the frame the Workspace tab was missing. This stream is
+        // deny-by-default — an event with no arm here is simply not projected —
+        // so without this the tab stays on refresh-and-refocus no matter what
+        // the store announces.
+        //
+        // Two keys, both structural, and both already reachable by the same
+        // operator through `GET {scope}/workspace`. There is deliberately **no
+        // node name and no body**: a note's text is operator- or agent-authored
+        // free text, and this frame's whole job is to say *something moved*.
+        // The console reacts by re-reading the tree it already knows how to
+        // read, which keeps the workspace's content on exactly one route.
+        CompanyEvent::WorkspaceChanged { node_id, change } => {
+            let mut o = envelope("workspace_changed");
+            o["nodeId"] = json!(node_id);
+            o["change"] = json!(change);
+            o
+        }
         CompanyEvent::TaskCardChanged {
             task_id,
             change,
@@ -4568,6 +4585,27 @@ mod test {
             v.get("column").is_none(),
             "a removed card is in no column: {v}"
         );
+    }
+
+    /// Issue #327: the workspace's own frame. The stream is deny-by-default, so
+    /// an event with no arm is silently unprojected — this is what proves the
+    /// arm exists at all.
+    ///
+    /// Also pins what is **not** on the wire: no node name, no body. A note's
+    /// text is operator- or agent-authored free text, and this frame's job is
+    /// to say something moved, not to carry the tree.
+    #[test]
+    fn projects_workspace_changed_without_a_name_or_a_body() {
+        let v = super::project_event(&stored(CompanyEvent::WorkspaceChanged {
+            node_id: "n-9".into(),
+            change: crate::runtime::CHANGE_UPDATED.into(),
+        }))
+        .expect("a workspace write must reach the console");
+        assert_eq!(v["type"], "workspace_changed");
+        assert_eq!(v["nodeId"], "n-9");
+        assert_eq!(v["change"], "updated");
+        assert!(v.get("name").is_none(), "no node name on the wire: {v}");
+        assert!(v.get("content").is_none(), "no body on the wire: {v}");
     }
 
     #[test]

@@ -781,6 +781,14 @@ fn summarize_event(event: &CompanyEvent) -> String {
             Some(column) => format!("card {change}: {task_id} → {column}"),
             None => format!("card {change}: {task_id}"),
         },
+        // Issue #327. Structural only, like the board arm above: the id and the
+        // change word, from a fixed vocabulary. The node's NAME is deliberately
+        // absent — it is operator-authored free text, and this string is a
+        // non-sensitive one-liner for the insight surface, which is exactly
+        // where free text does not belong.
+        CompanyEvent::WorkspaceChanged { node_id, change } => {
+            format!("workspace {change}: {node_id}")
+        }
         CompanyEvent::ScheduleFired { cron, .. } => format!("schedule fired: {cron}"),
         CompanyEvent::WebhookReceived { channel, .. } => format!("webhook on {channel}"),
         CompanyEvent::A2aTaskReceived { from, .. } => format!("A2A task from {from}"),

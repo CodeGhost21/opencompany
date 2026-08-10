@@ -1265,6 +1265,11 @@ fn cycle_task_id(
             // in the approval gate, not by starting or claiming a cycle, so it
             // names no card and competes with none.
             | CompanyEvent::EmergencyPauseChanged { .. }
+            // Issue #327: joins `TaskCardChanged` below on the same terms — a
+            // record of a write that already happened, appended by the
+            // workspace store after it. A note that started a cycle merely by
+            // being written would re-enter that store and announce again.
+            | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
@@ -1394,6 +1399,11 @@ fn cycle_thread_id(
             // in the approval gate, not by starting or claiming a cycle, so it
             // names no card and competes with none.
             | CompanyEvent::EmergencyPauseChanged { .. }
+            // Issue #327: joins `TaskCardChanged` below on the same terms — a
+            // record of a write that already happened, appended by the
+            // workspace store after it. A note that started a cycle merely by
+            // being written would re-enter that store and announce again.
+            | CompanyEvent::WorkspaceChanged { .. }
             | CompanyEvent::AgentReply { .. }
             | CompanyEvent::ApprovalParked { .. }
             | CompanyEvent::MemoryFactDeleted { .. }
