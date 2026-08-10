@@ -444,6 +444,290 @@ async fn pause_toggles_and_chat_409() {
     assert_eq!(ok.status(), StatusCode::OK);
 }
 
+// ---------------------------------------------------------------------------
+// Emergency stop (issue #86)
+// ---------------------------------------------------------------------------
+
+/// A `POST` carrying a JSON body, for the step-up-confirmed emergency routes.
+fn json_post_req(uri: &str, token: Option<&str>, body: serde_json::Value) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header("content-type", "application/json");
+    if let Some(token) = token {
+        builder = builder.header("authorization", format!("Bearer {token}"));
+    }
+    builder.body(Body::from(body.to_string())).unwrap()
+}
+
+/// The happy path end to end: stop, observe it in `status`, release it.
+///
+/// `ACME_TOML` sets `mode = "full"`, so this also pins that the stop overrides
+/// the most permissive policy the manifest can ask for.
+#[tokio::test]
+async fn emergency_pause_shows_in_status_and_resume_clears_it() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    let paused = app
+        .clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "EMERGENCY-PAUSE", "reason": "runaway loop" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(paused.status(), StatusCode::OK);
+    let body = json_body(paused).await;
+    assert_eq!(body["emergency_paused"], true);
+    assert_eq!(body["changed"], true);
+    // Orthogonal to lifecycle: the company is still running, so chat still works.
+    assert_eq!(body["lifecycle"], "running");
+
+    let ok = app
+        .clone()
+        .oneshot(chat_req(
+            "/api/v1/companies/acme/chat",
+            Some(PLATFORM_SECRET),
+            "what are you doing?",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(ok.status(), StatusCode::OK);
+
+    // Release requires the company id, not the fixed phrase.
+    let resumed = app
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-resume",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "acme" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), StatusCode::OK);
+    let body = json_body(resumed).await;
+    assert_eq!(body["emergency_paused"], false);
+    assert_eq!(body["changed"], true);
+}
+
+/// The failure path that matters most: a request with no confirmation, or the
+/// wrong one, must not move the switch.
+#[tokio::test]
+async fn emergency_routes_refuse_without_the_right_confirmation() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    // Empty body → 400, and nothing changed.
+    let bare = app
+        .clone()
+        .oneshot(post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(bare.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(json_body(bare).await["code"], "confirmation_required");
+
+    // Wrong phrase → 400.
+    let wrong = app
+        .clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "emergency pause please" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong.status(), StatusCode::BAD_REQUEST);
+
+    // The company is still running normally.
+    let status = app
+        .clone()
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(json_body(status).await["emergency_paused"], false);
+
+    // Engage it, then try to release with the *pause* phrase rather than the id.
+    app.clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "EMERGENCY-PAUSE" }),
+        ))
+        .await
+        .unwrap();
+
+    let wrong_resume = app
+        .clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-resume",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "EMERGENCY-PAUSE" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(wrong_resume.status(), StatusCode::BAD_REQUEST);
+
+    // Still stopped — a failed release must never be a release.
+    let status = app
+        .oneshot(get_req("/api/v1/companies/acme", Some(PLATFORM_SECRET)))
+        .await
+        .unwrap();
+    assert_eq!(json_body(status).await["emergency_paused"], true);
+}
+
+/// Pressing the panic button twice is not an error, and the second press
+/// reports that it changed nothing.
+#[tokio::test]
+async fn emergency_pause_is_idempotent() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    let body = serde_json::json!({ "confirm": "EMERGENCY-PAUSE" });
+    let first = app
+        .clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            body.clone(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(json_body(first).await["changed"], true);
+
+    let second = app
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            body,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(second.status(), StatusCode::OK);
+    let body = json_body(second).await;
+    assert_eq!(body["changed"], false);
+    assert_eq!(body["emergency_paused"], true);
+}
+
+/// Unauthenticated callers cannot reach either route — checked before the
+/// confirmation, so a correct phrase is never a substitute for a credential.
+#[tokio::test]
+async fn emergency_routes_require_auth() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state);
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    let anon = app
+        .clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            None,
+            serde_json::json!({ "confirm": "EMERGENCY-PAUSE" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(anon.status(), StatusCode::UNAUTHORIZED);
+
+    let anon_resume = app
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-resume",
+            None,
+            serde_json::json!({ "confirm": "acme" }),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(anon_resume.status(), StatusCode::UNAUTHORIZED);
+}
+
+/// The kill switch is journaled with the acting operator, both directions.
+#[tokio::test]
+async fn emergency_transitions_are_journaled_with_the_actor() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = platform_state(&home, None);
+    let app = router(state.clone());
+
+    app.clone()
+        .oneshot(provision_req(Some(PLATFORM_SECRET), ACME_TOML))
+        .await
+        .unwrap();
+
+    app.clone()
+        .oneshot(json_post_req(
+            "/api/v1/companies/acme/emergency-pause",
+            Some(PLATFORM_SECRET),
+            serde_json::json!({ "confirm": "EMERGENCY-PAUSE", "reason": "burning budget" }),
+        ))
+        .await
+        .unwrap();
+    app.oneshot(json_post_req(
+        "/api/v1/companies/acme/emergency-resume",
+        Some(PLATFORM_SECRET),
+        serde_json::json!({ "confirm": "acme" }),
+    ))
+    .await
+    .unwrap();
+
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company registered");
+    let events = runtime
+        .events()
+        .read_from(runtime.id(), EventSeq::new(0), 1000)
+        .await
+        .unwrap();
+    let changes: Vec<_> = events
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            CompanyEvent::EmergencyPauseChanged {
+                engaged,
+                by,
+                reason,
+            } => Some((*engaged, by.clone(), reason.clone())),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(changes.len(), 2, "expected an engage and a release");
+    assert!(changes[0].0, "first event should be the engage");
+    assert_eq!(changes[0].2.as_deref(), Some("burning budget"));
+    assert!(!changes[1].0, "second event should be the release");
+    // Both carry an identified actor rather than an anonymous one.
+    assert!(!changes[0].1.id.is_empty());
+    assert!(!changes[1].1.id.is_empty());
+}
+
 #[tokio::test]
 async fn suspend_requires_platform_scope_and_blocks_chat() {
     let home_dir = home();
