@@ -64,8 +64,10 @@ owner-scoped and both take a confirmation phrase in the body. Normative:
   just stopped without ever releasing it. Denial returns to the brain as a
   refusal it replans around, which is what "park all new work" has to mean.
 - **`Other` stays allowed, so chat survives.** The operator has to be able to
-  ask the company what it was doing. Anything with an effect outside the
-  conversation is stopped.
+  ask the company what it was doing. Effects classified as `Other` remain
+  allowed while the emergency stop is engaged; the gate otherwise treats
+  `Other` as a catch-all group, not a chat-only one, and does not police which
+  tools it covers.
 - **It is orthogonal to `lifecycle`.** `lifecycle = "paused"` rejects every
   request with a `409`, chat included — the opposite of what an emergency
   needs. A company can be `running` *and* stopped; resuming one does not resume
