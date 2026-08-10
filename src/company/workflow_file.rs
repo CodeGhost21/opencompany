@@ -993,11 +993,15 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     }
 
     // Reachability check. Every node must sit on some path from a `trigger`, or
-    // the engine will never execute it. SKIPPED entirely when there are no
-    // triggers: the "needs at least one trigger" problem already fired above, and
-    // without an entry point EVERY node is trivially unreachable — reporting all
-    // of them would just bury the real problem in noise.
-    if trigger_count > 0 {
+    // the engine will never execute it. SKIPPED entirely when no trigger
+    // contributed a usable entry id — either there are no triggers, or every
+    // trigger failed id validation (empty id). In both cases the real problem
+    // ("needs at least one trigger" / "missing an `id`") already fired above, and
+    // without a seed EVERY node is trivially unreachable, so reporting all of them
+    // would just bury that problem in noise. Gate on `trigger_ids` (the entries
+    // the BFS can actually seed from), NOT the raw `trigger_count`, so an id-less
+    // trigger doesn't clear the count yet seed nothing.
+    if !trigger_ids.is_empty() {
         let mut reached = vec![false; node_count];
         let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
         for tid in &trigger_ids {
@@ -1920,6 +1924,34 @@ mod tests {
         assert!(
             !message.contains("cannot be reached"),
             "reachability must be skipped with no trigger: {message}"
+        );
+    }
+
+    /// A trigger with an EMPTY id already fails id-validation, and it seeds no
+    /// entry into the reachability BFS. The gate keys off `trigger_ids` (usable
+    /// entries), not the raw trigger count, so the run's one valid node is NOT
+    /// piled with a bogus "cannot be reached" on top of the real "missing an
+    /// `id`" problem. (Regression, #540.)
+    #[test]
+    fn empty_id_trigger_skips_reachability_noise() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = ""
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "work"
+            kind = "output"
+            name = "Work"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("missing an `id`"), "{message}");
+        assert!(
+            !message.contains("cannot be reached"),
+            "an id-less trigger must not spawn reachability noise: {message}"
         );
     }
 
