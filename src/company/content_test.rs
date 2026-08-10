@@ -250,3 +250,117 @@ fn the_repo_skill_registry_parses() {
         );
     }
 }
+
+/// Every bundled workflow must be *runnable*, not merely parseable (issue #530).
+/// `every_workflow_graph_parses` only proves the TOML deserializes; it never
+/// checks that a `tool_call` names a wired tool or that an `agent` names a real
+/// teammate — which is exactly how the marketing agency preset shipped pointing
+/// `research` at an unwired slug (halt) and `publish` at a nonexistent HTTP node.
+///
+/// This translates each graph the way the engine will and asserts the two facts
+/// that decide whether a run halts: every `tool_call` slug resolves to a real
+/// toolbelt namespace ([`namespace_of`]), and every `agent` ref is on that
+/// company's roster.
+///
+/// Gated on `openhuman` because `translate` and `namespace_of` live behind that
+/// feature; the `Rust (openhuman, tinycortex)` CI lane runs it.
+#[cfg(feature = "openhuman")]
+#[test]
+fn every_bundled_workflow_is_runnable_against_its_roster() {
+    use std::collections::BTreeSet;
+
+    use tinyflows::model::NodeKind;
+
+    use crate::harness::toolbelt::namespace_of;
+    use crate::workflows::translate;
+
+    for company in subdirs(&repo_root().join("companies")) {
+        let manifest = CompanyManifest::from_path(&company)
+            .unwrap_or_else(|err| panic!("{}: {err}", company.display()));
+        let roster: BTreeSet<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+
+        for file in toml_files(&company.join("workflows")) {
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
+            let workflow =
+                parse_workflow(&text).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+            let graph = translate(&workflow);
+
+            for node in &graph.nodes {
+                match node.kind {
+                    NodeKind::ToolCall => {
+                        let slug = node
+                            .config
+                            .get("slug")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{} node `{}`: a tool_call with no slug",
+                                    file.display(),
+                                    node.id
+                                )
+                            });
+                        assert!(
+                            namespace_of(slug).is_some(),
+                            "{} node `{}`: tool_call slug `{slug}` maps to no toolbelt namespace, so \
+                             the run halts on it — every tool_call must name a wired tool (shell / \
+                             code / web / search / …).",
+                            file.display(),
+                            node.id
+                        );
+                    }
+                    NodeKind::Agent => {
+                        let agent_ref = node
+                            .config
+                            .get("agent_ref")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{} node `{}`: an agent node with no agent_ref",
+                                    file.display(),
+                                    node.id
+                                )
+                            });
+                        assert!(
+                            roster.contains(agent_ref),
+                            "{} node `{}`: agent_ref `{agent_ref}` is not on the roster ({roster:?}) \
+                             — the step would route to a teammate that does not exist.",
+                            file.display(),
+                            node.id
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// The marketing agency's default desktop preset specifically — the three
+/// defects issue #530 fixed, pinned so a future edit cannot silently reintroduce
+/// them: `research` calls the metered `web_search` and continues past a search
+/// failure rather than halting, and `publish` is the copywriter assembly step
+/// (there is no CMS to POST to).
+#[cfg(feature = "openhuman")]
+#[test]
+fn the_marketing_campaign_preset_is_runnable() {
+    use crate::workflows::translate;
+
+    let path =
+        repo_root().join("companies/agentic_marketing_agency/workflows/campaign_pipeline.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let graph = translate(&parse_workflow(&text).expect("campaign parses"));
+    let node = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("no node `{id}`"))
+    };
+
+    let research = node("research");
+    assert_eq!(research.config["slug"], "web_search");
+    assert_eq!(research.config["on_error"], "continue");
+
+    assert_eq!(node("publish").config["agent_ref"], "copywriter");
+}
