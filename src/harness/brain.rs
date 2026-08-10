@@ -22,6 +22,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 
 use crate::Result;
+use crate::company::artifact_mirror;
 use crate::company::steer::{InflightEntry, InflightKind, SteerAction, cap_redirect};
 use crate::harness::build::agent_workspace;
 use crate::harness::confine;
@@ -1482,9 +1483,13 @@ impl HarnessBrain {
             // The revision THIS run wrote (#339). A fresh record is always its
             // own v1; an extended one takes whatever `push_version` numbered.
             let mut version = 1;
+            // The node the PREVIOUS version was mirrored into, read before the
+            // push below appends a version whose own node is not chosen yet.
+            let mut prior_node = None;
             let mut record = match existing {
                 Some(index) => {
                     let mut found = on_card.remove(index);
+                    prior_node = found.workspace_node_id().map(str::to_string);
                     version = found.push_version(
                         &pending.body,
                         ArtifactAuthor::Agent,
@@ -1521,6 +1526,48 @@ impl HarnessBrain {
             };
             if let Some(run_id) = run_id {
                 record.stamp_run(run_id);
+            }
+            // Issue #552: the deliverable also goes into the shared workspace
+            // tree, which is the one surface the operator browses and every
+            // other agent can read. The artifact chain above stays the
+            // authoritative version history; the node holds the current body.
+            //
+            // **A failed mirror does not lose the deliverable.** An explicit
+            // publish that could not be filed into the tree is still recorded
+            // as an artifact — dropping a produced file over tree bookkeeping
+            // would be far worse than a deliverable the operator has to reach
+            // through the Artifacts tab. So this logs at `error` (loudly: the
+            // tree is where people look) and continues with no node id, which
+            // is exactly what a pre-#552 record carries. The next publish of
+            // the same path retries and heals it.
+            //
+            // The node is written before the artifact upsert because the id it
+            // returns is what gets stamped onto this version, and doing it
+            // afterwards would need a second upsert. The residual is narrow and
+            // named: if the upsert below then fails, a re-published node shows
+            // a body one version ahead of the chain until the next write on
+            // either surface reconciles them.
+            if let Some(workspace) = self.deps.workspace.as_ref() {
+                let target = artifact_mirror::PublishTarget {
+                    agent_id: author,
+                    task_id: &card.id,
+                    source: &pending.source,
+                    body: &pending.body,
+                    existing_node_id: prior_node.as_deref(),
+                };
+                match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
+                    .await
+                {
+                    Ok(node_id) => record.stamp_workspace_node(node_id),
+                    Err(err) => tracing::error!(
+                        task_id = %card.id,
+                        agent = %author,
+                        source = %pending.source,
+                        error = %err,
+                        "[publish] could not put the published file into the company workspace; \
+                         it is still recorded as an artifact"
+                    ),
+                }
             }
             artifacts.upsert(&self.record.id, &record).await?;
             written.push(TaskOutputArtifact {
@@ -2585,6 +2632,25 @@ members = ["engineer"]
     /// [`FsOps`] handle (it implements both), so a dispatch's versioned output
     /// is observable.
     fn brain_with_artifacts(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        brain_with_stores(dir, false)
+    }
+
+    /// As [`brain_with_artifacts`], but with the workspace store wired to the
+    /// same [`FsOps`] handle too (it implements all three), so issue #552's
+    /// dual write into the shared tree is observable.
+    ///
+    /// A separate constructor rather than a change to the one above: leaving
+    /// `brain_with_artifacts` workspace-less is what keeps every pre-existing
+    /// publish test on the artifact-only path, which is the guarantee that an
+    /// unwired workspace behaves exactly as it did before this cell.
+    fn brain_with_artifacts_and_workspace(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
+        brain_with_stores(dir, true)
+    }
+
+    fn brain_with_stores(
+        dir: &std::path::Path,
+        with_workspace: bool,
+    ) -> (HarnessBrain, Arc<FsOps>) {
         let ops = Arc::new(FsOps::new(dir));
         let deps = HarnessDeps {
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -2619,7 +2685,7 @@ members = ["engineer"]
             run_supervisor: crate::runtime::RunSupervisor::default(),
             delivery: None,
             search: None,
-            workspace: None,
+            workspace: with_workspace.then(|| ops.clone() as Arc<dyn crate::ports::WorkspaceStore>),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -2627,6 +2693,294 @@ members = ["engineer"]
         )
     }
 
+    // -- issue #552: a published deliverable reaches the shared workspace -----
+
+    /// The headline of #552. A published file used to reach the artifact store
+    /// and stop, which left it visible only in the Artifacts tab of one card.
+    /// It must now also land in the shared tree, under the publishing agent's
+    /// own folder, attributed to that agent — and the version that wrote it
+    /// must carry the node id, which is the link the console's cross-link and
+    /// every later mirror depend on.
+    #[tokio::test]
+    async fn a_publish_lands_in_the_shared_workspace_and_the_version_names_the_node() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+        use crate::ports::workspace::{WorkspaceOrigin, WorkspaceStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts_and_workspace(dir.path());
+        let company = CompanyId::new("acme");
+
+        brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                "maya",
+                vec![PendingPublish {
+                    agent: "maya".to_string(),
+                    source: "specs/launch.md".to_string(),
+                    title: "Launch spec".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "the spec body".to_string(),
+                }],
+                Some("run-1"),
+            )
+            .await
+            .expect("records");
+
+        let listed = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap();
+        let node_id = listed[0]
+            .workspace_node_id()
+            .expect("the version must name the node its body was mirrored into");
+
+        let (node, body) = WorkspaceStore::read(&*ops, &company, node_id)
+            .await
+            .unwrap()
+            .expect("the node exists in the shared tree");
+        assert_eq!(body, "the spec body");
+        assert_eq!(node.name, "launch.md");
+        assert_eq!(
+            node.created_by,
+            WorkspaceOrigin::Agent {
+                id: "maya".to_string()
+            },
+            "the tree must say which teammate produced this"
+        );
+    }
+
+    /// The "zero tool work" claim in #552, proven rather than asserted: a
+    /// second agent reads the first agent's deliverable through the ordinary
+    /// `workspace_read` path, with nothing published-specific involved.
+    ///
+    /// The read goes through the *same* index-and-resolve the tool uses (a
+    /// company-scoped `tree()` then a `read()` by id), so what this pins is
+    /// that the node is reachable by path from the shared tree — which is
+    /// exactly what makes it readable by every teammate.
+    #[tokio::test]
+    async fn a_second_agent_can_read_what_the_first_published() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts_and_workspace(dir.path());
+        let company = CompanyId::new("acme");
+
+        brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                "maya",
+                vec![PendingPublish {
+                    agent: "maya".to_string(),
+                    source: "launch.md".to_string(),
+                    title: "Launch spec".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "what maya produced".to_string(),
+                }],
+                None,
+            )
+            .await
+            .expect("records");
+
+        // Agent B knows nothing about the artifact. It walks the shared tree by
+        // path, exactly as `workspace_list` / `workspace_read` do.
+        let nodes = WorkspaceStore::tree(&*ops, &company).await.unwrap();
+        let name_of = |id: &str| nodes.iter().find(|n| n.id == id).map(|n| n.name.clone());
+        let found = nodes
+            .iter()
+            .find(|n| {
+                n.name == "launch.md"
+                    && n.parent_id
+                        .as_deref()
+                        .and_then(name_of)
+                        .is_some_and(|parent| parent == "t-1")
+            })
+            .expect("agent B finds the deliverable by browsing the shared tree");
+
+        let (_, body) = WorkspaceStore::read(&*ops, &company, &found.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(body, "what maya produced");
+    }
+
+    /// A re-publish revises the SAME node rather than opening a rival beside
+    /// it, so the operator's open tab and any link to it keep working — and
+    /// the new version carries the same node id, which is what lets the next
+    /// re-publish find it again.
+    #[tokio::test]
+    async fn a_republish_updates_the_same_node() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+        use crate::ports::workspace::WorkspaceStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts_and_workspace(dir.path());
+        let company = CompanyId::new("acme");
+        let c = card("t-1", "maya");
+        let publish = |body: &str| PendingPublish {
+            agent: "maya".to_string(),
+            source: "specs/launch.md".to_string(),
+            title: "Launch spec".to_string(),
+            kind: crate::ports::artifacts::ArtifactKind::Markdown,
+            note: None,
+            body: body.to_string(),
+        };
+
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish("v1")], Some("run-1"))
+            .await
+            .unwrap();
+        let first_node = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap()[0]
+            .workspace_node_id()
+            .expect("v1 named a node")
+            .to_string();
+        let tree_before = WorkspaceStore::tree(&*ops, &company).await.unwrap().len();
+
+        brain
+            .record_published_artifacts(&c, "maya", vec![publish("v2")], Some("run-2"))
+            .await
+            .unwrap();
+
+        let record = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap()[0]
+            .clone();
+        assert_eq!(record.versions.len(), 2, "one record, two versions");
+        assert_eq!(
+            record.workspace_node_id(),
+            Some(first_node.as_str()),
+            "the second version must name the node the first one already had"
+        );
+        assert_eq!(
+            WorkspaceStore::tree(&*ops, &company).await.unwrap().len(),
+            tree_before,
+            "a re-publish must create no new nodes"
+        );
+        assert_eq!(
+            WorkspaceStore::read(&*ops, &company, &first_node)
+                .await
+                .unwrap()
+                .unwrap()
+                .1,
+            "v2",
+            "the node holds the current body"
+        );
+    }
+
+    /// An unwired workspace must behave **exactly** as before this cell: the
+    /// artifact is recorded, nothing is attempted against a tree that does not
+    /// exist, and no version claims a node.
+    ///
+    /// This is what keeps every pre-#552 publish test honest, since they all
+    /// run on this path.
+    #[tokio::test]
+    async fn without_a_workspace_store_the_publish_path_is_unchanged() {
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts(dir.path());
+        let company = CompanyId::new("acme");
+
+        brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                "maya",
+                vec![PendingPublish {
+                    agent: "maya".to_string(),
+                    source: "specs/launch.md".to_string(),
+                    title: "Launch spec".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "body".to_string(),
+                }],
+                None,
+            )
+            .await
+            .expect("the artifact is still recorded");
+
+        let listed = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(
+            listed[0].workspace_node_id(),
+            None,
+            "with no tree to mirror into, a version names no node"
+        );
+    }
+
+    /// A deliverable is never dropped for tree bookkeeping. When the node
+    /// cannot be written — here a `Standards` *file* squatting the `Agents`
+    /// root name, which the fail-closed resolver refuses rather than guesses —
+    /// the artifact is still recorded, just without a node id.
+    ///
+    /// The opposite behaviour (propagating the error) would lose an explicitly
+    /// published file because a folder could not be made, which is the worse
+    /// of the two failures by a wide margin.
+    #[tokio::test]
+    async fn a_failed_node_write_still_records_the_artifact() {
+        use crate::company::workspace_scaffold::AGENTS_ROOT;
+        use crate::harness::publish::PendingPublish;
+        use crate::ports::artifacts::ArtifactStore;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, ops) = brain_with_artifacts_and_workspace(dir.path());
+        let company = CompanyId::new("acme");
+
+        // A *file* named `Agents` at the workspace root. The minter refuses to
+        // resolve a folder through it rather than clobbering an operator's note.
+        WorkspaceStore::create(
+            &*ops,
+            &company,
+            &WorkspaceNode {
+                id: crate::ports::generate_id(),
+                name: AGENTS_ROOT.to_string(),
+                kind: NodeKind::File,
+                parent_id: None,
+                updated_at_millis: now_millis(),
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
+            },
+            Some("an operator's note, in the way"),
+        )
+        .await
+        .unwrap();
+
+        let written = brain
+            .record_published_artifacts(
+                &card("t-1", "maya"),
+                "maya",
+                vec![PendingPublish {
+                    agent: "maya".to_string(),
+                    source: "launch.md".to_string(),
+                    title: "Launch spec".to_string(),
+                    kind: crate::ports::artifacts::ArtifactKind::Markdown,
+                    note: None,
+                    body: "the deliverable".to_string(),
+                }],
+                None,
+            )
+            .await
+            .expect("a tree that refuses must not fail the publish");
+
+        assert_eq!(written.len(), 1, "the deliverable is still recorded");
+        let listed = ArtifactStore::list(&*ops, &company, Some("t-1"))
+            .await
+            .unwrap();
+        assert_eq!(listed[0].latest().unwrap().body, "the deliverable");
+        assert_eq!(
+            listed[0].workspace_node_id(),
+            None,
+            "no node was written, so no version may claim one"
+        );
+    }
     fn card(id: &str, assignee: &str) -> TaskRecord {
         TaskRecord {
             id: id.to_string(),
