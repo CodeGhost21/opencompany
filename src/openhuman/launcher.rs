@@ -94,11 +94,16 @@ impl OpenHumanLaunch {
         // non-numeric value would emit usable-but-wrong JSON, and quotes or
         // backslashes would make it malformed. Parse as u16 and fall back to
         // Tauri/Vite's default 1420.
-        let port = std::env::var("OPENHUMAN_DEV_PORT")
-            .ok()
-            .and_then(|p| p.trim().parse::<u16>().ok())
-            .unwrap_or(1420);
-        match (self.release, DesktopBackend::for_host()) {
+        let port = desktop_dev_port(std::env::var("OPENHUMAN_DEV_PORT").ok().as_deref());
+        self.desktop_tauri_args_for(DesktopBackend::for_host(), port)
+    }
+
+    /// The backend-specific `cargo tauri` arguments. Split from
+    /// [`desktop_tauri_args`](Self::desktop_tauri_args) so both the CEF and Wry
+    /// branches are directly testable from any host rather than only via
+    /// [`DesktopBackend::for_host`].
+    fn desktop_tauri_args_for(&self, backend: DesktopBackend, port: u16) -> Vec<String> {
+        match (self.release, backend) {
             (false, DesktopBackend::Cef) => {
                 let config = format!("{{\"build\":{{\"devUrl\":\"http://localhost:{port}\"}}}}");
                 vec!["dev".into(), "--config".into(), config]
