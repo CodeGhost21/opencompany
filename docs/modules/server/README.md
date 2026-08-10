@@ -397,22 +397,52 @@ offering the field would be a trap) and `version` sent as `expectedVersion`. A
 persistent conflict banner Delete uses, whose Reload re-reads the graph and its
 token; nothing is retried without one.
 
-**An edit does not disarm a schedule.** OpenHuman's `flows_update` forces
-`enabled = false` when an edit turns a manual trigger into an automatic one, so
-a new schedule cannot go live unreviewed. This host has no equivalent and
-deliberately gains none here: `WorkflowScheduler::tick` does not gate on
-`[workflows].enabled` at all, so writing `false` would stop nothing, and
-`adding_a_schedule_by_edit_arms_the_workflow_on_the_next_tick` pins that. An
-edit is therefore exactly as live as a create, which already persists a running
-schedule the same way. Reversing this means first making the scheduler honour
-`enabled`, which is the enable/disable follow-up below.
-
 **Deliberately not in #259**, each its own follow-up: revision history and
 rollback (OpenHuman keeps a bounded snapshot ring in a dedicated table; our
 overlay bodies live inside `CompanyRecord`, which is saved whole on every write,
-so a ring needs its own store surface); journal retention (see above); and
-enable/disable without deleting, which means first reversing this scheduler's
-deliberate decision not to gate on `[workflows].enabled`.
+so a ring needs its own store surface) and journal retention (see above).
+Enable/disable and disarm-on-edit landed separately, as issue #276 — below.
+
+### Pausing a workflow, and the disarm rule (issue #276)
+
+`PUT …/workflows/{wid}/enabled` with `{"enabled": false}` stops a workflow's
+schedule without deleting it. **Pausing stops the schedule, not the workflow**:
+a paused workflow keeps its graph, stays in the picker and still runs from the
+Run button. `WorkflowScheduler::tick` is the only reader of the flag.
+
+The switch is `CompanyRecord.disabled_workflows`, **not** the manifest's
+`[workflows].enabled`. That list is a declaration of what this company was
+provisioned with, and `merge_enabled_workflows` (issue #208) rebuilds it at boot
+from seed ids ∪ surviving overlay ids — so "off" expressed as absence from it
+would re-arm itself on the next restart, which is the one failure mode a safety
+switch may not have. Read `workflow_enabled`, write `set_workflow_enabled`;
+never touch the field directly.
+
+Toggling is a **wider** set than editing: any id that resolves to a real graph,
+including a seed-defined one that `PUT`/`DELETE` refuse with a `409`. Pausing
+does not touch the source tree and can only remove capability, so it cannot let
+a runtime write outlive a seed rollback. A manifest-`enabled` id with no graph
+is still a `409` — no graph, no schedule to stop. There is no `expectedVersion`:
+a switch carries no content to overwrite, and requiring a token would make a
+seed-backed workflow untoggleable since only overlay bodies have one.
+
+**An edit disarms; nothing ever silently arms.** OpenHuman's `flows_update`
+forces `enabled = false` when an edit turns a manual or absent trigger into an
+automatic one, after a flow of its own started running on an unreviewed 8am
+schedule. This host adopts that rule and widens it to **create**, because
+`create_company_workflow` is also the orchestrator's `create_workflow` tool — so
+an agent cannot arm a cron, and an operator cannot route around the rule by
+authoring the graph fresh instead of editing it. Changing an already-armed
+workflow's cron does **not** disarm: the reviewed decision is "automatic at
+all", and putting a re-enable click behind every typo fix is how an operator
+learns to click through it. `a_switched_off_workflow_does_not_fire` and
+`an_edit_that_adds_a_schedule_switches_the_workflow_off` pin the two halves.
+
+**In the console.** Each row carries a switch, rendered from `enabled` on the
+list read. Like `editable`, only an explicit `false` counts — a host predating
+#276 sends no field, and `undefined` must not read as paused. A row the disarm
+rule just switched off reports `enabled: false` on the create/update response
+itself, so the console learns about it from the write it made.
 
 ### Workflow runs and report delivery
 
