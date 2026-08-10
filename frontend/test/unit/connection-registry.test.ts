@@ -8,6 +8,7 @@ import {
   listConnections,
   removeConnection,
   resetConnections,
+  restoreConnections,
 } from "@/connections/registry";
 import { findProfile, readProfiles } from "@/connections/profileStore";
 import { scopedKey } from "@/connections/types";
@@ -148,5 +149,69 @@ describe("persistence", () => {
   it("survives storage it cannot parse at all", () => {
     window.localStorage.setItem("oc.connections.v1", "{not json");
     expect(readProfiles()).toEqual([]);
+  });
+});
+
+describe("credentials", () => {
+  it("never writes a platform bearer to local storage", () => {
+    // A platform bearer is a machine credential. It arrives in `?token=` and
+    // `stripAuthParams` deletes it from the address bar immediately, so that it
+    // does not linger anywhere readable — persisting it here would undo that
+    // and go further, since `localStorage` has no expiry and any injected
+    // script can read it.
+    const token = "platform-bearer-do-not-persist";
+    addConnection({
+      baseUrl: "https://acme.test",
+      credential: { kind: "platform", token },
+    });
+
+    expect(window.localStorage.getItem("oc.connections.v1")).not.toContain(token);
+    // The kind survives as a marker — "this host authenticates as the
+    // platform" — while the secret does not. The live token is re-derived from
+    // the URL on the next load.
+    expect(readProfiles()[0]?.credential).toEqual({ kind: "platform" });
+    // In memory it is still the live credential — only the written form is
+    // redacted.
+    expect(getConnection(listConnections()[0].id)?.credential).toEqual({
+      kind: "platform",
+      token,
+    });
+  });
+
+  it("re-applies the live bearer to a restored connection", () => {
+    // The consequence of not persisting it, and the reason `addConnection`
+    // cannot simply return early. `restoreConnections` runs first on every
+    // load and can only supply what was written down; the bootstrap add that
+    // follows carries the token from `?token=`. Returning the existing entry
+    // without adopting it would leave the connection permanently
+    // unauthenticated after one reload.
+    const token = "fresh-bearer";
+    const first = addConnection({
+      baseUrl: "https://acme.test",
+      credential: { kind: "platform", token: "stale" },
+    });
+
+    // A reload: memory is gone, storage is not.
+    resetConnections();
+    const restored = restoreConnections();
+    expect(getConnection(restored[0])?.credential).toEqual({ kind: "platform" });
+
+    const bootstrap = addConnection({
+      baseUrl: "https://acme.test",
+      credential: { kind: "platform", token },
+    });
+    expect(bootstrap).toBe(first);
+    expect(getConnection(bootstrap)?.credential).toEqual({ kind: "platform", token });
+  });
+
+  it("leaves a device credential alone, because a ref is not a secret", () => {
+    // `device.ref` names a keychain entry rather than holding the token, which
+    // is the whole reason the type is shaped that way. Redacting it would lose
+    // the handle and there would be nothing to look the secret up with.
+    addConnection({
+      baseUrl: "https://acme.test",
+      credential: { kind: "device", ref: "keychain-handle-1" },
+    });
+    expect(readProfiles()[0]?.credential).toEqual({ kind: "device", ref: "keychain-handle-1" });
   });
 });
