@@ -204,6 +204,15 @@ cargo check --features tiny
 cargo run --bin opencompany -- open-human --dry-run -- status
 ```
 
+Preview the Tauri desktop host (calls `cargo tauri` directly with OpenHuman's
+preflight ported into Rust — CEF on macOS, `wry` on Linux/Windows):
+
+```sh
+cargo run --bin opencompany -- open-human --mode desktop --dry-run
+cargo run --bin opencompany -- open-human --mode desktop            # launch
+cargo run --bin opencompany -- open-human --mode desktop --release  # bundle
+```
+
 ## Under the hood
 
 OpenCompany is a Rust 2024 crate: one configurable host. Business types are

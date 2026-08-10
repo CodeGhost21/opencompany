@@ -99,7 +99,13 @@ enum Command {
         #[arg(long)]
         home: Option<PathBuf>,
     },
-    /// Launch a sibling OpenHuman checkout through cargo.
+    /// Launch a sibling OpenHuman checkout: the core binary (`--mode core`)
+    /// or the Tauri desktop host (`--mode desktop`). Desktop calls `cargo tauri`
+    /// directly and performs the preflight OpenHuman's own scripts do — install
+    /// the vendored CEF-aware `tauri-cli`, pin `CEF_PATH`, load `<root>/.env`,
+    /// and on macOS seed the Chromium keychain + signing identity (CEF on macOS,
+    /// `wry` on Linux/Windows; Tauri still drives the Vite dev server). Pass
+    /// `--dry-run` to preview.
     OpenHuman {
         /// OpenHuman checkout path.
         #[arg(long, default_value = "vendor/openhuman")]
@@ -107,10 +113,16 @@ enum Command {
         /// Launch target.
         #[arg(long, value_enum, default_value_t = ModeArg::Core)]
         mode: ModeArg,
-        /// Print the cargo command without executing it.
+        /// Build a release bundle instead of launching a dev session
+        /// (`cargo run --release` for core; `cargo tauri build` for desktop —
+        /// a signed `.app`/dmg on macOS, a deb/AppImage elsewhere).
+        #[arg(long)]
+        release: bool,
+        /// Print the command without executing it.
         #[arg(long)]
         dry_run: bool,
-        /// Arguments passed after `--` to the OpenHuman binary.
+        /// Arguments passed after `--` to the OpenHuman core binary. Ignored
+        /// (and rejected) in desktop mode, which drives fixed pnpm scripts.
         #[arg(last = true)]
         args: Vec<String>,
     },
@@ -823,6 +835,41 @@ async fn import_from_dir(dir: &std::path::Path, home: Option<PathBuf>) -> Result
     Ok(())
 }
 
+/// Handle the `openhuman` subcommand: build the launch request, reject
+/// passthrough args in Desktop mode via [`OpenHumanLaunch::validate`]
+/// (before the dry-run branch so `--dry-run -- --arg` reports the same error
+/// as a real launch instead of printing an unlaunchable command), then either
+/// print the preview or run to completion and exit with the child's code.
+async fn run_openhuman(
+    root: PathBuf,
+    mode: ModeArg,
+    release: bool,
+    dry_run: bool,
+    args: Vec<String>,
+) -> Result<()> {
+    let mut launch = match LaunchMode::from(mode) {
+        LaunchMode::Core => OpenHumanLaunch::core(root),
+        LaunchMode::Desktop => OpenHumanLaunch::desktop(root),
+    }
+    .with_args(args);
+    if release {
+        launch = launch.release();
+    }
+
+    // validate() rejects passthrough args in Desktop mode; run it before
+    // the dry-run branch so `--dry-run -- --arg` reports the same error
+    // as an actual launch instead of printing an unlaunchable command.
+    launch.validate()?;
+
+    if dry_run {
+        println!("{}", launch.dry_run_preview());
+        return Ok(());
+    }
+
+    let status = launch.run().await?;
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -1195,23 +1242,10 @@ async fn main() -> Result<()> {
         Some(Command::OpenHuman {
             root,
             mode,
+            release,
             dry_run,
             args,
-        }) => {
-            let launch = match LaunchMode::from(mode) {
-                LaunchMode::Core => OpenHumanLaunch::core(root),
-                LaunchMode::Desktop => OpenHumanLaunch::desktop(root),
-            }
-            .with_args(args);
-
-            if dry_run {
-                println!("{}", launch.command_preview().join(" "));
-                return Ok(());
-            }
-
-            let status = launch.run().await?;
-            std::process::exit(status.code().unwrap_or(1));
-        }
+        }) => run_openhuman(root, mode, release, dry_run, args).await,
         None => {
             println!("opencompany {}", opencompany::VERSION);
             Ok(())
@@ -1222,6 +1256,34 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[tokio::test]
+    async fn openhuman_desktop_dry_run_rejects_passthrough_args() {
+        // The handler validates before the dry-run branch, so `--dry-run`
+        // with passthrough args in Desktop mode reports the same 400 as a
+        // real launch instead of printing a command that could never run.
+        let tmp = std::env::temp_dir().join(format!(
+            "oc-bin-oh-desktop-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let err = run_openhuman(
+            tmp.clone(),
+            ModeArg::Desktop,
+            false,
+            true,
+            vec!["--flag".into()],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(
+            &err,
+            opencompany::OpenCompanyError::OpenHuman { code: 400, .. }
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
 
     #[test]
     fn the_home_flag_is_taken_verbatim() {

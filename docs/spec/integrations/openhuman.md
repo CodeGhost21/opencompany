@@ -62,9 +62,18 @@ lives in the WS3 chat handler, not inline in the harness.
 The former out-of-process seam is retained for one release behind
 `feature = "openhuman-rpc"` and is then removed:
 
-- **Process**: the launcher (`opencompany open-human [--dry-run]`) shells out
-  through Cargo to `openhuman-core` (Core) or the Tauri app (Desktop);
-  `OPENCOMPANY_OPENHUMAN_URL` attaches to a running `openhuman-core serve`.
+- **Process**: the launcher (`opencompany open-human [--mode core|desktop]
+  [--release] [--dry-run]`) drives `cargo run --bin openhuman-core` (Core) or
+  `cargo tauri dev`/`build` directly (Desktop) with the exact argument
+  sequences OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/
+  `tauri:build:ui` pnpm scripts invoke. The Desktop preflight ports those
+  scripts into Rust — it installs the vendored CEF-aware `tauri-cli`, pins
+  `CEF_PATH`, and loads `<root>/.env`, seeding it from `<root>/.env.example`
+  only in Desktop mode when the file is absent (Core never touches `.env`); on
+  macOS it additionally seeds the Chromium keychain + signing identity. Tauri
+  still drives the Vite dev server via `beforeDevCommand`. CEF on macOS,
+  `wry` on Linux/Windows. `OPENCOMPANY_OPENHUMAN_URL` attaches to a running
+  `openhuman-core serve`.
 - **Wire**: JSON-RPC at `http://127.0.0.1:<port>/rpc` (methods
   `openhuman.<namespace>_<function>`, per-launch bearer) plus REST
   `GET /health`, `GET /schema`, `GET /events`; `OpenHumanToolProvider` /
@@ -79,7 +88,15 @@ The Tauri app is a natural prosumer install path: OpenHuman as the shell,
 OpenCompany as the company runtime behind it. Whether the prosumer UI ships
 as an OpenHuman mode or a separate frontend is an open product question
 ([product/prosumer.md](../product/prosumer.md)); the runtime API is the same
-either way.
+either way. Launching the desktop host from an OpenCompany checkout is wired through
+`opencompany open-human --mode desktop` (add `--release` for a bundle): it
+calls `cargo tauri dev`/`build` directly and ports OpenHuman's own script
+preflight into Rust — installing the vendored CEF-aware `tauri-cli`, pinning
+`CEF_PATH`, loading `<root>/.env`, and on macOS seeding the Chromium keychain
+and `APPLE_SIGNING_IDENTITY` — so the CEF runtime, Vite dev server, and signing
+are set up exactly as OpenHuman expects, without shelling out to pnpm. Tauri's
+`beforeDevCommand` still drives the Vite dev server. CEF on macOS; `wry`
+(WebKitGTK / WebView2) on Linux and Windows.
 
 ## Upstreaming policy
 
