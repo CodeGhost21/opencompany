@@ -843,7 +843,7 @@ mod tests {
             .collect();
         let get = |key: &str| {
             envs.iter()
-                .find(|(k, _)| k == key)
+                .find(|(k, _)| k.as_os_str() == std::ffi::OsStr::new(key))
                 .and_then(|(_, v)| v.as_ref())
                 .map(|v| v.to_string_lossy().into_owned())
         };
