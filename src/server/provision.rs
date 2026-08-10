@@ -425,8 +425,16 @@ async fn emergency_pause(
         .emergency_pause(lifecycle_actor(&auth), body.reason)
         .await
     {
-        Ok(changed) => emergency_response(&runtime, changed).await,
-        Err(err) => ApiError(err).into_response(),
+        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Err(err) => emergency_response(
+            &runtime,
+            false,
+            Some(format!(
+                "the emergency stop is active in memory but its journal \
+                 write failed and will not survive a restart: {err}"
+            )),
+        )
+        .await,
     }
 }
 
