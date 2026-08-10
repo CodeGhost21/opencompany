@@ -647,7 +647,7 @@ mod tests {
 
     #[test]
     fn tauri_cli_is_fresh_when_binary_is_newer_than_sources() {
-        let tmp = tempfile_dir();
+        let tmp = tempfile_dir("fresh");
         let bin = tmp.join("bin").join("cargo-tauri");
         fs::create_dir_all(bin.parent().unwrap()).unwrap();
         fs::write(&bin, b"#!/bin/sh\n").unwrap();
