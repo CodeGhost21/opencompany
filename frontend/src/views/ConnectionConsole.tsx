@@ -148,7 +148,10 @@ export function ConnectionConsole({
   );
 
   const backToPicker = useCallback(() => {
-    void client.listCompanies().then((companies) => setPhase({ kind: "picker", companies }));
+    void client
+      .listCompanies()
+      .then((companies) => setPhase({ kind: "picker", companies }))
+      .catch((err: unknown) => setPhase(connectionError(client, err, null)));
   }, [client]);
 
   const consoleCompany = phase.kind === "console" ? phase.company : null;
