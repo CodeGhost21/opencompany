@@ -983,39 +983,21 @@ impl HarnessPool {
         // into the roster the very next turn runs on.
         fresh_company.overlay_budgets = overlay_budgets;
 
-        // Issue #551: provision `Agents/<id>/` for the roster this rebuild is
-        // about to build, manifest teammates and overlay teammates alike.
+        // Issue #551 note — this rebuild deliberately touches no workspace.
         //
-        // This is the second of the feature's two seams. The first
-        // ([`RuntimeBuilder::build`]) covers boot; this one covers everything
-        // that changes the roster afterwards — a manifest edit, the console's
-        // `add_member`, the orchestrator's `add_agent` — because all three land
-        // here as a moved overlay fingerprint, on the slow path, just before
-        // the roster is rebuilt. Putting it here rather than in each of those
-        // writers is what keeps them from having to know the workspace exists.
-        //
-        // Only when a workspace store is actually wired: with none, no agent
-        // has workspace tools either, so there is nothing for a folder to be
-        // the home of.
-        if let Some(workspace) = &fresh_deps.workspace {
-            crate::company::workspace_agents::ensure_agent_folders(
-                workspace.as_ref(),
-                &company.id,
-                fresh_company
-                    .manifest
-                    .agents
-                    .iter()
-                    .map(|agent| agent.id.as_str())
-                    .chain(
-                        fresh_company
-                            .overlay_agents
-                            .iter()
-                            .map(|agent| agent.id.as_str()),
-                    ),
-            )
-            .await?;
-        }
-
+        // It used to provision `Agents/<id>/` for the roster it was about to
+        // build, because a teammate added at runtime (a manifest edit, the
+        // console's `add_member`, the orchestrator's `add_agent`) all land here
+        // as a moved overlay fingerprint and boot could not have known about
+        // them. That justification is gone: a member folder is no longer a
+        // function of the roster. `Agents/` and `Desks/` are laid down once at
+        // boot ([`RuntimeBuilder::build`]) and depend on nothing a rebuild can
+        // change, and `Agents/<id>/` is minted by
+        // [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)
+        // at the moment that agent first produces something — which is also the
+        // repair path if boot's create ever fail-softed, since the minter
+        // creates the root it needs. A rebuild-time call would now be a tree
+        // read that can only ever find its work already done.
         let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
 
         let mut agents = self.agents.write().await;
@@ -2398,17 +2380,21 @@ description = "Builds the product."
         );
     }
 
-    /// Issue #551, the second provisioning seam.
+    /// Issue #551: a roster rebuild writes nothing to the workspace.
     ///
-    /// Everything that changes a roster after boot — a manifest edit, the
-    /// console's `add_member`, the orchestrator's `add_agent` — reaches the
-    /// harness the same way: a moved overlay fingerprint, then a roster
-    /// rebuild. Hanging provisioning off that rebuild is what covers all three
-    /// without any of those writers learning that a workspace exists.
+    /// This used to be the feature's second provisioning seam — a teammate
+    /// added at runtime (a manifest edit, the console's `add_member`, the
+    /// orchestrator's `add_agent`) reaches the harness as a moved overlay
+    /// fingerprint, and the folder was minted here. A member folder is no
+    /// longer a function of the roster, so joining one is no longer an event
+    /// the tree records: the folder appears when the teammate first produces
+    /// something, and the two system roots come from boot.
+    ///
+    /// Pinned as a test because a rebuild that quietly resumed writing would
+    /// re-fill the tree with empty folders for teammates who have done nothing
+    /// — exactly the noise this change removed.
     #[tokio::test]
-    async fn ensure_provisions_an_agents_folder_for_a_teammate_added_at_runtime() {
-        use crate::company::workspace_agents::AGENTS_ROOT;
-
+    async fn a_roster_rebuild_writes_nothing_to_the_workspace() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ws: Arc<dyn crate::ports::WorkspaceStore> =
             Arc::new(crate::store::FsOps::new(dir.path()));
@@ -2418,21 +2404,9 @@ description = "Builds the product."
         let mut rec = record();
         let pool = HarnessPool::new();
         pool.ensure(&rec, &fx.deps).await.expect("first ensure");
-
-        let names = |nodes: &[crate::ports::WorkspaceNode]| {
-            let mut out: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
-            out.sort();
-            out
-        };
-        let tree = ws.tree(&rec.id).await.expect("tree");
-        assert_eq!(
-            names(&tree),
-            vec![
-                AGENTS_ROOT.to_string(),
-                "ceo".to_string(),
-                "engineer".to_string()
-            ],
-            "both manifest teammates get a folder"
+        assert!(
+            ws.is_empty(&rec.id).await.expect("is_empty"),
+            "the roster build touched the workspace"
         );
 
         // The runtime-added teammate. The overlay fingerprint moves, so this
@@ -2445,24 +2419,26 @@ description = "Builds the product."
         });
         pool.ensure(&rec, &fx.deps).await.expect("second ensure");
 
-        let tree = ws.tree(&rec.id).await.expect("tree");
         assert!(
-            tree.iter().any(|n| n.name == "designer"),
-            "the overlay teammate got no folder: {:?}",
-            names(&tree)
+            ws.is_empty(&rec.id).await.expect("is_empty"),
+            "the rebuild minted a folder for a teammate that has produced nothing"
         );
+
+        // …and the folder the teammate *does* get is the one it earns by
+        // producing something, minted through the lazy seam instead.
+        let minted = crate::company::workspace_scaffold::ensure_agent_folder(
+            ws.as_ref(),
+            &rec.id,
+            "designer",
+        )
+        .await
+        .expect("mint");
+        let tree = ws.tree(&rec.id).await.expect("tree");
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Agents", "designer"]);
         assert_eq!(
-            tree.iter()
-                .filter(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
-                .count(),
-            1,
-            "the rebuild minted a rival Agents root"
-        );
-        assert_eq!(
-            tree.iter()
-                .find(|n| n.name == "designer")
-                .unwrap()
-                .created_by,
+            tree.iter().find(|n| n.id == minted).unwrap().created_by,
             crate::ports::WorkspaceOrigin::Agent {
                 id: "designer".to_string()
             },

@@ -273,14 +273,19 @@ prompt = "Weekly review and operator digest"
     edited in the console since the agent read it is refused rather than
     clobbered. `workspace_create` adds one folder or note at a path that is
     **free** and whose parent folder already exists — never an overwrite, never
-    a `mkdir -p`. Renaming and deleting stay operator-only.
+    a `mkdir -p`. The single exception is the agent's own
+    `Agents/<agent-id>/`, which is created on demand when the agent writes
+    directly into it, because that folder is minted on first use rather than
+    provisioned at boot and this call is the only thing that ever brings it into
+    existence. Renaming and deleting stay operator-only.
 
     Agent writes are **unconfined**: an agent may create or edit anywhere in its
     company's tree. Confining creation while leaving overwrite free would
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
-    `Agents/<agent-id>/` (provisioned per roster agent at boot and on every
-    roster change) as the default home for what it produces and marks shared
+    `Agents/<agent-id>/` (minted the first time that agent puts something in it;
+    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both
     sides are capped at the agent harness's own per-tool-result byte budget

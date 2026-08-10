@@ -831,26 +831,33 @@ impl RuntimeBuilder {
             seed_workspace(ops.workspace.as_ref(), &id, seed_dir).await?;
         }
 
-        // Issue #551: give every manifest agent its `Agents/<id>/` folder in the
-        // shared tree, so anything it produces has a named home both the
-        // operator and the other agents can navigate to.
+        // Issue #551: lay down the workspace's system roots — `Agents/` and
+        // `Desks/` — beside the template-seeded top-level folders, so anything
+        // an agent or a desk produces has a named home both the operator and
+        // the other agents can navigate to. The roots only; the folder for a
+        // given agent or desk is minted the first time that agent or desk
+        // actually produces something (see
+        // [`company::workspace_scaffold`](crate::company::workspace_scaffold)).
         //
         // Gated on `handover.is_none()` and nothing else, deliberately:
         //
         //  * NOT on `seed_dir` — a provisioned tenant and the desktop build have
-        //    no company bundle to seed from, and their agents need folders just
-        //    as much.
+        //    no company bundle to seed from, and their workspace needs the same
+        //    shape.
         //  * NOT on `is_empty` — that gate exists so an operator's deletions
-        //    stick against re-seeding, which is a different question. A roster
-        //    grows between boots, and a workspace that already has notes in it
-        //    still needs a folder for the teammate added last week.
+        //    stick against re-seeding, which is a different question. An
+        //    existing company with notes already in it picks the roots up on
+        //    its next boot, which is the only way it ever gets them.
+        //  * NOT on the roster — the roots are part of what a workspace *is*,
+        //    so a company with no agents at all still gets both.
         //
         // It is idempotent, so running it on every boot costs one tree read.
+        // This is the feature's only eager seam: everything that used to be
+        // re-provisioned on a roster change is now minted on demand instead.
         if handover.is_none() {
-            crate::company::workspace_agents::ensure_agent_folders(
+            crate::company::workspace_scaffold::ensure_workspace_scaffold(
                 ops.workspace.as_ref(),
                 &id,
-                self.manifest.agents.iter().map(|agent| agent.id.as_str()),
             )
             .await?;
         }
@@ -2777,10 +2784,22 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md.
+        // Seeded: README.md, Brand/, Brand/voice.md — plus the two system roots
+        // boot always scaffolds beside them (issue #551), which are not seeded
+        // content and so are not what the re-seed gate is about.
+        let seeded = |tree: &[crate::ports::WorkspaceNode]| {
+            let mut names: Vec<String> = tree
+                .iter()
+                .map(|n| n.name.clone())
+                .filter(|name| {
+                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&name.as_str())
+                })
+                .collect();
+            names.sort();
+            names
+        };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(tree.len(), 3);
-        assert!(tree.iter().any(|n| n.name == "voice.md"));
+        assert_eq!(seeded(&tree), vec!["Brand", "README.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -2796,24 +2815,28 @@ mod test {
             .unwrap();
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
-            tree.len(),
-            2,
+            seeded(&tree),
+            vec!["Brand", "README.md"],
             "workspace re-seeded despite operator deletion"
         );
-        assert!(!tree.iter().any(|n| n.name == "voice.md"));
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Issue #551: boot gives every manifest agent a home in the shared tree.
+    /// Issue #551: boot lays down the workspace's system roots — and nothing
+    /// inside them.
+    ///
+    /// The per-agent folder is deliberately absent: it is minted the first time
+    /// that agent produces something, so a roster of teammates who have done
+    /// nothing yet leaves no trace in the tree.
     ///
     /// Also pins the two gates the seeding block above does NOT share: this
     /// runs with **no** `seed_dir` (the provisioned-tenant and desktop shape),
-    /// and it runs again on a workspace that is no longer empty, picking up the
-    /// teammate the manifest gained in between.
+    /// and it runs again on a workspace that is no longer empty — which is how
+    /// an existing company picks the roots up.
     #[tokio::test]
-    async fn boot_provisions_an_agents_folder_per_manifest_agent() {
-        use crate::company::workspace_agents::AGENTS_ROOT;
+    async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, DESKS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -2834,23 +2857,30 @@ mod test {
         .await
         .unwrap();
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        let root = tree
-            .iter()
-            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
-            .expect("the Agents root is provisioned with no seed dir");
-        assert_eq!(root.kind, NodeKind::Folder);
-        assert_eq!(root.created_by, WorkspaceOrigin::Seed);
-        let ceo = tree.iter().find(|n| n.name == "ceo").expect("Agents/ceo");
-        assert_eq!(ceo.parent_id.as_deref(), Some(root.id.as_str()));
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
         assert_eq!(
-            ceo.created_by,
-            WorkspaceOrigin::Agent {
-                id: "ceo".to_string()
-            }
+            names,
+            vec![AGENTS_ROOT, DESKS_ROOT],
+            "boot provisions the two roots with no seed dir, and no folder for a \
+             teammate that has produced nothing"
         );
+        for node in &tree {
+            assert!(node.parent_id.is_none());
+            assert_eq!(node.kind, NodeKind::Folder);
+            assert_eq!(node.created_by, WorkspaceOrigin::Seed);
+        }
 
-        // A manifest that gains a teammate: the workspace is no longer empty,
-        // so an `is_empty` gate would have skipped this rebuild entirely.
+        // An existing, non-empty workspace: an `is_empty` gate would have
+        // skipped this boot entirely, and a company that predates the feature
+        // would never get its roots.
+        let agents_root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT)
+            .unwrap()
+            .id
+            .clone();
+        runtime.workspace().delete(&id, &agents_root).await.unwrap();
         drop(runtime);
         let runtime = RuntimeBuilder::new(
             home,
@@ -2864,17 +2894,36 @@ mod test {
         .await
         .unwrap();
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert!(
-            tree.iter().any(|n| n.name == "cmo"),
-            "a teammate added between boots got no folder"
-        );
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
         assert_eq!(
-            tree.iter()
-                .filter(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
-                .count(),
-            1,
-            "the second boot minted a rival Agents root"
+            names,
+            vec![AGENTS_ROOT, DESKS_ROOT],
+            "the deleted root was re-provisioned and the surviving one not duplicated"
         );
+    }
+
+    /// The roots are part of what a workspace *is*, not a projection of the
+    /// roster: a company with no agents at all still gets both.
+    #[tokio::test]
+    async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, DESKS_ROOT};
+
+        let home_dir = tmp_home("oc-noagents-");
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(
+            home_dir.path().to_path_buf(),
+            parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n"),
+        )
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+
+        let tree = runtime.workspace().tree(&id).await.unwrap();
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec![AGENTS_ROOT, DESKS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

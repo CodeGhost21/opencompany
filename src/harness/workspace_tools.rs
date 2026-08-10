@@ -40,6 +40,15 @@
 //! from this surface entirely — the operator has a console to undo them in and
 //! the agent does not.
 //!
+//! That home folder is minted on first use rather than provisioned at boot, so
+//! [`WorkspaceCreateTool`] makes it on demand when the target sits directly
+//! inside it (via
+//! [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)).
+//! It is the only place the tool auto-creates a parent, and it has to be: the
+//! brief points every agent at a folder that, by design, does not exist until
+//! somebody uses it, so refusing the call that would bring it into existence
+//! would make the steering unfollowable.
+//!
 //! # The tenancy boundary
 //!
 //! This is a live read/write surface over shared company data, so the
@@ -151,7 +160,7 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
-use crate::company::workspace_agents::AGENTS_ROOT;
+use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
@@ -289,6 +298,31 @@ impl CompanyWorkspace {
     async fn index(&self) -> crate::Result<PathIndex> {
         let nodes = self.store.tree(&self.company).await?;
         Ok(PathIndex::build(nodes))
+    }
+
+    /// Whether `segments` spell exactly this agent's own home folder,
+    /// `Agents/<this agent's id>`.
+    ///
+    /// Compared segment-wise against the id fixed at agent-build time, so it
+    /// cannot be spoofed from a tool argument and cannot match a *teammate's*
+    /// home — a path one level deeper (`Agents/<self>/drafts`) is not the home
+    /// either, which is what keeps the one-node-per-call rule intact.
+    fn is_own_home(&self, segments: &[&str]) -> bool {
+        matches!(segments, [root, agent] if *root == AGENTS_ROOT && *agent == self.agent_id)
+    }
+
+    /// Adopt-or-create this agent's own `Agents/<id>/` folder, returning its id.
+    ///
+    /// Since issue #551 a member folder is minted on first use rather than
+    /// provisioned for every roster member at boot, so the agent's home may
+    /// legitimately not exist yet the first time it puts something there.
+    async fn ensure_own_home(&self) -> crate::Result<String> {
+        crate::company::workspace_scaffold::ensure_agent_folder(
+            self.store.as_ref(),
+            &self.company,
+            &self.agent_id,
+        )
+        .await
     }
 }
 
@@ -624,7 +658,10 @@ pub fn workspace_brief(can_write: bool) -> String {
         brief.push_str(&format!(
             " `{AGENTS_ROOT}/<your agent id>/` is your own folder and the default home for anything you \
              produce — put a deliverable, a draft or a working note there with \
-             `{WORKSPACE_CREATE_TOOL}` rather than leaving it only in your reply. You may create \
+             `{WORKSPACE_CREATE_TOOL}` rather than leaving it only in your reply. The folder \
+             itself appears the first time you use it, so create the note straight away rather \
+             than the folder first; do not be put off if you do not see it in a listing yet. \
+             You may create \
              or edit notes anywhere in the tree, but shared guidance (`Standards/`, `Playbooks/`) \
              belongs to everyone: edit it only when the task you were given is about it, and \
              otherwise leave it alone. Revising an existing note is `{WORKSPACE_WRITE_TOOL}`, \
@@ -1196,10 +1233,11 @@ impl Tool for WorkspaceCreateTool {
     fn description(&self) -> &str {
         "Create ONE new folder or note in the company's shared workspace at `path`. USE FOR \
          putting work you have produced somewhere the operator and your teammates can find it — \
-         your own folder `Agents/<your agent id>/` is the default home for it. The parent folder \
-         must already exist (create it first, one level at a time), and the path must be free — \
-         this never overwrites. To change a note that already exists use `workspace_write`. NOT \
-         for your own scratch files (use the `file_*` tools)."
+         your own folder `Agents/<your agent id>/` is the default home for it, and is made for \
+         you the first time you put something directly in it. Everywhere else the parent folder \
+         must already exist (create it first, one level at a time). The path must be free — this \
+         never overwrites. To change a note that already exists use `workspace_write`. NOT for \
+         your own scratch files (use the `file_*` tools)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1208,7 +1246,7 @@ impl Tool for WorkspaceCreateTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder. Include the file extension on a note."
+                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder, except your own `Agents/<your agent id>/`, which is made on demand. Include the file extension on a note."
                 },
                 "kind": {
                     "type": "string",
@@ -1324,6 +1362,16 @@ impl Tool for WorkspaceCreateTool {
         // store's `create` contract is one node with a resolved parent, and
         // silently making the intermediate folders would let a single typo grow
         // a whole phantom subtree nobody asked for.
+        //
+        // The agent's own `Agents/<self>/` home is the one exception, and it is
+        // not a relaxation of that rule: since issue #551 the home is minted on
+        // first use rather than provisioned at boot, so the *only* way an agent
+        // reaches the folder the brief tells it to work in is by putting
+        // something there. Refusing with "create the folder first" would be
+        // refusing an agent access to its own home for the exact call that is
+        // supposed to bring it into existence. It stays one node per call:
+        // nothing else in the tree is auto-made, and a path one level deeper
+        // (`Agents/<self>/drafts/x.md`) still gets the ordinary refusal.
         let parent_id = if parent_segments.is_empty() {
             None
         } else {
@@ -1344,6 +1392,18 @@ impl Tool for WorkspaceCreateTool {
                         parent = echo_path(&parent_path),
                         n = entries.len(),
                     )));
+                }
+                // The agent's own home, not yet minted: make it and carry on.
+                None if self.workspace.is_own_home(parent_segments) => {
+                    match self.workspace.ensure_own_home().await {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return Ok(ToolResult::error(format!(
+                                "Could not create your own workspace folder `{parent}`: {e}",
+                                parent = echo_path(&parent_path),
+                            )));
+                        }
+                    }
                 }
                 None => {
                     return Ok(ToolResult::error(format!(
@@ -2575,6 +2635,158 @@ mod tests {
         assert_eq!(ceo.kind, NodeKind::Folder);
     }
 
+    /// The steered-for case as the brief actually tells an agent to do it:
+    /// straight to the note, with no folder call first.
+    ///
+    /// Since issue #551 stopped provisioning a folder per roster member, the
+    /// home does not exist until it is used — so this call is the *only* way it
+    /// ever comes into existence, and refusing it would make the brief's
+    /// instruction unfollowable.
+    #[tokio::test]
+    async fn create_in_the_agents_own_home_mints_the_home_folder() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({
+                "path": "Agents/ceo/Launch brief.md",
+                "kind": "file",
+                "content": "# Launch",
+            }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let tree = store.tree(&id).await.unwrap();
+        let root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+            .expect("the scaffolded root");
+        let home = tree
+            .iter()
+            .find(|n| n.name == TEST_AGENT)
+            .expect("the home folder was minted");
+        assert_eq!(home.kind, NodeKind::Folder);
+        assert_eq!(home.parent_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(
+            home.created_by,
+            agent_origin(),
+            "the folder belongs to the agent that earned it"
+        );
+        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        assert_eq!(brief.parent_id.as_deref(), Some(home.id.as_str()));
+
+        // A second note goes into the same folder — minting is find-or-create,
+        // not create.
+        let out = tool
+            .execute(json!({ "path": "Agents/ceo/Retro.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+        let tree = store.tree(&id).await.unwrap();
+        assert_eq!(
+            tree.iter().filter(|n| n.name == TEST_AGENT).count(),
+            1,
+            "the second create minted a rival home folder"
+        );
+        assert_eq!(
+            tree.iter()
+                .find(|n| n.name == "Retro.md")
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(home.id.as_str())
+        );
+    }
+
+    /// The mint repairs its own root too: an agent whose company never got the
+    /// boot scaffold (or whose create fail-softed) still lands its work under
+    /// `Agents/`, rather than being stuck behind a folder nobody will make.
+    #[tokio::test]
+    async fn the_home_mint_creates_the_agents_root_when_it_is_missing() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents/ceo/Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let tree = store.tree(&id).await.unwrap();
+        let root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+            .expect("the root was minted alongside the home");
+        assert_eq!(root.created_by, WorkspaceOrigin::Seed);
+        assert_eq!(
+            tree.iter()
+                .find(|n| n.name == TEST_AGENT)
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(root.id.as_str())
+        );
+    }
+
+    /// The exception is *this* agent's own home and nothing else. A teammate's
+    /// home is somebody else's folder to earn, so the ordinary missing-parent
+    /// refusal stands — an agent must not be able to conjure a folder that
+    /// then reads as belonging to a teammate who never produced anything.
+    #[tokio::test]
+    async fn create_does_not_mint_another_agents_home() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let before = store.tree(&id).await.unwrap().len();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents/cmo/Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", text(&out));
+        assert!(text(&out).contains("Agents/cmo"), "{}", text(&out));
+        assert_eq!(
+            store.tree(&id).await.unwrap().len(),
+            before,
+            "a refused create must not have made a teammate's folder"
+        );
+    }
+
+    /// One node per call survives the exception: the home is minted only when
+    /// it is the *direct* parent, so a deeper path is still an actionable
+    /// refusal and still creates nothing at all — not even the home.
+    #[tokio::test]
+    async fn create_below_the_home_still_refuses_and_mints_nothing() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let before = store.tree(&id).await.unwrap().len();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents/ceo/drafts/Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", text(&out));
+        assert!(text(&out).contains("Agents/ceo/drafts"), "{}", text(&out));
+        assert_eq!(
+            store.tree(&id).await.unwrap().len(),
+            before,
+            "a refused create made intermediate folders"
+        );
+    }
+
     /// Create never overwrites. A path that already resolves is refused with
     /// the note left byte-identical — the failure mode this tool must never
     /// have, since it carries no compare-and-swap token to protect one.
@@ -2612,7 +2824,7 @@ mod tests {
     async fn create_cannot_mint_a_rival_agents_root() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        crate::company::workspace_agents::ensure_agent_folders(store.as_ref(), &id, [TEST_AGENT])
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
             .await
             .unwrap();
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
@@ -2886,6 +3098,10 @@ mod tests {
         );
         for phrase in [
             "default home",
+            // The folder is minted on first use, so the brief has to say so —
+            // an agent told to look for a folder that is not there yet would
+            // otherwise reasonably conclude it has none.
+            "appears the first time you use it",
             "anywhere in the tree",
             "Standards/",
             "Renaming and deleting",
