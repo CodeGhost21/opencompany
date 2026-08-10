@@ -1879,6 +1879,27 @@ impl RuntimeBuilder {
             .await;
         }
 
+        // Issue #86: seed the kill switch from the event log, so a company
+        // stopped before a restart comes back up stopped.
+        //
+        // A rebuild inherits the live gate (see the `handover` arm above), and
+        // with it the flag already in memory — so only a cold boot, which has no
+        // live flag to inherit, replays. Re-seeding on a rebuild would be
+        // harmless today and would quietly become wrong the moment anything
+        // engages the stop without journaling it first, which is exactly what
+        // `emergency_pause` does in the window before its append lands.
+        //
+        // The read is deliberately NOT `?`-propagated: `hydrate_emergency` turns
+        // an unreadable log into a stopped company, which is a strictly better
+        // outcome than refusing to boot — an operator can release a stop, but
+        // cannot reach a company that never came up.
+        if handover.is_none() {
+            let engaged = crate::policy::gate::replayed_emergency(runtime.events(), runtime.id())
+                .await
+                .map(Some);
+            runtime.hydrate_emergency(engaged);
+        }
+
         Ok(runtime)
     }
 }

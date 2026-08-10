@@ -52,6 +52,61 @@ effect emitted ─▶ evaluate ─▶ Allow ─▶ execute, journal
   is a no-op with a fixed reply. It writes no journal record and runs no
   follow-up cycle.
 
+## Emergency stop (the governance kill switch)
+
+`POST /api/v1/companies/{id}/emergency-pause` denies **every** new effect
+outside the `Other` group, ahead of every policy rule including
+`always_approve`. `POST .../emergency-resume` releases it. Both are
+owner-scoped and both take a confirmation phrase in the body. Normative:
+
+- **It denies, it does not park.** Parking would make the approval queue an
+  escape hatch from the switch: an operator could approve the very effects they
+  just stopped without ever releasing it. Denial returns to the brain as a
+  refusal it replans around, which is what "park all new work" has to mean.
+- **`Other` stays allowed, so chat survives.** The operator has to be able to
+  ask the company what it was doing. Effects classified as `Other` remain
+  allowed while the emergency stop is engaged; the gate otherwise treats
+  `Other` as a catch-all group, not a chat-only one, and does not police which
+  tools it covers.
+- **It is orthogonal to `lifecycle`.** `lifecycle = "paused"` rejects every
+  request with a `409`, chat included — the opposite of what an emergency
+  needs. A company can be `running` *and* stopped; resuming one does not resume
+  the other. `GET /api/v1/companies/{id}` reports `emergency_paused`
+  separately, and a console that reads only `lifecycle` will show a stopped
+  company as healthy.
+- **Already-parked approvals stay resolvable.** The switch gates `evaluate`,
+  which runs before an effect executes; resolution does not pass through it.
+  New work stops, in-flight decisions the operator was already asked for do
+  not become unanswerable.
+- **The event log is the durable state.** The last
+  `CompanyEvent::EmergencyPauseChanged` decides, replayed at boot, so a stop
+  survives a restart. There is deliberately no `CompanyRecord` field: a second
+  copy of a safety flag is a second thing that can disagree with the first.
+- **Fails safe.** If the log cannot be read at boot, the company comes up
+  **stopped**. A company wrongly stopped is a visible, one-request problem; a
+  company wrongly running is the failure the switch exists to prevent, and
+  nothing would surface it.
+- **Engaging is eager, releasing is durable-first.** Engaging flips the
+  in-memory flag before journaling, so enforcement never waits on I/O that can
+  fail. Releasing journals first and only clears the flag on success, so a
+  failed write leaves the company stopped. The unsafe direction is never taken
+  on a best-effort basis.
+- **No timeout, ever.** Unlike a parked approval, the stop does not expire and
+  is untouched by the TTL sweep. Only a deliberate `emergency-resume` by an
+  identified operator clears it. A kill switch that lets itself go would resume
+  work at 3am with nobody watching.
+- **Both transitions are journaled with the acting `Actor`** and an optional
+  operator note.
+
+Confirmation is asymmetric on purpose: engaging takes the fixed phrase
+`EMERGENCY-PAUSE` (an operator reaching for a panic button should not have to
+look up an id), while releasing takes **the company's own id**, so the only way
+out of the stop cannot be reached by replaying one body across companies.
+
+Credential revocation — the other half of the audit's "emergency pause and
+credential revocation" — is not covered here; it needs token scoping in the
+harness.
+
 ### Settling the verdict is not running the follow-up
 
 Resolving is two halves with very different durations, and the runtime keeps

@@ -808,6 +808,18 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::FeedbackFiled { .. } => "feedback filed".to_string(),
         CompanyEvent::PaymentReceived { amount_usd, .. } => format!("payment ${amount_usd:.2}"),
         CompanyEvent::LifecycleChanged { from, to, .. } => format!("lifecycle {from} → {to}"),
+        // Issue #86. Structural only, on exactly the terms the arms around it
+        // set: the engaged/released word is fixed vocabulary, and BOTH of the
+        // event's other fields are dropped. `reason` is the operator's free-text
+        // incident note — the single most sensitive thing on this event and the
+        // clearest example of what an insight one-liner must not quote — and
+        // `by` is a user id, dropped for the same reason every arm here drops
+        // it. That the company was stopped is the insight; who typed what about
+        // it is not.
+        CompanyEvent::EmergencyPauseChanged { engaged, .. } => format!(
+            "emergency stop {}",
+            if *engaged { "engaged" } else { "released" }
+        ),
         CompanyEvent::MemoryFactDeleted { .. } => "memory fact deleted".to_string(),
         // Issue #364. The emoji is carried — a reaction with the emoji taken out
         // says nothing at all — and it is the one part of a reaction that cannot
