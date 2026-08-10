@@ -19,6 +19,17 @@ existing runtime and harness primitives.
 - Edit workflow metadata, nodes, edges, assignments, inputs, and enablement.
 - Validate cycles, unreachable nodes, missing assignments, unavailable tools,
   unsafe outputs, and incompatible input/output contracts before publishing.
+  Author-time validation (G15, issue #540) now enforces three of these four in
+  `src/company/workflow_file.rs` `validate()` and the create/update path in
+  `src/company/workflow_create.rs`: **inescapable cycles** (an SCC with no
+  `condition`/`switch` branch that leaves it — a guarded retry loop stays
+  legal), **unreachable nodes** (every node must sit on a path from a
+  `trigger`), and **unavailable tools** (a `tool_call` slug must name a wired
+  toolbelt namespace the company's `[tools].allow` grants). Incompatible
+  **input/output contract** checking is deferred (issue tracked in the PR):
+  `translate` emits empty node ports and nodes carry no typed schema, so there
+  is nothing to compare yet. The run-time gate in `src/workflows/caps/tools.rs`
+  remains the enforcement backstop.
 - Version published workflows while allowing drafts to change independently.
 - Trigger runs manually, on a schedule, from inbound events, or from another
   approved workflow.

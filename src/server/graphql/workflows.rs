@@ -338,6 +338,9 @@ mod tests {
             name = "Report"
             [node.destination]
             kind = "owner"
+            [[edge]]
+            from = "start"
+            to = "done"
             "#,
         )
         .expect("parses");

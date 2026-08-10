@@ -308,6 +308,25 @@ fn every_bundled_workflow_is_runnable_against_its_roster() {
                             file.display(),
                             node.id
                         );
+                        // Beyond "is it wired", the company must GRANT the slug's
+                        // namespace or the run is denied at the invoke gate. Use
+                        // the same search-explicit / grants_cover split the
+                        // run-time invoker and the author-time create path use.
+                        let namespace = namespace_of(slug).expect("asserted present just above");
+                        let granted = if namespace == "search" {
+                            grants_search_explicit(&manifest.tools.allow)
+                        } else {
+                            crate::harness::build::grants_cover(&manifest.tools.allow, namespace)
+                        };
+                        assert!(
+                            granted,
+                            "{} node `{}`: tool_call slug `{slug}` (namespace `{namespace}`) is not \
+                             granted by this company's [tools].allow ({:?}) — the run is denied at \
+                             the invoke gate. Grant it in `[tools].allow`.",
+                            file.display(),
+                            node.id,
+                            manifest.tools.allow
+                        );
                     }
                     NodeKind::Agent => {
                         let agent_ref = node
