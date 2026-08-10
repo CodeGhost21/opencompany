@@ -65,7 +65,7 @@ The former out-of-process seam is retained for one release behind
 - **Process**: the launcher (`opencompany open-human [--mode core|desktop]
   [--release] [--dry-run]`) drives `cargo run --bin openhuman-core` (Core) or
   `cargo tauri dev`/`build` directly (Desktop) with the exact argument
-  sequences OpenAI… OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/
+  sequences OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/
   `tauri:build:ui` pnpm scripts invoke. The Desktop preflight ports those
   scripts into Rust — it installs the vendored CEF-aware `tauri-cli`, pins
   `CEF_PATH`, and loads `<root>/.env`, seeding it from `<root>/.env.example`
