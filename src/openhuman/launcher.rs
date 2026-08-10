@@ -671,11 +671,10 @@ mod tests {
         assert!(!tauri_cli_is_fresh(&tmp.join("missing"), &src));
     }
 
-    fn tempfile_dir() -> PathBuf {
+    fn tempfile_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "opencompany-launcher-{}-{}",
-            std::process::id(),
-            "fixed-seed"
+            "opencompany-launcher-{}-{name}",
+            std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
