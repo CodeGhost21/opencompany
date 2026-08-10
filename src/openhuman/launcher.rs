@@ -269,24 +269,16 @@ impl OpenHumanLaunch {
     }
 
     /// The CEF binary distribution location. Mirrors `ensure-tauri-cli.sh`:
-    /// the `CEF_PATH` override wins on every host; otherwise the default
-    /// `$HOME/Library/Caches/tauri-cef` is derived **only** for the CEF
-    /// backend. Wry hosts (Linux/Windows) have no CEF distribution, so `None`
-    /// avoids requiring `HOME` — which is often unset on Windows — and avoids
-    /// creating a macOS-shaped cache directory there.
+    /// Wry hosts (Linux/Windows) have **no** CEF distribution, so `None` —
+    /// even when a `CEF_PATH` is set in the caller's environment, which must
+    /// not leak into a non-CEF run — and no macOS-shaped cache directory or
+    /// `$HOME` requirement is created there. On the CEF backend the `CEF_PATH`
+    /// override wins, otherwise the default `$HOME/Library/Caches/tauri-cef`.
     fn cef_path() -> Option<PathBuf> {
-        if let Ok(p) = std::env::var("CEF_PATH") {
-            return Some(PathBuf::from(p));
-        }
-        if DesktopBackend::for_host() != DesktopBackend::Cef {
-            return None;
-        }
-        let home = std::env::var("HOME").ok()?;
-        Some(
-            PathBuf::from(home)
-                .join("Library")
-                .join("Caches")
-                .join("tauri-cef"),
+        cef_path_for(
+            DesktopBackend::for_host(),
+            std::env::var("CEF_PATH").ok().as_deref(),
+            std::env::var("HOME").ok().as_deref(),
         )
     }
 
