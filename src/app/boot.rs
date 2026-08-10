@@ -131,6 +131,17 @@ mod test {
         );
     }
 
+    /// How long [`releasing_the_instance_frees_the_root`] waits for a released
+    /// root to become takeable, and how long it sleeps between attempts.
+    ///
+    /// The window this rides out is measured in microseconds (see the test's
+    /// own comment), so two seconds is several orders of magnitude of headroom
+    /// — generous enough that only a genuinely stuck lock exhausts it, short
+    /// enough that a real regression fails the suite promptly rather than
+    /// looking like a hang.
+    const RELEASE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+    const RELEASE_POLL: std::time::Duration = std::time::Duration::from_millis(10);
+
     #[tokio::test]
     async fn releasing_the_instance_frees_the_root() {
         // A desktop app restarted after a clean quit must be able to start.
@@ -140,8 +151,36 @@ mod test {
                 .await
                 .unwrap(),
         );
-        let again = prepare_instance(Some(dir.path().to_path_buf())).await;
-        assert!(again.is_ok(), "a released root must be takeable: {again:?}");
+
+        // Retried rather than asserted in the same instant, because an instant
+        // re-acquire is stricter than the lock promises. `store::lock`'s "The
+        // fork window" section states it outright: the lock belongs to the open
+        // file description, so between `fork()` and `exec()` a child transiently
+        // shares every descriptor its parent held. This binary spawns
+        // subprocesses in sibling tests (`app::journal`'s vendored-seam and
+        // keyring-pin children), and one landing in this test's release window
+        // keeps the just-released root locked for the microseconds until the
+        // child `exec`s and its `O_CLOEXEC` copy closes.
+        //
+        // So this asserts what the lock actually guarantees — that the root
+        // *becomes* takeable — and not that it is takeable within one
+        // instruction. A lock that never releases still fails: the loop reports
+        // the last refusal after the timeout rather than passing quietly, which
+        // is what stops the retry being a blindfold over a real regression.
+        let deadline = std::time::Instant::now() + RELEASE_TIMEOUT;
+        let mut attempts = 0;
+        let last = loop {
+            attempts += 1;
+            match prepare_instance(Some(dir.path().to_path_buf())).await {
+                Ok(_) => return,
+                Err(e) if std::time::Instant::now() >= deadline => break e,
+                Err(_) => tokio::time::sleep(RELEASE_POLL).await,
+            }
+        };
+        panic!(
+            "a released root must become takeable, but {attempts} attempts over \
+             {RELEASE_TIMEOUT:?} were all refused; last error: {last}"
+        );
     }
 
     #[tokio::test]
