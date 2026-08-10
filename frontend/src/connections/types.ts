@@ -42,8 +42,15 @@ export type Credential =
    * in local storage and in every React devtools inspection.
    */
   | { kind: "device"; ref: string }
-  /** A platform bearer, from `?token=`. Machine credentials, not a person. */
-  | { kind: "platform"; token: string };
+  /**
+   * A platform bearer, from `?token=`. Machine credentials, not a person.
+   *
+   * `token` is optional in a *persisted* profile: `saveProfile` redacts it, so
+   * `localStorage` never holds the secret. A token-less `{ kind: "platform" }`
+   * is a marker meaning "this host authenticates as the platform" — the live
+   * token is re-derived from the URL on the next load.
+   */
+  | { kind: "platform"; token?: string };
 
 /**
  * Where a connection stands right now.
