@@ -12,8 +12,9 @@
 //!   [`OcMemory`](crate::harness::memory), approval policy, and cost metering.
 //! * **tool_call** ([`WorkflowToolInvoker`](tools::WorkflowToolInvoker)) — a
 //!   `tool_call` node executes a real Cell A toolbelt tool (`shell` / `code` /
-//!   `web`) scoped to a dedicated per-company workflow workspace, fail-closed on
-//!   the company's `[tools].allow` grants.
+//!   `web`, plus the metered `search` family behind an explicit `search` grant)
+//!   scoped to a dedicated per-company workflow workspace, fail-closed on the
+//!   company's `[tools].allow` grants.
 //! * **http_request** ([`GuardedHttpClient`](http::GuardedHttpClient)) — an
 //!   `http_request` node routes through OpenHuman's `HttpRequestTool` so every
 //!   request (and redirect) passes the upstream `url_guard` SSRF check.
@@ -112,12 +113,24 @@ pub async fn build_capabilities(
     let web_allowed_domains = record.manifest.tools.web_allowed_domains.clone();
     let grants = record.manifest.tools.allow.clone();
 
+    // The metered `search` family is threaded through the invoker the same way
+    // `build_agent` wires it onto a roster agent — explicit `search` grant +
+    // managed backend, fail-closed. Read `deps.search` / `deps.meter` here,
+    // before `deps` moves into `HarnessAgentRunner` below. The agent label names
+    // the run so a search sample is attributed to the workflow, not a chat turn.
+    let search_metering = crate::harness::search::SearchMetering {
+        company: company.clone(),
+        agent: format!("workflow:{workflow_id}"),
+        meter: deps.meter.clone(),
+    };
     let tools = WorkflowToolInvoker::new(
         exec_security.clone(),
         &workflow_ws,
         web_allowed_domains.clone(),
         grants,
         &deps.capabilities,
+        deps.search.as_ref(),
+        search_metering,
     );
     let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
 
@@ -159,8 +172,8 @@ pub async fn build_capabilities(
         state,
         resolver,
         // `deps` moves in last — the borrows above (`deps.capabilities`,
-        // `deps.secrets`, `deps.workspace_root`, `deps.workflow_source_dir`) are
-        // all done by here.
+        // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
+        // `deps.workflow_source_dir`) are all done by here.
         agent: Some(Arc::new(HarnessAgentRunner::new(
             pool,
             deps,
