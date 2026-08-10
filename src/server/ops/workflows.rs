@@ -754,6 +754,20 @@ struct RunWorkflowBody {
     /// happened from the response's **shape**, not from what it asked for.
     #[serde(default)]
     detach: bool,
+    /// Run as a **dry run / test run** (issue #542): walk the real graph with
+    /// real branch selection over stubbed effectful capabilities, so the run
+    /// proves routing and output shape without any real effect — no agent
+    /// inference, no tool/http execution, no delivery, no journaling, no gate
+    /// parked in Approvals.
+    ///
+    /// **Opt-in and compatible in both directions, exactly like `detach`.** A
+    /// caller that omits it gets today's behaviour byte-for-byte. A newer
+    /// console asking an *older* host for a dry run sends it and the old host
+    /// ignores the unknown field (no `deny_unknown_fields`) and runs it **FOR
+    /// REAL** — which is why the response carries a `dryRun` presence
+    /// discriminator the console must read, never trusting what it asked for.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// The run response: the engine's final state plus any nodes left pending
@@ -793,6 +807,27 @@ struct RunWorkflowResponse {
     /// caller's body is byte-unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    /// Per-node progress for this run, in the order the nodes finished (issue
+    /// #542). Carried for **every** synchronous run, not only a dry one — it is
+    /// the same structural per-node timeline `GET …/workflows/runs` returns, so
+    /// the run-result panel can render it without a second read. For a dry run
+    /// it is the *only* record of what ran, since a test run journals nothing.
+    ///
+    /// Empty for a run whose nodes all failed to report (or a build with no
+    /// progress observer), so an empty list means "no per-node trail", never
+    /// "the run did nothing".
+    nodes: Vec<WorkflowRunNode>,
+    /// Whether this was a **dry run** (issue #542) — the presence discriminator.
+    ///
+    /// **A constant `true` when set, and absent otherwise, on purpose** — the
+    /// exact shape `detached` takes for #383. A newer console asking an older
+    /// host for a dry run gets a *real* run back (the old host ignored the
+    /// unknown request field), and the body then carries no `dryRun` key. So the
+    /// console cannot tell a dry run from a real one by what it asked for — only
+    /// by what came back. A field that is only ever `true` makes that a presence
+    /// check, and its absence a loud signal that the run was REAL.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    dry_run: bool,
 }
 
 /// The `detach: true` response (issue #383): the run's id, handed back before
@@ -861,6 +896,7 @@ fn spawn_workflow_run(
     runner: std::sync::Arc<dyn crate::ports::WorkflowRunner>,
     workflow: WorkflowFile,
     input: Value,
+    dry_run: bool,
 ) -> (
     String,
     tokio::task::JoinHandle<crate::Result<crate::ports::WorkflowRun>>,
@@ -869,7 +905,10 @@ fn spawn_workflow_run(
     // journalling that used to live here now live in `WorkflowSpawn`, because
     // approving a paused workflow gate starts a run too and owes exactly the
     // same two things. One copy of the discipline, two entry points.
-    crate::runtime::WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false)
+    //
+    // Issue #542: `dry_run` rides through to the spawn task, which stamps it on
+    // the run context and skips the outcome journal write when set.
+    crate::runtime::WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, dry_run)
 }
 
 /// `POST …/workflows/{wid}/run` (both scope forms).
@@ -914,12 +953,22 @@ async fn run_workflow(
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let detach = body.detach;
+    // Issue #542: captured before `body.input` moves, and threaded into both the
+    // spawn (so the run runs dry) and the settled response's discriminator (so
+    // the console can confirm the host honoured the request rather than running
+    // for real).
+    let dry_run = body.dry_run;
 
     // Issue #383: registered and spawned before either mode branches, so the two
     // modes cannot drift in what they start. Issue #228's journalling now lives
     // inside the task rather than around this await.
-    let (run_id, handle) =
-        spawn_workflow_run(company.runtime.as_ref(), runner.clone(), file, body.input);
+    let (run_id, handle) = spawn_workflow_run(
+        company.runtime.as_ref(),
+        runner.clone(),
+        file,
+        body.input,
+        dry_run,
+    );
 
     if detach {
         // Returned before the engine has walked a node. From here the client
@@ -947,6 +996,12 @@ async fn run_workflow(
             deliveries: run.deliveries,
             run_id,
             cancelled: run.cancelled,
+            // Issue #542: the runner collects this per-node trail on every run;
+            // map the port rows onto the wire shape the history route already
+            // uses. `dry_run` is the request's, echoed back as the presence
+            // discriminator a console pointed at an old host would never see.
+            nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
+            dry_run,
         })),
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
@@ -1206,6 +1261,21 @@ struct WorkflowRunNode {
     node_id: String,
     status: WorkflowNodeStatus,
     elapsed_ms: u64,
+}
+
+impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
+    /// The run-response path (issue #542): the runner hands its per-node trail
+    /// back on [`WorkflowRun::nodes`](crate::ports::WorkflowRun) as
+    /// [`WorkflowRunNodeRow`](crate::ports::WorkflowRunNodeRow)s, which carry the
+    /// same three structural scalars this wire shape does — so the run response
+    /// reuses the identical camelCase rows the history route already serves.
+    fn from(row: crate::ports::WorkflowRunNodeRow) -> Self {
+        Self {
+            node_id: row.node_id,
+            status: row.status,
+            elapsed_ms: row.elapsed_ms,
+        }
+    }
 }
 
 /// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
@@ -1910,6 +1980,8 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -1940,6 +2012,8 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -1955,6 +2029,8 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
@@ -3453,6 +3529,7 @@ mod tests {
                             pending_approvals: Vec::new(),
                             deliveries: Vec::new(),
                             cancelled: true,
+                            nodes: Vec::new(),
                         });
                     }
                 }
@@ -3462,6 +3539,7 @@ mod tests {
                     pending_approvals: Vec::new(),
                     deliveries: Vec::new(),
                     cancelled: false,
+                    nodes: Vec::new(),
                 })
             }
         }
@@ -4059,6 +4137,106 @@ label = "ok"
                 body.to_string().contains("workflow run"),
                 "the 404 should come from the cancel handler: {body}"
             );
+        }
+
+        // ── Issue #542: dry run through the real route ──────────────────────
+
+        /// A runner that completes immediately, returning one node row — enough
+        /// to prove the route maps `WorkflowRun.nodes` onto the response and
+        /// echoes the request's `dry_run` as the discriminator.
+        struct EchoRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for EchoRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                Ok(WorkflowRun {
+                    output: serde_json::json!({ "run": {}, "nodes": {} }),
+                    pending_approvals: Vec::new(),
+                    deliveries: Vec::new(),
+                    cancelled: false,
+                    nodes: vec![crate::ports::WorkflowRunNodeRow {
+                        node_id: "done".to_string(),
+                        status: crate::ports::types::WorkflowNodeStatus::Ok,
+                        elapsed_ms: 3,
+                    }],
+                })
+            }
+        }
+
+        /// A hosted company whose runner echoes immediately.
+        async fn echo_company(home: &std::path::Path) -> axum::Router {
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+            let id = CompanyId::new("acme");
+            FsCompanyStore::new(home.to_path_buf())
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                        id: "demo".to_string(),
+                        toml: GRAPH.to_string(),
+                    }],
+                    overlay_budgets: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            let mut runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            runtime.set_workflow_runner(Arc::new(EchoRunner));
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id.clone(), Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            router(state)
+        }
+
+        /// T8 — `{"dry_run":true}` answers 200 carrying `dryRun:true` and the
+        /// per-node `nodes`; a plain body carries neither `dryRun` (a real run's
+        /// shape an old host would produce) — the presence discriminator the
+        /// console reads instead of trusting what it asked for.
+        #[tokio::test]
+        async fn dry_run_request_echoes_the_marker_and_nodes_a_plain_body_omits_it() {
+            let home_dir = home();
+            let app = echo_company(home_dir.path()).await;
+
+            let dry = app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "dry_run": true })))
+                .await
+                .unwrap();
+            assert_eq!(dry.status(), StatusCode::OK);
+            let body = json_body(dry).await;
+            assert_eq!(body["dryRun"], serde_json::json!(true), "{body}");
+            assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
+            assert_eq!(body["nodes"][0]["status"], "ok", "{body}");
+
+            let plain = app
+                .oneshot(run_request(serde_json::json!({})))
+                .await
+                .unwrap();
+            assert_eq!(plain.status(), StatusCode::OK);
+            let body = json_body(plain).await;
+            assert!(
+                body.get("dryRun").is_none(),
+                "a real run must carry no dryRun key: {body}"
+            );
+            // The node trail rides every settled run, dry or not.
+            assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
         }
     }
 }
