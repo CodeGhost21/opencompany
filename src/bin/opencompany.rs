@@ -1269,9 +1269,15 @@ mod test {
         ));
         let _ = std::fs::remove_dir_all(&tmp);
         std::fs::create_dir_all(&tmp).unwrap();
-        let err = run_openhuman(tmp.clone(), ModeArg::Desktop, false, true, vec!["--flag".into()])
-            .await
-            .unwrap_err();
+        let err = run_openhuman(
+            tmp.clone(),
+            ModeArg::Desktop,
+            false,
+            true,
+            vec!["--flag".into()],
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(
             &err,
             opencompany::OpenCompanyError::OpenHuman { code: 400, .. }
