@@ -34,7 +34,7 @@ use crate::ports::types::{
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 /// A minimal valid manifest used to seed [`CompanyRecord`]s in the suite.
 fn sample_manifest() -> crate::company::CompanyManifest {
@@ -1843,16 +1843,26 @@ pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
 }
 
 /// Asserts the [`WorkspaceStore`] contract: isolation, create/read/write,
-/// rename+move (with cycle rejection), recursive delete, and the seeding gate.
+/// rename+move (with cycle rejection), recursive delete, the seeding gate, and
+/// the authorship stamps (issue #326).
 pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
+    let agent = || WorkspaceOrigin::Agent {
+        id: "ceo".to_string(),
+    };
     let node = |id: &str, name: &str, kind: NodeKind, parent: Option<&str>| WorkspaceNode {
         id: id.to_string(),
         name: name.to_string(),
         kind,
         parent_id: parent.map(str::to_string),
         updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        },
+        updated_by: WorkspaceOrigin::Agent {
+            id: "ceo".to_string(),
+        },
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());
@@ -1882,11 +1892,33 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     assert_eq!(content, "# Voice");
     assert_eq!(ws.read(&alpha, "root").await.unwrap().unwrap().1, "");
 
-    // Overwrite content.
-    ws.write(&alpha, "note", "# Voice v2").await.unwrap();
+    // Authorship round-trips through the backend's own storage (issue #326).
+    // Every backend persists the node as opaque JSON, so this is the assertion
+    // that a backend did not quietly drop a field it does not know about.
+    assert_eq!(read_node.created_by, agent(), "created_by must round-trip");
+    assert_eq!(read_node.updated_by, agent(), "updated_by must round-trip");
+
+    // Overwrite content: `updated_by` follows the writer, `created_by` does not.
+    let written = ws
+        .write(&alpha, "note", "# Voice v2", WorkspaceOrigin::Operator)
+        .await
+        .unwrap();
     assert_eq!(
-        ws.read(&alpha, "note").await.unwrap().unwrap().1,
-        "# Voice v2"
+        written.updated_by,
+        WorkspaceOrigin::Operator,
+        "a write must restamp updated_by with its author"
+    );
+    assert_eq!(
+        written.created_by,
+        agent(),
+        "a write must never rewrite created_by"
+    );
+    let (reread, body) = ws.read(&alpha, "note").await.unwrap().unwrap();
+    assert_eq!(body, "# Voice v2");
+    assert_eq!(
+        (reread.created_by, reread.updated_by),
+        (agent(), WorkspaceOrigin::Operator),
+        "the write's stamps must be what the store persisted, not just what it returned"
     );
 
     // A second folder to move under.
@@ -1919,6 +1951,15 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         .unwrap();
     assert_eq!(moved.name, "voice-final.md");
     assert_eq!(moved.parent_id.as_deref(), Some("root2"));
+    // A rename/move leaves BOTH origins alone. This is the load-bearing half of
+    // the #326 split: if a move restamped `updated_by`, an operator tidying an
+    // agent's note into another folder would silently take credit for a body it
+    // never touched.
+    assert_eq!(
+        (moved.created_by.clone(), moved.updated_by.clone()),
+        (agent(), WorkspaceOrigin::Operator),
+        "rename_move must not restamp authorship"
+    );
     assert_eq!(
         ws.read(&alpha, "note").await.unwrap().unwrap().1,
         "# Voice v2",
