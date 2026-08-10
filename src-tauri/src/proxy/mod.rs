@@ -192,8 +192,18 @@ impl ProxyRegistry {
 
         let method = reqwest::Method::from_bytes(request.method.as_bytes())
             .map_err(|_| ProxyError::Transport(format!("bad method {:?}", request.method)))?;
-        let mut builder = self.http.request(method, &url);
+        let mut builder = self
+            .http
+            .request(method, &url)
+            // Per-request, not client-wide: `subscribe` must stay long-lived.
+            .timeout(std::time::Duration::from_secs(30));
         for (name, value) in &request.headers {
+            // The proxy owns the session/authority headers; a caller-supplied
+            // copy would be appended rather than replaced, leaving the host to
+            // arbitrate between two session values.
+            if RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
+                continue;
+            }
             builder = builder.header(name, value);
         }
         builder = apply_credential(builder, &connection.credential);
