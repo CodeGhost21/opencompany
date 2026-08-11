@@ -328,25 +328,25 @@ export type TaskApprovalStatus = "pending" | "approved" | "denied" | "expired";
  * Distinct from an `approval` {@link TimelineEntry}, which can only describe a
  * *resolution*: an approval still parked has no resolution event, so it cannot
  * reach the timeline at all, and it is the row that matters most — the card is
- * stopped behind it. Carries no payload; the Approvals page is where a sign-off
- * is read in full and decided.
+ * stopped behind it.
+ *
+ * **Three fields on purpose (#468).** This used to back an Approvals tab on the
+ * task card. That tab is gone — approvals are decided in one place, and a
+ * second half-surface beside it could not decide anything. All the card does
+ * now is say *that* it is waiting and for how long, linking to the Approvals
+ * page, so this type carries only what that line reads. `kind`,
+ * `resolvedAtMillis` and `waitedMillis` went with the tab; the park to resolve
+ * span is still on the `approval` {@link TimelineEntry}.
  */
 export interface TaskApproval {
   /** The approval's id, the same one the Approvals page resolves against. */
   id: string;
-  /** The parked effect's dotted kind, e.g. `payment.send`. */
-  kind: string;
-  /** Epoch-millis the effect parked. Rows are ordered by this, oldest first. */
+  /**
+   * Epoch-millis the effect parked. Rows are ordered by this, oldest first, and
+   * the card measures "waiting for N" from the oldest pending one.
+   */
   atMillis: number;
   status: TaskApprovalStatus;
-  /** Epoch-millis the resolution landed; absent while pending. */
-  resolvedAtMillis?: number;
-  /**
-   * The park to resolve span. Absent while pending, where the console runs that
-   * clock itself from `atMillis`, and for an approval whose park instant the
-   * host cannot recover.
-  */
-  waitedMillis?: number;
 }
 
 /**
