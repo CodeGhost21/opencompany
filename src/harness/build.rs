@@ -592,6 +592,10 @@ pub fn build_agent(
             // stage onto, so a dispatched card can link to the workflow its
             // attempt built or ran. Orchestrator-only, like the tools.
             deps.workflow_refs.clone(),
+            // Issue #418: the shared run-output cache `run_workflow` fills and
+            // the `read_run_output` companion reads back, so a clipped preview
+            // is reachable within the turn. Orchestrator-only, like the tools.
+            deps.run_outputs.clone(),
         ));
     }
 
@@ -1179,6 +1183,7 @@ mod tests {
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
