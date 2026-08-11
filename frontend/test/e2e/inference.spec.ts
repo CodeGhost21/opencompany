@@ -17,9 +17,10 @@ import { expect, test } from "@playwright/test";
  * nothing to refuse. These tests assert the invariant against the new mechanism:
  * a typed key survives the switch and lands server-side.
  *
- * This spec drives the real browser against a live host. It is not part of CI
- * (the Playwright config declares no `webServer`), so treat it as an executable
- * reproduction plus documentation of the invariant, not a merge gate.
+ * This spec drives a real browser against a real host, and the `Console E2E` job
+ * runs it (issue #428) — the "not part of CI" note this header used to carry
+ * predates that job and was already stale. It is a merge gate, so treat a red
+ * run here as a real regression rather than a stale reproduction.
  */
 
 type Page = import("@playwright/test").Page;
