@@ -48,6 +48,8 @@ use crate::ports::{
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
@@ -229,6 +231,7 @@ pub struct RuntimeBuilder {
     runs: Option<Arc<dyn RunStore>>,
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
+    run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -321,6 +324,7 @@ impl RuntimeBuilder {
             runs: None,
             workflow_revisions: None,
             schedule_fires: None,
+            run_output_store: None,
             usage: None,
             skills: None,
             users: None,
@@ -430,6 +434,7 @@ impl RuntimeBuilder {
         self.runs = Some(handles.runs.clone());
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
+        self.run_output_store = Some(handles.run_outputs.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -514,6 +519,15 @@ impl RuntimeBuilder {
     /// Swaps the scheduler fire-claim store (default: fs-backed).
     pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
         self.schedule_fires = Some(schedule_fires);
+        self
+    }
+
+    /// Swaps the per-node run-output store (default: fs-backed; #596).
+    pub fn with_run_output_store(
+        mut self,
+        run_output_store: Arc<dyn WorkflowRunOutputStore>,
+    ) -> Self {
+        self.run_output_store = Some(run_output_store);
         self
     }
 
@@ -844,6 +858,10 @@ impl RuntimeBuilder {
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
+                workflow_run_outputs: self
+                    .run_output_store
+                    .clone()
+                    .unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
@@ -1562,6 +1580,13 @@ impl RuntimeBuilder {
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
                                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(
                                 ),
+                                // Issue #596: the DURABLE, console-facing run
+                                // output store — distinct from `run_outputs`
+                                // above (the in-process agent cache). The runner
+                                // persists each settled run's bounded node output
+                                // here so a past run is readable from the console.
+                                // `None` degrades to no-persist, like `events`.
+                                run_output_store: self.run_output_store.clone(),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.

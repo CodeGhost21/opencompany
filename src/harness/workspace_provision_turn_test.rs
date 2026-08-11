@@ -277,6 +277,7 @@ fn build_brain(
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
         run_outputs: Default::default(),
+        run_output_store: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

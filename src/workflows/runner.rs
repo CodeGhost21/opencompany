@@ -234,6 +234,12 @@ async fn run_workflow_inner(
     // (the default build, and every existing test) degrades the whole progress
     // path to a no-op — no started event, a `NoopObserver`, no collector.
     let events = deps.events.clone();
+    // Issue #596: the durable, console-facing run-output store, read off `deps`
+    // before it moves into the capability bundle — like `events`/`delivery`
+    // above. `None` (default build, unwired tests) degrades the persist to a
+    // no-op. Kept beside `events` so it rides the same "read the host-side ports
+    // out before the engine takes deps" pattern.
+    let run_output_store = deps.run_output_store.clone();
     // Issue #542: the mode. A dry run walks the same real graph over stubbed
     // effectful capabilities (see `caps::dry_run`) and, host-side, skips every
     // durable effect around the engine — the started/finished/node journal
@@ -493,6 +499,19 @@ async fn run_workflow_inner(
     // is emptied for the same reason `cancelled_run()` empties it — listing gates
     // this run will not continue would imply it is still waiting on them.
     if outcome.cancelled {
+        // Issue #596: a cleanly-cancelled run still produced real partial output
+        // for the nodes that completed — persist it so the console inspector can
+        // show how far the run got and what each finished node made. This is an
+        // outcome-bearing arm (unlike the hard-abort return above, which has no
+        // outcome and persists nothing).
+        persist_run_output(
+            run_output_store.as_deref(),
+            &record.id,
+            &workflow.id,
+            &run_id,
+            &outcome.output,
+        )
+        .await;
         return Ok(WorkflowRun {
             output: outcome.output,
             pending_approvals: Vec::new(),
@@ -588,6 +607,23 @@ async fn run_workflow_inner(
         &trigger_input,
         &outcome.pending_approvals,
         &deliveries,
+        // Issue #596: the reached-node output + the graph's edges, so each parked
+        // gate can carry the verbatim upstream content awaiting sign-off.
+        &outcome.output,
+        &workflow.edges,
+    )
+    .await;
+
+    // Issue #596: persist this settled run's per-node output durably (normal
+    // completion AND the paused-with-`pending_approvals` case both reach here).
+    // Best-effort, upstream of the WorkflowRun below so console/scheduled/
+    // agent-tool runs all persist through this one site.
+    persist_run_output(
+        run_output_store.as_deref(),
+        &record.id,
+        &workflow.id,
+        &run_id,
+        &outcome.output,
     )
     .await;
 
@@ -598,6 +634,51 @@ async fn run_workflow_inner(
         cancelled: false,
         nodes,
     })
+}
+
+/// Persists a settled run's per-node output to the durable, console-facing
+/// store (issue #596), best-effort.
+///
+/// One helper, called from every outcome-bearing arm of `run_workflow_inner`, so
+/// the bounding + write live in exactly one place. `store` is `None` on the
+/// default build and every unwired test — then this is a no-op. A write failure
+/// is logged at `warn` and never fails the run: the run's work is already done
+/// and correct, and losing an inspector snapshot must not discard it.
+///
+/// The value persisted is `output["nodes"]` — the same capture the in-process
+/// [`RunOutputCache`](crate::harness::orchestrator::RunOutputCache) reads — but
+/// on a **separate** durable store, so the two consumers never share storage.
+/// Bounding happens inside
+/// [`WorkflowRunOutputRecord::from_raw_nodes`](crate::ports::WorkflowRunOutputRecord::from_raw_nodes),
+/// which clips (never refuses) so the durable record always exists.
+async fn persist_run_output(
+    store: Option<&dyn crate::ports::run_output::WorkflowRunOutputStore>,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+    output: &Value,
+) {
+    let Some(store) = store else {
+        return;
+    };
+    // The engine's per-node map lives under `output["nodes"]`; a run with no such
+    // key persists an empty map, which the console renders as "produced none".
+    let raw_nodes = output.get("nodes").cloned().unwrap_or(Value::Null);
+    let record = crate::ports::WorkflowRunOutputRecord::from_raw_nodes(
+        run_id,
+        workflow_id,
+        crate::ports::now_millis(),
+        &raw_nodes,
+    );
+    if let Err(err) = store.put_run_output(company, &record).await {
+        tracing::warn!(
+            company = %company,
+            workflow = %workflow_id,
+            %run_id,
+            %err,
+            "workflow: could not persist the run's per-node output; the run is unaffected"
+        );
+    }
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -635,6 +716,12 @@ async fn run_workflow_inner(
 /// continuation an approval starts knows what has already left the process.
 /// Without it, approving a gate re-mails every report upstream of it — the
 /// re-run semantics above applied to a side effect that reaches a real person.
+// Issue #596 pushed this to nine params (the run's reached output + the graph's
+// edges, so a parked gate can preview its upstream content). A cohesive bundle
+// struct would be the tidy fix, but it would also churn a signature Elvin's
+// in-flight gate-policy PRs (#612/#627) are editing — so the two additive params
+// take an `allow` instead, to keep a keep-both merge trivial.
+#[allow(clippy::too_many_arguments)]
 async fn park_pending_gates(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     record: &CompanyRecord,
@@ -643,6 +730,12 @@ async fn park_pending_gates(
     trigger_input: &Value,
     pending: &[String],
     deliveries: &[crate::ports::DeliveryReport],
+    // Issue #596: the run's reached-node output and the graph's edges. Passed
+    // through so a parked gate's card can carry the verbatim upstream content the
+    // operator is being asked to sign off. Additive params — the pre-#596
+    // park/dedupe logic is unchanged.
+    output: &Value,
+    edges: &[crate::company::WorkflowEdgeDef],
 ) {
     if pending.is_empty() {
         return;
@@ -663,12 +756,23 @@ async fn park_pending_gates(
     };
 
     for node_id in pending {
-        let effect = crate::runtime::workflow_resume::gate_effect(
+        let mut effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
+        );
+        // Issue #596: enrich the card with the verbatim output of this gate's
+        // upstream nodes — the content awaiting sign-off. A self-contained
+        // addition on top of the effect `gate_effect` already built; the dedupe
+        // below keys on explicit payload keys only (NOT this content), so two
+        // parks differing only in content still collapse to one card.
+        crate::runtime::workflow_resume::attach_upstream_content(
+            &mut effect,
+            output,
+            edges,
+            node_id,
         );
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(
@@ -808,6 +912,7 @@ mod tests {
 
     use crate::company::parse_workflow;
     use crate::harness::provider::MockProvider;
+    use crate::ports::run_output::WorkflowRunOutputStore;
     use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
     fn record() -> CompanyRecord {
@@ -866,6 +971,7 @@ description = "Runs Acme."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -1007,6 +1113,148 @@ to = "done"
         // the pool through the engine.
         let output = run.output.to_string();
         assert!(output.contains("hello-marker"), "{output}");
+    }
+
+    // --- Durable per-node output persist-at-settle (issue #596) ---------------
+
+    /// A completed run persists its per-node output to the durable store, so a
+    /// later console read can show what each node produced. The agent node's
+    /// text is present in the stored snapshot.
+    #[tokio::test]
+    async fn a_completed_run_persists_its_per_node_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsOps::new(dir.path()));
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let mut deps = deps(dir.path());
+        deps.run_output_store = Some(store.clone());
+        // The GREET graph has an agent node, so the roster must be resident and
+        // the record loadable — exactly like `agent_node_runs_on_the_harness_pool`.
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let file = parse_workflow(GREET).expect("parses");
+        let ctx = WorkflowRunContext::new(false);
+        let run_id = ctx.run_id.clone();
+
+        run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "launch" }),
+            &ctx,
+        )
+        .await
+        .expect("workflow runs");
+
+        let stored = store
+            .get_run_output(&rec.id, &run_id)
+            .await
+            .expect("store read")
+            .expect("a completed run must persist its output");
+        assert_eq!(stored.workflow_id, "greet");
+        assert_eq!(stored.run_id, run_id);
+        assert!(
+            stored.nodes.to_string().contains("hello-marker"),
+            "the agent node's produced text must be in the durable snapshot: {}",
+            stored.nodes
+        );
+    }
+
+    /// A paused (`requires_approval`) run still settles with an outcome and so
+    /// persists the output of the nodes it reached before the gate.
+    #[tokio::test]
+    async fn a_paused_run_persists_the_output_it_reached() {
+        let src = r#"
+id = "gated"
+name = "Gated"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate"
+kind = "tool_call"
+name = "Gate"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "gate"
+[[edge]]
+from = "gate"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsOps::new(dir.path()));
+        let mut deps = deps(dir.path());
+        deps.run_output_store = Some(store.clone());
+        let rec = tools_record();
+        let file = parse_workflow(src).expect("parses");
+        let ctx = WorkflowRunContext::new(false);
+        let run_id = ctx.run_id.clone();
+
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &rec,
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &ctx,
+        )
+        .await
+        .expect("run pauses cleanly");
+        assert!(run.pending_approvals.iter().any(|id| id == "gate"));
+
+        assert!(
+            store
+                .get_run_output(&rec.id, &run_id)
+                .await
+                .unwrap()
+                .is_some(),
+            "a paused-with-pending-approvals run must persist its reached output"
+        );
+    }
+
+    /// A dry run writes NOTHING durable — no output snapshot, matching its "the
+    /// settled response body is the whole record" contract (#542).
+    #[tokio::test]
+    async fn a_dry_run_persists_no_output() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Arc::new(FsOps::new(dir.path()));
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let mut deps = deps(dir.path());
+        deps.run_output_store = Some(store.clone());
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let file = parse_workflow(GREET).expect("parses");
+        let mut ctx = WorkflowRunContext::new(false);
+        ctx.dry_run = true;
+        let run_id = ctx.run_id.clone();
+
+        run_workflow(
+            pool,
+            deps,
+            &rec,
+            &file,
+            serde_json::json!({ "brief": "launch" }),
+            &ctx,
+        )
+        .await
+        .expect("dry run completes");
+
+        assert!(
+            store
+                .get_run_output(&rec.id, &run_id)
+                .await
+                .unwrap()
+                .is_none(),
+            "a dry run must persist nothing durable"
+        );
     }
 
     // --- Output destinations, end to end (issue #170) ------------------------
