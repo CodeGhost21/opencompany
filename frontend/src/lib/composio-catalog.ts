@@ -168,9 +168,20 @@ export const PROVIDER_CATEGORY_ORDER: readonly ProviderCategory[] = [
  * shipped — which is precisely the trap `TOOLKIT_LABELS` above is allowed to
  * fall into only because its failure mode is cosmetic.
  *
- * Ported from OpenHuman's `mapComposioCategory` (`toolkitMeta.tsx`), which
- * drives the same catalog from the same strings. Keeping the two in step is
- * cheaper than diverging.
+ * ## This function has a twin. Edit both.
+ *
+ * The other copy is `mapComposioCategory` in
+ * `app/src/components/composio/toolkitMeta.tsx` in **tinyhumansai/openhuman**.
+ * The two drive the same Composio catalog off the same free-form strings, and
+ * nothing mechanical detects a divergence: edit one and both consoles keep
+ * looking correct in isolation while bucketing the same provider differently.
+ *
+ * There is no shared package to hoist this into, so the guard is social and
+ * deliberately cheap — this notice, the matching one on the OpenHuman side, and
+ * `mapComposioCategory keeps the buckets its OpenHuman twin produces` in
+ * `test/unit/composio-catalog.test.ts`, which pins the substring table
+ * case-by-case. That test is the diff a divergence has to survive: change the
+ * table without changing it and the suite says so.
  */
 export function mapComposioCategory(categories: readonly string[]): ProviderCategory | null {
   if (categories.length === 0) return null;

@@ -91,6 +91,62 @@ describe("mapComposioCategory", () => {
     expect(mapComposioCategory(["quantum-widgets"])).toBeNull();
     expect(mapComposioCategory([])).toBeNull();
   });
+
+  it("keeps the buckets its OpenHuman twin produces", () => {
+    // The drift guard. This function is a second copy of
+    // `mapComposioCategory` in `app/src/components/composio/toolkitMeta.tsx`
+    // in tinyhumansai/openhuman, and nothing mechanical can compare the two
+    // across repositories — edit one and both consoles keep looking correct in
+    // isolation while bucketing the same provider differently.
+    //
+    // So the substring table is pinned case-by-case here. It is not testing
+    // that the code does what the code does: it is the diff a divergence has to
+    // survive. Anyone editing the table has to edit this list too, and that is
+    // the moment they are told a twin exists.
+    const table: Array<[string, string | null]> = [
+      // Chat wins over everything, including a string that also reads social.
+      ["chat", "Chat"],
+      ["messaging", "Chat"],
+      ["communication", "Chat"],
+      // Social is tested BEFORE productivity, so `marketing` is Social even
+      // though a marketing tool is arguably productivity.
+      ["social", "Social"],
+      ["marketing", "Social"],
+      ["productivity", "Productivity"],
+      ["document", "Productivity"],
+      ["calendar", "Productivity"],
+      ["scheduling", "Productivity"],
+      ["project management", "Productivity"],
+      ["project-management", "Productivity"],
+      ["note", "Productivity"],
+      ["task", "Productivity"],
+      ["storage", "Productivity"],
+      ["email", "Productivity"],
+      ["crm", "Platform"],
+      ["developer", "Platform"],
+      ["devtool", "Platform"],
+      ["analytics", "Platform"],
+      ["payment", "Platform"],
+      ["finance", "Platform"],
+      ["database", "Platform"],
+      ["cloud", "Platform"],
+      // Not in the table on either side.
+      ["quantum-widgets", null],
+    ];
+    for (const [category, expected] of table) {
+      expect(mapComposioCategory([category]), `category ${category}`).toBe(expected);
+    }
+  });
+
+  it("orders its buckets so the first hit wins, not the last", () => {
+    // Both copies test Chat, then Social, then Productivity, then Platform,
+    // and return on the first hit. An entry carrying several categories
+    // therefore depends on that order — reordering the branches on one side
+    // only is the subtlest way the twins can drift.
+    expect(mapComposioCategory(["email", "messaging"])).toBe("Chat");
+    expect(mapComposioCategory(["crm", "marketing"])).toBe("Social");
+    expect(mapComposioCategory(["analytics", "calendar"])).toBe("Productivity");
+  });
 });
 
 describe("buildProviderRows", () => {
@@ -145,6 +201,20 @@ describe("buildProviderRows", () => {
       github: "Platform",
       quantumwidgets: "Tools & Automation",
     });
+  });
+
+  it("never drops a provider whose category Composio has just invented", () => {
+    // The property worth pinning explicitly rather than inferring from the two
+    // tests above: Composio can add a category string tomorrow that neither
+    // `mapComposioCategory` nor the keyword heuristic knows, and that provider
+    // must still get a tile. "Tools & Automation" is the floor, and it is a
+    // real bucket that `availableCategories` will offer — not a hole a provider
+    // can fall through and silently leave the grid.
+    const rows = buildProviderRows([entry("newthing", { categories: ["quantum-widgets"] })], [], {});
+    expect(rows.map((r) => r.slug)).toEqual(["newthing"]);
+    expect(rows[0].category).toBe("Tools & Automation");
+    expect(availableCategories(rows)).toContain("Tools & Automation");
+    expect(visibleProviderRows(rows, "All", "")).toHaveLength(1);
   });
 
   it("puts connected first, then the common ones, then the tail alphabetically", () => {
