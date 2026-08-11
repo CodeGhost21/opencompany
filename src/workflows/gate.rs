@@ -444,7 +444,13 @@ description = "Runs Acme."
     #[tokio::test]
     async fn a_plain_read_and_a_metered_read_do_not_gate() {
         let mut g = graph(vec![
-            tool_node("read", "read_workspace_state"),
+            // `file_read` is a genuine `Reach::Nothing` read of the agent's own
+            // workspace. `read_workspace_state` is NOT one — issue #459
+            // reclassified it to `Reach::Consequence` because it shells out to
+            // git under an agent-writable `.git/config`, so it parks under
+            // supervision by design (see `consequence.rs` +
+            // `reading_workspace_state_is_classified_with_shell_because_it_runs_git`).
+            tool_node("read", "file_read"),
             tool_node("search", "web_search"),
         ]);
         let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;

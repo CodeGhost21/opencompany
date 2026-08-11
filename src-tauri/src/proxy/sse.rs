@@ -22,6 +22,8 @@
 pub struct SseDecoder {
     /// Bytes received but not yet forming a complete event.
     buffer: String,
+    /// Bytes that are not yet a whole codepoint. See [`SseDecoder::push_bytes`].
+    partial: Vec<u8>,
 }
 
 impl SseDecoder {
@@ -29,9 +31,69 @@ impl SseDecoder {
         Self::default()
     }
 
-    /// Feeds a chunk, returning every event completed by it.
+    /// Feeds a chunk of **bytes**, returning every event completed by it.
     ///
-    /// A chunk may complete several events, part of one, or none.
+    /// This is the entry point a network reader wants, and the reason it exists
+    /// is the same reason this is a chunk decoder at all — one level down.
+    /// Framing is chunk-safe, but decoding each chunk with
+    /// `String::from_utf8_lossy` before framing is not: a read boundary lands
+    /// wherever the network puts it, and eventually that is *inside* a
+    /// multi-byte codepoint. Each half then decodes to U+FFFD independently, so
+    /// an agent reply containing an emoji or any accented text arrives silently
+    /// mangled — under load, occasionally, in a payload nobody can reproduce.
+    ///
+    /// So incomplete trailing bytes are held here until the chunk that
+    /// completes them. Bytes that are genuinely malformed — as opposed to
+    /// merely truncated — still become U+FFFD, exactly as before, because
+    /// waiting for the rest of a sequence that is never coming would stall the
+    /// stream.
+    pub fn push_bytes(&mut self, chunk: &[u8]) -> Vec<String> {
+        self.partial.extend_from_slice(chunk);
+        let decoded = self.take_decodable();
+        self.push(&decoded)
+    }
+
+    /// The longest prefix of `partial` that is whole codepoints, consuming it.
+    fn take_decodable(&mut self) -> String {
+        let mut out = String::new();
+        loop {
+            match std::str::from_utf8(&self.partial) {
+                Ok(all) => {
+                    out.push_str(all);
+                    self.partial.clear();
+                    return out;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    // Sound by construction: `valid_up_to` is where decoding
+                    // stopped, so everything before it is valid UTF-8.
+                    out.push_str(std::str::from_utf8(&self.partial[..valid]).unwrap_or_default());
+                    match error.error_len() {
+                        // A truncated codepoint at the tail. The rest of it is
+                        // in the next chunk, so keep the bytes rather than
+                        // replacing them. At most three are ever held.
+                        None => {
+                            self.partial.drain(..valid);
+                            return out;
+                        }
+                        // Genuinely malformed, not split. Mirror what
+                        // `from_utf8_lossy` would have produced and continue,
+                        // so one bad sequence does not stall the stream.
+                        Some(len) => {
+                            out.push(char::REPLACEMENT_CHARACTER);
+                            self.partial.drain(..valid + len);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Feeds a chunk of text, returning every event completed by it.
+    ///
+    /// A chunk may complete several events, part of one, or none. Prefer
+    /// [`push_bytes`](Self::push_bytes) when reading from a socket; this is for
+    /// callers that already hold text.
     pub fn push(&mut self, chunk: &str) -> Vec<String> {
         self.buffer.push_str(chunk);
         let mut out = Vec::new();
@@ -111,6 +173,42 @@ mod test {
             decoder.push("data: {\"type\":\"agent_reply\"}\n\n"),
             vec!["{\"type\":\"agent_reply\"}"]
         );
+    }
+
+    #[test]
+    fn a_codepoint_split_across_chunks_survives() {
+        // THE reason `push_bytes` exists. A read boundary can fall inside a
+        // multi-byte codepoint just as easily as between two lines. Decoding
+        // each chunk with `from_utf8_lossy` first turns both halves into
+        // U+FFFD, so an agent reply containing an emoji or accented text
+        // arrives mangled — silently, and only under load.
+        let payload = "data: {\"text\":\"héllo 🚀 done\"}\n\n";
+        let bytes = payload.as_bytes();
+
+        // Split at every byte offset, so the boundary lands mid-codepoint for
+        // every multi-byte character in the payload.
+        for split in 1..bytes.len() {
+            let mut decoder = SseDecoder::new();
+            let mut events = decoder.push_bytes(&bytes[..split]);
+            events.extend(decoder.push_bytes(&bytes[split..]));
+            assert_eq!(
+                events,
+                vec!["{\"text\":\"héllo 🚀 done\"}"],
+                "split at byte {split} corrupted the payload"
+            );
+        }
+    }
+
+    #[test]
+    fn malformed_bytes_still_degrade_rather_than_stall() {
+        // Truncation is held for the next chunk; a sequence that is simply
+        // invalid is not, because the rest of it is never coming and waiting
+        // would stop the stream.
+        let mut decoder = SseDecoder::new();
+        let mut raw = b"data: ".to_vec();
+        raw.push(0xff);
+        raw.extend_from_slice(b"\n\n");
+        assert_eq!(decoder.push_bytes(&raw), vec!["\u{fffd}"]);
     }
 
     #[test]

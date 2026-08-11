@@ -44,9 +44,24 @@ required-features = ["openhuman"]
 async-graphql = "7"
 async-graphql-axum = "7"
 async-trait = "0.1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+# `multipart` is what lets the workspace accept a file upload at all (issue
+# #553): the existing create route takes a JSON body, and JSON cannot carry
+# bytes. Scoped to the one upload route, which sets its own `DefaultBodyLimit`.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "tokio"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+# Direct, not incidental: `Bytes` is the chunk type of `ports::workspace::BlobStream`,
+# so it appears in the port's public signature and cannot be a transitive detail.
+bytes = "1"
+# Extension → media type for uploads and for publishing a generated file. The
+# alternative is a hand-rolled table that is wrong for everything nobody thought
+# of, on a value the console uses to decide whether to render or download.
+mime_guess = "2"
+# `ReaderStream`, which turns the file `FsOps` already has on disk into the
+# `BlobStream` the port returns — so a large download is never resident.
+# `compat` bridges the same helper onto GridFS, whose streams implement
+# `futures_io`'s traits rather than tokio's.
+tokio-util = { version = "0.7", features = ["compat", "io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
@@ -305,10 +320,20 @@ medulla = ["dep:reqwest"]
 # key parsers, is how a signature check comes to differ between two callers.
 identity = ["dep:ed25519-dalek", "dep:bs58", "dep:rand_core"]
 tinyplace = ["identity", "dep:reqwest"]
+# The Agent Client Protocol: the `/acp` endpoint's session/permission surface
+# and the `RunTurn` implementation over an ACP agent.
+#
+# Named as a feature because both modules already document themselves in terms
+# of one — `server::acp` reasons about "a build without the feature" and
+# `routes::RESERVED_PREFIXES` reserves `/acp` so such a build 404s rather than
+# answering an ACP client with the console shell. Until this existed the code
+# compiled into every build, was served by no route and run by no lane.
+acp = ["openhuman"]
 # The runner control lane: machines that dial out and execute this host's work.
 # Dispatch folds an ACP turn into a `TurnOutcome`, which lives behind
-# `openhuman` along with the `RunTurn` seam it satisfies.
-runner = ["identity", "openhuman"]
+# `openhuman` along with the `RunTurn` seam it satisfies, and drives it over the
+# `AcpAgent` port from `acp`.
+runner = ["identity", "acp"]
 # Real HTTP POST webhook delivery + HMAC-SHA256 signing. The `WebhookSink` trait,
 # the offline `RecordingWebhookSink`, and the deterministic default signer
 # compile without this; only `HttpWebhookSink`/`HmacSha256Signer` are gated here.

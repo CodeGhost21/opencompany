@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { signInWithHubToken, verifyCode } from "@/api/auth";
+import { embeddedHost } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
 import { ConnectionRail } from "@/components/connection-rail";
 import { resolveConfig } from "@/config";
@@ -120,6 +121,30 @@ export function App() {
     },
     [config],
   );
+  /**
+   * The host running inside this application, when there is one.
+   *
+   * Asked for rather than assumed: the embedded host binds an ephemeral port,
+   * so only the core knows its address — and it may not be running at all,
+   * most often because another instance holds the data root. `null` then, and
+   * the desktop still shows every remote host, which is the point of holding
+   * several.
+   *
+   * A connection like any other. Added after the first paint because the
+   * address arrives over IPC; the probe effect below picks it up from the id
+   * list, so nothing here has to drive it.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void embeddedHost().then((host) => {
+      if (cancelled || !host) return;
+      addConnection({ baseUrl: host.baseUrl, label: "This computer" });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const connections = useConnections();
   /**
    * Which console is on screen.

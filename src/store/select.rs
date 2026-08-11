@@ -24,7 +24,9 @@ use crate::ports::facts::FactStore;
 use crate::ports::inbox::InboxStore;
 use crate::ports::login_codes::LoginCodeStore;
 use crate::ports::memory::MemoryStore;
+use crate::ports::run_output::WorkflowRunOutputStore;
 use crate::ports::runs::RunStore;
+use crate::ports::schedule_fires::ScheduleFireStore;
 use crate::ports::secrets::SecretStore;
 use crate::ports::sessions::SessionStore;
 use crate::ports::skills_state::SkillStateStore;
@@ -33,6 +35,7 @@ use crate::ports::tasks::TaskStore;
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
 use crate::ports::users::UserStore;
+use crate::ports::workflow_revisions::WorkflowRevisionStore;
 use crate::ports::workspace::WorkspaceStore;
 
 /// Which storage backend hosts the durable ports.
@@ -148,6 +151,12 @@ pub struct StorageHandles {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class task-run records and their step traces (#242).
     pub runs: Arc<dyn RunStore>,
+    /// Per-workflow edit history for rollback (#274).
+    pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    /// Durable cross-replica scheduler fire claims (#241).
+    pub schedule_fires: Arc<dyn ScheduleFireStore>,
+    /// Durable, console-facing per-node run output snapshots (#596).
+    pub run_outputs: Arc<dyn WorkflowRunOutputStore>,
     pub usage: Arc<dyn UsageMeter>,
     pub skills: Arc<dyn SkillStateStore>,
     pub users: Arc<dyn UserStore>,
@@ -402,6 +411,9 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         facts: store.clone(),
         artifacts: store.clone(),
         runs: store.clone(),
+        workflow_revisions: store.clone(),
+        schedule_fires: store.clone(),
+        run_outputs: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
         users: store.clone(),
@@ -439,6 +451,9 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         facts: store.clone(),
         artifacts: store.clone(),
         runs: store.clone(),
+        workflow_revisions: store.clone(),
+        schedule_fires: store.clone(),
+        run_outputs: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
         users: store.clone(),

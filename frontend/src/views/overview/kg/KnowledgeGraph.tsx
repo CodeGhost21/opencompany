@@ -294,7 +294,11 @@ export function KnowledgeGraph({
         workerOfTask.set(e.source, e.target);
         taskOfWorker.set(e.target, e.source);
       }
-      if (e.kind === 'member') teamOfWorker.set(e.source, e.target);
+      // An unplaced worker's `member` edge points at the core, not a pillar
+      // (issue #486). It is still their one structural edge, but it is not a
+      // team: recording `self` here would give them a phantom pillar that owns
+      // their tools and swallows them into focus mode.
+      if (e.kind === 'member' && e.target.startsWith('team:')) teamOfWorker.set(e.source, e.target);
       if (e.kind === 'uses') {
         (toolsOfWorker.get(e.source) ?? toolsOfWorker.set(e.source, []).get(e.source)!).push(e.target);
         (workersOfTool.get(e.target) ?? workersOfTool.set(e.target, []).get(e.target)!).push(e.source);
@@ -492,7 +496,12 @@ export function KnowledgeGraph({
         toolIds: toolsByPillar.get(t.id) ?? [],
       };
     });
-    return radialRestLayout({ selfId: SELF_ID, pillars, ringR: RING_R, cx: CX, cy: CY });
+    // Workers with no pillar (issue #486): on the roster, on no desk. They get
+    // their own sector rather than a resting spot inside somebody else's.
+    const unplacedIds = graph.nodes
+      .filter((n) => (n.kind === 'employee' || n.kind === 'person') && !teamOfWorker.has(n.id))
+      .map((n) => n.id);
+    return radialRestLayout({ selfId: SELF_ID, pillars, unplacedIds, ringR: RING_R, cx: CX, cy: CY });
   }, [graph, tasksOfTeam, workersOfTeam, workersOfTool, teamOfWorker]);
 
   // Staggered label rows for the focused tree: within each band (tasks,
@@ -1493,10 +1502,15 @@ export function KnowledgeGraph({
           graph's persistent, low-weight chrome, so it is where an operator
           reading the wheel is already looking to learn how to read it. The
           full sentence lives in the title — the strip is crowded enough
-          without seven kind-labels wrapping around a whole caveat. */}
+          without seven kind-labels wrapping around a whole caveat.
+
+          It used to read "derived data", covering three whole invented rings.
+          Since issue #601 the notice names the one thing left: where a flow
+          sits on the wheel. Departments, tools and stages are the company's own
+          answers now, so claiming otherwise here would understate them. */}
       <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-[9.5px] text-os-dim" title={DERIVED_NOTICE}>
         <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
-        derived data
+        flow placement
       </span>
     </div>
   );
@@ -1608,7 +1622,11 @@ export function KnowledgeGraph({
   const humanCard = selectedHuman ? (
     <GraphHumanDetailCard
       person={selectedHuman}
-      deptName={byId.get(`team:${selectedHuman.departmentId}`)?.label ?? selectedHuman.departmentId}
+      // A human is always unplaced now (issue #486) — the company staffs desks
+      // with agents — so this reads "Not on a desk" rather than echoing the
+      // `UNPLACED` sentinel at the operator. The lookup stays for the case
+      // where a person does carry a drawn desk.
+      deptName={byId.get(`team:${selectedHuman.departmentId}`)?.label ?? 'Not on a desk'}
       color="var(--warn)"
       task={selectedHumanTask}
       tools={toolChips(selectedHumanId)}

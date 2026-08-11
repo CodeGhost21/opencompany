@@ -42,8 +42,14 @@ use crate::ports::types::{
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
     FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore, SessionStore,
-    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
+    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
+    WorkspaceStore,
 };
+// Separate line (#241) so this addition is a pure append, not a reflow of the
+// grouped import that sibling store-seam branches (#274, #596) also edit.
+use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
@@ -220,9 +226,16 @@ pub struct RuntimeBuilder {
     mail: Option<CompanyMail>,
     tasks: Option<Arc<dyn TaskStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
+    /// Issue #553: the byte limits the workspace is held to. Defaults to a
+    /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
+    /// naming a quota is still not a way to write an unbounded file.
+    workspace_quota: crate::runtime::WorkspaceQuota,
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
+    workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
+    schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
+    run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -310,9 +323,13 @@ impl RuntimeBuilder {
             mail: None,
             tasks: None,
             workspace: None,
+            workspace_quota: crate::runtime::WorkspaceQuota::default(),
             facts: None,
             artifacts: None,
             runs: None,
+            workflow_revisions: None,
+            schedule_fires: None,
+            run_output_store: None,
             usage: None,
             skills: None,
             users: None,
@@ -420,6 +437,9 @@ impl RuntimeBuilder {
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
         self.runs = Some(handles.runs.clone());
+        self.workflow_revisions = Some(handles.workflow_revisions.clone());
+        self.schedule_fires = Some(handles.schedule_fires.clone());
+        self.run_output_store = Some(handles.run_outputs.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -474,6 +494,13 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Sets the workspace's byte limits (default: 256 MiB per file, unlimited
+    /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
+    pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
+        self.workspace_quota = quota;
+        self
+    }
+
     /// Swaps the facts store (default: fs-backed).
     pub fn with_facts(mut self, facts: Arc<dyn FactStore>) -> Self {
         self.facts = Some(facts);
@@ -489,6 +516,30 @@ impl RuntimeBuilder {
     /// Swaps the task-run store (default: fs-backed).
     pub fn with_runs(mut self, runs: Arc<dyn RunStore>) -> Self {
         self.runs = Some(runs);
+        self
+    }
+
+    /// Swaps the workflow-revision store (default: fs-backed).
+    pub fn with_workflow_revisions(
+        mut self,
+        workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    ) -> Self {
+        self.workflow_revisions = Some(workflow_revisions);
+        self
+    }
+
+    /// Swaps the scheduler fire-claim store (default: fs-backed).
+    pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
+        self.schedule_fires = Some(schedule_fires);
+        self
+    }
+
+    /// Swaps the per-node run-output store (default: fs-backed; #596).
+    pub fn with_run_output_store(
+        mut self,
+        run_output_store: Arc<dyn WorkflowRunOutputStore>,
+    ) -> Self {
+        self.run_output_store = Some(run_output_store);
         self
     }
 
@@ -810,13 +861,26 @@ impl RuntimeBuilder {
                 // console routes, the agent tools, the publish drain, the
                 // seeder below — passes through this port, so none of them has
                 // to remember to emit. See [`WorkspaceAnnouncer`].
+                // Issue #553: and the tree refuses what it cannot afford,
+                // wrapped INSIDE the announcer so a refused write is never
+                // announced — the feed must not claim a file appeared that the
+                // quota rejected. See [`QuotaEnforcedWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
-                    self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                    Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
+                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        self.workspace_quota,
+                    )),
                     events.clone(),
                 )),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
+                schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
+                workflow_run_outputs: self
+                    .run_output_store
+                    .clone()
+                    .unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
@@ -1166,6 +1230,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #390, the cycle-level equivalent, resting on the same three
+            // invariants: a cycle journals a start before it takes the serial
+            // lock, every cycle is driven in this process, and one process owns
+            // this journal. So a start with no finish at boot is a cycle that
+            // died with the last host.
+            //
+            // Gated on the handover for exactly the same reason as the sweep
+            // above: a cycle survives a live runtime swap, and sweeping mid-life
+            // would stamp "interrupted by a host restart" on one still running,
+            // whose real finish would then land after the synthetic one.
+            //
+            // Placed after `journal.load()`, whose replay is what populates the
+            // open set, and best-effort inside for the same reason.
+            let settled = journal.sweep_interrupted_cycles().await;
+            if settled > 0 {
+                tracing::info!(
+                    company = %id,
+                    settled,
+                    "settled cycles left open by a previous host process"
+                );
+            }
         }
 
         // The policy gate, rehydrated from the journal replay above so approvals
@@ -1266,6 +1352,11 @@ impl RuntimeBuilder {
         // above already use.
         #[cfg(feature = "openhuman")]
         let mut planner: Option<Arc<crate::harness::planning::TaskPlanner>> = None;
+        // Issue #580: the company's workflow builder, built from the SAME deps as
+        // the planner (shared provider + model override) and installed the same
+        // way via `CompanyRuntime::set_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1528,6 +1619,15 @@ impl RuntimeBuilder {
                                 // dispatch settle that drains the publishes.
                                 workflow_refs:
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                                run_outputs: crate::harness::orchestrator::RunOutputCache::default(
+                                ),
+                                // Issue #596: the DURABLE, console-facing run
+                                // output store — distinct from `run_outputs`
+                                // above (the in-process agent cache). The runner
+                                // persists each settled run's bounded node output
+                                // here so a past run is readable from the console.
+                                // `None` degrades to no-persist, like `events`.
+                                run_output_store: self.run_output_store.clone(),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.
@@ -1673,6 +1773,13 @@ impl RuntimeBuilder {
                             // that could drift from the roster's.
                             planner = Some(Arc::new(
                                 crate::harness::planning::TaskPlanner::from_deps(&deps),
+                            ));
+                            // Issue #580: built from the same deps, so it shares
+                            // the tenant provider and model override with the
+                            // roster and the planner rather than resolving a
+                            // second credential path.
+                            builder = Some(Arc::new(
+                                crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
@@ -1913,6 +2020,14 @@ impl RuntimeBuilder {
         if let Some(planner) = planner {
             runtime.set_planner(planner);
         }
+        // Issue #580: same rebuild treatment as the planner — rebuilt from the
+        // successor's deps (so a BYOK switch reaches building), with an empty
+        // in-flight set that matters to nothing (a pass interrupted by a rebuild
+        // has no settle to reach the board; the boot reaper settles its run).
+        #[cfg(feature = "openhuman")]
+        if let Some(builder) = builder {
+            runtime.set_builder(builder);
+        }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —
         // any failure degrades to "private" with a warning and never fails boot.
@@ -1999,6 +2114,9 @@ async fn seed_workspace(
             // nor an agent, and the console says exactly that (issue #326).
             created_by: WorkspaceOrigin::Seed,
             updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);
@@ -2660,6 +2778,8 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())

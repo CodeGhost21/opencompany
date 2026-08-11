@@ -40,6 +40,11 @@ path = "src/main.rs"
 opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth"] }
 
 tauri = { version = "2", features = [] }
+# The OS credential store, so a device session token never has to live in the
+# webview or on disk in the clear. Native backends only — the same set
+# `vendor/openhuman` uses, and for the same reason: a pure-Rust fallback would
+# mean a secret store that is not the platform's.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
 tauri-plugin-shell = "2"
 
 tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "net"] }

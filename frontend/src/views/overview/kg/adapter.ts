@@ -5,181 +5,226 @@
 // ## What is real, and what is not
 //
 // The graph reads `company → department → SOP task → the worker who does it →
-// that worker's tools`. This host serves only some of those edges:
+// that worker's tools`. Every one of those is a value the host answers for:
 //
-// | Edge                | Source                        | Real? |
-// |---------------------|-------------------------------|-------|
-// | task → worker       | `task.assignee` on the board  | yes   |
-// | category → skill    | `skill.category`              | yes   |
-// | server → tool       | what the server advertises    | yes   |
-// | teammate → department | nothing                     | **derived** |
-// | worker → tools      | nothing (`[tools] allow` is company-wide) | **derived** |
-// | human → department  | nothing (sign-in tells us who, not what) | **derived** |
-// | department → workflow | nothing (no flow API yet)   | **derived** |
+// | Edge                  | Source                                        |
+// |-----------------------|-----------------------------------------------|
+// | task → worker         | `task.assignee` on the board                  |
+// | teammate → department | the desk that seats it (`GET {scope}/desks`)  |
+// | worker → tools        | its resolved grants (`GET …/team`)            |
+// | workflow → stages     | the saved graph's nodes (`GET …/workflows/…`) |
+// | stage → worker        | the `agent` node's own agent id               |
 //
-// The four derived edges are placeholders: a company manifest has no department
-// field and no per-agent tool list, there is no flow API, and signing in says
-// who somebody is rather than what they work on. This module invents a
-// plausible structure rather than leaving most of the five rings empty. That is
-// a deliberate, and temporary, lie — `DERIVED_NOTICE` is the standing caveat.
-// As each field lands upstream, delete the matching `assign*` helper (or
-// `WORKFLOW_TEMPLATES`) and read the real value straight through.
+// The one thing left that is this console's reading rather than the company's
+// declaration is **where a workflow hangs on the wheel** — see `DERIVED_NOTICE`.
+//
+// Ring 1 used to be invented too: `assignDepartment` keyword-matched a role
+// string into one of five hardcoded buckets, falling back to Operations. It is
+// gone (issue #486). A desk — a `[[group_chat]]` or an operator-created overlay
+// desk — is the one place the company actually declares how it is organised, so
+// the departments are its desks and a teammate's department is the desk they
+// are seated on.
+//
+// The consequence is that the graph now has to answer a question the invention
+// let it dodge: **what about somebody the company declares no desk for?** They
+// are not placed — see `UNPLACED`. Nothing here invents a position for anyone.
+//
+// The per-agent tool list used to be derived too: `assignTools` dealt each
+// teammate a slice of the company-wide `[tools] allow` list, because the roster
+// **list** carried no grants and fetching every agent's detail on page load was
+// worse. That DTO gap is closed (issue #601) — a roster row now carries the
+// grants the host resolved for that teammate, from the same server-side
+// constructor the per-agent detail read uses, so the graph and the agent card
+// cannot disagree about who holds what (the rule issue #264 established).
+//
+// Workflows were the last invention: `WORKFLOW_ROUTINES` dealt one made-up
+// routine per desk by position, and `model.ts` dealt its stages round-robin
+// across that desk's agents. Both are gone (issue #601). A workflow is one of
+// the company's saved graphs, its stages are that graph's nodes in run order,
+// and a stage hands off to the agent the flow itself names.
 
 import type { Person as HostPerson } from "@/api/auth";
-import type { Skill } from "@/api/skills";
 import type { Task } from "@/api/tasks";
 import type { MemoryEntry } from "@/api/memory";
-import type { McpServer, McpToolInfo } from "@/api/types";
+import type { DeskDto } from "@/api/types";
+import type { WorkflowGraph } from "@/api/workflows";
 import type { TeamMember } from "@/lib/team";
 import { TASK_COLUMNS } from "@/lib/tasks-sample";
 import type { BrainGraphEdge, BrainGraphNode, MemoryGraph } from "./memory-core";
 import { distillMemoryGraph } from "./memory-core";
 import { isOpen } from "../pulse";
-import type { Agent, Department, Person, SopTask, Workflow } from "./schemas";
+import type { Agent, Department, Person, SopTask, Workflow, WorkflowStage } from "./schemas";
 
-/** Shown wherever the derived structure is on screen. */
+/**
+ * The one caveat left on this surface.
+ *
+ * Everything the graph draws is something the company declared — except which
+ * pillar a workflow hangs off, because the host scopes a flow to the *company*
+ * and nothing links a flow to a desk. It is drawn on the desk of the first
+ * teammate it runs through, which is a real relationship (that teammate really
+ * does perform that stage, and really does sit on that desk) read as a
+ * placement it was never declared to be.
+ */
 export const DERIVED_NOTICE =
-  "Departments, workflows, and tool assignments are placeholders — this company doesn't declare them.";
+  "A workflow is drawn on the desk of the first teammate it runs through — the company scopes flows to itself, not to a desk. Everything else on this graph is declared.";
 
 /**
- * The department set. Keyed by the functional areas a small company actually
- * splits into, so the derived assignment lands somewhere plausible rather than
- * arbitrary. Colours are the console's chart hues.
- */
-const DEPARTMENTS: Department[] = [
-  { id: "dept-product", name: "Product", slug: "product", tagline: "What we build and why", color: "#2a78d6", order: 0 },
-  { id: "dept-engineering", name: "Engineering", slug: "engineering", tagline: "Building and running it", color: "#1baf7a", order: 1 },
-  { id: "dept-design", name: "Design", slug: "design", tagline: "How it looks and feels", color: "#eb6834", order: 2 },
-  { id: "dept-growth", name: "Growth", slug: "growth", tagline: "Finding and keeping users", color: "#4a3aa7", order: 3 },
-  { id: "dept-ops", name: "Operations", slug: "ops", tagline: "Keeping the machine running", color: "#eda100", order: 4 },
-];
-
-/**
- * Role keywords that place a teammate in a department, checked in order.
+ * The department a worker gets when the company declares no desk for them.
  *
- * Order matters where a title names two areas: "Product Designer" is a
- * designer, so Design is tested before Product, and Product's own words are
- * the ones no other area claims.
+ * Not a department: no `team:` node is ever built for it, so a worker carrying
+ * it draws no pillar and hangs off the company core instead of a desk. This is
+ * the graph's version of the org chart's "Not on a desk" section — `lib/org.ts`
+ * keeps the same people out of its tree for the same reason, and says so:
+ * inventing a position for them "is exactly the mistake the Overview graph
+ * makes when it keyword-matches a role into a department".
+ *
+ * Prefixed so it can never collide with a real desk: desk ids become
+ * `desk:<id>`, so a manifest desk literally named `unplaced` is `desk:unplaced`
+ * and stays distinct from this.
  */
-const ROLE_HINTS: { department: string; words: string[] }[] = [
-  { department: "dept-design", words: ["design", "ux", "ui", "brand", "creative"] },
-  { department: "dept-engineering", words: ["engineer", "developer", "backend", "frontend", "qa", "devops", "security", "infrastructure"] },
-  { department: "dept-growth", words: ["growth", "market", "sales", "writer", "content", "social", "campaign"] },
-  { department: "dept-product", words: ["product", "pm", "strategy", "research", "analyst", "data", "roadmap"] },
-  { department: "dept-ops", words: ["ops", "operation", "support", "finance", "legal", "front desk", "admin"] },
-];
+export const UNPLACED = "unplaced";
+
+/** A desk's department id. Namespaced so no desk id can collide with `UNPLACED`. */
+export function departmentIdOfDesk(deskId: string): string {
+  return `desk:${deskId}`;
+}
 
 /**
- * Which department a teammate belongs to.
- *
- * **Derived.** Their role text is matched against the hint words above; a role
- * that matches nothing falls to Operations, which is where unclassified work
- * really does end up. Deterministic, so a teammate does not move between
- * renders.
+ * The pillar colours, in order. The console's chart hues — the same five the
+ * hardcoded department list used, now dealt to desks by position. A company
+ * with more desks than hues wraps, which is a repeated tint rather than a
+ * wrong one.
  */
-export function assignDepartment(member: TeamMember): string {
-  const haystack = `${member.role} ${member.name}`.toLowerCase();
-  for (const hint of ROLE_HINTS) {
-    if (hint.words.some((word) => haystack.includes(word))) return hint.department;
+const PILLAR_COLORS = ["#2a78d6", "#1baf7a", "#eb6834", "#4a3aa7", "#eda100"];
+
+/** `Product Design` → `product-design`, for the department's slug. */
+function slugify(s: string): string {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Ring 1: the company's desks, in the order the host serves them.
+ *
+ * **Declared, not derived.** A desk is a `[[group_chat]]` in the manifest or an
+ * operator-created overlay desk; either way the company said it exists and said
+ * who is on it. The order is the host's own — never re-sorted here, the same
+ * rule `lib/org.ts` follows for seats.
+ */
+export function deskDepartments(desks: DeskDto[]): Department[] {
+  return desks.map((desk, i) => ({
+    id: departmentIdOfDesk(desk.id),
+    name: desk.name,
+    slug: slugify(desk.name) || slugify(desk.id) || `desk-${i}`,
+    tagline: desk.description ?? "",
+    color: PILLAR_COLORS[i % PILLAR_COLORS.length],
+    order: i,
+  }));
+}
+
+/**
+ * Which desk a teammate is seated on, or `UNPLACED`.
+ *
+ * A teammate can sit on several desks — desks are flat, and nothing stops a
+ * manifest seating one agent twice. The graph's model gives an agent exactly
+ * one `departmentId`, so the **first** desk that names them wins, in the host's
+ * desk order. That under-reports the structure (the org chart shows both
+ * seats); it never invents one, which is the property that matters here.
+ */
+export function deskOfMember(id: string, desks: DeskDto[]): string {
+  const desk = desks.find((d) => d.members.includes(id));
+  return desk ? departmentIdOfDesk(desk.id) : UNPLACED;
+}
+
+/**
+ * A saved workflow graph, written out as an ordered list of stages.
+ *
+ * The nodes are sorted into run order (Kahn's algorithm over the graph's own
+ * edges, ties broken by declared order) rather than taken as declared: the file
+ * lists nodes, the edges say what follows what, and a flow read out of order is
+ * a flow described wrongly. A cycle — or a node no edge reaches — cannot be
+ * ordered that way, so anything left over is appended in declared order rather
+ * than dropped.
+ *
+ * `agentId` rides along from the graph's own `agent` nodes, so the "who performs
+ * this stage" edge is the flow's own answer rather than a deal across a desk.
+ */
+export function orderStages(graph: Pick<WorkflowGraph, "nodes" | "edges">): WorkflowStage[] {
+  const rank = new Map(graph.nodes.map((n, i) => [n.id, i]));
+  const indegree = new Map(graph.nodes.map((n) => [n.id, 0]));
+  const next = new Map<string, string[]>();
+  // A repeated edge needs no special case: it raises the target's in-degree
+  // twice and is then followed twice, so the two cancel and the target is
+  // still released exactly once. An edge naming a node this graph does not
+  // contain is skipped, so it can never hold a real node back.
+  for (const edge of graph.edges) {
+    if (!rank.has(edge.from) || !rank.has(edge.to)) continue;
+    indegree.set(edge.to, (indegree.get(edge.to) ?? 0) + 1);
+    next.set(edge.from, [...(next.get(edge.from) ?? []), edge.to]);
   }
-  return "dept-ops";
-}
 
-/**
- * Which tools a teammate uses.
- *
- * **Derived.** The host knows the company's tools but not who reaches for
- * which, so each teammate is given the tools of their department's slice — a
- * deterministic deal from the company-wide list, not a record of anything.
- */
-// (member is not consulted: the assignment is positional, not personal)
-export function assignTools(index: number, tools: string[]): string[] {
-  if (tools.length === 0) return [];
-  const take = Math.min(3, Math.max(1, Math.ceil(tools.length / 3)));
-  return Array.from({ length: take }, (_, k) => tools[(index * 2 + k) % tools.length]).filter(
-    (tool, k, all) => all.indexOf(tool) === k,
-  );
-}
-
-/**
- * One standing routine per department.
- *
- * **Derived.** The console has no flow API — the Workflows canvas draws a
- * single hard-coded sample — so these are plausible routines for each area
- * rather than anything the company declared. They exist to show the shape a
- * real flow will take on the graph: a department runs a flow, and the flow
- * passes through several of that department's agents in turn.
- */
-const WORKFLOW_TEMPLATES: Omit<Workflow, "agentIds">[] = [
-  {
-    id: "flow-discovery",
-    departmentId: "dept-product",
-    name: "Discovery loop",
-    summary: "Turn a raw request into a specced, prioritised piece of work.",
-    stages: ["Intake", "Research", "Spec", "Prioritise"],
-  },
-  {
-    id: "flow-delivery",
-    departmentId: "dept-engineering",
-    name: "Ship it",
-    summary: "Take a spec through build, review, and release.",
-    stages: ["Plan", "Build", "Review", "Release"],
-  },
-  {
-    id: "flow-brand",
-    departmentId: "dept-design",
-    name: "Make it look right",
-    summary: "Draft, critique, and hand off the visuals for a piece of work.",
-    stages: ["Brief", "Draft", "Critique", "Hand off"],
-  },
-  {
-    id: "flow-campaign",
-    departmentId: "dept-growth",
-    name: "Campaign run",
-    summary: "Angle to published post, with the numbers read back after.",
-    stages: ["Angle", "Write", "Publish", "Measure"],
-  },
-  {
-    id: "flow-triage",
-    departmentId: "dept-ops",
-    name: "Inbound triage",
-    summary: "Sort what arrives, answer it, and escalate what needs a person.",
-    stages: ["Receive", "Sort", "Answer", "Escalate"],
-  },
-];
-
-/**
- * Which department a human belongs to.
- *
- * **Derived.** Signing in tells the console who someone is, not what they work
- * on. Admins sit with Operations — administering the company *is* operations —
- * and everyone else is spread deterministically across the departments that
- * exist, so humans read as part of the org rather than piled on one pillar.
- *
- * `departments` here is already filtered to the ones with an agent in them
- * (see `adapt` below), so it may not include Operations at all — a roster
- * that's all engineers and designers, say. Pointing an admin at "dept-ops"
- * regardless would hand `buildKnowledgeGraph` a department id no `team:`
- * node exists for, and it throws building the force-link edges. Falling back
- * to the same spread everyone else gets keeps every returned id inside
- * `departments`.
- */
-export function assignHumanDepartment(person: HostPerson, departments: Department[]): string {
-  if (departments.length === 0) return "dept-ops";
-  if (person.role === "admin") {
-    const ops = departments.find((d) => d.id === "dept-ops");
-    if (ops) return ops.id;
+  const ready = graph.nodes.filter((n) => indegree.get(n.id) === 0).map((n) => n.id);
+  const order: string[] = [];
+  const placed = new Set<string>();
+  while (ready.length) {
+    // Lowest declared index first, so a fan-out reads in file order and the
+    // same graph always produces the same list.
+    ready.sort((a, b) => (rank.get(a) ?? 0) - (rank.get(b) ?? 0));
+    const id = ready.shift()!;
+    if (placed.has(id)) continue;
+    placed.add(id);
+    order.push(id);
+    for (const to of next.get(id) ?? []) {
+      const left = (indegree.get(to) ?? 0) - 1;
+      indegree.set(to, left);
+      if (left === 0) ready.push(to);
+    }
   }
-  return departments[hash(person.email) % departments.length].id;
+  for (const node of graph.nodes) if (!placed.has(node.id)) order.push(node.id);
+
+  const byId = new Map(graph.nodes.map((n) => [n.id, n]));
+  return order.map((id) => {
+    const node = byId.get(id)!;
+    return {
+      name: node.name,
+      // Only an `agent` node names a teammate; every other kind performs no
+      // agent's work and must not be attached to one.
+      ...(node.kind === "agent" && node.agent ? { agentId: node.agent } : {}),
+    };
+  });
 }
+
+// `assignHumanDepartment` was deleted with `assignDepartment` (issue #486),
+// and the reason is worth keeping: it did not merely stay derived, it got
+// *worse* when ring 1 became real.
+//
+// It spread humans deterministically across the departments that existed. While
+// those were invented buckets that was internally consistent fiction — a made-up
+// person-to-made-up-bucket edge. Now the departments are the company's actual
+// desks, with membership the company declared. Dealing a human onto one would
+// claim they sit on a real desk whose real member list does not name them, and
+// the graph would contradict the org chart on a fact the operator can check.
+//
+// So a human is `UNPLACED`, which is what the org chart already decided for the
+// same people: "Desks staff agents, so the company declares no desk for a
+// person, and this chart does not guess one."
 
 export interface AdaptInput {
   members: TeamMember[];
+  /**
+   * The company's desks — ring 1, and the only declared statement of how this
+   * company is organised. An empty list is a company that declares no
+   * structure: it draws no pillars and everyone is unplaced, which is the true
+   * answer rather than a guessed one.
+   */
+  desks: DeskDto[];
   tasks: Task[];
-  skills: Skill[];
-  servers: McpServer[];
-  /** Keyed by server **name** — the key `.../mcp/servers` identifies a server by. */
-  toolsByServer: Record<string, McpToolInfo[]>;
+  /**
+   * The company's saved workflow graphs, whole — nodes and edges, not just
+   * names. The list read serves summaries only, so the caller fetches each
+   * graph; see `Overview.tsx` for why that is bounded and what a flow with no
+   * saved graph falls back to.
+   */
+  workflows: WorkflowGraph[];
   /** The humans who can sign in to this company. */
   people: HostPerson[];
   /** Matches a board card to a roster member; the one real assignment edge. */
@@ -198,38 +243,31 @@ export interface Adapted {
 
 /** Shape the host's data into the graph's org model. */
 export function adapt(input: AdaptInput): Adapted {
-  const toolLabels: Record<string, string> = {};
-  const toolSlugs: string[] = [];
-
-  // Only active skills are tools an agent can actually reach for; a disabled
-  // one is installed but off, so it does not belong on anyone's tool shelf.
-  for (const skill of input.skills) {
-    if (!skill.enabled) continue;
-    const slug = `skill-${skill.id}`;
-    toolLabels[slug] = skill.name;
-    toolSlugs.push(slug);
-  }
-  for (const server of input.servers) {
-    for (const tool of input.toolsByServer[server.name] ?? []) {
-      const slug = `mcp-${server.name}-${tool.name}`;
-      toolLabels[slug] = tool.name;
-      toolSlugs.push(slug);
-    }
-  }
-
-  const agents: Agent[] = input.members.map((member, i) => ({
+  const agents: Agent[] = input.members.map((member) => ({
     id: member.id,
-    departmentId: assignDepartment(member),
+    departmentId: deskOfMember(member.id, input.desks),
     name: member.name,
     role: member.role,
     status: "active",
     tier: "worker",
     description: member.description,
     model: "—",
-    tools: assignTools(i, toolSlugs),
+    // What the host says this teammate actually holds, straight through: its
+    // own `[[agent]].tools` line narrowed by the company's `[tools] allow`,
+    // resolved server-side. The agent detail card renders the same list from
+    // the same resolution, which is the whole point of issue #601.
+    tools: member.effectiveTools,
     parentId: null,
     instance: "builtin",
   }));
+
+  // A tool slug is a grant glob now — the literal `[tools] allow` entry, like
+  // `composio`, `mcp:*` or `workspace.*` — so it is its own best label. The map
+  // is kept because the detail card takes one, and mapping each grant to itself
+  // is what stops the card title-casing `workspace.*` into something an
+  // operator cannot grep for.
+  const toolLabels: Record<string, string> = {};
+  for (const agent of agents) for (const grant of agent.tools) toolLabels[grant] = grant;
 
   // A board card becomes an SOP task owned by the teammate it is assigned to —
   // the one edge here that the host actually records. Cards nobody owns are
@@ -241,9 +279,18 @@ export function adapt(input: AdaptInput): Adapted {
     if (!isOpen(task)) continue;
     const member = input.members.find((m) => input.ownedBy(task, m));
     if (!member) continue;
+    // A task hangs off its owner's desk. An unplaced owner has none, and ring 2
+    // hangs off ring 1 — so their card is dropped rather than parked under a
+    // desk they are not on. That loses a real card from the graph, which is a
+    // genuine cost and the reason it is stated here rather than left to fall
+    // out of a guard in `model.ts`: the alternative is asserting a desk
+    // membership the company never declared, and the board still shows the
+    // card. Seat the teammate on a desk and it comes back.
+    const departmentId = deskOfMember(member.id, input.desks);
+    if (departmentId === UNPLACED) continue;
     tasks.push({
       id: task.id,
-      departmentId: assignDepartment(member),
+      departmentId,
       title: task.title,
       summary: task.note ?? "",
       steps: [
@@ -256,13 +303,17 @@ export function adapt(input: AdaptInput): Adapted {
     });
   }
 
-  // Only departments that ended up with somebody in them.
+  // Only desks that ended up with somebody on them. A declared desk with no
+  // members draws no pillar — `buildKnowledgeGraph` skips a department nobody
+  // claims, and matching that here keeps the two from disagreeing.
   const used = new Set(agents.map((a) => a.departmentId));
-  const departments = DEPARTMENTS.filter((d) => used.has(d.id));
+  const departments = deskDepartments(input.desks).filter((d) => used.has(d.id));
 
   const people: Person[] = input.people.map((p) => ({
     id: p.id,
-    departmentId: assignHumanDepartment(p, departments),
+    // Never a desk: the company staffs desks with agents and declares no desk
+    // for a person. See the note where `assignHumanDepartment` used to be.
+    departmentId: UNPLACED,
     // Falling back to the local part of the address keeps a real name off the
     // graph only when nobody has set one.
     name: p.displayName?.trim() || p.email.split("@")[0],
@@ -272,14 +323,31 @@ export function adapt(input: AdaptInput): Adapted {
     tools: [],
   }));
 
-  // A flow only makes sense where its department has agents to run it; each is
-  // wired through that department's agents in roster order.
-  const workflows: Workflow[] = WORKFLOW_TEMPLATES.filter((f) => used.has(f.departmentId)).map(
-    (f) => ({
-      ...f,
-      agentIds: agents.filter((a) => a.departmentId === f.departmentId).map((a) => a.id),
-    }),
-  );
+  // Every workflow the company has saved, written out. Placement is the one
+  // reading here (see `DERIVED_NOTICE`): a flow hangs off the desk of the first
+  // teammate it runs through.
+  //
+  // A flow that runs through nobody seated — a pure trigger/HTTP routine, one
+  // whose agents are all on no desk, or one the host lists with no saved graph
+  // behind it — comes out `UNPLACED`. Unlike an unplaced teammate's board card,
+  // which is dropped above, the flow is still drawn: `model.ts` hangs it off the
+  // company core, the same answer it gives an unplaced worker. The company
+  // really does declare the flow, so the choice is between drawing it somewhere
+  // honest and hiding it, not between two placements.
+  const deskOfAgent = new Map(agents.map((a) => [a.id, a.departmentId]));
+  const workflows: Workflow[] = input.workflows.map((graph) => {
+    const stages = orderStages(graph);
+    const firstSeated = stages
+      .map((stage) => (stage.agentId ? deskOfAgent.get(stage.agentId) : undefined))
+      .find((desk) => desk !== undefined && desk !== UNPLACED);
+    return {
+      id: graph.id,
+      departmentId: firstSeated ?? UNPLACED,
+      name: graph.name,
+      summary: graph.description ?? "",
+      stages,
+    };
+  });
 
   return { departments, agents, people, workflows, tasks, toolLabels };
 }

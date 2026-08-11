@@ -11,6 +11,10 @@ Implementation: `src/harness/planning.rs` (the pass), `src/ports/tasks.rs`
 (the `TaskPlan` shape), `src/metering/planning.rs` (what it costs and who pays),
 `src/runtime/advance.rs` (the boot sweep).
 
+A planned card can also be turned into a *reusable workflow* rather than done
+once — the sibling [workflow-build.md](workflow-build.md) pass reads the same
+plan and proposes a graph for review. This document is only the planning half.
+
 ---
 
 ## The contract in one table

@@ -426,6 +426,13 @@ impl HarnessAgentRunner {
         if requests.len() > cap {
             // Bounded exactly as the cycle drain is: a model that keeps
             // re-trying a blocked tool must not be able to flood the queue.
+            //
+            // Issue #638: the chat path now *tells* the operator when it
+            // discards (#561, `DrainedRequests::overflow_notice`); this one
+            // still only logs. Less bad than the chat path was — the count
+            // exists somewhere — but a log line is not the operator learning
+            // anything. Fixing it needs a surface a run can speak on, which is
+            // why it is tracked separately rather than done here.
             tracing::warn!(
                 company = %self.company,
                 run_id = %self.run_id,

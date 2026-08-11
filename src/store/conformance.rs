@@ -24,6 +24,9 @@ use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
+use crate::ports::run_output::{
+    MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore,
+};
 use crate::ports::sessions::{SessionKind, SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
@@ -34,6 +37,9 @@ use crate::ports::types::{
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
+use crate::ports::workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 /// A minimal valid manifest used to seed [`CompanyRecord`]s in the suite.
@@ -866,6 +872,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -1575,6 +1583,305 @@ pub async fn assert_artifact_store(artifacts: Arc<dyn ArtifactStore>) {
     assert_eq!(artifacts.list(&beta, None).await.unwrap().len(), 1);
 }
 
+/// Asserts the [`WorkflowRevisionStore`] contract (issue #274): per-company and
+/// per-workflow isolation, newest-first order, prune-to-cap inside the push, a
+/// verbatim body round-trip, and the delete cascade.
+///
+/// The prune assertion is the load-bearing one: a backend that grew the ring
+/// unbounded, or that pruned the *newest* rows instead of the oldest, would
+/// still pass a naive "push then read back" check while defeating the whole
+/// point of a bounded history.
+pub async fn assert_workflow_revision_store(revisions: Arc<dyn WorkflowRevisionStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // A helper that pins the capture time, so ordering is asserted against a
+    // known sequence rather than the wall clock.
+    let rev = |workflow_id: &str, name: &str, toml: &str, at: u64| {
+        let mut r = WorkflowRevisionRecord::new(workflow_id, name, toml, at);
+        // Force a distinct, ordered id so the tie-break is deterministic even
+        // when two share a millisecond.
+        r.id = format!("{workflow_id}-{at:04}");
+        r
+    };
+
+    // Two revisions of `greeter`, plus one of a sibling workflow, plus one under
+    // company beta that must never leak into alpha.
+    let first = rev(
+        "greeter",
+        "Greeter v1",
+        "id = \"greeter\"\nname = \"Greeter v1\"",
+        10,
+    );
+    let second = rev(
+        "greeter",
+        "Greeter v2",
+        "id = \"greeter\"\nname = \"Greeter v2\"",
+        20,
+    );
+    revisions.push_revision(&alpha, &first).await.unwrap();
+    revisions.push_revision(&alpha, &second).await.unwrap();
+    revisions
+        .push_revision(&alpha, &rev("digest", "Digest", "id = \"digest\"", 15))
+        .await
+        .unwrap();
+    revisions
+        .push_revision(&beta, &rev("greeter", "Other", "id = \"greeter\"", 99))
+        .await
+        .unwrap();
+
+    // Isolation by company AND by workflow.
+    let alpha_greeter = revisions.list_revisions(&alpha, "greeter").await.unwrap();
+    assert_eq!(alpha_greeter.len(), 2, "only greeter's two snapshots");
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "digest")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Newest first, and the body round-trips verbatim.
+    assert_eq!(alpha_greeter[0].id, second.id, "newest snapshot leads");
+    assert_eq!(alpha_greeter[1].id, first.id);
+    assert_eq!(
+        alpha_greeter[0].toml, second.toml,
+        "the captured TOML must survive byte-for-byte"
+    );
+
+    // get_revision is workflow-scoped: greeter's id is invisible under digest.
+    assert!(
+        revisions
+            .get_revision(&alpha, "greeter", &first.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        revisions
+            .get_revision(&alpha, "digest", &first.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a revision id must not resolve under the wrong workflow"
+    );
+    assert!(
+        revisions
+            .get_revision(&alpha, "greeter", "nope")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Prune-to-cap: push MAX+5 distinct snapshots of a fresh workflow and prove
+    // the ring holds exactly MAX, keeping the newest and dropping the oldest.
+    for i in 0..(MAX_WORKFLOW_REVISIONS as u64 + 5) {
+        revisions
+            .push_revision(
+                &alpha,
+                &rev(
+                    "ring",
+                    &format!("v{i}"),
+                    &format!("id = \"ring\" # {i}"),
+                    1000 + i,
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let ring = revisions.list_revisions(&alpha, "ring").await.unwrap();
+    assert_eq!(
+        ring.len(),
+        MAX_WORKFLOW_REVISIONS,
+        "the ring must be capped at MAX_WORKFLOW_REVISIONS"
+    );
+    assert_eq!(
+        ring[0].created_at_millis,
+        1000 + MAX_WORKFLOW_REVISIONS as u64 + 4,
+        "the newest snapshot survives the prune"
+    );
+    assert_eq!(
+        ring[ring.len() - 1].created_at_millis,
+        1000 + 5,
+        "the oldest kept is exactly MAX back from the newest — older ones pruned"
+    );
+
+    // The prune must not have touched the sibling workflows or company beta.
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Delete cascade: drops exactly one workflow's history, reports the count,
+    // and is a no-op the second time.
+    let removed = revisions.delete_revisions(&alpha, "greeter").await.unwrap();
+    assert_eq!(removed, 2, "both greeter snapshots removed");
+    assert!(
+        revisions
+            .list_revisions(&alpha, "greeter")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        revisions.delete_revisions(&alpha, "greeter").await.unwrap(),
+        0
+    );
+    // Siblings and beta untouched by the cascade.
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "digest")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "ring")
+            .await
+            .unwrap()
+            .len(),
+        MAX_WORKFLOW_REVISIONS
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Asserts the [`WorkflowRunOutputStore`] contract (issue #596): roundtrip,
+/// company isolation, overwrite idempotence, and prune-to-newest-N.
+pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutputStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let record = |run_id: &str, workflow_id: &str, at: u64, marker: &str| WorkflowRunOutputRecord {
+        run_id: run_id.to_string(),
+        workflow_id: workflow_id.to_string(),
+        at_millis: at,
+        nodes: serde_json::json!({ "writer": { "items": [marker] } }),
+        truncated: false,
+    };
+
+    // Roundtrip: a stored record reads back byte-identically.
+    let first = record("run-1", "greet", 10, "hello");
+    outputs.put_run_output(&alpha, &first).await.unwrap();
+    let got = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .expect("the stored run output must read back");
+    assert_eq!(got, first, "a run output must round-trip verbatim");
+
+    // A run that was never stored is `None`, not an error — the pre-feature /
+    // dry-run / hard-abort shape the read route turns into a 404.
+    assert!(
+        outputs
+            .get_run_output(&alpha, "never")
+            .await
+            .unwrap()
+            .is_none(),
+        "an unknown run id must read back as None"
+    );
+
+    // Company isolation: beta cannot see alpha's run, even by the same id.
+    outputs
+        .put_run_output(&beta, &record("run-1", "greet", 10, "beta-secret"))
+        .await
+        .unwrap();
+    let beta_got = outputs
+        .get_run_output(&beta, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(beta_got.nodes["writer"]["items"][0], "beta-secret");
+    let alpha_got = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        alpha_got.nodes["writer"]["items"][0], "hello",
+        "one company's run output must never leak into another's"
+    );
+
+    // Overwrite idempotence: re-writing the same run_id replaces, never stacks.
+    let replaced = record("run-1", "greet", 20, "world");
+    outputs.put_run_output(&alpha, &replaced).await.unwrap();
+    let after = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, replaced,
+        "a re-write must overwrite the prior snapshot"
+    );
+
+    // Prune-to-cap: push MAX+5 distinct runs and prove only the newest MAX survive.
+    for i in 0..(MAX_RUN_OUTPUTS_PER_COMPANY as u64 + 5) {
+        outputs
+            .put_run_output(&alpha, &record(&format!("r{i}"), "ring", 1000 + i, "x"))
+            .await
+            .unwrap();
+    }
+    // The newest run is retained…
+    let newest_id = format!("r{}", MAX_RUN_OUTPUTS_PER_COMPANY as u64 + 4);
+    assert!(
+        outputs
+            .get_run_output(&alpha, &newest_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the newest run must survive the prune"
+    );
+    // …and the oldest of the batch was evicted.
+    assert!(
+        outputs
+            .get_run_output(&alpha, "r0")
+            .await
+            .unwrap()
+            .is_none(),
+        "the oldest run beyond the cap must be pruned"
+    );
+
+    // Beta's single run is untouched by alpha's prune.
+    assert!(
+        outputs
+            .get_run_output(&beta, "run-1")
+            .await
+            .unwrap()
+            .is_some(),
+        "one company's prune must not touch another's records"
+    );
+}
+
 /// Asserts the [`FactStore`] contract: isolation, query/kind filtering, upsert,
 /// and delete.
 pub async fn assert_fact_store(facts: Arc<dyn FactStore>) {
@@ -1879,6 +2186,9 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         updated_by: WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
         },
+        mime: None,
+        size: None,
+        sha256: None,
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());
@@ -2001,6 +2311,317 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     let tree = ws.tree(&alpha).await.unwrap();
     assert!(tree.iter().all(|n| n.id != "root" && n.id != "child"));
     assert!(!ws.delete(&alpha, "root").await.unwrap());
+}
+
+/// Collects a [`BlobStream`](crate::ports::workspace::BlobStream) into bytes.
+///
+/// Only the suite buffers: the port streams so a production download never has
+/// to be resident, but an assertion about byte-exactness has to hold the whole
+/// payload to make it.
+async fn drain(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let mut stream = stream;
+    while let Some(chunk) = stream.next().await {
+        out.extend_from_slice(&chunk.expect("a blob chunk must not fail"));
+    }
+    out
+}
+
+/// Asserts the **binary** half of the [`WorkspaceStore`] contract (issue #553).
+///
+/// Kept separate from [`assert_workspace_store`] rather than folded into it,
+/// because the two answer different questions: that one pins the tree every
+/// backend has always had, this one pins the payload path added on top. A
+/// backend can be wired into the first and not yet the second, and the split
+/// makes that state visible instead of turning it into one large failure.
+///
+/// The suite deliberately includes a payload **larger than MongoDB's 16 MB BSON
+/// document cap**. That is the case GridFS exists for, and it is the reason
+/// this is a shared suite rather than a Mongo-only test: fs and sqlite run the
+/// identical assertion, so "the big file round-trips" is a property of the
+/// port, not a property of whichever backend somebody remembered to test.
+pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
+    let alpha = CompanyId::new("bin-alpha");
+    let beta = CompanyId::new("bin-beta");
+    let agent = || WorkspaceOrigin::Agent {
+        id: "designer".to_string(),
+    };
+    let node = |id: &str, name: &str, mime: Option<&str>, parent: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::File,
+        parent_id: parent.map(str::to_string),
+        updated_at_millis: now_millis(),
+        created_by: agent(),
+        updated_by: agent(),
+        mime: mime.map(str::to_string),
+        // Deliberately wrong, and deliberately not `None`: the store must
+        // compute these from the bytes and must not carry a caller's claim
+        // about them through to storage.
+        size: Some(999_999),
+        sha256: Some("not-a-real-digest".to_string()),
+    };
+
+    // A payload that is emphatically not text: a lone continuation byte, an
+    // interior NUL, and a byte sequence no UTF-8 decoder accepts. A backend
+    // that round-trips through `String` anywhere fails here rather than
+    // silently replacing bytes with U+FFFD.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0xc0, 0x80, 0x01,
+    ];
+
+    ws.create(&alpha, &folder_node("shots", "Shots"), None)
+        .await
+        .unwrap();
+    ws.create_binary(
+        &alpha,
+        &node("img", "hero.png", Some("image/png"), Some("shots")),
+        &png,
+    )
+    .await
+    .unwrap();
+
+    // -- Metadata is computed, not accepted -------------------------------
+    let (meta, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(meta.mime.as_deref(), Some("image/png"));
+    assert_eq!(
+        meta.size,
+        Some(png.len() as u64),
+        "size must come from the bytes, not from the caller's claim"
+    );
+    let (_, expected_sha) = crate::ports::workspace::blob_metadata(&png);
+    assert_eq!(
+        meta.sha256.as_deref(),
+        Some(expected_sha.as_str()),
+        "sha256 must be computed from the stored bytes, not trusted from the caller"
+    );
+    assert_eq!(
+        drain(stream).await,
+        png,
+        "the payload must round-trip byte-exactly"
+    );
+
+    // -- Authorship survives the binary path ------------------------------
+    assert_eq!(meta.created_by, agent());
+    assert_eq!(meta.updated_by, agent());
+
+    // -- The tree carries the metadata ------------------------------------
+    let in_tree = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.id == "img")
+        .expect("the binary node is in the tree");
+    assert_eq!(in_tree.mime.as_deref(), Some("image/png"));
+    assert_eq!(in_tree.size, Some(png.len() as u64));
+    assert!(in_tree.is_binary());
+
+    // -- A text read of a binary node is empty, never bytes-as-text -------
+    let (text_node, body) = ws.read(&alpha, "img").await.unwrap().unwrap();
+    assert!(body.is_empty(), "a binary node reads as an empty body");
+    assert!(text_node.is_binary());
+
+    // -- A text write over a payload is refused ---------------------------
+    let refused = ws
+        .write(&alpha, "img", "# not an image", WorkspaceOrigin::Operator)
+        .await
+        .expect_err("writing text over a payload must be refused");
+    assert!(
+        refused.to_string().contains("image/png"),
+        "the refusal must name what the node actually holds, got: {refused}"
+    );
+    // …and the refusal changed nothing.
+    let (still, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(still.sha256.as_deref(), Some(expected_sha.as_str()));
+    assert_eq!(drain(stream).await, png);
+
+    // -- `read_bytes` of a prose note, and of a folder, is None -----------
+    ws.create(
+        &alpha,
+        &WorkspaceNode {
+            mime: None,
+            size: None,
+            sha256: None,
+            ..node("note", "brief.md", None, None)
+        },
+        Some("# Brief"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.read_bytes(&alpha, "note").await.unwrap().is_none(),
+        "a prose note has no payload"
+    );
+    assert!(
+        ws.read_bytes(&alpha, "shots").await.unwrap().is_none(),
+        "a folder has no payload"
+    );
+    assert!(ws.read_bytes(&alpha, "nope").await.unwrap().is_none());
+
+    // -- Replacing a payload keeps the node and restamps it ---------------
+    let replaced = ws
+        .write_binary(&alpha, "img", &[0x00, 0x01, 0x02], Some("image/jpeg"), {
+            WorkspaceOrigin::Operator
+        })
+        .await
+        .unwrap();
+    assert_eq!(replaced.mime.as_deref(), Some("image/jpeg"));
+    assert_eq!(replaced.size, Some(3));
+    assert_eq!(
+        replaced.updated_by,
+        WorkspaceOrigin::Operator,
+        "a payload replacement restamps updated_by like a text write"
+    );
+    assert_eq!(
+        replaced.created_by,
+        agent(),
+        "and never rewrites created_by"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "the old payload must be gone, not merely shadowed"
+    );
+
+    // Writing bytes over a prose note is the mirror refusal of the text case.
+    assert!(
+        ws.write_binary(&alpha, "note", &[1, 2], Some("image/png"), agent())
+            .await
+            .is_err(),
+        "a prose note must not be convertible into a payload by a write"
+    );
+
+    // -- Rename/move leaves the payload intact ----------------------------
+    ws.create(&alpha, &folder_node("archive", "Archive"), None)
+        .await
+        .unwrap();
+    let moved = ws
+        .rename_move(&alpha, "img", Some("hero-final.jpg"), Some(Some("archive")))
+        .await
+        .unwrap();
+    assert_eq!(moved.name, "hero-final.jpg");
+    assert_eq!(
+        moved.mime.as_deref(),
+        Some("image/jpeg"),
+        "a move must not disturb the payload metadata"
+    );
+    let (after_move, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(after_move.size, Some(3));
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "the bytes must survive a rename and reparent"
+    );
+
+    // -- Cross-company isolation, including through the blob store --------
+    ws.create_binary(
+        &beta,
+        &node("img", "other.png", Some("image/png"), None),
+        b"beta-only-bytes",
+    )
+    .await
+    .unwrap();
+    let (_, stream) = ws.read_bytes(&beta, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        b"beta-only-bytes".to_vec(),
+        "the same node id in another company must resolve to that company's payload"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "and must not have been overwritten by it"
+    );
+
+    // -- Delete removes the payload, not just the node --------------------
+    assert!(ws.delete(&beta, "img").await.unwrap());
+    assert!(
+        ws.read_bytes(&beta, "img").await.unwrap().is_none(),
+        "deleting a node must delete its payload"
+    );
+    // A folder delete takes its binary descendants' payloads with it.
+    assert!(ws.delete(&alpha, "archive").await.unwrap());
+    assert!(
+        ws.read_bytes(&alpha, "img").await.unwrap().is_none(),
+        "a recursive delete must remove descendants' payloads too"
+    );
+
+    // -- Past the 16 MB BSON document cap, under the per-write cap --------
+    //
+    // 17 MiB does double duty. It is past MongoDB's 16 MB BSON document limit,
+    // which is the case GridFS exists for — and it is comfortably under
+    // `DEFAULT_MAX_BLOB_BYTES` (64 MiB), so it is also the proof that a large
+    // but legitimate payload still round-trips on **all three** backends rather
+    // than being caught by the cap. The boundary either side of the cap itself
+    // is asserted on the quota decorator, where the comparison lives.
+    //
+    // Patterned rather than zeroed so a backend that silently truncates or pads
+    // is caught by the digest instead of matching by luck.
+    let big: Vec<u8> = (0..17 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let (big_size, big_sha) = crate::ports::workspace::blob_metadata(&big);
+    ws.create_binary(
+        &alpha,
+        &node("big", "render.mp4", Some("video/mp4"), None),
+        &big,
+    )
+    .await
+    .unwrap();
+    let (big_meta, stream) = ws.read_bytes(&alpha, "big").await.unwrap().unwrap();
+    assert_eq!(big_meta.size, Some(big_size));
+    assert_eq!(big_meta.sha256.as_deref(), Some(big_sha.as_str()));
+    let got = drain(stream).await;
+    assert_eq!(
+        got.len(),
+        big.len(),
+        "a payload past the BSON document cap must round-trip whole"
+    );
+    assert_eq!(
+        crate::ports::workspace::blob_metadata(&got).1,
+        big_sha,
+        "…and byte-exactly"
+    );
+
+    // -- A binary node must carry a mime ----------------------------------
+    assert!(
+        ws.create_binary(&alpha, &node("nomime", "x.bin", None, None), b"x")
+            .await
+            .is_err(),
+        "a binary node without a mime type is refused"
+    );
+    // …and must be a file.
+    assert!(
+        ws.create_binary(
+            &alpha,
+            &WorkspaceNode {
+                kind: NodeKind::Folder,
+                ..node("asfolder", "Nope", Some("image/png"), None)
+            },
+            b"x"
+        )
+        .await
+        .is_err(),
+        "a folder cannot hold a payload"
+    );
+}
+
+/// A folder node for the binary suite.
+fn folder_node(id: &str, name: &str) -> WorkspaceNode {
+    WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::Folder,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2511,5 +3132,147 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+//
+// Imports for this suite are function-local rather than added to the module
+// header, keeping it a pure append to a file edited concurrently on other
+// branches.
+
+/// Asserts the
+/// [`ScheduleFireStore`](crate::ports::schedule_fires::ScheduleFireStore)
+/// contract: a claim is won exactly once; keys are isolated per minute, per
+/// schedule and per company; `latest_fire` is the max claimed minute (never the
+/// last written); pruning removes only rows strictly below the cutoff and never
+/// the anchor; and N concurrent claimers of one key produce exactly one winner —
+/// the cross-replica race the whole port exists to arbitrate.
+pub async fn assert_schedule_fire_store(
+    fires: Arc<dyn crate::ports::schedule_fires::ScheduleFireStore>,
+) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // -- first claim wins, a repeat loses -----------------------------------
+
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "the first claim on a key wins"
+    );
+    assert!(
+        !fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "a second claim on the same key loses"
+    );
+
+    // -- keys are distinct per minute, per schedule, per company ------------
+
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 101).await.unwrap(),
+        "a different minute is a different claim"
+    );
+    assert!(
+        fires.claim_fire(&alpha, "workflow-b", 100).await.unwrap(),
+        "a different schedule at the same minute is a different claim"
+    );
+    assert!(
+        fires.claim_fire(&beta, "workflow-a", 100).await.unwrap(),
+        "another company claiming the same key does not collide"
+    );
+
+    // -- latest_fire is the max claimed minute, or None ---------------------
+
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101),
+        "the anchor is the highest claimed minute"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-b").await.unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        fires.latest_fire(&beta, "workflow-a").await.unwrap(),
+        Some(100),
+        "company A's rows are invisible to company B's anchor"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "never").await.unwrap(),
+        None,
+        "a schedule that never fired has no anchor"
+    );
+
+    // Claiming an OLDER minute after a newer one does not move the anchor down:
+    // it is a max, not a last-write.
+    assert!(fires.claim_fire(&alpha, "workflow-a", 50).await.unwrap());
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101)
+    );
+
+    // -- prune removes only rows strictly below the cutoff, never the anchor -
+    //
+    // Prune is COMPANY-wide across every schedule, not per schedule. alpha holds
+    // workflow-a {50, 100, 101} and workflow-b {100}. Pruning below 101 drops
+    // workflow-a's 50 and 100 and workflow-b's 100 — three rows — and keeps
+    // workflow-a's 101, exactly the anchor-preservation invariant the 14-day
+    // cutoff / 7-day window gap guarantees in production.
+    let removed = fires.prune_fires_before(&alpha, 101).await.unwrap();
+    assert_eq!(
+        removed, 3,
+        "prune removes every row below the cutoff, across all schedules"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101),
+        "the newest row survives a prune whose cutoff equals it"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-b").await.unwrap(),
+        None,
+        "a schedule whose only row fell below the cutoff has no anchor left"
+    );
+    // A pruned minute no longer exists, so it can be claimed again.
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "a pruned minute can be re-claimed"
+    );
+    // Prune is per-company: beta's row is untouched.
+    assert_eq!(
+        fires.latest_fire(&beta, "workflow-a").await.unwrap(),
+        Some(100)
+    );
+    // A cutoff below everything removes nothing.
+    assert_eq!(fires.prune_fires_before(&alpha, 0).await.unwrap(), 0);
+
+    // -- N concurrent claimers of one key: exactly one winner ---------------
+    //
+    // Spawned tasks, so the claims genuinely contend rather than serialising on
+    // one await. This is the property hosted replicas depend on: two processes
+    // ticking the same minute must not both fire.
+    const N: usize = 16;
+    let key_minute = 777_u64;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..N {
+        let fires = fires.clone();
+        let company = alpha.clone();
+        set.spawn(async move {
+            fires
+                .claim_fire(&company, "race", key_minute)
+                .await
+                .unwrap()
+        });
+    }
+    let mut winners = 0;
+    while let Some(res) = set.join_next().await {
+        if res.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(
+        winners, 1,
+        "exactly one of {N} concurrent claimers may win the key"
     );
 }

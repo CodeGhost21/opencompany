@@ -168,6 +168,17 @@ impl ProxyRegistry {
         self.connections.read().await.keys().cloned().collect()
     }
 
+    /// The base url a connection is registered against.
+    ///
+    /// Returns the url alone, never the [`Connection`]: `get` is private
+    /// precisely so a credential cannot leave this registry, and a public
+    /// accessor handing back the whole struct would put `Credential::Device`
+    /// one `serde` derive away from the webview. The only caller needs the url
+    /// — to re-register after a credential changes — so the url is all it gets.
+    pub async fn base_url(&self, id: &str) -> Result<String, ProxyError> {
+        self.get(id).await.map(|connection| connection.base_url)
+    }
+
     async fn get(&self, id: &str) -> Result<Connection, ProxyError> {
         self.connections
             .read()
@@ -200,7 +211,7 @@ impl ProxyRegistry {
         for (name, value) in &request.headers {
             // The proxy owns the session/authority headers; a caller-supplied
             // copy would be appended rather than replaced, leaving the host to
-            // arbitrate between two session values.
+            // arbitrate between two session values. See `RESERVED_HEADERS`.
             if RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str()) {
                 continue;
             }
@@ -281,9 +292,14 @@ impl ProxyRegistry {
         let mut stream = response.bytes_stream();
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|error| ProxyError::Transport(error.to_string()))?;
-            // Lossy on purpose: a stream is not a place to fail over one
-            // malformed byte, and the payloads are JSON the console re-parses.
-            for event in decoder.push(&String::from_utf8_lossy(&chunk)) {
+            // Bytes, not `from_utf8_lossy` per chunk: a read boundary can fall
+            // inside a multi-byte codepoint, and decoding each chunk on its own
+            // would turn both halves into U+FFFD. The decoder holds the
+            // incomplete tail until the chunk that finishes it. Genuinely
+            // malformed bytes are still lossy — a stream is not a place to fail
+            // over one bad sequence, and the payloads are JSON the console
+            // re-parses.
+            for event in decoder.push_bytes(&chunk) {
                 on_event(event);
             }
         }
@@ -291,10 +307,34 @@ impl ProxyRegistry {
     }
 }
 
-/// Header names the proxy owns. A caller-supplied `x-opencompany-session`,
-/// `authorization` or `cookie` is ignored so the connection's credential — the
-/// only value the Rust core should ever attach — is never shadowed or doubled.
-const RESERVED_HEADERS: [&str; 3] = ["x-opencompany-session", "authorization", "cookie"];
+/// Header names the proxy owns, matched case-insensitively.
+///
+/// The console passes its request headers straight through
+/// (`ProxyTransport.request`), and `RequestBuilder::header` **appends** rather
+/// than replaces — so without this filter a header the webview supplied and the
+/// credential attached alongside it would both go on the wire under one name.
+/// Axum reads `HeaderMap::get`, which returns the *first*, so the webview's
+/// value would win and the connection's own credential would be the one
+/// ignored.
+///
+/// That inverts the property this module exists for. The token never entering
+/// the webview is worth little if the webview can still say what the request
+/// authenticates as — a script injected into rendered agent markdown could
+/// present a credential of its choosing to every connected host.
+///
+/// Dropped rather than rejected: these are not headers a legitimate console
+/// call sets, so refusing the whole request would turn a defence into a way to
+/// break one.
+const RESERVED_HEADERS: [&str; 4] = [
+    // The session carrier `apply_credential` sets for a paired device.
+    "x-opencompany-session",
+    // The platform bearer, via `bearer_auth`.
+    "authorization",
+    // Neither is set here, but both are ambient authority all the same, and a
+    // caller has no reason to hand-roll one through the proxy.
+    "cookie",
+    "proxy-authorization",
+];
 
 /// Attaches whatever this connection authenticates with.
 fn apply_credential(
@@ -331,6 +371,147 @@ pub type SharedProxy = Arc<ProxyRegistry>;
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// A one-shot host that answers with the request head it received.
+    ///
+    /// Deliberately raw TCP rather than a framework: what is under test is
+    /// which bytes leave this process, and anything that parses the request
+    /// into a map on the way in could normalise away the very duplicate the
+    /// test exists to catch.
+    async fn reflector() -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut head = Vec::new();
+            let mut byte = [0u8; 1];
+            // Read to the end of the head only; a body would block a reader
+            // that does not know the content length.
+            while !head.ends_with(b"\r\n\r\n") {
+                use tokio::io::AsyncReadExt as _;
+                if socket.read_exact(&mut byte).await.is_err() {
+                    break;
+                }
+                head.push(byte[0]);
+            }
+            use tokio::io::AsyncWriteExt as _;
+            let body = String::from_utf8_lossy(&head).to_string();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = socket.write_all(response.as_bytes()).await;
+            let _ = socket.shutdown().await;
+        });
+        format!("http://{addr}")
+    }
+
+    /// The webview must not be able to choose what a request authenticates as.
+    ///
+    /// `RequestBuilder::header` appends, and axum reads `HeaderMap::get`, which
+    /// takes the first value — so a caller-supplied session header that reached
+    /// the wire would be the one the host honoured, and the connection's own
+    /// credential would be the one ignored.
+    #[tokio::test]
+    async fn a_caller_cannot_supply_the_credential_headers() {
+        let base = reflector().await;
+        let registry = ProxyRegistry::new();
+        registry
+            .upsert(
+                "primary".into(),
+                Connection {
+                    base_url: base,
+                    credential: Credential::Device("acme.the-real-token".into()),
+                },
+            )
+            .await;
+
+        let mut headers = HashMap::new();
+        headers.insert(
+            "x-opencompany-session".to_string(),
+            "evil.stolen".to_string(),
+        );
+        headers.insert("Authorization".to_string(), "Bearer evil".to_string());
+        headers.insert("cookie".to_string(), "oc_session_acme=evil".to_string());
+        // An ordinary header must still get through; this is a filter, not a
+        // seal.
+        headers.insert("content-type".to_string(), "application/json".to_string());
+
+        let reflected = registry
+            .request(
+                "primary",
+                ProxyRequest {
+                    method: "POST".into(),
+                    path: "/api/v1/anything".into(),
+                    headers,
+                    body: None,
+                },
+            )
+            .await
+            .expect("the reflector answers")
+            .text
+            .to_ascii_lowercase();
+
+        assert!(
+            reflected.contains("x-opencompany-session: acme.the-real-token"),
+            "the connection's own credential must be on the wire: {reflected}"
+        );
+        assert_eq!(
+            reflected.matches("x-opencompany-session:").count(),
+            1,
+            "exactly one session header, or the host reads the wrong one: {reflected}"
+        );
+        for forbidden in ["evil.stolen", "bearer evil", "oc_session_acme=evil"] {
+            assert!(
+                !reflected.contains(forbidden),
+                "{forbidden:?} must not reach the host: {reflected}"
+            );
+        }
+        assert!(
+            reflected.contains("content-type: application/json"),
+            "an ordinary header must still pass: {reflected}"
+        );
+    }
+
+    #[test]
+    fn credential_header_matching_ignores_case() {
+        // A caller sends whatever casing it likes; HTTP header names are
+        // case-insensitive, so a case-sensitive filter would be no filter.
+        let reserved = |name: &str| RESERVED_HEADERS.contains(&name.to_ascii_lowercase().as_str());
+        for name in ["Authorization", "AUTHORIZATION", "X-OpenCompany-Session"] {
+            assert!(reserved(name), "{name} must be filtered");
+        }
+        for name in ["content-type", "accept", "x-request-id"] {
+            assert!(!reserved(name), "{name} must pass");
+        }
+    }
+
+    #[tokio::test]
+    async fn the_public_accessor_hands_back_no_credential() {
+        // `get` is private so a credential cannot leave this registry. The one
+        // public accessor exists for a caller that needs somewhere to re-point
+        // a connection, and it must stay a url — a `Connection` here would put
+        // `Credential::Device` one `serde` derive away from the webview.
+        let registry = ProxyRegistry::new();
+        registry
+            .upsert(
+                "primary".into(),
+                Connection {
+                    base_url: "https://acme.test".into(),
+                    credential: Credential::Device("acme.the-secret".into()),
+                },
+            )
+            .await;
+
+        let url = registry
+            .base_url("primary")
+            .await
+            .expect("a registered host");
+        assert_eq!(url, "https://acme.test");
+        // The type is what enforces this; the assertion is here so a future
+        // widening of the return type has to delete a test that says why.
+        assert!(!url.contains("the-secret"));
+    }
 
     #[test]
     fn joining_never_doubles_a_slash() {

@@ -383,28 +383,30 @@ pub struct WorkflowRunContext {
 
 /// A one-way stop signal for one workflow run (issue #383).
 ///
-/// # Why this is not the engine's `CancellationToken`
+/// # Why this is not itself the engine's `CancellationToken`
 ///
-/// tinyflows *has* a `CancellationToken`, but no public entry point accepts one
-/// **together with** a `RunObserver`: `run_cancellable` hardcodes a
-/// `NoopObserver`, `run_with_observer` hardcodes a fresh token, and
-/// `build_and_run` — which takes both — is private. Reaching for the engine's
-/// token would therefore cost every cancellable run its per-node progress
-/// events (issue #371), which is a strictly worse trade than stopping the run
-/// host-side. So the runner selects on this signal instead and drops the engine
-/// future when it fires.
-///
-/// It also could not live here even if the engine's would do: this type is on
-/// the port, and the port compiles in the **default build**, which links no
-/// `tinyflows` at all.
+/// This type is on the **port**, and the port compiles in the default build,
+/// which links no `tinyflows` at all — so it cannot *be* the engine's token.
+/// Instead the engine-backed runner **bridges** it: when this signal fires, the
+/// runner flips a `tinyflows::engine::CancellationToken` it handed to
+/// `run_cancellable_with_observer` (issue #398). That entry point takes a token
+/// **and** an observer, so a cancellable run keeps its per-node progress trail
+/// (issue #371/#382) rather than trading it away.
 ///
 /// # Semantics
 ///
-/// Firing this stops the run **mid-await**, it does not let the current node
-/// finish. A node that was half way through an external side effect stays half
-/// way through it — the same class of outcome as the host being killed, which
-/// the boot sweep already handles, only operator-initiated and therefore more
-/// frequent. "Stopped", not "finished".
+/// Firing this stops the run at the next **node boundary**: the engine checks
+/// the token before each node, so a node already executing runs to completion
+/// and is journaled, then the run winds down carrying a real (partial) outcome
+/// with `cancelled` set. "Stopped", not "finished" — but stopped cleanly, not
+/// mid-await.
+///
+/// The one exception is a node **wedged** mid-await on a stalled external call:
+/// it never reaches the next boundary, so the runner bounds the wait
+/// (`CANCEL_HARD_ABORT_GRACE`) and, past it, falls back to dropping the engine
+/// future — the hard abort. That case *does* stop mid-await, the same class of
+/// outcome as the host being killed, which the boot sweep already handles. A
+/// wedged run therefore stays killable even though the clean path cannot reach it.
 ///
 /// Cheap to [`Clone`] (a shared handle); firing is idempotent and safe from any
 /// thread.

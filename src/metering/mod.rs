@@ -55,6 +55,10 @@ pub mod planning;
 pub mod search;
 mod types;
 mod usage;
+/// Issue #580: the workflow-builder pass's usage sample and its
+/// assignee/run attribution rule (the mirror image of [`planning`]). See
+/// [`workflow_build`].
+pub mod workflow_build;
 
 pub use capability::{BudgetPeriod, CapabilityPlan, TierBudgetStatus, plan_named, tokens_in};
 pub use daily_budget::{AgentBudgetStatus, usd_spent_by_agent, utc_day_start_millis};
@@ -73,6 +77,7 @@ pub use types::{
     UsageRange, UsageTotals,
 };
 pub use usage::bucket_usage;
+pub use workflow_build::{record_workflow_build_usage, workflow_build_sample};
 
 /// Builds the teammate id → display-name map [`bucket_usage`] resolves against,
 /// in prosumer language.
