@@ -13,8 +13,8 @@ a safe default; the defaults produce a working company with only
 
 Parsing lives in `src/company/manifest.rs` (`CompanyManifest::from_path`,
 serde + validation). Validation errors MUST be actionable in prosumer
-language ("`[policy].mode` must be one of readonly, supervised, full — you
-wrote `supervized`"), never serde traces.
+language ("`[policy].mode` must be one of readonly, supervised, auto, full —
+you wrote `supervized`"), never serde traces.
 
 ## Full schema
 
@@ -70,7 +70,7 @@ allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
-mode = "supervised"                # readonly | supervised (default) | full
+mode = "supervised"                # readonly | supervised (default) | auto | full
 always_approve = ["payment.send", "filing.submit", "external.publish"]
 auto_approve_under_usd = 1.0
 
@@ -187,11 +187,14 @@ prompt = "Weekly review and operator digest"
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
-- **`[policy]`** configures the default `ApprovalGate`. `mode` mirrors
-  OpenHuman's security tiers. `always_approve` lists effect kinds that park
-  for approval regardless of amount; `auto_approve_under_usd` lets small
-  spends through. Defaults are conservative: `supervised`, with all
-  money/publish/filing effects gated.
+- **`[policy]`** configures the default `ApprovalGate`. `mode` takes three of
+  its four names from OpenHuman's security tiers; `auto` is opencompany's own
+  and sits between `supervised` and `full` (the agent's sandbox writes and
+  outward reads run unattended, anything that leaves the company or spends on
+  submit still parks). `always_approve` lists effect kinds that park for
+  approval regardless of amount and wins over every tier including `full`;
+  `auto_approve_under_usd` lets small spends through. Defaults are
+  conservative: `supervised`, with all money/publish/filing effects gated.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across

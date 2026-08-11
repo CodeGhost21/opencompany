@@ -111,7 +111,7 @@
 //! task to cancel, no connection to close.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::Result;
 use crate::company::load_workflow_union;
@@ -147,6 +147,14 @@ pub const PAYLOAD_NOTE: &str = "note";
 /// identity (see [`is_same_gate`]): two runs whose only difference is the content
 /// their upstream nodes produced are still one decision on the same gate.
 pub const PAYLOAD_CONTENT: &str = "content";
+/// The payload key holding the toolbelt slug a policy-gated `tool_call` node
+/// would run (issue #460). Absent on an authored `requires_approval` gate,
+/// which stops the run without any particular call behind it.
+pub const PAYLOAD_TOOL: &str = "tool";
+/// The payload key holding the policy's own words for why it stopped this call
+/// (issue #460) — the same sentence the agent path puts on its card. Absent for
+/// the same reason as [`PAYLOAD_TOOL`].
+pub const PAYLOAD_REASON: &str = "reason";
 
 /// The reserved trigger-input key the delivery ledger rides into a continuation
 /// run under (issue #438).
@@ -260,31 +268,51 @@ fn delivery_ledger(input: &Value, deliveries: &[DeliveryReport]) -> Vec<Delivere
 /// It is folded into the card's ledger rather than looked up later for the same
 /// reason the input is copied in: a card that needs a side table is a card that
 /// stops working after a restart.
+///
+/// `tool` is `Some((slug, reason))` when the company's `ApprovalPolicy` is what
+/// stopped this node (issue #460), and `None` for an authored
+/// `requires_approval` gate, where no particular call is being decided. It is
+/// deliberately outside the dedupe identity ([`is_same_gate`]): it describes the
+/// *same* decision in more words, so two cards that differ only here are still
+/// one question.
 pub fn gate_effect(
     workflow_id: &str,
     node_id: &str,
     input: &Value,
     run_id: &str,
     deliveries: &[DeliveryReport],
+    tool: Option<(&str, &str)>,
 ) -> Effect {
+    let mut payload = Map::new();
+    payload.insert(PAYLOAD_WORKFLOW_ID.to_string(), json!(workflow_id));
+    payload.insert(PAYLOAD_NODE_ID.to_string(), json!(node_id));
+    // The whole trigger input, so the parked card is self-contained and a
+    // resume needs nothing but the journal. This is what makes
+    // approve-after-restart work.
+    payload.insert(PAYLOAD_INPUT.to_string(), input.clone());
+    // What must NOT be sent again when this card is approved.
+    payload.insert(
+        PAYLOAD_DELIVERED.to_string(),
+        json!(delivery_ledger(input, deliveries)),
+    );
+    // What approving costs, in the operator's own terms.
+    payload.insert(PAYLOAD_NOTE.to_string(), json!(CONTINUATION_NOTE));
+    // Issue #460: which call the policy stopped, and why. The keys are ABSENT
+    // rather than null on an authored gate — a card that names no tool is a
+    // different thing from one whose tool could not be determined, and a
+    // console reading `payload.tool` should be able to tell them apart.
+    if let Some((slug, reason)) = tool {
+        payload.insert(PAYLOAD_TOOL.to_string(), json!(slug));
+        payload.insert(PAYLOAD_REASON.to_string(), json!(reason));
+    }
+
     Effect {
         kind: WORKFLOW_APPROVE_KIND.to_string(),
         group: crate::ports::types::EffectGroup::Other,
         amount_usd: None,
         established_thread: false,
         first_time_counterparty: false,
-        payload: serde_json::json!({
-            PAYLOAD_WORKFLOW_ID: workflow_id,
-            PAYLOAD_NODE_ID: node_id,
-            // The whole trigger input, so the parked card is self-contained and
-            // a resume needs nothing but the journal. This is what makes
-            // approve-after-restart work.
-            PAYLOAD_INPUT: input.clone(),
-            // What must NOT be sent again when this card is approved.
-            PAYLOAD_DELIVERED: delivery_ledger(input, deliveries),
-            // What approving costs, in the operator's own terms.
-            PAYLOAD_NOTE: CONTINUATION_NOTE,
-        }),
+        payload: Value::Object(payload),
         // Native, not a teammate's tool call — see the doc above.
         agent: None,
         // The run that paused. Not the run the approval will start (which does
@@ -591,7 +619,7 @@ mod tests {
     use super::*;
 
     fn effect(workflow: &str, node: &str, input: Value) -> Effect {
-        gate_effect(workflow, node, &input, "run-1", &[])
+        gate_effect(workflow, node, &input, "run-1", &[], None)
     }
 
     /// A delivery row with `status`, as `deliver_outputs` would have returned it.
@@ -723,6 +751,7 @@ mod tests {
                 delivery("owner_summary", "owner", DeliveryStatus::Sent),
                 delivery("cold_note", "email", DeliveryStatus::Pending),
             ],
+            None,
         );
         assert_eq!(
             ledger(&e),
@@ -755,6 +784,7 @@ mod tests {
                 &Value::Null,
                 "run-1",
                 &[delivery("summary", "owner", status)],
+                None,
             );
             assert!(
                 ledger(&e).is_empty(),
@@ -776,6 +806,7 @@ mod tests {
                 delivery("summary", "owner", DeliveryStatus::Sent),
                 delivery("summary", "owner", DeliveryStatus::Sent),
             ],
+            None,
         );
         assert_eq!(ledger(&e).len(), 1);
     }
@@ -790,6 +821,7 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            None,
         );
 
         let input = continuation_input(&card).expect("a well-formed card continues");
@@ -822,11 +854,12 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            None,
         );
         let continuation = continuation_input(&first).expect("continues");
 
         // Run 2 skips the summary (delivering nothing) and pauses on gate-b.
-        let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[]);
+        let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[], None);
         assert_eq!(
             ledger(&second),
             vec![DeliveredReport {
@@ -863,6 +896,7 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            None,
         );
         // The same gate, re-reached by the continuation the card started: same
         // input plus the approval… minus the approval, which the gate node
@@ -872,7 +906,7 @@ mod tests {
             .as_object_mut()
             .expect("object")
             .remove("approvals");
-        let re_reached = gate_effect("digest", "gate", &continuation, "run-2", &[]);
+        let re_reached = gate_effect("digest", "gate", &continuation, "run-2", &[], None);
 
         assert!(
             is_same_gate(&paused, &re_reached),
@@ -904,7 +938,7 @@ mod tests {
         });
         let edges = [edge("start", "writer"), edge("writer", "publish")];
 
-        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[]);
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
         attach_upstream_content(&mut effect, &output, &edges, "publish");
 
         let content = &effect.payload[PAYLOAD_CONTENT];
@@ -925,7 +959,7 @@ mod tests {
     fn a_gate_with_no_upstream_output_gets_an_empty_preview() {
         let output = serde_json::json!({ "nodes": {} });
         let edges = [edge("writer", "publish")];
-        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[]);
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
         attach_upstream_content(&mut effect, &output, &edges, "publish");
         assert_eq!(effect.payload[PAYLOAD_CONTENT], serde_json::json!({}));
     }
@@ -940,7 +974,7 @@ mod tests {
         let edges = [edge("writer", "publish")];
         let input = serde_json::json!({ "request": "x" });
 
-        let mut a = gate_effect("wf", "publish", &input, "run-1", &[]);
+        let mut a = gate_effect("wf", "publish", &input, "run-1", &[], None);
         attach_upstream_content(
             &mut a,
             &serde_json::json!({ "nodes": { "writer": { "items": ["draft one"] } } }),
@@ -948,7 +982,7 @@ mod tests {
             "publish",
         );
 
-        let mut b = gate_effect("wf", "publish", &input, "run-2", &[]);
+        let mut b = gate_effect("wf", "publish", &input, "run-2", &[], None);
         attach_upstream_content(
             &mut b,
             &serde_json::json!({ "nodes": { "writer": { "items": ["a totally different draft"] } } }),
@@ -1168,7 +1202,7 @@ mode = "full"
         input: Value,
         deliveries: &[DeliveryReport],
     ) -> ApprovalId {
-        let effect = gate_effect("gated", "gate", &input, "run-that-paused", deliveries);
+        let effect = gate_effect("gated", "gate", &input, "run-that-paused", deliveries, None);
         let id = rt
             .approvals
             .park(rt.id(), effect.clone())

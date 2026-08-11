@@ -207,7 +207,22 @@ async fn run_workflow_inner(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
-    let graph = super::translate::translate(workflow);
+    let mut graph = super::translate::translate(workflow);
+    // Issue #460: the company's `ApprovalPolicy` decides which `tool_call`
+    // nodes stop for an operator, and says so by marking them with the engine's
+    // own `requires_approval` flag — so a gated tool call inherits #395's whole
+    // pause → park → resume path instead of needing a second one. BEFORE
+    // `compile`, because the flag is read off the compiled node config.
+    //
+    // Skipped for a dry run: every effect is stubbed, so there is nothing to
+    // approve, and pausing would stop the dry run walking the rest of the graph
+    // — the one thing it exists to do. See `super::gate` for why the gate is
+    // not in the invoker, and for the deviations this takes deliberately.
+    let gated = if ctx.dry_run {
+        Vec::new()
+    } else {
+        super::gate::apply_tool_call_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+    };
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     // Issue #371: the caller's run id, not a freshly minted one. Correlating the
     // run's progress events with the `WorkflowRunFinished` the caller journals
@@ -604,13 +619,17 @@ async fn run_workflow_inner(
         record,
         &workflow.id,
         &run_id,
-        &trigger_input,
-        &outcome.pending_approvals,
-        &deliveries,
-        // Issue #596: the reached-node output + the graph's edges, so each parked
-        // gate can carry the verbatim upstream content awaiting sign-off.
-        &outcome.output,
-        &workflow.edges,
+        PausedGates {
+            trigger_input: &trigger_input,
+            pending: &outcome.pending_approvals,
+            deliveries: &deliveries,
+            gated: &gated,
+            // Issue #596: the reached-node output + the graph's edges, so each
+            // parked gate can carry the verbatim upstream content awaiting
+            // sign-off.
+            output: &outcome.output,
+            edges: &workflow.edges,
+        },
     )
     .await;
 
@@ -681,6 +700,31 @@ async fn persist_run_output(
     }
 }
 
+/// What a settled run left for the operator to decide.
+///
+/// Grouped rather than passed as four more parameters because they only make
+/// sense together: the gates the engine paused on, the input a continuation has
+/// to be started with, what this run already delivered (so approving does not
+/// re-send it), and which of those gates the company's policy raised rather
+/// than an author (issue #460), so the card can name the call.
+struct PausedGates<'a> {
+    /// The trigger payload the paused run was started with.
+    trigger_input: &'a Value,
+    /// The node ids the engine reported on `pending_approvals`.
+    pending: &'a [String],
+    /// What this run actually routed (issue #438).
+    deliveries: &'a [crate::ports::DeliveryReport],
+    /// The policy-raised gates, so a card can say which tool and why. An
+    /// authored gate has no entry here and its card stays as #395 shipped it.
+    gated: &'a [super::gate::GatedToolCall],
+    /// Issue #596: the run's reached-node output and the graph's edges, so a
+    /// parked gate's card can carry the verbatim upstream content awaiting
+    /// sign-off. Additive to the #460 struct — the pre-existing fields are
+    /// untouched.
+    output: &'a Value,
+    edges: &'a [crate::company::WorkflowEdgeDef],
+}
+
 /// Parks one approval card per gate the run paused on (issue #395).
 ///
 /// # The hole this closes
@@ -716,27 +760,23 @@ async fn persist_run_output(
 /// continuation an approval starts knows what has already left the process.
 /// Without it, approving a gate re-mails every report upstream of it — the
 /// re-run semantics above applied to a side effect that reaches a real person.
-// Issue #596 pushed this to nine params (the run's reached output + the graph's
-// edges, so a parked gate can preview its upstream content). A cohesive bundle
-// struct would be the tidy fix, but it would also churn a signature Elvin's
-// in-flight gate-policy PRs (#612/#627) are editing — so the two additive params
-// take an `allow` instead, to keep a keep-both merge trivial.
-#[allow(clippy::too_many_arguments)]
 async fn park_pending_gates(
     delivery: Option<&super::delivery::WorkflowDeliveryDeps>,
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
-    trigger_input: &Value,
-    pending: &[String],
-    deliveries: &[crate::ports::DeliveryReport],
-    // Issue #596: the run's reached-node output and the graph's edges. Passed
-    // through so a parked gate's card can carry the verbatim upstream content the
-    // operator is being asked to sign off. Additive params — the pre-#596
-    // park/dedupe logic is unchanged.
-    output: &Value,
-    edges: &[crate::company::WorkflowEdgeDef],
+    paused: PausedGates<'_>,
 ) {
+    let PausedGates {
+        trigger_input,
+        pending,
+        deliveries,
+        gated,
+        // Issue #596: the reached-node output + the graph's edges, so each parked
+        // gate's card can carry the verbatim upstream content awaiting sign-off.
+        output,
+        edges,
+    } = paused;
     if pending.is_empty() {
         return;
     }
@@ -756,12 +796,20 @@ async fn park_pending_gates(
     };
 
     for node_id in pending {
+        // Issue #460: when the policy is what stopped this node, the card says
+        // which tool and why. An authored gate carries neither — nobody asked a
+        // question on its behalf — so it stays exactly as #395 shipped it.
+        let tool = gated
+            .iter()
+            .find(|gate| gate.node_id == *node_id)
+            .map(|gate| (gate.slug.as_str(), gate.reason.as_str()));
         let mut effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
+            tool,
         );
         // Issue #596: enrich the card with the verbatim output of this gate's
         // upstream nodes — the content awaiting sign-off. A self-contained
