@@ -15,8 +15,8 @@
 //! - workspace → real folders + Markdown files under `workspace/`, indexed by
 //!   `.workspace-index.json` (ULID → node metadata; physical paths derive from
 //!   the folder/name tree so a rename physically relocates the subtree). The
-//!   filesystem store therefore refuses duplicate sibling names: two ids may
-//!   never alias the same on-disk path (issue #666).
+//!   filesystem store therefore refuses a write whose resolved path another
+//!   node already holds: two ids may never alias one on-disk path (issue #666).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};

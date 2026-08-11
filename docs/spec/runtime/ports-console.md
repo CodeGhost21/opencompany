@@ -236,10 +236,14 @@ the upload route, not their eventual representation; ordinary text writes stay
 unmetered and text nodes still do not contribute to `tree_quota_gb`.
 
 The filesystem backend mirrors logical names as real paths, so it refuses a
-create, rename, or move that would duplicate a sibling name (#666). The check
-runs under the workspace-index lock: a refused upload leaves the existing node,
-payload, size, and digest unchanged. Id-keyed database backends can continue to
-represent duplicate sibling names without aliasing payloads.
+create, rename, or move that would land on a path another node already holds
+(#666). It compares the whole resolved name chain rather than the sibling name,
+because a tree can legitimately hold two folders under one name — the scaffold
+finds such roots, declines to resolve them and leaves them standing — and their
+equally-named children are not siblings by `parent_id` yet still resolve to one
+path. The check runs under the workspace-index lock: a refused upload leaves the
+existing node, payload, size, and digest unchanged. Id-keyed database backends
+can continue to represent duplicate names without aliasing payloads.
 
 **A stored `mime` does not decide how the blob route serves it (#667).** That
 value is the uploader's declared `Content-Type`, or `mime_guess` on a published
