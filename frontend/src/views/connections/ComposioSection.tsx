@@ -2,7 +2,6 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Check,
-  ChevronDown,
   KeyRound,
   Loader2,
   LogIn,
@@ -29,12 +28,54 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import {
+  availableCategories,
   buildProviderRows,
   catalogWarning,
+  permissionHint,
   toolkitLabel,
   visibleProviderRows,
+  type ProviderCategory,
+  type ProviderRow,
 } from "@/lib/composio-catalog";
+
+/**
+ * A provider's branded logo, degrading to a monogram.
+ *
+ * The URL is best-effort by construction: the backend publishes one for most
+ * catalog entries, and every other tile falls back to a slug-derived guess at
+ * Composio's logo CDN. A guess that 404s must look like a plain tile, never a
+ * broken-image glyph — so the error is caught and swapped rather than left to
+ * the browser.
+ */
+function ProviderLogo({ row }: { row: ProviderRow }) {
+  const [failed, setFailed] = useState(false);
+  // A company can repoint at a different backend, which re-keys the logo. Reset
+  // on URL change so one dead image does not poison the slot for good.
+  useEffect(() => setFailed(false), [row.logoUrl]);
+
+  if (failed) {
+    return (
+      <span
+        aria-hidden="true"
+        className="flex size-8 items-center justify-center rounded-lg bg-muted text-xs font-semibold text-muted-foreground"
+      >
+        {row.label.charAt(0).toUpperCase()}
+      </span>
+    );
+  }
+  return (
+    <img
+      src={row.logoUrl}
+      alt=""
+      aria-hidden="true"
+      loading="lazy"
+      className="size-8 rounded-lg object-contain"
+      onError={() => setFailed(true)}
+    />
+  );
+}
 
 interface Props {
   client: OpenCompanyClient;
@@ -98,8 +139,9 @@ export function ComposioSection({ client, company, canManage }: Props) {
   // catalog — roughly a hundred toolkits — so finding one by scrolling stopped
   // being reasonable (issue #397).
   const [query, setQuery] = useState("");
-  // Whether the operator asked to see past the preview.
-  const [expanded, setExpanded] = useState(false);
+  // The selected category chip. Composed with the search rather than replacing
+  // it, so an operator can look for "invoices" inside Platform (issue #600).
+  const [category, setCategory] = useState<ProviderCategory>("All");
 
   const requestGeneration = useRef(0);
   const pollTimers = useRef<Record<string, number>>({});
@@ -156,7 +198,7 @@ export function ComposioSection({ client, company, canManage }: Props) {
     setOtherToolkit("");
     setExtraToolkits([]);
     setQuery("");
-    setExpanded(false);
+    setCategory("All");
     setLoad("loading");
     void refresh();
   }, [refresh]);
@@ -237,15 +279,31 @@ export function ComposioSection({ client, company, canManage }: Props) {
   }
 
   // Ordered once per status/connection change: connected first, then the
-  // handful everyone reaches for, then the tail alphabetically. Ordering and
-  // filtering live in `@/lib/composio-catalog` so they are testable without a
-  // document — see `vitest.config.ts` on where the line sits.
+  // handful everyone reaches for, then the tail alphabetically. Ordering,
+  // bucketing and filtering live in `@/lib/composio-catalog` so they are
+  // testable without a document — see `vitest.config.ts` on where the line sits.
+  //
+  // Built from `effectiveCatalog`, not `effectiveToolkits`: the slug list is
+  // still the wire contract every host call uses, but it is the catalog entries
+  // that carry the name, description, logo and categories this grid is made of
+  // (issue #600).
   const rows = useMemo(
-    () => buildProviderRows(status?.effectiveToolkits ?? [], extraToolkits, connected),
-    [status?.effectiveToolkits, extraToolkits, connected],
+    () => buildProviderRows(status?.effectiveCatalog ?? [], extraToolkits, connected),
+    [status?.effectiveCatalog, extraToolkits, connected],
   );
-  const { visible, hidden } = visibleProviderRows(rows, query, expanded);
+  const categories = useMemo(() => availableCategories(rows), [rows]);
+  const visible = useMemo(
+    () => visibleProviderRows(rows, category, query),
+    [rows, category, query],
+  );
   const degraded = status ? catalogWarning(status) : null;
+
+  // A chip can go away under the operator — a company narrows its manifest, or
+  // a refresh returns a shorter catalog. Falling back to All beats leaving them
+  // staring at an empty grid filtered by a bucket that no longer exists.
+  useEffect(() => {
+    if (!categories.includes(category)) setCategory("All");
+  }, [categories, category]);
 
   if (load === "unavailable") return null;
 
@@ -336,7 +394,8 @@ export function ComposioSection({ client, company, canManage }: Props) {
                   openMode && (
                     <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
                       This company allows <span className="font-medium">any</span> provider Composio
-                      offers — {rows.length} in total, most-used first. Search to narrow them.
+                      offers — {rows.length} in total, connected first. Filter by category or
+                      search by name, slug, or what a provider does.
                     </p>
                   )
                 )}
@@ -347,54 +406,157 @@ export function ComposioSection({ client, company, canManage }: Props) {
                       aria-label="Search providers"
                       autoComplete="off"
                       className="pl-7"
-                      placeholder={`Search ${rows.length} providers…`}
+                      placeholder={`Search ${rows.length} providers by name or what they do…`}
                       value={query}
                       onChange={(e) => setQuery(e.target.value)}
                     />
                   </div>
                 )}
-                <ul className="divide-y divide-border">
+                {categories.length > 2 && (
+                  // Chips only earn their row when there is more than one real
+                  // bucket to choose between — `availableCategories` always
+                  // includes "All", so two means one bucket, which is not a
+                  // choice. A two-provider manifest list gets the grid without
+                  // a filter that can only ever do nothing.
+                  <div
+                    role="group"
+                    aria-label="Filter providers by category"
+                    className="flex gap-1.5 overflow-x-auto pb-1"
+                  >
+                    {categories.map((c) => (
+                      <Button
+                        key={c}
+                        type="button"
+                        size="sm"
+                        variant={c === category ? "secondary" : "ghost"}
+                        aria-pressed={c === category}
+                        className={cn(
+                          "h-7 shrink-0 rounded-full px-3 text-xs",
+                          c !== category && "text-muted-foreground",
+                        )}
+                        onClick={() => setCategory(c)}
+                      >
+                        {c}
+                      </Button>
+                    ))}
+                  </div>
+                )}
+                {/*
+                  A dense tile grid, not rows (issue #600). 123 full-width rows
+                  are unreadable at any scroll depth, which is why the old list
+                  hid all but twelve behind a "show all" button — the cut was a
+                  workaround for the layout. Compact branded tiles fit the whole
+                  catalog on a screen or two, so the button is gone rather than
+                  relabelled.
+                */}
+                <ul
+                  className="grid gap-2"
+                  style={{
+                    // Uniform rows so a grid of 123 tiles reads as a grid and
+                    // not as ragged masonry — the tile is a fixed slot, and the
+                    // label clamps to fit it.
+                    gridTemplateColumns: "repeat(auto-fill, minmax(8.5rem, 1fr))",
+                    gridAutoRows: "5.5rem",
+                  }}
+                >
                   {visible.map((row) => {
                     const isSigningIn = signingIn === row.slug;
-                    return (
-                      <li key={row.slug} className="flex items-center justify-between py-2">
-                        <span className="text-sm">{row.label}</span>
-                        {row.connected ? (
-                          <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
-                            <Check className="size-3" /> connected
+                    // The whole tile is the affordance. An 8.5rem tile has no
+                    // room for a label AND a button, and a tile that looks
+                    // clickable but is not would be worse than either.
+                    const actionable = canManage && !row.connected;
+                    // Named `state`, not `status` — `status` is the component's
+                    // ComposioStatus, and shadowing it here would be a quiet
+                    // trap for the next edit.
+                    const state = row.connected
+                      ? "connected"
+                      : isSigningIn
+                        ? "signing in"
+                        : "not connected";
+                    const shell = cn(
+                      "flex size-full flex-col items-start justify-between gap-1 rounded-lg border p-2.5 text-left",
+                      row.connected
+                        ? "border-emerald-500/30 bg-emerald-500/5"
+                        : "border-border bg-card",
+                    );
+                    const body = (
+                      <>
+                        <div className="flex w-full items-start justify-between gap-1">
+                          <ProviderLogo row={row} />
+                          {row.connected ? (
+                            <Check className="size-3.5 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                          ) : isSigningIn ? (
+                            <Loader2 className="size-3.5 shrink-0 animate-spin text-muted-foreground" />
+                          ) : actionable ? (
+                            <LogIn className="size-3.5 shrink-0 text-muted-foreground" />
+                          ) : null}
+                        </div>
+                        <div className="w-full min-w-0">
+                          <span className="line-clamp-2 text-xs leading-tight font-medium">
+                            {row.label}
                           </span>
-                        ) : !canManage ? (
-                          <span className="text-xs text-muted-foreground">not connected</span>
-                        ) : (
-                          <Button
-                            size="sm"
-                            variant="outline"
+                          <span
+                            className={cn(
+                              "block text-[10px]",
+                              row.connected
+                                ? "text-emerald-600 dark:text-emerald-400"
+                                : "text-muted-foreground",
+                            )}
+                          >
+                            {state}
+                          </span>
+                        </div>
+                      </>
+                    );
+                    return (
+                      <li key={row.slug} className="min-w-0">
+                        {actionable ? (
+                          <button
+                            type="button"
                             disabled={signingIn !== null || noCredential}
                             onClick={() => void signIn(row.slug)}
-                          >
-                            {isSigningIn ? (
-                              <Loader2 className="size-4 animate-spin" />
-                            ) : (
-                              <LogIn className="size-4" />
+                            title={row.description || undefined}
+                            aria-label={`Sign in to ${row.label}. ${state}. Authorises: ${permissionHint(row.category)}.`}
+                            className={cn(
+                              shell,
+                              "transition-colors hover:border-foreground/20 hover:bg-accent",
+                              "focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none",
+                              "disabled:cursor-not-allowed disabled:opacity-60 disabled:hover:border-border disabled:hover:bg-card",
                             )}
-                            Sign in
-                          </Button>
+                          >
+                            {body}
+                          </button>
+                        ) : (
+                          // Connected, or a viewer who cannot manage: there is
+                          // nothing to click. Rendered as a div rather than a
+                          // disabled button so it stays in the reading order —
+                          // "Gmail, connected" is exactly what a member opened
+                          // this panel to learn, and a disabled button is
+                          // unfocusable.
+                          <div
+                            className={shell}
+                            title={row.description || undefined}
+                            aria-label={`${row.label}. ${state}.`}
+                          >
+                            {body}
+                          </div>
                         )}
                       </li>
                     );
                   })}
                 </ul>
-                {visible.length === 0 && query.trim() !== "" && (
+                {visible.length === 0 && (
                   <p className="py-2 text-xs text-muted-foreground">
-                    No provider matches “{query.trim()}”. Composio&apos;s slug may differ from the
-                    product name — try connecting it by slug below.
+                    {query.trim() !== "" ? (
+                      <>
+                        No provider matches “{query.trim()}”
+                        {category !== "All" && <> in {category}</>}. Composio&apos;s slug may differ
+                        from the product name — try another category, or connect it by slug below.
+                      </>
+                    ) : (
+                      <>No provider in {category}.</>
+                    )}
                   </p>
-                )}
-                {hidden > 0 && (
-                  <Button size="sm" variant="ghost" onClick={() => setExpanded(true)}>
-                    <ChevronDown className="size-4" />
-                    Show all {rows.length} providers
-                  </Button>
                 )}
                 {openMode && canManage && (
                   <div className="flex items-end gap-2 border-t border-border pt-3">
