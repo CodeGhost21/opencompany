@@ -32,6 +32,7 @@ pub mod mail;
 pub mod mailer;
 pub mod mcp;
 pub mod memory;
+pub mod policy;
 pub mod runs;
 pub mod scope;
 pub mod skills;
@@ -171,6 +172,7 @@ pub fn router() -> Router<AppState> {
         .merge(mcp::router())
         .merge(inference::router())
         .merge(team::router())
+        .merge(policy::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]

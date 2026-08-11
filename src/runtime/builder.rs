@@ -17,10 +17,10 @@ use crate::app::config::BrainMode;
 use crate::brain::medulla::MedullaTransport;
 use crate::brain::medulla::wire::ToolManifestEntry;
 use crate::brain::{EchoBrain, HostedMedullaBrain};
-use crate::company::CompanyManifest;
 #[cfg(feature = "openhuman")]
 use crate::company::inference::{self, EnvDefault};
 use crate::company::runtime::{CompanyMail, CompanyRuntime, OpsStores};
+use crate::company::{CompanyManifest, Policy};
 use crate::feedback::github::{GitHubClient, RateLimiter};
 use crate::feedback::service::FeedbackFiler;
 use crate::feedback::store::FeedbackStore;
@@ -37,7 +37,7 @@ use crate::policy::ManifestApprovalGate;
 #[cfg(feature = "openhuman")]
 use crate::ports::WorkflowRunner;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, OverlayWorkflow, SecretValue, TemplateProvenance,
+    CompanyId, CompanyRecord, OverlayWorkflow, PolicyOverride, SecretValue, TemplateProvenance,
 };
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
@@ -183,6 +183,61 @@ fn dedup(grants: Vec<String>) -> Vec<String> {
 /// than a convention: `[tools]` and `[policy]` must be seed-wins, because a
 /// record-wins merge would let a runtime write **outlive a seed rollback** —
 /// privilege persisting after the operator revoked it in version control.
+/// Whether the operator's console `[policy]` override survives this rebuild
+/// (issue #562).
+///
+/// **Version control wins when it speaks, and stays quiet when it doesn't.**
+/// The override is kept while the seed's `[policy]` is unchanged, and dropped
+/// the moment the seed's `[policy]` differs from the one the previous boot ran.
+///
+/// # Why the condition is the whole point
+///
+/// The override is deliberately *not* a manifest merge — [`CompanyRecord::effective_policy`]
+/// resolves it ahead of the manifest instead, so `record.manifest` stays
+/// seed-authoritative and the invariant stated on [`merge_enabled_workflows`]
+/// is untouched in the letter.
+///
+/// Carrying it unconditionally would nonetheless reproduce that invariant's own
+/// named harm in the spirit. An operator tightens `[policy]` in `company.toml`,
+/// redeploys, and a looser console override silently wins — *"a runtime write
+/// outliving a seed rollback; privilege persisting after the operator revoked it
+/// in version control."* That reasoning is exactly why `[tools]` and `[policy]`
+/// are the two fields singled out, and an approval gate is precisely the thing
+/// it was written about. The per-teammate spend cap (issue #343) makes the
+/// opposite trade and is defensible doing so: a cap is a number, not the gate.
+///
+/// # Why it is conditional rather than always-clear
+///
+/// Dropping the override on *every* rebuild would be the opposite failure, and
+/// just as silent: a routine redeploy that changed nothing would revert the
+/// operator's console action, and nothing in the console would show the tier had
+/// moved back. So the seed only wins when it actually says something new.
+///
+/// # What counts as the seed speaking
+///
+/// Any change to `[policy]` — `mode`, `always_approve`, or
+/// `auto_approve_under_usd`. Comparing the whole block rather than just the
+/// field being overridden is deliberate: an operator who edits `[policy]` at all
+/// has turned their attention to the approval gate, and resolving *which* of
+/// their edits was meant to override the console is a guess. Clearing and
+/// letting them re-apply is the answer that cannot silently pick wrong.
+///
+/// `previous_seed` is the prior boot's `record.manifest.policy`, which is that
+/// boot's seed verbatim — `[policy]` is never merged, so the persisted manifest
+/// is the seed for this field.
+///
+/// This is a **second** clearing path, not a replacement for the explicit
+/// `DELETE …/policy` reset: that one is how an operator clears their own
+/// override without touching version control.
+fn carry_policy_override(
+    previous_seed: &Policy,
+    next_seed: &Policy,
+    held: Option<&PolicyOverride>,
+) -> Option<PolicyOverride> {
+    let held = held?;
+    (previous_seed == next_seed).then(|| held.clone())
+}
+
 fn merge_enabled_workflows(seed_enabled: &[String], overlays: &[OverlayWorkflow]) -> Vec<String> {
     let mut merged: Vec<String> = Vec::with_capacity(seed_enabled.len() + overlays.len());
     let mut seen = std::collections::HashSet::new();
@@ -1417,6 +1472,25 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
             .unwrap_or_default();
+        // Issue #562: the operator's `[policy]` override, carried across the
+        // rebuild — but ONLY while the seed's `[policy]` has not itself changed.
+        // See `carry_policy_override` for why that condition is the whole point.
+        let overlay_policy = existing.as_ref().and_then(|r| {
+            let carried = carry_policy_override(
+                &r.manifest.policy,
+                &self.manifest.policy,
+                r.overlay_policy.as_ref(),
+            );
+            if carried.is_none() && r.overlay_policy.is_some() {
+                tracing::info!(
+                    company = %id,
+                    seed_mode = %self.manifest.policy.mode,
+                    "[policy] the seed `[policy]` changed, so the console override was cleared — \
+                     version control wins when it speaks"
+                );
+            }
+            carried
+        });
         // Issue #276: the workflows the operator switched off. This is the field
         // that makes the pause switch durable, and it is carried across the
         // rebuild for a sharper reason than the two above: `merge_enabled_workflows`
@@ -1770,6 +1844,7 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
+                                overlay_policy: overlay_policy.clone(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
@@ -1901,6 +1976,7 @@ impl RuntimeBuilder {
                 overlay_desks,
                 overlay_workflows,
                 overlay_budgets,
+                overlay_policy,
                 disabled_workflows,
                 template_provenance,
             })
@@ -3151,6 +3227,103 @@ mod test {
         toml::from_str(toml_src).expect("valid manifest")
     }
 
+    // ---- `[policy]` override across a rebuild (issue #562) ----------------
+
+    fn seed_policy(mode: &str, always: &[&str], under: Option<f64>) -> Policy {
+        Policy {
+            mode: mode.to_string(),
+            always_approve: always.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: under,
+        }
+    }
+
+    fn held_override(mode: &str) -> PolicyOverride {
+        use crate::ports::types::{Actor, ActorKind};
+        PolicyOverride {
+            mode: Some(mode.to_string()),
+            always_approve: None,
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "admin-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// A rebuild that does not touch `[policy]` leaves the console override
+    /// alone (issue #562).
+    ///
+    /// The half that makes the feature durable. Clearing on every rebuild would
+    /// mean a routine redeploy silently reverting the operator's console action,
+    /// with nothing in the console showing the tier had moved back — the exact
+    /// mirror of the failure the other half prevents.
+    #[test]
+    fn an_unchanged_seed_policy_leaves_the_override_alone() {
+        let seed = seed_policy("supervised", &["payment.send"], None);
+        let carried = carry_policy_override(&seed, &seed.clone(), Some(&held_override("full")));
+        assert_eq!(carried.and_then(|o| o.mode).as_deref(), Some("full"));
+    }
+
+    /// A seed `[policy]` change clears the override — version control wins when
+    /// it speaks.
+    ///
+    /// **The security half.** Without it, an operator tightening `[policy]` in
+    /// `company.toml` and redeploying would find a looser console override
+    /// silently still in force: a runtime write outliving a seed rollback, which
+    /// is the named harm that makes `[tools]` / `[policy]` seed-authoritative in
+    /// the first place. An approval gate is precisely what that rule was written
+    /// about.
+    #[test]
+    fn a_changed_seed_policy_clears_the_override() {
+        let before = seed_policy("full", &["payment.send"], None);
+        let tightened = seed_policy("supervised", &["payment.send"], None);
+        assert!(
+            carry_policy_override(&before, &tightened, Some(&held_override("full"))).is_none(),
+            "a tightened seed must clear a looser console override"
+        );
+
+        // Loosening the seed clears it too. The rule is "the seed spoke", not
+        // "the seed got stricter" — an operator who edits `[policy]` at all has
+        // turned their attention to the gate, and guessing which of their edits
+        // was meant to lose to the console is a guess that can pick wrong
+        // silently.
+        let loosened = seed_policy("full", &["payment.send"], None);
+        assert!(
+            carry_policy_override(&tightened, &loosened, Some(&held_override("readonly")))
+                .is_none()
+        );
+    }
+
+    /// Any field of `[policy]` counts as the seed speaking, not just `mode`.
+    ///
+    /// `always_approve` is the operator's real lever — it wins over every tier
+    /// including `full` — so an edit to it that left a console override standing
+    /// would be the same hole through a different field.
+    #[test]
+    fn every_policy_field_counts_as_the_seed_speaking() {
+        let base = seed_policy("supervised", &["payment.send"], None);
+
+        let list_changed = seed_policy("supervised", &["payment.send", "filing.submit"], None);
+        assert!(
+            carry_policy_override(&base, &list_changed, Some(&held_override("full"))).is_none()
+        );
+
+        let threshold_changed = seed_policy("supervised", &["payment.send"], Some(1.0));
+        assert!(
+            carry_policy_override(&base, &threshold_changed, Some(&held_override("full")))
+                .is_none()
+        );
+    }
+
+    /// With no override held there is nothing to carry, whatever the seed did.
+    #[test]
+    fn no_override_carries_nothing() {
+        let before = seed_policy("supervised", &[], None);
+        let after = seed_policy("full", &[], None);
+        assert!(carry_policy_override(&before, &before.clone(), None).is_none());
+        assert!(carry_policy_override(&before, &after, None).is_none());
+    }
+
     /// A bodiless overlay stub — `merge_enabled_workflows` only reads the id.
     fn overlay(id: &str) -> OverlayWorkflow {
         OverlayWorkflow {
@@ -3833,6 +4006,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })

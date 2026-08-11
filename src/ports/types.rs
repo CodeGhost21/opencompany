@@ -13,7 +13,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::company::CompanyManifest;
+use crate::company::{CompanyManifest, POLICY_MODES, Policy};
 use crate::ports::ids::{agent_slug, generate_id, now_millis};
 use crate::ports::workflow_runner::DeliveryReport;
 
@@ -2362,6 +2362,96 @@ impl BudgetOverride {
     }
 }
 
+/// An operator-set override of the company's `[policy]` block, persisted on the
+/// [`CompanyRecord`] so a tier change wins over the manifest without rewriting
+/// `company.toml` and without a redeploy (issue #562).
+///
+/// The company-scoped twin of [`BudgetOverride`], and it exists for the same
+/// reason: the manifest is a **boot snapshot** baked into the tenant image, so
+/// before this the shipped tier was the only tier an operator could ever run —
+/// and the tier is what decides whether they drown in approval cards.
+///
+/// # Why an overlay and not a manifest write
+///
+/// This is the constraint that shapes the whole feature. A rebuild
+/// (`runtime::builder`) re-persists `record.manifest` **from the seed**, merging
+/// only `[workflows].enabled` from the overlays; every other field is
+/// seed-authoritative, *"and for `[tools]` / `[policy]` that is a security
+/// property — a record-wins merge would let a runtime grant outlive the operator
+/// revoking it in version control."*
+///
+/// So writing `[policy].mode` into `record.manifest` would be wiped by the next
+/// rebuild **and** would contradict a stated invariant. An overlay is a
+/// different thing: it is not a merge into the blueprint, it is a durable,
+/// attributed operator decision that survives the rebuild the way
+/// [`overlay_budgets`](CompanyRecord::overlay_budgets) does, and that
+/// [`CompanyRecord::effective_policy`] resolves *ahead* of the manifest at read
+/// time.
+///
+/// # Version control still wins when it speaks
+///
+/// The invariant above is about the seed winning a *merge*, and an override that
+/// simply outlived every seed edit would reproduce its named harm by another
+/// route: an operator tightens `[policy]` in `company.toml`, redeploys, and the
+/// looser console override silently wins — a runtime write outliving a seed
+/// rollback. #343 makes the opposite trade for spend caps and is right to; a cap
+/// is a number, not the gate.
+///
+/// So there are **two** clearing paths, and they answer different questions:
+///
+/// - `runtime::builder::carry_policy_override` drops the override when the
+///   seed's `[policy]` **changes** — and only then, so a routine redeploy that
+///   said nothing does not silently revert the operator.
+/// - `DELETE …/policy` is how an operator clears their own override without
+///   touching version control.
+///
+/// Between seed edits the override is durable, which is what makes it usable at
+/// all, and every one is **attributed** (`set_by` + `at_millis`) so the console
+/// can show who moved the gate and when.
+///
+/// # Absent fields mean "not overridden"
+///
+/// Both fields are optional and independent, so an operator can move the tier
+/// without touching the always-ask list, or edit the list while leaving the tier
+/// where the manifest put it. `None` is never "empty" — an explicitly emptied
+/// always-ask list is `Some(vec![])`, which is a real state an operator can
+/// choose and which must not collapse into "fall back to the manifest's three
+/// defaults".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PolicyOverride {
+    /// The autonomy tier to run, or `None` to leave the manifest's in force.
+    ///
+    /// A `POLICY_MODES` word. Validated at the write route rather than here:
+    /// this type is inert data. [`CompanyRecord::effective_policy`] ignores an
+    /// unknown stored value and keeps the manifest's tier, so version skew can
+    /// never loosen a stricter seed policy.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The always-ask effect kinds, or `None` to leave the manifest's in force.
+    ///
+    /// `Some(vec![])` is an operator deliberately clearing the list, which is
+    /// **not** the same as `None`. It is the operator's real lever and it wins
+    /// over every tier including `full`, so the two must stay distinguishable.
+    #[serde(default)]
+    pub always_approve: Option<Vec<String>>,
+    /// Who set it. A tier that can be loosened anonymously is not much of a gate.
+    pub set_by: Actor,
+    /// When it was set (epoch millis).
+    pub at_millis: u64,
+}
+
+impl PolicyOverride {
+    /// Does this override actually change anything?
+    ///
+    /// An override with both fields `None` carries only attribution, and
+    /// resolving it is a no-op. The write route rejects one rather than
+    /// persisting a row that says nothing but whose presence the console renders
+    /// as "overridden".
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none() && self.always_approve.is_none()
+    }
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
@@ -2394,6 +2484,12 @@ pub struct OverlayBlob {
     /// loads them as empty — which is exactly "the manifest still decides".
     #[serde(default)]
     pub budgets: Vec<BudgetOverride>,
+    /// The operator's `[policy]` override (issue #562). Absent on rows written
+    /// before console policy writes existed, and `#[serde(default)]` reads that
+    /// absence as `None` — "the manifest's `[policy]` still decides", which is
+    /// the pre-#562 behaviour exactly.
+    #[serde(default)]
+    pub policy: Option<PolicyOverride>,
     /// The workflow ids the operator has switched off (issue #276). Absent on
     /// rows written before the pause switch existed, and `#[serde(default)]`
     /// reads that absence as "nothing is paused" — the pre-#276 behaviour
@@ -2417,6 +2513,7 @@ impl OverlayBlob {
             desks: record.overlay_desks.clone(),
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
+            policy: record.overlay_policy.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
@@ -2441,6 +2538,7 @@ impl OverlayBlob {
                     desks: Vec::new(),
                     workflows: Vec::new(),
                     budgets: Vec::new(),
+                    policy: None,
                     disabled_workflows: Vec::new(),
                     provenance: None,
                 })
@@ -2515,6 +2613,13 @@ pub struct CompanyRecord {
     /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's `[policy]` override, if one is set (issue #562).
+    ///
+    /// `None` — the manifest's `[policy]` applies, exactly as before this
+    /// existed. Read through [`Self::effective_policy`], never directly, so the
+    /// approval gate and the console cannot disagree about which tier is live.
+    #[serde(default)]
+    pub overlay_policy: Option<PolicyOverride>,
     /// Workflow ids the operator has switched **off** (issue #276). A workflow
     /// named here keeps its graph, stays listed and stays runnable by hand, and
     /// is skipped by
@@ -2854,6 +2959,50 @@ impl CompanyRecord {
         self.overlay_budgets
             .retain(|held| held.agent_id != entry.agent_id);
         self.overlay_budgets.push(entry);
+    }
+
+    /// The `[policy]` actually in force: the operator's override where it sets a
+    /// field, the manifest's `[policy]` everywhere else (issue #562).
+    ///
+    /// **The single source of truth for "which tier is this company running"**,
+    /// in the shape of [`Self::effective_budget`]. `build_roster`'s
+    /// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy), the workflow
+    /// capability bundle and the console read through here, so a tier changed in
+    /// the console cannot be honoured by one and ignored by another.
+    ///
+    /// Returns an owned [`Policy`] rather than a borrow because the effective
+    /// value may not exist anywhere to borrow from — it is a field-wise merge of
+    /// two sources.
+    ///
+    /// The merge is per field and `None` means "not overridden", so an operator
+    /// who moved the tier has not thereby silently reset the always-ask list to
+    /// the manifest's. An explicitly emptied list (`Some(vec![])`) survives as
+    /// empty; only an absent field falls through. An unknown stored mode also
+    /// falls through to the manifest: it can arise under version skew, and
+    /// allowing the policy parser to downgrade it to `supervised` would loosen
+    /// a `readonly` manifest.
+    pub fn effective_policy(&self) -> Policy {
+        let manifest = &self.manifest.policy;
+        let Some(override_) = &self.overlay_policy else {
+            return manifest.clone();
+        };
+        Policy {
+            mode: override_
+                .mode
+                .as_deref()
+                .filter(|mode| POLICY_MODES.contains(mode))
+                .map(str::to_owned)
+                .unwrap_or_else(|| manifest.mode.clone()),
+            always_approve: override_
+                .always_approve
+                .clone()
+                .unwrap_or_else(|| manifest.always_approve.clone()),
+            // Not overridable from the console today. Left reading the manifest
+            // rather than added to `PolicyOverride` speculatively: the issue asks
+            // for the tier and the always-ask list, and a spend threshold whose
+            // console control does not exist would be a field nothing can write.
+            auto_approve_under_usd: manifest.auto_approve_under_usd,
+        }
     }
 
     /// The first `agent_id` on this record carrying more than one override, if
@@ -3840,6 +3989,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -4000,6 +4150,37 @@ mod test {
         let json = serde_json::to_string(&blob).expect("serialize blob");
         let parsed = OverlayBlob::parse(&json).expect("parse blob");
         assert_eq!(parsed.desk_order, record.overlay_desk_order);
+    }
+
+    /// The persisted overlay blob round-trips the `[policy]` override, and a
+    /// blob written before it existed still parses (issue #562).
+    ///
+    /// Both halves matter. Without the first, a serialization path that dropped
+    /// the field would move an operator's approval gate back to the manifest on
+    /// the next load, silently. Without the second, every company record written
+    /// before this feature would fail to parse at all.
+    #[test]
+    fn overlay_blob_round_trips_the_policy_override() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("auto"), Some(vec!["payment.send"])));
+
+        let blob = OverlayBlob::from_record(&record);
+        let json = serde_json::to_string(&blob).expect("serialize blob");
+        let parsed = OverlayBlob::parse(&json).expect("parse blob");
+        assert_eq!(parsed.policy, record.overlay_policy);
+
+        // A blob from before this field existed loads as "not overridden",
+        // which is the pre-#562 behaviour exactly.
+        let legacy = r#"{"agents":[],"desk_members":[],"budgets":[]}"#;
+        let blob = OverlayBlob::parse(legacy).expect("blob without a policy key");
+        assert!(
+            blob.policy.is_none(),
+            "an older record must load with the manifest's policy in charge"
+        );
+
+        // And so does the oldest form of all, the bare agent array.
+        let bare = OverlayBlob::parse("[]").expect("legacy array");
+        assert!(bare.policy.is_none());
     }
 
     /// An object-form blob written before `desk_order` existed still parses, and
@@ -4296,6 +4477,132 @@ mod test {
             },
             at_millis: 1_700_000_000_000,
         }
+    }
+
+    // ---- `[policy]` override (issue #562) --------------------------------
+
+    const POLICY_MANIFEST: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+         [policy]\nmode = \"supervised\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+
+    fn policy_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
+        PolicyOverride {
+            mode: mode.map(str::to_string),
+            always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// With no override stored, `effective_policy` is the manifest verbatim —
+    /// the pre-#562 behaviour, and the net that says adding this field changed
+    /// nothing for a company that never uses it.
+    #[test]
+    fn effective_policy_falls_back_to_the_manifest() {
+        let record = desk_record(POLICY_MANIFEST, Vec::new());
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "supervised");
+        assert_eq!(
+            effective.always_approve,
+            vec!["payment.send", "filing.submit"]
+        );
+    }
+
+    /// A stored override beats the manifest. This is the "no redeploy" property
+    /// at its source: nothing here consults `company.toml` once a row exists.
+    #[test]
+    fn a_stored_policy_override_beats_the_manifest() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("full"), None));
+        assert_eq!(record.effective_policy().mode, "full");
+    }
+
+    /// Version skew can leave an override written by a newer host on a build
+    /// that does not recognise its tier. Falling through to `supervised` would
+    /// loosen a `readonly` seed, so the manifest wins for that field while any
+    /// independently valid always-ask override remains in force.
+    #[test]
+    fn an_unknown_stored_policy_mode_cannot_loosen_the_manifest() {
+        let manifest = POLICY_MANIFEST.replace("mode = \"supervised\"", "mode = \"readonly\"");
+        let mut record = desk_record(&manifest, Vec::new());
+        record.overlay_policy = Some(policy_entry(
+            Some("future-tier"),
+            Some(vec!["external.publish"]),
+        ));
+
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "readonly");
+        assert_eq!(effective.always_approve, vec!["external.publish"]);
+    }
+
+    /// The two fields are independent: moving the tier must not silently reset
+    /// the always-ask list to the manifest's, nor the reverse.
+    ///
+    /// This is the merge that makes the console usable — the tier control and
+    /// the always-ask editor are separate widgets, and each `PUT` names only
+    /// what it changed. If either field reset the other, using one control would
+    /// quietly undo the other, and the always-ask list is the operator's real
+    /// lever: it wins over every tier including `full`.
+    #[test]
+    fn overriding_one_policy_field_leaves_the_other_alone() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+
+        record.overlay_policy = Some(policy_entry(Some("full"), None));
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "full");
+        assert_eq!(
+            effective.always_approve,
+            vec!["payment.send", "filing.submit"],
+            "moving the tier must not discard the manifest's always-ask list"
+        );
+
+        record.overlay_policy = Some(policy_entry(None, Some(vec!["external.publish"])));
+        let effective = record.effective_policy();
+        assert_eq!(
+            effective.mode, "supervised",
+            "editing the always-ask list must not move the tier"
+        );
+        assert_eq!(effective.always_approve, vec!["external.publish"]);
+    }
+
+    /// An emptied always-ask list is a real state, not a fallback.
+    ///
+    /// `Some(vec![])` is an operator deliberately clearing the list; `None` is
+    /// "not overridden". If these collapsed, an operator clearing the list would
+    /// instead get the manifest's three defaults back — silently re-imposing the
+    /// gates they had just removed, and with no way to express what they meant.
+    #[test]
+    fn an_emptied_always_approve_list_is_not_a_fallback() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+
+        record.overlay_policy = Some(policy_entry(None, Some(vec![])));
+        assert!(
+            record.effective_policy().always_approve.is_empty(),
+            "an explicitly emptied always-ask list must survive as empty"
+        );
+
+        record.overlay_policy = Some(policy_entry(None, None));
+        assert_eq!(
+            record.effective_policy().always_approve,
+            vec!["payment.send", "filing.submit"],
+            "an absent field must fall through to the manifest"
+        );
+    }
+
+    /// `auto_approve_under_usd` is not overridable and keeps reading the
+    /// manifest, so the merge cannot silently drop a threshold it does not carry.
+    #[test]
+    fn the_spend_threshold_is_untouched_by_a_policy_override() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+             [policy]\nmode = \"supervised\"\nauto_approve_under_usd = 2.5\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("full"), Some(vec![])));
+        assert_eq!(record.effective_policy().auto_approve_under_usd, Some(2.5));
     }
 
     /// Issue #343: with no override stored, `effective_budget` is the manifest

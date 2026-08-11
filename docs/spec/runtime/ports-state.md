@@ -19,6 +19,23 @@ console cannot be honoured by one surface and ignored by another. At most one
 `overlay_budgets` entry may exist per teammate — the console write path upserts
 through `CompanyRecord::upsert_budget_override`, and a bundle import carrying two
 entries for the same teammate is rejected rather than resolved by guesswork.
+And (issue #562) `overlay_policy`: the operator's `[policy]` override — the
+autonomy tier and always-ask list an admin sets from the console, read through
+`CompanyRecord::effective_policy`, which resolves it *ahead* of the manifest for
+the same single-reconciliation-point reason as `effective_budget`. Its two
+fields are independently optional, so `None` means "not overridden" while
+`Some(vec![])` is a deliberately emptied always-ask list. An unknown stored
+tier falls back to the manifest rather than to `supervised`, so version skew
+cannot loosen a `readonly` seed. It is an overlay
+rather than a manifest write **by necessity**: a rebuild re-persists
+`record.manifest` from the seed and merges only `[workflows].enabled`, because
+for `[tools]` / `[policy]` a record-wins merge would let a runtime grant outlive
+the operator revoking it in version control. It is cleared by either of two paths: the seed's
+`[policy]` **changing** across a rebuild (`carry_policy_override` — version
+control wins when it speaks, and stays quiet when it doesn't, so a redeploy that
+changed nothing does not silently revert the operator), or an explicit
+`DELETE …/policy`. Between seed edits it is durable, and attributed, so the
+console can show who moved the gate and when.
 And (issue #168) `overlay_workflows`: the
 workflow graph bodies authored at runtime through the console's create dialog or
 the orchestrator's `create_workflow` tool. These are persisted here rather than

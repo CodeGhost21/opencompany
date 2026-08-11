@@ -122,7 +122,11 @@ pub async fn build_capabilities(
     dry_run: bool,
 ) -> Capabilities {
     let company = record.id.clone();
-    let mode = PolicyMode::parse(&record.manifest.policy.mode);
+    // Issue #562: the tier actually in force — the operator's console override
+    // when one is set, the manifest's otherwise. Reading `manifest.policy` here
+    // would leave a workflow run on the shipped tier while the roster ran on the
+    // operator's, which is the disagreement `effective_policy` exists to prevent.
+    let mode = PolicyMode::parse(&record.effective_policy().mode);
     let grants = record.manifest.tools.allow.clone();
 
     // sub_workflow-by-id resolves children from the union of the company's seed

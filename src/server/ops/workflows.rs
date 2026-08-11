@@ -2454,6 +2454,7 @@ mod tests {
                     overlay_desks: Vec::new(),
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
+                    overlay_policy: None,
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                 })
@@ -2530,6 +2531,7 @@ mod tests {
                     overlay_desks: Vec::new(),
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
+                    overlay_policy: None,
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                 })
@@ -4129,6 +4131,7 @@ mod tests {
                     overlay_desks: Vec::new(),
                     overlay_workflows: Vec::new(),
                     overlay_budgets: Vec::new(),
+                    overlay_policy: None,
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
                 })
@@ -4296,6 +4299,7 @@ label = "ok"
                         toml: GRAPH.to_string(),
                     }],
                     overlay_budgets: Vec::new(),
+                    overlay_policy: None,
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
@@ -4890,6 +4894,7 @@ label = "ok"
                         toml: GRAPH.to_string(),
                     }],
                     overlay_budgets: Vec::new(),
+                    overlay_policy: None,
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,

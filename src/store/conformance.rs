@@ -121,12 +121,31 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
     ]
 }
 
+/// A populated `[policy]` override, so every store's round-trip proves a
+/// console-set tier survives persistence (issue #562).
+///
+/// Both fields are `Some`, and `always_approve` is deliberately **not** the
+/// manifest default — a round-trip that stored the manifest's own list would
+/// pass whether or not the override had been persisted at all.
+fn sample_policy_override() -> crate::ports::types::PolicyOverride {
+    use crate::ports::types::{Actor, ActorKind, PolicyOverride};
+    PolicyOverride {
+        mode: Some("auto".to_string()),
+        always_approve: Some(vec!["payment.send".to_string()]),
+        set_by: Actor {
+            kind: ActorKind::User,
+            id: "user-conformance".to_string(),
+        },
+        at_millis: 1_700_000_000_002,
+    }
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
-/// (issue #343), a paused workflow id (issue #276), and stamped with the sample
-/// template provenance (so round-trips assert it survives persistence, issue
-/// #85).
+/// (issue #343), a `[policy]` override (issue #562), a paused workflow id
+/// (issue #276), and stamped with the sample template provenance (so round-trips
+/// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -142,6 +161,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
+        overlay_policy: Some(sample_policy_override()),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
@@ -258,6 +278,21 @@ pub async fn assert_isolation_by_company(
             .iter()
             .any(|entry| entry.agent_id == "writer" && entry.budget_usd_daily.is_none()),
         "the explicitly-uncapped override decayed into an absent or zeroed entry"
+    );
+    // The operator's `[policy]` override survives too (issue #562). Seeding the
+    // fixture is not enough on its own: without this assertion a backend that
+    // dropped the field would still pass, which is the failure the populated
+    // fixture exists to catch.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not survive save/load"
+    );
+    assert_eq!(
+        loaded.effective_policy().mode,
+        "auto",
+        "the effective tier did not survive the round-trip, so a restart would \
+         silently move the company back to the manifest's gate"
     );
     // Issue #276: a paused workflow survives save/load. A backend that dropped
     // this field would re-arm every schedule an operator had switched off, and
@@ -642,6 +677,14 @@ pub async fn assert_export_totality(
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
     );
+    // Issue #562: the console-set tier round-trips on every backend, for the
+    // same reason — an approval gate that forgets across a restart is not a gate.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not round-trip through the store"
+    );
+    assert_eq!(loaded.effective_policy().mode, "auto");
     // Issue #276: the pause switch round-trips on every backend, for the same
     // reason the caps do — a switch that forgets across a restart is not a
     // safety switch.
