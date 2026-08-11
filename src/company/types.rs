@@ -372,13 +372,42 @@ fn default_true() -> bool {
     true
 }
 
+/// The default ceiling on concurrent in-flight workflow runs per company
+/// (issue #401), applied when `[workflows].max_in_flight_runs` is omitted.
+///
+/// Deliberately well above 1: a running workflow's agent node can itself call
+/// the `run_workflow` tool, so the parent run holds a slot while a child begins.
+/// A ceiling of 1 would refuse that legitimate nesting on the first hop, which
+/// is why the field's validation floor is 1 but its default is generous.
+pub const DEFAULT_MAX_IN_FLIGHT_RUNS: usize = 8;
+
+fn default_max_in_flight_runs() -> usize {
+    DEFAULT_MAX_IN_FLIGHT_RUNS
+}
+
 /// `[workflows]` — references to the workflow graphs to enable. The graphs live
 /// as separate files under the company's `workflows/` directory.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workflows {
     /// Workflow ids to enable, each a `workflows/<id>.toml` graph file.
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// The most workflow runs this company may have executing at once
+    /// (issue #401). Every run — manual, scheduled, gate-resume, or one an
+    /// orchestrator agent starts — is admitted through the same choke point and
+    /// counts against this ceiling; a run over it is refused, never queued.
+    /// Defaults to [`DEFAULT_MAX_IN_FLIGHT_RUNS`]; validation requires `>= 1`.
+    #[serde(default = "default_max_in_flight_runs")]
+    pub max_in_flight_runs: usize,
+}
+
+impl Default for Workflows {
+    fn default() -> Self {
+        Self {
+            enabled: Vec::new(),
+            max_in_flight_runs: DEFAULT_MAX_IN_FLIGHT_RUNS,
+        }
+    }
 }
 
 /// `[users]` — the company's human collaborators.

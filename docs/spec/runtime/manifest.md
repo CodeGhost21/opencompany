@@ -88,6 +88,10 @@ name = "starter"                   # free | starter | pro | unlimited (optional)
 period = "daily"                   # daily (default) | monthly
 token_budgets = { web = 500000 }   # override/extend the named tier per namespace
 
+[workflows]                        # saved workflow graphs (issue #401)
+enabled = ["digest"]               # ids of workflows/<id>.toml graphs to enable
+max_in_flight_runs = 8             # concurrent-run ceiling (default 8; must be >= 1)
+
 [[schedule]]
 cron = "0 9 * * MON"
 prompt = "Weekly review and operator digest"
@@ -321,6 +325,19 @@ prompt = "Weekly review and operator digest"
   separately, with the same dialect: its `trigger` node carries a `schedule`
   cron that the workflow scheduler fires (issue #169). A manifest schedule
   drives a company cycle; a trigger schedule drives one workflow run.
+- **`[workflows]`** enables saved graphs and bounds how many may run at once.
+  `enabled` lists the `workflows/<id>.toml` ids to turn on. `max_in_flight_runs`
+  (issue #401) is the company's concurrent-run ceiling — default **8**,
+  validated **>= 1** (a `0` would refuse every run and is rejected at load). It
+  applies to *every* entry point that starts a run (the manual run route, the
+  cron scheduler, an approved gate's continuation, and the orchestrator's
+  `run_workflow` tool), enforced at one choke point. The default sits above 1
+  deliberately: a running workflow's agent node can call `run_workflow` while
+  the parent run still holds a slot, so a ceiling of 1 would refuse legitimate
+  nesting. A run over the ceiling is **refused, never queued** — the run route
+  answers `429` (see `api.md`), a scheduled fire is skipped for that minute, and
+  the orchestrator tool tells the agent to wait. A slot frees the instant a run
+  settles.
 
 ## Layering and provenance
 

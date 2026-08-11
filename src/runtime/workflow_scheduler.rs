@@ -693,7 +693,25 @@ fn spawn_scheduled_run(
         // overlap guard and has to outlive the run, and the delivery-log sweep
         // below needs the outcome.
         // Issue #542: a scheduled run is always for real — `false`.
-        let (_run_id, handle) = spawn.spawn(workflow, input, true, false);
+        //
+        // Issue #401: `spawn` refuses when the company is at its in-flight run
+        // ceiling. A scheduled fire is SKIPPED, not queued: log it, drop the
+        // overlap `_claim` (on return below), and leave the durable minute
+        // burned — this minute is forfeited, and the schedule's next tick is the
+        // natural retry once a slot frees. A cron fire nobody is waiting on has
+        // nowhere to surface a 429, so the host log is the record.
+        let (_run_id, handle) = match spawn.spawn(workflow, input, true, false) {
+            Ok(started) => started,
+            Err(err) => {
+                tracing::warn!(
+                    %company,
+                    workflow = %workflow_id,
+                    %err,
+                    "workflow scheduler: scheduled fire skipped — company is at its in-flight run cap"
+                );
+                return;
+            }
+        };
         match handle.await {
             Ok(Ok(run)) => {
                 // A manual run hands `deliveries` back in the HTTP response and
@@ -1838,12 +1856,9 @@ to = "done"
             .cloned()
             .expect("the same runner the scheduler used");
         let workflow = parse_workflow(&body("digest", Some("* * * * *"))).expect("parses");
-        let (_run_id, handle) = crate::runtime::WorkflowSpawn::new(&runtime, runner).spawn(
-            workflow,
-            json!({}),
-            false,
-            false,
-        );
+        let (_run_id, handle) = crate::runtime::WorkflowSpawn::new(&runtime, runner)
+            .spawn(workflow, json!({}), false, false)
+            .expect("under the run cap");
         handle.await.expect("the run task completes").expect("runs");
         let outcomes = wait_for_outcomes(&registry, company, 2).await;
 

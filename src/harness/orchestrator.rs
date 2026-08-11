@@ -2122,7 +2122,28 @@ impl Tool for RunWorkflowTool {
         // re-entry guard that bounds a workflow reaching back into itself is
         // task-local. Spawning here would reset the depth mid-chain and turn the
         // guard off exactly where it is load-bearing.
-        let (ctx, _run_guard) = self.run_supervisor.begin(&wid, false);
+        // Issue #401: `begin` refuses when the company is already at its
+        // in-flight run ceiling. Return a `ToolResult::error` with retry-later
+        // guidance — the same "stop, don't retry blindly" convention as the
+        // cancelled-run arm below — rather than an `Err`, so the agent treats it
+        // as a reason to wait instead of a tool failure to surface as a crash.
+        // Nothing was started: no context, no run id, nothing journaled.
+        let (ctx, _run_guard) = match self.run_supervisor.begin(&wid, false) {
+            Ok(started) => started,
+            Err(err) => {
+                tracing::info!(
+                    company = %self.company,
+                    workflow = %wid,
+                    %err,
+                    "run_workflow: refused — company is at its in-flight run cap"
+                );
+                return Ok(ToolResult::error(format!(
+                    "Workflow `{wid}` wasn't started: {err}. Wait for a running workflow to finish \
+                     (or ask an operator to stop one from the runs view), then try again — don't \
+                     retry in a loop."
+                )));
+            }
+        };
         match runner.run(&self.company, &file, input, &ctx).await {
             Ok(run) => {
                 tracing::debug!(
@@ -4861,6 +4882,78 @@ name = "Morning"
         assert!(
             result.output_for_llm(true).contains("Greeter"),
             "{result:?}"
+        );
+    }
+
+    /// Issue #401: the orchestrator's run tool refuses when the company is
+    /// already at its in-flight run ceiling. The refusal is a
+    /// `ToolResult::error` the agent should treat as "wait / stop one", NOT an
+    /// `Err`, and it registers nothing — a held guard stands in for the
+    /// in-flight run, so no wall-clock and no real second run is needed.
+    #[tokio::test]
+    async fn run_workflow_tool_refuses_at_the_in_flight_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+
+        // Author a runnable graph on disk so `execute` reaches the cap check.
+        let create = CreateWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        assert!(
+            !create
+                .execute(greeter_body())
+                .await
+                .expect("execute")
+                .is_error
+        );
+
+        // A supervisor with room for one run, whose only slot is already taken
+        // by a (simulated) in-flight run held for the length of the test.
+        let supervisor = crate::runtime::RunSupervisor::with_limit(1);
+        let (_ctx, _held) = supervisor
+            .begin("greeter", false)
+            .expect("the held run fills the cap of 1");
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({}),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let run = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            store.clone(),
+            handle,
+            supervisor.clone(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+        );
+
+        let result = run
+            .execute(json!({ "id": "greeter" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "a run over the cap is refused: {result:?}");
+        let text = result.output_for_llm(false);
+        assert!(
+            text.contains("wasn't started") && text.contains("maximum"),
+            "the refusal names the cap and is actionable: {text}"
+        );
+        assert_eq!(
+            supervisor.len(),
+            1,
+            "the refused run registered nothing — only the held run remains"
         );
     }
 
