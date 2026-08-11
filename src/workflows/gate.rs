@@ -285,31 +285,94 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
             node.config.clone(),
             http_target(&node.config),
         )),
-        _ => None,
+
+        // Everything below reaches nothing outward *on this path*, and the match
+        // is exhaustive on purpose: a wildcard here is how the third effectful
+        // node kind ships ungated. Two PRs have each closed one hole in this
+        // match (#460 for `tool_call`, #614 for `http_request`) and neither
+        // announced itself — the second was found by reading, not by a failing
+        // test. Listing every variant costs one line each and turns the
+        // fourteenth kind into a compiler error at exactly the moment somebody
+        // has to decide.
+
+        // Runs a turn. Its gated calls already park through #395's drain, so
+        // gating here would park the same call twice.
+        NodeKind::Agent
+        // Capabilities that are explicit stubs today: `CodeRunner` and
+        // `MemoryProvider` are wired to error / left `None` (see `caps`), so
+        // there is no call to classify. **These are the next two to gate** —
+        // sandboxed code and a memory *write* are both effectful — and the
+        // decision belongs with whoever wires the capability, in the same PR.
+        | NodeKind::Code
+        | NodeKind::Memory
+        // A child graph is resolved and run *inside* the engine
+        // (`run_sub_workflow`), so its nodes never pass this function at all —
+        // this arm is not what excludes them. The module docs give the reason
+        // it stays that way for now, and issue #617 tracks closing it: today a
+        // call the policy parks at the top level runs unparked one level down.
+        // The capability-level grant check still applies to a child's calls.
+        | NodeKind::SubWorkflow
+        // Pure control flow and data shaping. They reach no capability: the
+        // decision belongs to the node they feed, which is classified above.
+        | NodeKind::Condition
+        | NodeKind::Dedup
+        | NodeKind::Loop
+        | NodeKind::Merge
+        | NodeKind::OutputParser
+        | NodeKind::SplitOut
+        | NodeKind::Switch
+        | NodeKind::Transform
+        | NodeKind::Trigger => None,
     }
 }
 
 /// `"POST api.example.com"` for an `http_request` node's config — method and
 /// host only, for the reasons on [`GatedCall::target`].
 ///
-/// Returns `None` rather than guessing when the URL is missing or unparseable,
-/// which includes the common authoring case of a `=`-expression the run has not
-/// resolved yet (`url = "=item.endpoint"`). A card that names no destination is
-/// honest; one that names `=item.endpoint` as a host is not.
+/// # Credentials never reach the card
+///
+/// A URL may carry userinfo — `https://token:secret@api.example.com/v1` — and
+/// the authority is everything between the scheme and the first `/`, so taking
+/// it whole would put that token in the durable approval journal and on the
+/// Approvals page. Worse, it would show the operator the *wrong* host: a reader
+/// scanning `POST token:secret@api.example.com` sees the credential first. Only
+/// the part after the last `@` is kept, which is the host by definition — `@`
+/// is not legal in a host. This is the same test the path and query already
+/// failed; userinfo is one more place a secret sits.
+///
+/// # A destination that is not knowable yet says so
+///
+/// `url = "=item.endpoint"` is routine authoring: the destination is an
+/// expression the run has not resolved when this pass runs. Returning `None`
+/// there would render an `http_request` card identically to a `tool_call` one —
+/// a call with no destination to show — and an operator approving an outbound
+/// request whose host is unknown should be told that is what they are doing.
+/// So an unresolvable URL yields `"POST (destination resolved at run time)"`:
+/// still never a guess, but the absence is stated rather than implied. A
+/// **missing** `url` key stays `None` — nothing was authored, so there is
+/// nothing to explain.
 fn http_target(config: &Value) -> Option<String> {
     let url = config.get("url").and_then(Value::as_str)?;
-    let host = url
-        .split_once("://")
-        .map(|(_, rest)| rest)?
-        .split(['/', '?', '#'])
-        .next()
-        .filter(|host| !host.is_empty())?;
     let method = config
         .get("method")
         .and_then(Value::as_str)
         .unwrap_or("GET")
         .to_uppercase();
-    Some(format!("{method} {host}"))
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)
+        .and_then(|rest| rest.split(['/', '?', '#']).next())
+        // Userinfo is everything before the LAST `@`; a host cannot contain one.
+        .map(|authority| {
+            authority
+                .rsplit_once('@')
+                .map_or(authority, |(_, host)| host)
+        })
+        .filter(|host| !host.is_empty());
+    match host {
+        Some(host) => Some(format!("{method} {host}")),
+        None => Some(format!("{method} (destination resolved at run time)")),
+    }
 }
 
 /// The synthetic principal a workflow `tool_call` acts as.
@@ -549,10 +612,12 @@ description = "Runs Acme."
 
     /// A URL the run has not resolved yet is the common authoring case
     /// (`url = "=item.endpoint"`). The node still gates — the call is no less
-    /// consequential — but the card names no destination rather than claiming
-    /// `=item.endpoint` is a host.
+    /// consequential — and the card says the destination is not knowable yet
+    /// rather than either claiming `=item.endpoint` is a host or going silent.
+    /// An operator approving an outbound request with no host shown should be
+    /// told that is what they are doing.
     #[tokio::test]
-    async fn an_unresolved_url_gates_without_naming_a_target() {
+    async fn an_unresolved_url_gates_and_says_the_destination_is_not_known_yet() {
         let mut node = tool_node("fetch", "unused");
         node.kind = NodeKind::HttpRequest;
         node.config = json!({ "method": "GET", "url": "=item.endpoint" });
@@ -561,7 +626,13 @@ description = "Runs Acme."
         let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
 
         assert_eq!(gate_ids(&g), ["fetch"]);
-        assert_eq!(gated[0].target, None, "{gated:?}");
+        let target = gated[0].target.as_deref().expect("the absence is stated");
+        assert!(target.starts_with("GET "), "{target}");
+        assert!(target.contains("run time"), "{target}");
+        assert!(
+            !target.contains("item.endpoint"),
+            "an unresolved expression is not a host: {target}"
+        );
     }
 
     /// The default method matters: an `http_request` node with no `method` is a
@@ -576,10 +647,48 @@ description = "Runs Acme."
             http_target(&json!({ "method": "delete", "url": "http://h.test:8080/x" })).as_deref(),
             Some("DELETE h.test:8080")
         );
-        // No URL, no scheme, or an empty host: nothing to name.
+        // No `url` key at all: nothing was authored, so there is nothing to
+        // name and nothing to explain.
         assert_eq!(http_target(&json!({ "method": "GET" })), None);
-        assert_eq!(http_target(&json!({ "url": "not-a-url" })), None);
-        assert_eq!(http_target(&json!({ "url": "https:///only-path" })), None);
+        // Authored but unusable — no scheme, or a scheme with an empty host.
+        // The method is still known, and the missing host is stated.
+        for config in [
+            json!({ "url": "not-a-url" }),
+            json!({ "url": "https:///only-path" }),
+        ] {
+            let target = http_target(&config).expect("authored, so the absence is stated");
+            assert!(target.contains("run time"), "{target}");
+        }
+    }
+
+    /// A URL's userinfo never reaches the card (CWE-200).
+    ///
+    /// `https://token:secret@api.example.com/v1` puts a credential in the
+    /// authority, and this string is written to the durable approval journal,
+    /// rendered on the Approvals page and kept after the decision — the exact
+    /// test the path and query already failed. It also names the wrong thing:
+    /// a reader scanning `POST token:secret@api.example.com` sees the token
+    /// before the host the decision actually turns on.
+    #[test]
+    fn a_target_never_carries_url_userinfo() {
+        for (url, expected) in [
+            (
+                "https://token:secret@api.example.com/v1",
+                "POST api.example.com",
+            ),
+            ("https://user@api.example.com", "POST api.example.com"),
+            // A `@` in the credential itself: the host is after the LAST one.
+            (
+                "https://user:p@ss@api.example.com:8443/x",
+                "POST api.example.com:8443",
+            ),
+        ] {
+            let target = http_target(&json!({ "method": "POST", "url": url }))
+                .expect("a host is nameable here");
+            assert_eq!(target, expected, "{url}");
+            assert!(!target.contains('@'), "{url} → {target}");
+            assert!(!target.contains("secret"), "{url} → {target}");
+        }
     }
 
     /// A slugless `tool_call` has no call to classify; the engine's own node
