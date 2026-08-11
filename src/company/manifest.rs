@@ -218,6 +218,15 @@ impl CompanyManifest {
             }
         }
 
+        // The concurrent-run ceiling must admit at least one run (issue #401). A
+        // `0` is a misconfiguration that would refuse every run, so it fails
+        // here rather than silently wedging the company's workflows.
+        if self.workflows.max_in_flight_runs == 0 {
+            problems.push(
+                "`[workflows].max_in_flight_runs` must be at least 1 — a value of 0 would refuse every workflow run.".into(),
+            );
+        }
+
         if !BRAIN_MODES.contains(&self.brain.mode.as_str()) {
             problems.push(one_of("`[brain].mode`", BRAIN_MODES, &self.brain.mode));
         }
@@ -447,6 +456,40 @@ mod tests {
         assert_eq!(
             manifest.policy.always_approve,
             vec!["payment.send", "filing.submit", "external.publish"]
+        );
+    }
+
+    #[test]
+    fn workflows_run_cap_defaults_when_omitted() {
+        // Issue #401: an absent `[workflows].max_in_flight_runs` takes the
+        // generous default and never trips validation.
+        let manifest = parse("[company]\nname = \"X\"\n");
+        assert_eq!(
+            manifest.workflows.max_in_flight_runs,
+            crate::company::types::DEFAULT_MAX_IN_FLIGHT_RUNS
+        );
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    #[test]
+    fn workflows_run_cap_parses_explicit_value() {
+        let manifest = parse("[company]\nname = \"X\"\n[workflows]\nmax_in_flight_runs = 3\n");
+        assert_eq!(manifest.workflows.max_in_flight_runs, 3);
+        assert!(manifest.validate().is_empty(), "{:?}", manifest.validate());
+    }
+
+    #[test]
+    fn workflows_run_cap_of_zero_is_rejected() {
+        // Issue #401: `0` would refuse every run, so it is a validation error
+        // named in prosumer language rather than a silently wedged company.
+        let manifest = parse("[company]\nname = \"X\"\n[workflows]\nmax_in_flight_runs = 0\n");
+        let problems = manifest.validate();
+        assert!(
+            problems
+                .iter()
+                .any(|p| p.contains("`[workflows].max_in_flight_runs`")
+                    && p.contains("at least 1")),
+            "{problems:?}"
         );
     }
 
