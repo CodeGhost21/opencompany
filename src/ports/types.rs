@@ -13,7 +13,7 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::company::{CompanyManifest, Policy};
+use crate::company::{CompanyManifest, POLICY_MODES, Policy};
 use crate::ports::ids::{agent_slug, generate_id, now_millis};
 use crate::ports::workflow_runner::DeliveryReport;
 
@@ -2422,8 +2422,9 @@ pub struct PolicyOverride {
     /// The autonomy tier to run, or `None` to leave the manifest's in force.
     ///
     /// A `POLICY_MODES` word. Validated at the write route rather than here:
-    /// this type is inert data, and an unknown value still degrades safely
-    /// because `PolicyMode::parse` falls back to `supervised`.
+    /// this type is inert data. [`CompanyRecord::effective_policy`] ignores an
+    /// unknown stored value and keeps the manifest's tier, so version skew can
+    /// never loosen a stricter seed policy.
     #[serde(default)]
     pub mode: Option<String>,
     /// The always-ask effect kinds, or `None` to leave the manifest's in force.
@@ -2976,7 +2977,10 @@ impl CompanyRecord {
     /// The merge is per field and `None` means "not overridden", so an operator
     /// who moved the tier has not thereby silently reset the always-ask list to
     /// the manifest's. An explicitly emptied list (`Some(vec![])`) survives as
-    /// empty; only an absent field falls through.
+    /// empty; only an absent field falls through. An unknown stored mode also
+    /// falls through to the manifest: it can arise under version skew, and
+    /// allowing the policy parser to downgrade it to `supervised` would loosen
+    /// a `readonly` manifest.
     pub fn effective_policy(&self) -> Policy {
         let manifest = &self.manifest.policy;
         let Some(override_) = &self.overlay_policy else {
@@ -2985,7 +2989,9 @@ impl CompanyRecord {
         Policy {
             mode: override_
                 .mode
-                .clone()
+                .as_deref()
+                .filter(|mode| POLICY_MODES.contains(mode))
+                .map(str::to_owned)
                 .unwrap_or_else(|| manifest.mode.clone()),
             always_approve: override_
                 .always_approve
@@ -4513,6 +4519,24 @@ mod test {
         let mut record = desk_record(POLICY_MANIFEST, Vec::new());
         record.overlay_policy = Some(policy_entry(Some("full"), None));
         assert_eq!(record.effective_policy().mode, "full");
+    }
+
+    /// Version skew can leave an override written by a newer host on a build
+    /// that does not recognise its tier. Falling through to `supervised` would
+    /// loosen a `readonly` seed, so the manifest wins for that field while any
+    /// independently valid always-ask override remains in force.
+    #[test]
+    fn an_unknown_stored_policy_mode_cannot_loosen_the_manifest() {
+        let manifest = POLICY_MANIFEST.replace("mode = \"supervised\"", "mode = \"readonly\"");
+        let mut record = desk_record(&manifest, Vec::new());
+        record.overlay_policy = Some(policy_entry(
+            Some("future-tier"),
+            Some(vec!["external.publish"]),
+        ));
+
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "readonly");
+        assert_eq!(effective.always_approve, vec!["external.publish"]);
     }
 
     /// The two fields are independent: moving the tier must not silently reset

@@ -265,9 +265,9 @@ async fn set_policy(
 
     // Validate against the same list `company.toml` is validated against, so a
     // tier the console accepts is one the manifest would have accepted too. An
-    // unknown mode would not be *unsafe* — `PolicyMode::parse` falls back to
-    // `supervised` — but it would be silently ignored, which is worse: the
-    // console would show a tier the gate was not running.
+    // A stored unknown mode falls back to the manifest for version-skew safety,
+    // but a fresh write must still be refused: accepting it would leave the
+    // console showing a tier the gate was not running.
     if let Some(Some(mode)) = &body.mode
         && !POLICY_MODES.contains(&mode.as_str())
     {

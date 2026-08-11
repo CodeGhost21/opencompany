@@ -24,7 +24,9 @@ autonomy tier and always-ask list an admin sets from the console, read through
 `CompanyRecord::effective_policy`, which resolves it *ahead* of the manifest for
 the same single-reconciliation-point reason as `effective_budget`. Its two
 fields are independently optional, so `None` means "not overridden" while
-`Some(vec![])` is a deliberately emptied always-ask list. It is an overlay
+`Some(vec![])` is a deliberately emptied always-ask list. An unknown stored
+tier falls back to the manifest rather than to `supervised`, so version skew
+cannot loosen a `readonly` seed. It is an overlay
 rather than a manifest write **by necessity**: a rebuild re-persists
 `record.manifest` from the seed and merges only `[workflows].enabled`, because
 for `[tools]` / `[policy]` a record-wins merge would let a runtime grant outlive
