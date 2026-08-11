@@ -904,6 +904,61 @@ mod tests {
         assert_eq!(toolkit_slug("gmail"), "gmail");
     }
 
+    /// Every `toolkit` the console authorizes with must already be in this
+    /// normalizer's canonical form (issue #599).
+    ///
+    /// The console states its eleven Composio slugs explicitly rather than
+    /// deriving them — `x` maps to `twitter`, which no normalization rule
+    /// produces — and its doc calls the table a mirror of [`toolkit_slug`]. A
+    /// mirror with no reflection test drifts silently: loosen or tighten the
+    /// rule here and those eleven tiles keep authorizing against slugs this
+    /// host no longer reconciles rows under, surfacing as "provider not
+    /// enabled" — the exact symptom #599 fixed.
+    ///
+    /// So this reads the real console catalog and feeds it through the real
+    /// normalizer. It asserts a fixed point (`toolkit_slug(t) == t`) rather
+    /// than `toolkit_slug(id) == toolkit`, because the latter is false for
+    /// `x`/`twitter` by design — the alias is the reason the table is explicit.
+    #[test]
+    fn console_toolkit_slugs_are_canonical_under_this_normalizer() {
+        use super::toolkit_slug;
+
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/lib/connections.ts"
+        );
+        let source = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("read the console connection catalog at {path}: {err}"));
+
+        let slugs: Vec<String> = source
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("toolkit: \""))
+            .filter_map(|rest| rest.split('"').next())
+            .map(str::to_string)
+            .collect();
+
+        // Guard against a silent pass: a renamed field or a reformatted catalog
+        // would otherwise leave this asserting over an empty list.
+        assert_eq!(
+            slugs.len(),
+            11,
+            "expected one `toolkit:` per console tile, found {}: {slugs:?}. If the \
+             catalog legitimately changed size, update this count; if the field was \
+             renamed, update the parse.",
+            slugs.len()
+        );
+
+        for slug in &slugs {
+            assert_eq!(
+                &toolkit_slug(slug),
+                slug,
+                "console toolkit {slug:?} is not canonical under toolkit_slug; the \
+                 console would authorize a slug this host reconciles rows under a \
+                 different key"
+            );
+        }
+    }
+
     /// A company with no `[[connection]]` entries returns an empty list (200),
     /// not a 404 — so the console renders "ready" with an empty catalog rather
     /// than the "unavailable" fallback.
