@@ -485,7 +485,7 @@ function ConnectionCard({
             <div className="flex items-center gap-2">
               <p className="truncate font-medium">{provider.name}</p>
               {connected && (
-                <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs font-medium text-status-done-text">
                   <Check className="size-3" /> Connected
                 </span>
               )}
@@ -500,7 +500,7 @@ function ConnectionCard({
               </p>
             )}
             {!connected && unverified && (
-              <p className="mt-0.5 text-xs text-amber-600 dark:text-amber-400">
+              <p className="mt-0.5 text-xs text-status-blocked-text">
                 Couldn&apos;t check the Composio connection — state unknown.
               </p>
             )}
@@ -521,7 +521,7 @@ function ConnectionCard({
             </p>
           ) : managedByPlatform ? (
             <p
-              className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400"
+              className="inline-flex items-center gap-1 text-xs text-status-done-text"
               data-testid={`connection-managed-${provider.id}`}
             >
               <ShieldCheck className="size-3" /> Managed by the platform — nothing to set up here

@@ -116,12 +116,12 @@ function DomainCard({
               </span>
               <div className="flex items-center gap-2">
                 {settings.domain.verified ? (
-                  <Badge className="gap-1 bg-emerald-500/15 text-emerald-600 dark:text-emerald-400">
+                  <Badge className="gap-1 bg-status-done-soft text-status-done-text">
                     <Check className="size-3" /> Verified
                   </Badge>
                 ) : (
                   <Badge variant="secondary" className="gap-1">
-                    <span className="size-1.5 animate-pulse rounded-full bg-amber-500" /> Pending
+                    <span className="size-1.5 animate-pulse rounded-full bg-status-blocked" /> Pending
                   </Badge>
                 )}
                 <Button variant="ghost" size="sm" onClick={remove}>
@@ -197,7 +197,7 @@ function CopyCell({ value }: { value: string }) {
     <button onClick={copy} className="group flex max-w-[28ch] items-center gap-1.5 text-left sm:max-w-[40ch]" title="Copy">
       <span className="truncate font-mono">{value}</span>
       {copied ? (
-        <Check className="size-3 shrink-0 text-emerald-500" />
+        <Check className="size-3 shrink-0 text-status-done-text" />
       ) : (
         <Copy className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
       )}
@@ -285,7 +285,7 @@ function SmtpCard({
             <ShieldAlert className="size-4" /> Test connection
           </Button>
           {complete ? (
-            <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+            <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
               <Check className="size-3.5" /> Ready
             </span>
           ) : (

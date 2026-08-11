@@ -52,11 +52,23 @@ function usd(n: number): string {
 const RANGES: Record<string, number> = { "7d": 7, "30d": 30, "90d": 90 };
 const RANGE_LABELS: Record<string, string> = { "7d": "Last 7 days", "30d": "Last 30 days", "90d": "Last 90 days" };
 
+/*
+ * Series colours come from the chart tokens, not from hex pairs.
+ *
+ * This used to carry a `theme: { light, dark }` pair per series — a second,
+ * hand-maintained theme switch sitting beside the one the stylesheet already
+ * runs. `--chart-*` is defined for both themes in `index.css`, so naming the
+ * token deletes the duplication and the drift: a palette change now reaches
+ * this chart without anyone remembering it exists.
+ *
+ * Slot order is the system's: indigo leads, cyan follows. See
+ * docs/design-system/color.md.
+ */
 const chartConfig = {
-  inputTokens: { label: "Input", theme: { light: "#2a78d6", dark: "#3987e5" } },
-  outputTokens: { label: "Output", theme: { light: "#008300", dark: "#008300" } },
-  tokens: { label: "Tokens", theme: { light: "#2a78d6", dark: "#3987e5" } },
-  calls: { label: "Calls", theme: { light: "#1baf7a", dark: "#199e70" } },
+  inputTokens: { label: "Input", color: "var(--chart-1)" },
+  outputTokens: { label: "Output", color: "var(--chart-3)" },
+  tokens: { label: "Tokens", color: "var(--chart-1)" },
+  calls: { label: "Calls", color: "var(--chart-2)" },
 } satisfies ChartConfig;
 
 interface Props {

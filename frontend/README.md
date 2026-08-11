@@ -68,13 +68,33 @@ The same build works against any host/company. Resolution order (first wins):
 
 ## Design system
 
-- **Tokens** live in [`src/index.css`](src/index.css) — the shadcn "new-york"
-  neutral theme (OKLCH CSS variables, light + `.dark`). Swap the variables to
-  reskin; theming is driven by `next-themes`.
+- **Tokens** live in [`src/index.css`](src/index.css), in three layers —
+  primitive ramps → semantic names → Tailwind utilities. Components may only
+  use the third. Light lives in `:root`, dark in `.dark`; theming is driven by
+  `next-themes`.
+- **Living reference:** open **`#/styleguide`** — every token and component
+  state, rendered by this stylesheet. It reads the variables at runtime, so it
+  cannot drift, and it needs no host, company, or sign-in.
 - **Primitives** are shadcn/ui on **Base UI** under
   [`src/components/ui/`](src/components/ui/) — owned in-tree, add more with
   `npx shadcn@latest add <component>`.
 - Base UI composes with the `render` prop (not Radix's `asChild`).
+
+Written reference, in order of usefulness:
+
+| Doc | Answers |
+| --- | --- |
+| [`docs/design-system/README.md`](../docs/design-system/README.md) | The layer rule, anti-patterns, how to change a token |
+| [`docs/design-system/color.md`](../docs/design-system/color.md) | Every colour, its role, its measured contrast |
+| [`docs/design-system/typography.md`](../docs/design-system/typography.md) | The scale, the mono policy, the migration list |
+| [`docs/design-system/components.md`](../docs/design-system/components.md) | Anatomy and required states per primitive |
+| [`docs/brand/README.md`](../docs/brand/README.md) | Why these choices — positioning, voice, form |
+
+> Two rules save the most time. **Never write an arbitrary value**
+> (`text-[11px]`, `bg-[#5865f2]`) — the scale has a name for it, or the system
+> needs one. **Never assemble a class name from a template** — Tailwind scans
+> source text, so `` `bg-status-${key}` `` is never generated and fails
+> silently.
 
 ## Architecture & backend contract
 

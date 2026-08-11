@@ -245,7 +245,7 @@ function planTabCount(plan: TaskPlan): { count: number; tone: string } | null {
   if (blocking > 0) return { count: blocking, tone: "text-destructive" };
   const unresolved = approval + unchecked;
   if (unresolved > 0) {
-    return { count: unresolved, tone: "text-amber-600 dark:text-amber-400" };
+    return { count: unresolved, tone: "text-status-blocked-text" };
   }
   return null;
 }
@@ -676,7 +676,7 @@ function DetailHeader({
         {task.assignee && (
           <span className="inline-flex items-center gap-1.5">
             <span
-              className="flex size-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold"
+              className="flex size-5 items-center justify-center rounded-full bg-muted text-3xs font-semibold"
               aria-hidden
             >
               {initials(task.assignee)}
@@ -693,7 +693,7 @@ function DetailHeader({
                   Worked {formatDuration(workingMs)}
                 </span>
                 {worked!.live && (
-                  <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <span className="inline-flex items-center gap-1 text-status-done-text">
                     <span
                       className="size-1.5 animate-pulse rounded-full bg-current"
                       aria-hidden
@@ -709,12 +709,12 @@ function DetailHeader({
         )}
         {showWaiting && (
           <span className="inline-flex items-center gap-1.5">
-            <Hourglass className="size-3.5 text-amber-600 dark:text-amber-400" />
-            <span className="font-medium text-amber-700 dark:text-amber-400">
+            <Hourglass className="size-3.5 text-status-blocked-text" />
+            <span className="font-medium text-status-blocked-text">
               Waiting {formatDuration(waitedMs)}
             </span>
             {waiting!.live && (
-              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+              <span className="inline-flex items-center gap-1 text-status-blocked-text">
                 <span
                   className="size-1.5 animate-pulse rounded-full bg-current"
                   aria-hidden
@@ -738,7 +738,7 @@ function DetailHeader({
           host older than #333 has no link and still falls back to the run
           window. Said plainly rather than left for a reader to discover. */}
       {showWaiting && (
-        <p className="mt-2 text-[11px] text-muted-foreground/70">
+        <p className="mt-2 text-2xs text-muted-foreground/70">
           Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
           task id fall back to its run window.
         </p>
@@ -853,7 +853,7 @@ function ControlBar({
       <div className="flex flex-wrap items-center gap-2">
         {inflight ? (
           <>
-            <span className="mr-1 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            <span className="mr-1 inline-flex items-center gap-1.5 text-xs font-medium text-status-done-text">
               <span
                 className="size-1.5 animate-pulse rounded-full bg-current"
                 aria-hidden
@@ -861,7 +861,7 @@ function ControlBar({
               In flight
             </span>
             {pending !== null ? (
-              <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                 {pending}…
               </span>
             ) : (
@@ -1062,7 +1062,7 @@ function LineageRail({
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
     <div className="rounded-xl border bg-card/40 p-3">
-      <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
         Lineage
       </p>
       <div className="space-y-1.5">
@@ -1080,7 +1080,7 @@ function LineageRail({
             </Badge>
           </button>
         )}
-        <div className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+        <div className="px-2.5 py-1 text-2xs font-medium text-muted-foreground">
           This task
         </div>
         {lineage.children.map((child) => (
@@ -1223,17 +1223,17 @@ function rowIcon(kind: TimelineKind, status?: StepStatus): ReactElement {
 
 function kindTone(kind: TimelineKind, status?: StepStatus): string {
   // Outcome first, for the same reason `rowIcon` reads it first.
-  if (status === "running") return "text-sky-600 dark:text-sky-400";
+  if (status === "running") return "text-status-running-text";
   if (status === "awaiting_approval")
-    return "text-amber-600 dark:text-amber-400";
-  if (status === "error") return "text-rose-600 dark:text-rose-400";
+    return "text-status-blocked-text";
+  if (status === "error") return "text-status-failed-text";
   switch (kind) {
     case "completed":
-      return "text-emerald-600 dark:text-emerald-400";
+      return "text-status-done-text";
     case "tool_failed":
-      return "text-rose-600 dark:text-rose-400";
+      return "text-status-failed-text";
     case "approval":
-      return "text-amber-600 dark:text-amber-400";
+      return "text-status-blocked-text";
     default:
       return "text-muted-foreground";
   }
@@ -1301,8 +1301,7 @@ function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
     <li
       className={cn(
         "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
-        "border-amber-400/60 bg-amber-50/60 text-[11px] text-amber-700",
-        "dark:border-amber-500/40 dark:bg-amber-950/20 dark:text-amber-400",
+        "border-status-blocked/40 bg-status-blocked-soft text-2xs text-status-blocked-text",
         live && "animate-pulse",
       )}
       style={{ minHeight: height }}
@@ -1331,11 +1330,11 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.detail && (
         <div>
           {entry.result && (
-            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
               Called with
             </div>
           )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+          <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-muted-foreground">
             {entry.detail}
           </pre>
         </div>
@@ -1343,11 +1342,11 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.result && (
         <div>
           {entry.detail && (
-            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
               Result
             </div>
           )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+          <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-muted-foreground">
             {entry.result}
             {entry.truncated && " (cut short)"}
           </pre>
@@ -1368,10 +1367,10 @@ function StepStateChip({
   return (
     <span
       className={cn(
-        "shrink-0 rounded px-1 py-px text-[10px] font-medium",
+        "shrink-0 rounded px-1 py-px text-3xs font-medium",
         tone === "amber"
-          ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
-          : "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+          ? "bg-status-blocked-soft text-status-blocked-text"
+          : "bg-status-failed-soft text-status-failed-text",
       )}
     >
       {children}
@@ -1429,20 +1428,20 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
             gated call never ran, so its 0ms is the absence of a measurement
             rather than a fast one (#411). */}
         {group.count === 1 && first.status === "awaiting_approval" ? (
-          <span className="shrink-0 text-[11px] text-muted-foreground">
+          <span className="shrink-0 text-2xs text-muted-foreground">
             didn't run
           </span>
         ) : (
           group.count === 1 &&
           first.elapsedMs !== undefined && (
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
               {first.elapsedMs < 1000
                 ? `${first.elapsedMs}ms`
                 : formatDuration(first.elapsedMs)}
             </span>
           )
         )}
-        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+        <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
           {timeOf(first.atMillis)}
         </span>
         {expandable &&
@@ -1456,7 +1455,7 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
         <div className="space-y-2 border-t px-3 py-2">
           {group.count > 1
             ? group.entries.map((e) => (
-                <div key={e.seq} className="text-[11px]">
+                <div key={e.seq} className="text-2xs">
                   <div className="mb-0.5 text-muted-foreground">
                     {timeOf(e.atMillis)}
                   </div>
@@ -1482,16 +1481,16 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
 function runStatusTone(status: RunStatus): string {
   switch (status) {
     case "succeeded":
-      return "border-emerald-500/40 text-emerald-700 dark:text-emerald-400";
+      return "border-status-done/40 text-status-done-text";
     case "failed":
-      return "border-rose-500/40 text-rose-700 dark:text-rose-400";
+      return "border-status-failed/40 text-status-failed-text";
     case "cancelled":
       return "border-muted-foreground/30 text-muted-foreground";
     case "waiting_approval":
     case "paused":
-      return "border-amber-500/40 text-amber-700 dark:text-amber-400";
+      return "border-status-blocked/40 text-status-blocked-text";
     default:
-      return "border-sky-500/40 text-sky-700 dark:text-sky-400";
+      return "border-status-running/40 text-status-running-text";
   }
 }
 
@@ -1569,7 +1568,7 @@ function AttemptsTab({
         fault.
       </p>
       {missing && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+        <p className="rounded-md border border-status-blocked/40 bg-status-blocked-soft px-3 py-2 text-xs text-muted-foreground">
           The attempt that link points at is no longer in this card's history.
           Its other attempts are below.
         </p>
@@ -1645,7 +1644,7 @@ function AttemptRow({
           {elapsed !== null && (
             <span
               className={cn(
-                "shrink-0 tabular-nums text-[11px] text-muted-foreground",
+                "shrink-0 tabular-nums text-2xs text-muted-foreground",
                 isRunOpen(run) && "text-foreground",
               )}
             >
@@ -1655,14 +1654,14 @@ function AttemptRow({
           )}
           <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
         </div>
-        <div className="flex w-full items-center gap-2 pl-5 text-[11px] text-muted-foreground">
+        <div className="flex w-full items-center gap-2 pl-5 text-2xs text-muted-foreground">
           <span className="tabular-nums">{timeOf(run.createdAtMillis)}</span>
           <span aria-hidden>·</span>
           <span>{stepSummary(run)}</span>
           {run.stepCountCapped && <span>(trace capped)</span>}
         </div>
         {run.error && (
-          <p className="w-full truncate pl-5 text-[11px] text-rose-600 dark:text-rose-400">
+          <p className="w-full truncate pl-5 text-2xs text-status-failed-text">
             {run.error}
           </p>
         )}
@@ -1777,7 +1776,7 @@ function RunDrawer({
                   </Alert>
                 )}
                 {run.stepCountCapped && (
-                  <p className="text-[11px] text-muted-foreground">
+                  <p className="text-2xs text-muted-foreground">
                     This attempt hit the per-run trace ceiling, so what follows
                     is the start of the run, not all of it.
                   </p>
@@ -1839,9 +1838,9 @@ function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; no
   const { waited } = pending;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs dark:border-amber-400/30 dark:bg-amber-950/30">
-      <Hourglass className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-      <span className="min-w-0 flex-1 text-amber-800 dark:text-amber-300">
+    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
+      <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
+      <span className="min-w-0 flex-1 text-status-blocked-text">
         {pending.count === 1
           ? "Waiting on an approval"
           : `Waiting on ${pending.count} approvals`}{" "}
@@ -1849,7 +1848,7 @@ function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; no
       </span>
       <a
         href="#/approvals"
-        className="shrink-0 font-medium text-amber-800 underline-offset-2 hover:underline dark:text-amber-300"
+        className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
         aria-label={
           pending.count === 1
             ? "Review this task's pending approval on the Approvals page"
@@ -2134,7 +2133,7 @@ function DiscussionTab({
                 m.redacted ? "border-dashed bg-muted/40" : "bg-card",
               )}
             >
-              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <div className="flex items-center gap-2 text-2xs text-muted-foreground">
                 <MessagesSquare className="size-3.5 shrink-0" aria-hidden />
                 <span className="min-w-0 flex-1 truncate font-medium text-foreground">
                   {m.author}
@@ -2313,7 +2312,7 @@ function RetryButton({
                 // so the index carries the uniqueness the pair cannot.
                 <li key={`${e.kind}-${e.atMillis}-${i}`} className="flex items-start gap-2">
                   <AlertCircle
-                    className="mt-px size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                    className="mt-px size-3.5 shrink-0 text-status-blocked-text"
                     aria-hidden
                   />
                   <span className="min-w-0 flex-1">{effectDone(e.kind, e.amountUsd)}</span>
@@ -2333,7 +2332,7 @@ function RetryButton({
             </p>
           )}
           {named > 0 && (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-2xs text-muted-foreground">
               Each is recorded the moment it was committed, so one that was interrupted still
               appears — nothing is ever retried on its own.
             </p>

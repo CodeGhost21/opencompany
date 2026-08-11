@@ -117,7 +117,7 @@ function DayDivider({ label }: { label: string }) {
       aria-label={label}
       className="pointer-events-none sticky top-2 z-20 flex justify-center py-2"
     >
-      <p className="rounded-full border bg-background px-2.5 py-1 text-[11px] font-medium tracking-wide text-muted-foreground">
+      <p className="rounded-full border bg-background px-2.5 py-1 text-2xs font-medium tracking-wide text-muted-foreground">
         {label}
       </p>
     </div>

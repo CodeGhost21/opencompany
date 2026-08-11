@@ -41,7 +41,7 @@ function Excerpt({ text, query }: { text: string; query: string }) {
     <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground" data-testid="workspace-search-excerpt">
       {highlightRuns(text, query).map((run, i) =>
         run.hit ? (
-          <mark key={i} className="rounded-sm bg-amber-200/60 px-0.5 text-foreground dark:bg-amber-400/25">
+          <mark key={i} className="rounded-sm bg-highlight px-0.5 text-foreground">
             {run.text}
           </mark>
         ) : (
@@ -82,7 +82,7 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
 
   return (
     <div data-testid="workspace-search-results">
-      <p className="px-3 py-1.5 text-[11px] tracking-wide text-muted-foreground uppercase">
+      <p className="px-3 py-1.5 text-2xs tracking-wide text-muted-foreground uppercase">
         {/* `total` rather than `hits.length`: the host caps the page, and a
             count that only described what fits would quietly claim a partial
             answer is the whole one. */}
@@ -116,7 +116,7 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                       run.hit ? (
                         <mark
                           key={i}
-                          className="rounded-sm bg-amber-200/60 px-0.5 text-foreground dark:bg-amber-400/25"
+                          className="rounded-sm bg-highlight px-0.5 text-foreground"
                         >
                           {run.text}
                         </mark>
@@ -126,7 +126,7 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                     )}
                   </span>
                   {origin && (
-                    <Badge variant="outline" className="shrink-0 text-[10px]">
+                    <Badge variant="outline" className="shrink-0 text-3xs">
                       {origin}
                     </Badge>
                   )}
@@ -134,7 +134,7 @@ export function SearchResults({ query, hits, total, loading, error, onOpen }: Pr
                 {/* The path is the reason a flat hit list is usable at all — two
                     notes can share a name, and the tree that would have told
                     them apart is not on screen while a search is showing. */}
-                <span className="mt-0.5 block truncate text-[11px] text-muted-foreground">
+                <span className="mt-0.5 block truncate text-2xs text-muted-foreground">
                   {hit.path}
                   {isBinary(hit) && ` · ${hit.mime} · ${formatBytes(hit.size)}`}
                 </span>

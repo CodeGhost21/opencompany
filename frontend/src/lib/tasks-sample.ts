@@ -76,8 +76,17 @@ export function sampleTasks(): TaskCard[] {
   ];
 }
 
+/**
+ * Priority badges.
+ *
+ * These deliberately *do* use the status hues, unlike the category and kind
+ * palettes elsewhere. Priority and status share one axis — how much this
+ * wants your attention — so red-for-high and amber-for-medium reinforce the
+ * vocabulary rather than competing with it, and `low` stays neutral for the
+ * same reason `idle` does: nothing is being asked of anyone.
+ */
 export const PRIORITY_STYLES: Record<TaskPriority, string> = {
-  high: "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400",
-  medium: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
+  high: "border-status-failed/30 bg-status-failed-soft text-status-failed-text",
+  medium: "border-status-blocked/30 bg-status-blocked-soft text-status-blocked-text",
   low: "border-border bg-muted text-muted-foreground",
 };

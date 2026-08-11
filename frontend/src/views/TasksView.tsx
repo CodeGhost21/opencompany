@@ -628,7 +628,7 @@ function TaskItem({
       {task.assignee && (
         <div className="mt-3 flex items-center gap-2">
           <span
-            className="flex size-6 items-center justify-center rounded-full bg-muted text-[10px] font-semibold text-muted-foreground"
+            className="flex size-6 items-center justify-center rounded-full bg-muted text-3xs font-semibold text-muted-foreground"
             aria-hidden
           >
             {initials(task.assignee)}
@@ -637,7 +637,7 @@ function TaskItem({
         </div>
       )}
       {task.deliverable === "workflow" && (
-        <div className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">
+        <div className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs text-muted-foreground">
           <ListTree className="size-3 shrink-0" />
           Workflow
         </div>
@@ -703,7 +703,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
   const { blocking, approval, unchecked } = tallyPrerequisites(plan);
   if (blocking > 0) {
     return (
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] font-medium text-destructive">
+      <div className="mt-2 flex items-center gap-1.5 text-2xs font-medium text-destructive">
         <AlertTriangle className="size-3 shrink-0" />
         <span>
           Planned — needs {blocking} thing{blocking === 1 ? "" : "s"}
@@ -718,7 +718,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
   const unresolved = approval + unchecked;
   if (unresolved > 0) {
     return (
-      <div className="mt-2 flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400">
+      <div className="mt-2 flex items-center gap-1.5 text-2xs text-status-blocked-text">
         <CircleHelp className="size-3 shrink-0" />
         <span>
           Planned — {unresolved} to be aware of
@@ -727,7 +727,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
     );
   }
   return (
-    <div className="mt-2 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+    <div className="mt-2 flex items-center gap-1.5 text-2xs text-muted-foreground">
       <ClipboardList className="size-3 shrink-0" />
       <span>
         Planned
@@ -929,7 +929,7 @@ function CreateTaskDialog({
               ))}
             </SelectContent>
           </Select>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             {DELIVERABLE_OPTIONS.find((o) => o.value === deliverable)?.hint}
           </p>
         </div>

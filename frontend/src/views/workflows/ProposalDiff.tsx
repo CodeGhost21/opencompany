@@ -27,7 +27,7 @@ export function ProposalDiff({ diff }: { diff: GraphDiff }) {
           className="flex items-center gap-1 text-muted-foreground"
         >
           {edge.change === "added" ? (
-            <Plus className="size-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+            <Plus className="size-3 shrink-0 text-status-done-text" />
           ) : (
             <Minus className="size-3 shrink-0 text-destructive" />
           )}
@@ -51,7 +51,7 @@ function NodeLine({ node }: { node: NodeChange }) {
     return (
       <span className="block text-muted-foreground">
         <span className="flex items-start gap-1">
-          <Plus className="mt-px size-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+          <Plus className="mt-px size-3 shrink-0 text-status-done-text" />
           <span>
             new step <span className="font-mono">{node.id}</span>{" "}
             <span className="text-foreground">{node.name}</span>

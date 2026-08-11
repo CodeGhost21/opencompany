@@ -271,7 +271,7 @@ export function TaskEditDialog({
               </SelectContent>
             </Select>
             {!DELIVERABLE_EDITABLE.has(task.column) && (
-              <p className="text-[11px] text-muted-foreground">
+              <p className="text-2xs text-muted-foreground">
                 Locked once work starts — the workflow is built when a card enters In progress, so
                 this can only be changed while it&apos;s still in To-do or Planning.
               </p>

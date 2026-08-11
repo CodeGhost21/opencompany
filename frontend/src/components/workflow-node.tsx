@@ -18,9 +18,9 @@ const RUN_STATE_LABEL: Record<NodeRunState, string> = {
 /** Badge tint per run state — read alongside the ring, never instead of it, so
  * the state does not rely on colour alone. */
 const RUN_STATE_BADGE: Record<NodeRunState, string> = {
-  running: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
-  ok: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  error: "bg-red-500/15 text-red-700 dark:text-red-300",
+  running: "bg-status-running-soft text-status-running-text",
+  ok: "bg-status-done-soft text-status-done-text",
+  error: "bg-status-failed-soft text-status-failed-text",
 };
 
 /** A custom xyflow node: emoji + colored header, name, and a one-line summary.
@@ -51,7 +51,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
         {runState && (
           <span
             className={cn(
-              "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
+              "shrink-0 rounded px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide",
               RUN_STATE_BADGE[runState],
             )}
             // "running" is now reported by the engine (issue #382), not a
@@ -68,7 +68,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
           </span>
         )}
       </div>
-      <div className="px-3 py-2 text-[11px] leading-snug text-muted-foreground">
+      <div className="px-3 py-2 text-2xs leading-snug text-muted-foreground">
         {d.summary}
         {typeof d.elapsedMs === "number" && (
           <span className="ml-1 font-mono opacity-70">· {formatElapsed(d.elapsedMs)}</span>

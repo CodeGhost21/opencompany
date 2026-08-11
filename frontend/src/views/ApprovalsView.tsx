@@ -602,15 +602,19 @@ function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
 
   return (
     <div
-      className="space-y-2 rounded-lg border border-sky-500/30 bg-sky-500/5 px-3 py-2"
+      /* Blocked, not running. This arrived in the sky/running colour, which
+         says "the machine is working on it" about the one state that means
+         the opposite: it is parked until a person reads it. Same correction
+         as `runTone`'s "awaiting approval" arm. */
+      className="space-y-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2"
       data-testid="workflow-content-review"
     >
-      <p className="text-[10px] font-medium uppercase tracking-wide text-sky-700 dark:text-sky-300">
+      <p className="text-3xs font-medium uppercase tracking-wide text-status-blocked-text">
         Content awaiting review
       </p>
       {sections.map((section) => (
         <div key={section.nodeId} className="space-y-1">
-          <p className="text-[10px] uppercase tracking-wide text-muted-foreground">
+          <p className="text-3xs uppercase tracking-wide text-muted-foreground">
             {section.nodeId}
           </p>
           {section.messages.length > 0 ? (
@@ -630,7 +634,7 @@ function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
           ) : (
             // No parseable message text — show the raw value so the operator still
             // sees exactly what is about to publish rather than nothing.
-            <pre className="overflow-auto whitespace-pre-wrap rounded border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+            <pre className="overflow-auto whitespace-pre-wrap rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug">
               {JSON.stringify(section.value, null, 2)}
             </pre>
           )}
@@ -643,7 +647,7 @@ function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
 function EmptyApprovals({ onGoToConversation }: { onGoToConversation: () => void }) {
   return (
     <div className="mt-16 flex flex-col items-center gap-3 text-center">
-      <div className="flex size-12 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-status-done-soft text-status-done-text">
         <ShieldCheck className="size-6" />
       </div>
       <div className="space-y-1">

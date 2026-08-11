@@ -117,7 +117,7 @@ export function TaskWorkflowProposalPanel({
         <Workflow className="mt-0.5 size-4 shrink-0 text-muted-foreground" aria-hidden />
         <div className="min-w-0 flex-1">
           <p className="text-sm font-semibold leading-snug">{proposal.summary}</p>
-          <p className="mt-0.5 text-[11px] text-muted-foreground">
+          <p className="mt-0.5 text-2xs text-muted-foreground">
             Proposed workflow · built {generatedAt(proposal.generatedAtMillis)}
           </p>
         </div>
@@ -129,14 +129,14 @@ export function TaskWorkflowProposalPanel({
         // and rejected. Reject stays, so the card is never stuck.
         <Alert className="mt-3 py-1.5">
           <AlertTriangle className="size-3.5" />
-          <AlertDescription className="text-[11px] leading-snug">
+          <AlertDescription className="text-2xs leading-snug">
             <span className="font-medium text-foreground">Apply withheld.</span>{" "}
             {(result as { reason: string }).reason} You can still reject it to send the card back to
             To-do and have the workflow built again.
           </AlertDescription>
         </Alert>
       ) : (
-        <div className="mt-2 text-[11px] leading-snug">
+        <div className="mt-2 text-2xs leading-snug">
           <ProposalDiff diff={(result as { diff: GraphDiff }).diff} />
         </div>
       )}
@@ -144,7 +144,7 @@ export function TaskWorkflowProposalPanel({
       {error && (
         <Alert variant="destructive" className="mt-3 py-1.5" data-testid="task-workflow-proposal-error">
           <AlertTriangle className="size-3.5" />
-          <AlertDescription className="text-[11px] leading-snug">{error}</AlertDescription>
+          <AlertDescription className="text-2xs leading-snug">{error}</AlertDescription>
         </Alert>
       )}
 

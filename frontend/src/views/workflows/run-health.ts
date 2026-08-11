@@ -45,8 +45,12 @@ export function relativeTime(atMillis: number): string {
   return `${Math.round(hours / 24)}d ago`;
 }
 
-/** The status dot for a whole run: red when it failed or lost a report, sky
- * when something is parked for approval, green when everything landed.
+/** The status dot for a whole run.
+ *
+ * Every arm returns one of the console's five run states, so a dot here means
+ * exactly what the same dot means on the task board and in the runs table:
+ * running, blocked on a human, done, failed, or idle. See
+ * docs/design-system/color.md.
  *
  * **A run still in flight is checked FIRST**, ahead of every terminal reading.
  * A running run has no `error`, no `cancelled` and no deliveries yet, so
@@ -54,18 +58,28 @@ export function relativeTime(atMillis: number): string {
  * caller that trusts this function (the last-run chip, the history rows, the
  * cards) paints a run that has not finished as one that succeeded. That is a
  * claim the host has not made.
+ *
+ * The label is not decoration: it ships with the dot at every call site,
+ * because roughly 1 in 12 men cannot separate the red/green pair and a bare
+ * dot puts the whole signal on hue.
  */
 export function runTone(run: WorkflowRunOutcome): { dot: string; label: string } {
-  if (isRunning(run)) return { dot: "animate-pulse bg-sky-500", label: "running" };
-  if (run.error) return { dot: "bg-red-500", label: "failed" };
+  if (isRunning(run)) return { dot: "animate-pulse bg-status-running", label: "running" };
+  if (run.error) return { dot: "bg-status-failed", label: "failed" };
   // Issue #383: checked before the delivery reads, and deliberately NOT red. A
   // stop somebody asked for is not a fault, and a cancelled run has no
   // deliveries to weigh anyway — so without this arm it would fall through to
-  // the green "ok" and read as a clean success.
-  if (run.cancelled) return { dot: "bg-slate-400", label: "stopped" };
-  if (undeliveredCount(run.deliveries) > 0) return { dot: "bg-red-500", label: "not delivered" };
-  if (pendingCount(run.deliveries) > 0) return { dot: "bg-sky-500", label: "awaiting approval" };
-  return { dot: "bg-emerald-500", label: "ok" };
+  // the green "ok" and read as a clean success. Idle is the state for "nothing
+  // is happening and nothing went wrong".
+  if (run.cancelled) return { dot: "bg-status-idle", label: "stopped" };
+  if (undeliveredCount(run.deliveries) > 0)
+    return { dot: "bg-status-failed", label: "not delivered" };
+  // Blocked, not running. This was the running colour, which said "the machine
+  // is working on it" about the one state that means the opposite: it is
+  // parked until a human decides. Amber is the colour that gets looked at.
+  if (pendingCount(run.deliveries) > 0)
+    return { dot: "bg-status-blocked", label: "awaiting approval" };
+  return { dot: "bg-status-done", label: "ok" };
 }
 
 /**

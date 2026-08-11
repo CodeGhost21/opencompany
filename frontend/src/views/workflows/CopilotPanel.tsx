@@ -421,7 +421,7 @@ export function CopilotPanel({
           <Bot className="size-4 shrink-0" aria-hidden />
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">Copilot</div>
-            <div className="truncate text-[11px] text-muted-foreground">{graph.name}</div>
+            <div className="truncate text-2xs text-muted-foreground">{graph.name}</div>
           </div>
         </div>
         <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
@@ -442,7 +442,7 @@ export function CopilotPanel({
             and a turn that says which part of a question it could not answer
             rather than reaching for the rest of the company. See the header of
             `@/api/workflow-copilot`, and `harness::confine` host-side. */}
-        <div className="rounded-lg border bg-muted/30 p-2 text-[11px] leading-snug text-muted-foreground">
+        <div className="rounded-lg border bg-muted/30 p-2 text-2xs leading-snug text-muted-foreground">
           <p>
             Answers are grounded in{" "}
             <span className="font-medium text-foreground">{graph.name}</span>: its steps and
@@ -483,7 +483,7 @@ export function CopilotPanel({
 
         {echoing && (
           <Alert variant="destructive" data-testid="workflow-copilot-echo">
-            <AlertDescription className="text-[11px] leading-snug">
+            <AlertDescription className="text-2xs leading-snug">
               This company has no inference configured, so it can't answer
               questions — it would just repeat them back. Set a provider in
               Settings → Inference, then reopen the copilot.
@@ -492,7 +492,7 @@ export function CopilotPanel({
         )}
 
         {messages.length === 0 && !echoing && (
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             No questions yet. Try “what does this workflow do?” or “why did the
             last run fail?”.
           </p>
@@ -510,7 +510,7 @@ export function CopilotPanel({
               m.role === "operator" ? "workflow-copilot-ask" : "workflow-copilot-reply"
             }
           >
-            <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <p className="mb-1 text-3xs uppercase tracking-wide text-muted-foreground">
               {m.role === "operator" ? "You" : "Company"}
             </p>
             {m.role === "operator" ? (
@@ -543,7 +543,7 @@ export function CopilotPanel({
                 with no way to apply it and no hint that one was attempted. */}
             {m.role === "company" && reviews[m.id]?.problem && (
               <Alert className="mt-2 py-1.5">
-                <AlertDescription className="text-[11px] leading-snug">
+                <AlertDescription className="text-2xs leading-snug">
                   The copilot tried to propose a change this console couldn&apos;t read.{" "}
                   {reviews[m.id].problem} Ask again, or make the change in the editor.
                 </AlertDescription>
@@ -553,7 +553,7 @@ export function CopilotPanel({
         ))}
 
         {sending && (
-          <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <p className="flex items-center gap-1.5 text-2xs text-muted-foreground">
             <Loader2 className="size-3 animate-spin" />
             Thinking…
           </p>
@@ -561,7 +561,7 @@ export function CopilotPanel({
 
         {error && (
           <Alert variant="destructive">
-            <AlertDescription className="text-[11px]">{error}</AlertDescription>
+            <AlertDescription className="text-2xs">{error}</AlertDescription>
           </Alert>
         )}
       </div>

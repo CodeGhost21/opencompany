@@ -769,6 +769,18 @@ jobs:
       - run: npm run build
         working-directory: frontend
 
+      # The design system's token layer, asserted rather than trusted.
+      #
+      # 192 arbitrary font sizes, 87 raw palette colours and 26 stray hexes
+      # were cleared in one pass; without a guard they come back one
+      # convenient exception at a time, and each one is a value the system
+      # cannot see, theme, or change later. The script explains each rule and
+      # names the token to use instead, so a failure is self-service.
+      #
+      # Not part of `build`: this is a policy check, and a separate step names
+      # the failure as one. See docs/design-system/README.md.
+      - run: ./scripts/ci/assert-design-tokens.sh
+
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
 

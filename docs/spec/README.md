@@ -105,10 +105,16 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [feedback-loop/privacy.md](feedback-loop/privacy.md) | Redaction rules (normative) |
 | [feedback-loop/triage.md](feedback-loop/triage.md) | Labels, triage, closing the loop |
 | [vision/README.md](vision/README.md) | The AVI north star (aspirational) |
+| [../brand/README.md](../brand/README.md) | Brand guideline: positioning, voice, colour, form |
+| [../design-system/README.md](../design-system/README.md) | Design system: tokens, type, components (normative for the console) |
 
 Module docs under [`docs/modules/`](../modules/) describe the code as it
 exists today; this spec describes the target design. When they disagree, the
 spec wins for new work.
+
+The brand and design-system docs are the exception to that split: they describe
+what the console ships *today*, because their source of truth is a stylesheet
+(`frontend/src/index.css`) and a page that renders it (`#/styleguide`).
 
 ## Conventions
 

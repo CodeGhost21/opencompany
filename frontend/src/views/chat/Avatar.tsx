@@ -9,6 +9,16 @@ interface Props {
   tone?: string;
   /** The company's own voice wears the brand mark rather than initials. */
   company?: boolean;
+  /**
+   * Draw the tone tile without initials.
+   *
+   * For decorative stacks small enough that no glyph can be read at a size
+   * the tile can hold: a 16px facepile fits two letters only below 10px,
+   * and below 10px is not a size, it is a bug. The tile's colour still
+   * distinguishes one voice from the next, which is the whole of what a
+   * facepile claims to say.
+   */
+  markOnly?: boolean;
   className?: string;
 }
 
@@ -19,7 +29,7 @@ interface Props {
  * avatar from a contact-list one — DM rows, message gutters, and the member
  * pane all draw the same tile at different sizes.
  */
-export function Avatar({ name, tone, company, className }: Props) {
+export function Avatar({ name, tone, company, markOnly, className }: Props) {
   if (company) {
     return (
       <span
@@ -43,7 +53,7 @@ export function Avatar({ name, tone, company, className }: Props) {
       )}
       aria-hidden
     >
-      {initials(name)}
+      {markOnly ? null : initials(name)}
     </span>
   );
 }

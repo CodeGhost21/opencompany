@@ -187,7 +187,7 @@ export function Login({ client, company, companyName, notice, onSignedIn }: Prop
               ))}
             </div>
 
-            <p className="text-center text-[11px] leading-5 text-muted-foreground">
+            <p className="text-center text-2xs leading-5 text-muted-foreground">
               By continuing, you agree to the{" "}
               <a
                 href={TERMS_OF_USE_URL}
