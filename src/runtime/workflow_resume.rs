@@ -1036,6 +1036,7 @@ mode = "full"
                 TaskLink::Unlinked,
                 None,
                 None,
+                None,
             )
             .await
             .expect("journals");

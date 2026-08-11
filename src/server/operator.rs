@@ -5192,6 +5192,7 @@ mod test {
                 at_millis: 1_000,
                 expires_at_millis: crate::ports::now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                origin_parent: None,
                 scope: None,
             });
 

@@ -923,6 +923,12 @@ impl DeliveryParking {
                 now_millis(),
                 task_link,
                 thread,
+                // No thread root either (issue #435), and for a reason one step
+                // upstream of #469's: a workflow node's request is not raised
+                // by a chat message, so there is no message for a continuation
+                // to hang under. The channel above is the whole of the
+                // conversation identity here, exactly as before.
+                None,
                 // No turn key (issue #469): a workflow node's request is not
                 // raised by a cycle, so there is no turn holding a continuation
                 // for it. It resolves and continues on its own, exactly as it

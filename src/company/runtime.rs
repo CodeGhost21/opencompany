@@ -24,7 +24,9 @@ use crate::feedback::store::FeedbackStore;
 use crate::feedback::types::{FeedbackInput, FeedbackItem, FeedbackSummary};
 use crate::policy::ManifestApprovalGate;
 use crate::ports::now_millis;
-use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, Verdict};
+use crate::ports::types::{
+    Actor, ActorKind, ApprovalId, CompanyEvent, CompanyId, EventSeq, Verdict,
+};
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
     EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore,
@@ -1142,16 +1144,84 @@ impl CompanyRuntime {
     /// must not sink an answer the operator can already read on the response
     /// body. It costs the bubble its durable id, which the console reads as "not
     /// saved" and refuses to thread or react on — the honest degradation.
+    ///
+    /// **And the thread within that channel** (issue #435). A channel was the
+    /// finest conversation that existed when the above was written; threads are
+    /// persisted now, so answering into the channel alone drops a threaded
+    /// conversation's own conclusion out of it. The continuation is parented to
+    /// the same root the question hung off — the sibling rule the chat route
+    /// already follows for an ordinary answer (issue #364) — so it renders in
+    /// the thread rather than flat in the channel.
+    ///
+    /// A parent that no longer resolves **degrades to the channel** rather than
+    /// being dropped: see [`resolvable_parent`](Self::resolvable_parent) for
+    /// why that guard is load-bearing rather than defensive.
+    /// A recorded thread root, but only if it still resolves to a message in
+    /// `chat_id` (issue #435). `None` otherwise, which answers in the channel.
+    ///
+    /// **Why this is not defensive coding.** The console folds a transcript
+    /// exactly one level deep and *drops* a reply whose parent it cannot find
+    /// in the channel — it does not fall back to rendering it flat. So a stale
+    /// parent here does not produce a slightly-misplaced bubble; it produces a
+    /// continuation that renders nowhere at all. That is strictly worse than
+    /// the bug this issue fixes, because today's answer at least reaches the
+    /// channel. The issue names the requirement directly: a remembered parent
+    /// that no longer resolves degrades to the channel rather than being
+    /// dropped.
+    ///
+    /// Two ways it fails to resolve, and both must degrade:
+    ///
+    /// * **Gone.** [`read_from`](crate::ports::events::EventLog::read_from)
+    ///   returns events with sequence `>= seq`, so a pruned root comes back as
+    ///   whatever followed it. Comparing the returned sequence to the one asked
+    ///   for is what tells "found it" from "found its successor" — without that
+    ///   check a pruned root silently reparents the answer onto an unrelated
+    ///   message.
+    /// * **Elsewhere.** A root that resolves but lives in another channel is
+    ///   just as unrenderable, and the mismatch means the recorded pair was
+    ///   already inconsistent. Both are the same fact to the reader.
+    ///
+    /// One event read, only when a parent was recorded — a threaded approval,
+    /// not the common case. A read failure degrades to the channel too: the
+    /// answer must not be sunk by a lookup.
+    async fn resolvable_parent(&self, parent: Option<EventSeq>, chat_id: &str) -> Option<EventSeq> {
+        let parent = parent?;
+        let stored = self.events.read_from(&self.id, parent, 1).await.ok()?;
+        let stored = stored.into_iter().next()?;
+        // `>= seq`, so an exact match is the only proof the root itself is
+        // still there rather than its successor.
+        if stored.seq != parent {
+            return None;
+        }
+        let channel = match &stored.event {
+            CompanyEvent::OperatorMessage { chat, .. } => chat.clone(),
+            CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.clone()),
+            // Only a chat message can root a thread; anything else at that
+            // sequence means the recorded parent was never a valid root.
+            _ => None,
+        };
+        (channel.as_deref() == Some(chat_id)).then_some(parent)
+    }
+
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
-        let thread = self.journal.approval_thread(approval_id).flatten();
+        let conversation = self
+            .journal
+            .approval_conversation(approval_id)
+            .unwrap_or_default();
+        let thread = conversation.thread;
         for response in &mut report.responses {
             let chat_id = thread.clone().unwrap_or_else(|| response.channel.clone());
+            // Checked against the channel actually being answered into, not
+            // against the recorded thread: when `thread` is absent the reply
+            // goes to the responding agent's own channel, and a root belonging
+            // to some other channel must not follow it there.
+            let parent = self.resolvable_parent(conversation.parent, &chat_id).await;
             match self
                 .events
                 .append(
                     &self.id,
                     CompanyEvent::AgentReply {
-                        parent: None,
+                        parent,
                         chat_id,
                         agent_id: response.channel.clone(),
                         text: response.text.clone(),
@@ -1185,17 +1255,25 @@ impl CompanyRuntime {
     /// The wording says what is true and what to do: the decision stuck, the
     /// work did not, and re-approving is safe.
     async fn announce_continuation_failure(&self, approval_id: &ApprovalId) {
-        let thread = self
+        let conversation = self
             .journal
-            .approval_thread(approval_id)
-            .flatten()
+            .approval_conversation(approval_id)
+            .unwrap_or_default();
+        let thread = conversation
+            .thread
             .unwrap_or_else(|| crate::runtime::channel::OPERATOR_CHANNEL.to_string());
+        // Issue #435: the bad news belongs in the same place the good news
+        // would have gone. A failure notice left flat in the channel while the
+        // question sits in a thread is the same lost-conclusion bug wearing a
+        // different hat — and this is the message the operator is most likely
+        // to be waiting on.
+        let parent = self.resolvable_parent(conversation.parent, &thread).await;
         if let Err(err) = self
             .events
             .append(
                 &self.id,
                 CompanyEvent::AgentReply {
-                    parent: None,
+                    parent,
                     chat_id: thread,
                     agent_id: crate::runtime::channel::OPERATOR_CHANNEL.to_string(),
                     text: "Your approval was recorded, but the agent could not pick the work \
@@ -2121,5 +2199,187 @@ mod tests {
             "it never started, so it has no start time"
         );
         assert!(abandoned.finished_at_millis.is_some());
+    }
+
+    /// Issue #435: the guard that decides whether a remembered thread root is
+    /// still usable, and the direction it fails in.
+    ///
+    /// Every arm here degrades to `None`, which means "answer in the channel".
+    /// That is the issue's stated requirement and it is not merely tidy: the
+    /// console drops a reply whose parent it cannot resolve in the channel
+    /// rather than rendering it flat, so a stale root would make the
+    /// continuation invisible — strictly worse than the bug being fixed, since
+    /// today's answer at least reaches the channel.
+    #[tokio::test]
+    async fn an_unresolvable_thread_root_degrades_to_the_channel() {
+        use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq};
+        use crate::runtime::RuntimeBuilder;
+
+        let home_dir = tempfile::Builder::new()
+            .prefix("opencompany-parent-")
+            .tempdir()
+            .expect("tempdir");
+        let manifest: crate::company::types::CompanyManifest = toml::from_str(
+            r#"
+            [company]
+            name = "Acme"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+
+            [policy]
+            mode = "supervised"
+            "#,
+        )
+        .expect("manifest");
+        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+            .build()
+            .await
+            .expect("runtime");
+
+        // A real root in `desk-finance`, and a second message elsewhere.
+        let root = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "pay the invoice".into(),
+                    by: None,
+                    chat: Some("desk-finance".into()),
+                    parent: None,
+                },
+            )
+            .await
+            .expect("append");
+        let elsewhere = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "unrelated".into(),
+                    by: None,
+                    chat: Some("desk-ops".into()),
+                    parent: None,
+                },
+            )
+            .await
+            .expect("append");
+
+        // The good case: a root that exists, in the channel being answered.
+        assert_eq!(
+            rt.resolvable_parent(Some(root), "desk-finance").await,
+            Some(root),
+        );
+
+        // No root recorded at all — the overwhelmingly common case, and the
+        // pre-#435 behaviour.
+        assert_eq!(rt.resolvable_parent(None, "desk-finance").await, None);
+
+        // A root that resolves but lives in another channel. Renderable
+        // nowhere, and proof the recorded pair was already inconsistent.
+        assert_eq!(
+            rt.resolvable_parent(Some(elsewhere), "desk-finance").await,
+            None,
+            "a root in another channel must not follow the answer across",
+        );
+
+        // A root that is simply GONE, with a live message after it.
+        //
+        // This is the case the exact-sequence check exists for, and it has to
+        // be built deliberately. `read_from` returns events with sequence >=
+        // the one asked for, so a vanished root comes back as its *successor*.
+        // Asking past the end of the log proves nothing — that read is empty
+        // and every implementation returns `None`. A genuine gap is what
+        // separates "found it" from "found the next one", and the only thing
+        // that makes gaps is pruning, which the events module documents as
+        // leaving them by design.
+        //
+        // So: a prunable frame, then a real message in the channel, then a
+        // pass that removes the first. Without the sequence check the message
+        // answers for the hole underneath it — and it is in the right channel,
+        // so the channel check waves it through.
+        let doomed = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::WorkspaceChanged {
+                    node_id: "n-1".into(),
+                    change: "updated".into(),
+                },
+            )
+            .await
+            .expect("append");
+        let after_the_hole = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "and another thing".into(),
+                    by: None,
+                    chat: Some("desk-finance".into()),
+                    parent: None,
+                },
+            )
+            .await
+            .expect("append");
+        rt.events
+            .prune(
+                &rt.id,
+                &crate::ports::events::RetentionPolicy {
+                    max_entries_per_kind: Some(0),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("prune");
+        // The hole is real, and the next event is a same-channel message.
+        let successor = rt
+            .events
+            .read_from(&rt.id, doomed, 1)
+            .await
+            .expect("read")
+            .into_iter()
+            .next()
+            .expect("the message after the hole answers the read");
+        assert_eq!(
+            successor.seq, after_the_hole,
+            "the pruned sequence must genuinely be absent, answered by its successor",
+        );
+        assert_eq!(
+            rt.resolvable_parent(Some(doomed), "desk-finance").await,
+            None,
+            "a vanished root must not be answered by the message that follows it",
+        );
+
+        // And past the end of the log, where the read is simply empty.
+        let beyond = EventSeq::new(after_the_hole.value() + 500);
+        assert_eq!(
+            rt.resolvable_parent(Some(beyond), "desk-finance").await,
+            None
+        );
+
+        // A sequence that resolves to something that is not a chat message at
+        // all cannot root a thread either.
+        let not_a_message = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::LifecycleChanged {
+                    from: "idle".into(),
+                    to: "running".into(),
+                    by: Actor {
+                        kind: ActorKind::Operator,
+                        id: "owner".into(),
+                    },
+                },
+            )
+            .await
+            .expect("append");
+        assert_eq!(
+            rt.resolvable_parent(Some(not_a_message), "desk-finance")
+                .await,
+            None,
+        );
     }
 }
