@@ -51,6 +51,7 @@ export function StyleguideView() {
         <div className="mt-10 space-y-14 pb-24">
           <ColorSection />
           <StatusSection />
+          <ToneSection />
           <TypeSection />
           <ElevationSection />
           <RadiusSection />
@@ -402,6 +403,70 @@ function StatusSection() {
  * letterforms, and a 24px line clipped mid-word shows the container instead.
  */
 const TAGLINE = "Run an entire company with a headcount of one";
+/* Spelled out, for the reason given above `BRAND_STEPS`. */
+const TONES = [
+  { n: 1, name: "violet", tile: "bg-tone-1/15 text-tone-1-text", chip: "bg-tone-1" },
+  { n: 2, name: "blue", tile: "bg-tone-2/15 text-tone-2-text", chip: "bg-tone-2" },
+  { n: 3, name: "teal", tile: "bg-tone-3/15 text-tone-3-text", chip: "bg-tone-3" },
+  { n: 4, name: "fuchsia", tile: "bg-tone-4/15 text-tone-4-text", chip: "bg-tone-4" },
+  { n: 5, name: "slate", tile: "bg-tone-5/15 text-tone-5-text", chip: "bg-tone-5" },
+] as const;
+
+const TONE_NAMES = ["OC", "AR", "MK", "JL", "TP"] as const;
+
+/**
+ * The identity palette, shown next to the status one on purpose — the whole
+ * point of this section is that a reader can check the two do not collide.
+ */
+function ToneSection() {
+  return (
+    <Section
+      title="Identity tones"
+      hint="A categorical palette for who, not what state. Assigned by hash, so a name keeps its colour — and carrying no meaning beyond 'not the other one'."
+    >
+      <Card>
+        <CardContent className="space-y-4 py-5">
+          <div className="flex flex-wrap gap-2">
+            {TONES.map((t, i) => (
+              <span
+                key={t.n}
+                className={cn(
+                  "grid size-9 place-items-center rounded-md text-xs font-medium",
+                  t.tile,
+                )}
+                title={`tone-${t.n} · ${t.name}`}
+              >
+                {TONE_NAMES[i]}
+              </span>
+            ))}
+          </div>
+          <Separator />
+          <div className="flex flex-wrap gap-x-6 gap-y-2">
+            {TONES.map((t) => (
+              <span key={t.n} className="inline-flex items-center gap-2 text-2xs">
+                <span className={cn("size-2.5 rounded-sm", t.chip)} aria-hidden />
+                <code className="font-mono text-3xs text-muted-foreground">
+                  tone-{t.n}
+                </code>
+                <span className="text-muted-foreground">{t.name}</span>
+              </span>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
+      <p className="text-2xs text-muted-foreground">
+        No amber, no green, no red. Identity used to be drawn from the same
+        palette as status, so a desk could be tinted the exact green that means
+        “done”. Where the hues do come close, form separates them: identity is a{" "}
+        <strong className="font-medium text-foreground">tile with initials</strong>,
+        status is a{" "}
+        <strong className="font-medium text-foreground">pill or dot with a label</strong>.
+        They never take the same shape.
+      </p>
+    </Section>
+  );
+}
+
 const TYPE_STEPS = [
   { cls: "text-3xs", px: "10px", sample: TAGLINE, use: "Table meta, graph labels, counters" },
   { cls: "text-2xs", px: "11px", sample: TAGLINE, use: "Captions, timestamps, key/value rows" },
