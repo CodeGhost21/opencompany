@@ -1,10 +1,14 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { signInWithHubToken, verifyCode } from "@/api/auth";
 import { embeddedHost } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import { ConnectionRail } from "@/components/connection-rail";
+import {
+  CONNECTION_RAIL_WIDTH,
+  ConnectionRail,
+  connectionRailVisible,
+} from "@/components/connection-rail";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
@@ -319,7 +323,21 @@ function Console() {
           void probe(id);
         }}
       />
-      <div className="min-w-0 flex-1">
+      {/* `--oc-rail-inset` tells the shell's `position: fixed` sidebar where
+          this column actually starts. A fixed element positions against the
+          viewport, so without it the sidebar pins to 0 and slides under the
+          rail — see the note on `sidebar-container`. Zero when no rail is
+          drawn, which is the ordinary single-host web deployment. */}
+      <div
+        className="min-w-0 flex-1"
+        style={
+          {
+            "--oc-rail-inset": connectionRailVisible(connections.length)
+              ? CONNECTION_RAIL_WIDTH
+              : "0px",
+          } as CSSProperties
+        }
+      >
         {active && client && (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into
