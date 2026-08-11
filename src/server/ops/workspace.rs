@@ -13,6 +13,7 @@
 //! GET    …/workspace/search?q=…       which notes mention a phrase
 //! POST   …/workspace                  create a folder/file (JSON body)
 //! POST   …/workspace/upload           upload a file of any kind (multipart)
+//! POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays
 //! PUT    …/workspace/file/{nodeId}    overwrite file content
 //! PATCH  …/workspace/{nodeId}         rename / move
 //! DELETE …/workspace/{nodeId}         delete a node (folders recursive)
@@ -66,6 +67,9 @@ use crate::company::workspace_links::file_with_backlinks;
 use crate::company::workspace_search::{
     DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace,
 };
+use crate::company::workspace_sweep::{
+    SweptFolder, sweep_empty_agent_folders as sweep_workspace_agent_folders,
+};
 use crate::error::OpenCompanyError;
 use crate::ports::artifacts::ArtifactAuthor;
 use crate::ports::generate_id;
@@ -87,6 +91,12 @@ pub fn router() -> Router<AppState> {
         // what `/workspace/upload` already is — axum's router prefers a literal
         // segment over a parameter, so `search` is never captured as a node id.
         .merge(scoped("/workspace/search", get(search)))
+        // Another static sibling of `/workspace/{node_id}`, for the same reason
+        // `search` is one (issue #700).
+        .merge(scoped(
+            "/workspace/sweep-empty-agent-folders",
+            post(sweep_empty_agent_folders),
+        ))
         .merge(scoped("/workspace/blob/{node_id}", get(read_blob)))
         .merge(
             scoped("/workspace/upload", post(upload))
@@ -243,6 +253,34 @@ struct SearchQuery {
     /// silent "everything".
     #[serde(default)]
     limit: Option<usize>,
+}
+
+/// Whether the sweep is a preview or the real thing (issue #700).
+#[derive(Debug, Deserialize)]
+struct SweepQuery {
+    /// `true` names what *would* go and removes nothing. Absent means a real
+    /// run: this is a `POST`, and a caller that asked for one without saying
+    /// "preview" asked for the deletion.
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// What the sweep did, or would do.
+///
+/// Exactly one of the two lists is present, and which one says what actually
+/// happened — a preview answers `wouldRemove`, a real run answers `removed`.
+/// That is deliberate rather than tidy: a console reading the field it asked for
+/// cannot mistake a preview for a deletion (or the reverse) if the host and the
+/// request ever disagree about `dry_run`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SweepResult {
+    /// The candidates, on a dry run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    would_remove: Option<Vec<SweptFolder>>,
+    /// What was actually deleted, on a real run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    removed: Option<Vec<SweptFolder>>,
 }
 
 /// The create-node body.
@@ -928,6 +966,52 @@ async fn delete_node(
             "workspace node {node_id}"
         ))))
     }
+}
+
+/// `POST …/workspace/sweep-empty-agent-folders` — remove the empty
+/// `Agents/<id>/` folders a pre-#570 company still carries (issue #700).
+///
+/// Operator-triggered rather than automatic, and this route is the surface that
+/// makes that possible. The affected population is hosted tenants whose operator
+/// has a console and no shell, so a subcommand would be unreachable for exactly
+/// the people who need it; a boot sweep would change a tenant's tree on an
+/// upgrade nobody asked for, which is the outcome #570 and #645 both declined.
+/// The click is the opt-in.
+///
+/// `?dry_run=true` names the candidates and touches nothing, so the console can
+/// list every folder on a confirm dialog before the operator agrees. The real
+/// call answers with what actually went, and logs it — "removed 17 folders" is
+/// not something an operator who disagrees can check.
+///
+/// The deletes run through `runtime.workspace()`, the same announcer-wrapped
+/// handle [`delete_node`] uses, so each removal emits its own
+/// `WorkspaceChanged{change:"removed"}` (issue #327) and any console watching
+/// the feed sees the tree change rather than discovering it on the next refetch.
+///
+/// Same authorization as the per-node delete: addressing the company is the
+/// guard, because this removes only nodes that provably hold nothing.
+async fn sweep_empty_agent_folders(
+    company: ScopedCompany,
+    Query(query): Query<SweepQuery>,
+) -> Result<Json<SweepResult>, ApiError> {
+    let folders = sweep_workspace_agent_folders(
+        company.runtime.workspace().as_ref(),
+        company.id(),
+        query.dry_run,
+    )
+    .await?;
+
+    Ok(Json(if query.dry_run {
+        SweepResult {
+            would_remove: Some(folders),
+            removed: None,
+        }
+    } else {
+        SweepResult {
+            would_remove: None,
+            removed: Some(folders),
+        }
+    }))
 }
 
 #[cfg(test)]

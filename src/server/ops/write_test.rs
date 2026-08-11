@@ -1598,6 +1598,235 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     assert_eq!(results["total"], json!(1));
 }
 
+/// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
+/// one-time tidy of the empty `Agents/<id>/` folders a pre-#570 company still
+/// carries.
+///
+/// The whole route in one test, because the halves only mean something together:
+/// the dry run has to name every folder *and* leave the tree alone, or the
+/// confirm dialog it feeds is either uninformative or a lie; the real run has to
+/// remove exactly those folders, leave the occupied one, and announce each
+/// removal so a console watching the feed sees the tree change rather than
+/// discovering it on the next refetch.
+#[tokio::test]
+async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Boot already scaffolded `Agents/`; find it rather than making a rival.
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    let agents_id = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Agents")
+        .expect("boot scaffolds the Agents root")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two strays from the #551 era, one folder that actually holds a
+    // deliverable, and a note filed directly under the root by an operator.
+    let mut empty = Vec::new();
+    for id in ["ceo", "cto"] {
+        let (_, folder) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workspace",
+            Some(json!({"name": id, "kind": "folder", "parentId": agents_id})),
+        )
+        .await;
+        empty.push(folder["id"].as_str().unwrap().to_string());
+    }
+    let (_, cmo) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "cmo", "kind": "folder", "parentId": agents_id})),
+    )
+    .await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "launch-brief.md",
+            "kind": "file",
+            "parentId": cmo["id"].as_str().unwrap(),
+            "content": "# Launch",
+        })),
+    )
+    .await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "README.md",
+            "kind": "file",
+            "parentId": agents_id,
+            "content": "# who is who",
+        })),
+    )
+    .await;
+
+    let before = {
+        let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+        provisioned_names(&tree)
+    };
+    let events_before = journal_len(&runtime).await;
+
+    // -- the preview ------------------------------------------------------
+    let (status, preview) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        swept_names(&preview["wouldRemove"]),
+        vec!["ceo", "cto"],
+        "the confirm dialog needs every folder named, not a count: {preview}"
+    );
+    assert!(
+        preview.get("removed").is_none(),
+        "a preview must not claim it removed anything: {preview}"
+    );
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        before,
+        "a dry run must leave the tree exactly as it found it"
+    );
+    assert_eq!(
+        journal_len(&runtime).await,
+        events_before,
+        "a dry run must not announce anything either"
+    );
+
+    // -- the real thing ---------------------------------------------------
+    let (status, done) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        swept_names(&done["removed"]),
+        vec!["ceo", "cto"],
+        "an operator who disagrees needs to know what went: {done}"
+    );
+    assert!(
+        done.get("wouldRemove").is_none(),
+        "a real run must not answer in the preview's field: {done}"
+    );
+
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        vec![
+            "Agents".to_string(),
+            "README.md".to_string(),
+            "cmo".to_string(),
+            "launch-brief.md".to_string(),
+        ],
+        "the folder holding a deliverable, the operator's note and the root all stay"
+    );
+
+    // One `WorkspaceChanged{removed}` per folder — the announcer is reached
+    // because the handler deletes through `runtime.workspace()`, the same
+    // wrapped handle the per-node delete uses (issue #327).
+    let journal = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    //
+    // Sorted on both sides rather than compared in creation order: the sweep
+    // walks whatever order `tree()` returns, and the port promises none.
+    let mut announced: Vec<&str> = journal
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            CompanyEvent::WorkspaceChanged { node_id, change } if change == "removed" => {
+                Some(node_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    announced.sort_unstable();
+    let mut expected: Vec<&str> = empty.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    assert_eq!(
+        announced, expected,
+        "each removal announces itself, exactly once, and nothing else was announced removed"
+    );
+
+    // -- and again, which must be a no-op ---------------------------------
+    let (status, again) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        again["removed"],
+        json!([]),
+        "running it twice must remove nothing the second time: {again}"
+    );
+
+    // The route resolves under the platform scope form too, and is never
+    // captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, scoped) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/workspace/sweep-empty-agent-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["wouldRemove"], json!([]));
+}
+
+/// The sorted folder names in a sweep response list.
+fn swept_names(list: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = list
+        .as_array()
+        .unwrap_or_else(|| panic!("the sweep answers with a list, got {list}"))
+        .iter()
+        .map(|folder| folder["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// How many events the company has journalled so far.
+async fn journal_len(runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>) -> usize {
+    runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .len()
+}
+
 #[tokio::test]
 async fn skills_install_persists_the_registry_document_not_the_client_metadata() {
     let home_dir = home();
