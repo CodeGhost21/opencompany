@@ -101,6 +101,8 @@ pub struct ProxyResponse {
 pub enum ProxyError {
     #[error("no such connection: {0}")]
     UnknownConnection(ConnectionId),
+    #[error("not an absolute host url: {0:?}")]
+    UnusableBaseUrl(String),
     #[error("{0}")]
     Transport(String),
 }
@@ -156,8 +158,24 @@ impl ProxyRegistry {
     }
 
     /// Registers or replaces a connection.
-    pub async fn upsert(&self, id: ConnectionId, connection: Connection) {
+    ///
+    /// Refuses a base url this registry could never request. `join` is textual,
+    /// so a relative base — `""` above all, which a browser reads as "same
+    /// origin" — yields a relative url, and `reqwest` rejects that at `send`.
+    /// Every request for the connection then fails identically, and the failure
+    /// says "could not be reached" about a host that was never addressed.
+    ///
+    /// Registration is where that has to be caught. It is the moment the base
+    /// url is known and the last one at which the caller is still on the stack;
+    /// afterwards the mistake is only visible as a network fault, which is how
+    /// the desktop came to open on an unreachable connection every launch
+    /// (issue #613).
+    pub async fn upsert(&self, id: ConnectionId, connection: Connection) -> Result<(), ProxyError> {
+        if reqwest::Url::parse(&connection.base_url).is_err() {
+            return Err(ProxyError::UnusableBaseUrl(connection.base_url));
+        }
         self.connections.write().await.insert(id, connection);
+        Ok(())
     }
 
     pub async fn remove(&self, id: &str) {
@@ -424,7 +442,8 @@ mod test {
                     credential: Credential::Device("acme.the-real-token".into()),
                 },
             )
-            .await;
+            .await
+            .expect("an absolute host url");
 
         let mut headers = HashMap::new();
         headers.insert(
@@ -501,7 +520,8 @@ mod test {
                     credential: Credential::Device("acme.the-secret".into()),
                 },
             )
-            .await;
+            .await
+            .expect("an absolute host url");
 
         let url = registry
             .base_url("primary")
@@ -518,9 +538,39 @@ mod test {
         assert_eq!(join("http://h.test", "/api/v1"), "http://h.test/api/v1");
         assert_eq!(join("http://h.test/", "/api/v1"), "http://h.test/api/v1");
         assert_eq!(join("http://h.test/", "api/v1"), "http://h.test/api/v1");
-        // Same-origin, which is what the embedded host looks like before its
-        // port is known.
-        assert_eq!(join("", "/api/v1"), "/api/v1");
+    }
+
+    /// A base url with no authority is not a host, and saying so early is the
+    /// whole point.
+    ///
+    /// This test used to assert the opposite — that `join("", "/api/v1")`
+    /// giving `/api/v1` was fine, on the theory that an empty base meant
+    /// "same origin, port not known yet". Nothing here has an origin to be the
+    /// same as: the embedded host reports a real `127.0.0.1:<port>` once it
+    /// binds, and `reqwest` cannot request a relative url from any of them. The
+    /// comment made an unreachable connection look intentional, and the desktop
+    /// duly shipped one (issue #613).
+    #[tokio::test]
+    async fn a_base_url_that_names_no_host_is_refused_at_registration() {
+        let registry = ProxyRegistry::new();
+        for base in ["", "   ", "/api/v1", "acme.test"] {
+            let error = registry
+                .upsert(
+                    "primary".into(),
+                    Connection {
+                        base_url: base.into(),
+                        credential: Credential::None,
+                    },
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                error.to_string().contains("not an absolute host url"),
+                "{base:?} must be refused by name, not silently: {error}"
+            );
+        }
+        // Refused means not registered, rather than registered and broken.
+        assert!(registry.ids().await.is_empty());
     }
 
     #[tokio::test]
@@ -554,7 +604,8 @@ mod test {
                     credential: Credential::None,
                 },
             )
-            .await;
+            .await
+            .expect("an absolute host url");
         registry
             .upsert(
                 "b".into(),
@@ -563,7 +614,8 @@ mod test {
                     credential: Credential::None,
                 },
             )
-            .await;
+            .await
+            .expect("an absolute host url");
 
         let mut ids = registry.ids().await;
         ids.sort();
