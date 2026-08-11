@@ -1491,7 +1491,7 @@ impl HarnessBrain {
                     let mut found = on_card.remove(index);
                     prior_node = found.workspace_node_id().map(str::to_string);
                     version = found.push_version(
-                        &pending.payload.artifact_body(),
+                        pending.payload.artifact_body(),
                         ArtifactAuthor::Agent,
                         author,
                         at,
@@ -1511,7 +1511,7 @@ impl HarnessBrain {
                         &card.id,
                         &pending.title,
                         pending.kind,
-                        &pending.payload.artifact_body(),
+                        pending.payload.artifact_body(),
                         author,
                         at,
                     )

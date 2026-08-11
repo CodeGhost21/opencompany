@@ -2440,10 +2440,17 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         "a recursive delete must remove descendants' payloads too"
     );
 
-    // -- Past the 16 MB BSON document cap ---------------------------------
+    // -- Past the 16 MB BSON document cap, under the per-write cap --------
     //
-    // 17 MiB, patterned rather than zeroed so a backend that silently
-    // truncates or pads is caught by the digest instead of matching by luck.
+    // 17 MiB does double duty. It is past MongoDB's 16 MB BSON document limit,
+    // which is the case GridFS exists for — and it is comfortably under
+    // `DEFAULT_MAX_BLOB_BYTES` (64 MiB), so it is also the proof that a large
+    // but legitimate payload still round-trips on **all three** backends rather
+    // than being caught by the cap. The boundary either side of the cap itself
+    // is asserted on the quota decorator, where the comparison lives.
+    //
+    // Patterned rather than zeroed so a backend that silently truncates or pads
+    // is caught by the digest instead of matching by luck.
     let big: Vec<u8> = (0..17 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
     let (big_size, big_sha) = crate::ports::workspace::blob_metadata(&big);
     ws.create_binary(

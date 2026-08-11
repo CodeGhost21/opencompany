@@ -187,6 +187,21 @@ strands only a blob nothing references; `MongoStore::from_database` sweeps those
 at boot. Tenancy in the shared bucket is a filter on `metadata.company_id` **and**
 `metadata.node_id` for every read, delete and sweep.
 
+**Search (for #607).** No workspace search exists yet; when one is built, a
+binary node is **matchable by name and never content-scanned**. Its bytes are
+not text, so scanning them would produce mojibake matches, waste I/O
+proportional to the payload, and — on a streaming backend — pull a whole video
+through memory to find nothing.
+
+The port already makes the safe behaviour the default rather than a rule to
+remember: a text `read` of a binary node returns an **empty body** on all three
+backends, so a content scan built over `read`/`tree` finds nothing for one
+automatically. It does not need to know binaries exist, and it cannot
+accidentally index them. A scan that wants to *say* something about a payload
+should use `mime`/`size`/`sha256` off the node, which the tree read already
+carries — the same fields `workspace_list` renders. `read_bytes` is for serving
+a download and should not appear in a search path at all.
+
 `assert_workspace_binary_store` pins all of it across all three backends,
 including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:
 `GET …/workspace/blob/{id}` streams the payload (`ETag` = sha256) and

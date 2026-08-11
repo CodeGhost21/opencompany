@@ -47,13 +47,56 @@ use crate::error::{OpenCompanyError, Result};
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{BlobStream, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-/// The default per-file cap: 256 MiB.
+/// The default cap on a single binary write: 64 MiB.
+///
+/// # Why there is a number here at all
+///
+/// Until this issue, MongoDB's 16 MB BSON document limit was an *accidental*
+/// brake: a large payload physically could not be stored, so nothing had to
+/// decide whether it should be. GridFS exists precisely to remove that limit by
+/// chunking it away. The moment it lands, the only thing standing between a
+/// retry-looping agent and unbounded writes into a hosted tenant's database is
+/// a deliberate refusal — and there was none, and no lever for an operator to
+/// see or set one. This constant is that refusal. It is cheap now and a
+/// migration later.
+///
+/// # Why 64 MiB
+///
+/// Sized against what a binary node is *for*: the output of
+/// `media_generate_image`, a `csv_export`, a PDF or spreadsheet a `shell` step
+/// produced, a downloaded attachment. A generated image is single-digit
+/// megabytes even at high resolution; a generated document rarely reaches ten.
+/// 64 MiB clears all of those by an order of magnitude, so no legitimate
+/// deliverable of the kinds this feature exists to make durable is anywhere
+/// near it.
+///
+/// It deliberately is **not** sized down to image-only. Issue #553's stated
+/// purpose is to stop a paid generation from becoming a dangling digest, and
+/// `media_generate_video` is one of the paid tools named in it; a cap that
+/// refused every short generated clip would re-create the exact bug this change
+/// removes, one tier down. A few seconds of generated video lands in the low
+/// tens of megabytes and fits.
+///
+/// # What it costs to hit it
+///
+/// A caller producing something genuinely larger — a long or high-bitrate
+/// video, a multi-gigabyte dataset, a full disk image — is refused with the
+/// limit and the attempted size named, and nothing is stored. The file stays in
+/// the agent's sandbox and is not durable, which is the pre-#553 situation for
+/// that one file. That is a real loss and it is the intended trade: the
+/// alternative is an unbounded write path into a shared tenant database, where
+/// the cost is borne by everyone rather than by the one oversized artifact.
+///
+/// Operators who need more set `[workspace] max_blob_mb`; the constant is only
+/// the default.
+///
+/// # One number, two enforcement points
 ///
 /// Also the upload route's `DefaultBodyLimit`, so a request too large to accept
-/// is rejected at the edge with the same number and the same status the store
-/// would have used. One limit, stated twice, is a bug waiting to happen — so
-/// both read it from here.
-pub const DEFAULT_MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
+/// is rejected at the edge with the same number and the same 413 the store
+/// would have used. One limit stated twice is a bug waiting to happen — so both
+/// read it from here.
+pub const DEFAULT_MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The limits a company's workspace is held to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -449,5 +492,49 @@ mod test {
         assert_eq!(quota.max_blob_bytes, DEFAULT_MAX_BLOB_BYTES);
         assert_eq!(quota.tree_quota_bytes, None);
         assert!(!quota.is_unlimited());
+    }
+
+    /// The boundary, from both sides.
+    ///
+    /// An off-by-one here is not cosmetic: one direction refuses a deliverable
+    /// that is exactly at the documented limit, and the other is the first byte
+    /// of an unbounded write path. Asserted on the decorator rather than by
+    /// storing 64 MiB three times, because the comparison *is* the logic —
+    /// everything below it is the backends' round-trip, which
+    /// `assert_workspace_binary_store` already pins with a 17 MiB payload.
+    #[tokio::test]
+    async fn a_write_at_the_cap_is_admitted_and_one_byte_over_is_refused() {
+        let (_dir, store, co) = wired(WorkspaceQuota {
+            max_blob_bytes: 64,
+            tree_quota_bytes: None,
+        });
+
+        store
+            .create_binary(&co, &png("at", "at.png"), &[0u8; 64])
+            .await
+            .expect("exactly at the cap must be stored");
+
+        let err = store
+            .create_binary(&co, &png("over", "over.png"), &[0u8; 65])
+            .await
+            .expect_err("one byte over must be refused");
+        // Actionable: what was attempted and what is allowed. A truncation
+        // would be worse than either — a truncated binary is a corrupt binary,
+        // and it would carry a digest the store computed over the wrong bytes.
+        let msg = err.to_string();
+        assert!(msg.contains("65 bytes"), "the attempted size: {msg}");
+        assert!(msg.contains("64 bytes"), "the limit: {msg}");
+        assert!(msg.contains("Nothing was stored"), "{msg}");
+
+        // The refusal stored nothing — not a truncated 64-byte node.
+        assert!(store.read_bytes(&co, "over").await.unwrap().is_none());
+        // …and the replacement path enforces the same boundary.
+        assert!(
+            store
+                .write_binary(&co, "at", &[0u8; 65], None, WorkspaceOrigin::Operator)
+                .await
+                .is_err(),
+            "the cap is per write, so a replacement is capped too"
+        );
     }
 }
