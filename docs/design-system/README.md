@@ -80,10 +80,13 @@ everywhere at once — that is the payoff for the indirection.
 
 **File:** [OpenCompany Design System](https://www.figma.com/design/bUj8Ofz2EQL6Y8DU06zbDR)
 
-Generated from these tokens, not drawn by hand. Every swatch, specimen and
-component is **bound to a variable** — change a token and the documentation
-pages redraw themselves. A foundations page painted with hex literals is a
-screenshot that lies the moment the system moves.
+Built from these tokens rather than eyeballed. Every swatch, specimen and
+component is **bound to a variable**, so changing a variable's value redraws
+the documentation pages that show it — a foundations page painted with hex
+literals is a screenshot that lies the moment the system moves.
+
+Binding is what keeps the file coherent internally. Keeping it in step with
+*this repo* is a separate, manual job — see below.
 
 | Collection | Variables | Contents |
 | --- | --- | --- |
@@ -100,22 +103,28 @@ Every variable carries an explicit scope and a **WEB code syntax** naming the
 real CSS variable — `color/status/running` reports as `var(--status-running)`
 — so Dev Mode round-trips to this codebase rather than to an invented name.
 
-### Regenerating it
+### Keeping it in step — by hand, for now
 
-The library is a **build output**. [`figma-plugin/`](../../figma-plugin/) holds
-a Figma development plugin that writes the whole thing — variables, styles,
-pages, components — from the same token values. Import it once via Figma
-desktop → Plugins → Development → Import plugin from manifest, then run it
-whenever a token moves.
+**The codebase is the source of truth; Figma follows.** When a token changes
+in `index.css`, update the matching variable's value in the Figma file — the
+aliases and bound styles propagate the rest. Never fix a drift by editing a
+swatch's fill: that puts a literal back into a file whose whole point is that
+it has none.
 
-It exists because the hosted MCP server is capped at **6 tool calls per month**
-on a Starter plan with a View seat. A dev plugin runs the same Plugin API with
-no rate limit and no seat gate, which is what makes the library maintainable
-rather than a one-time hand-off that drifts.
+There is no generator in this repo. One was written and removed before merge,
+so the sync is manual and will drift the way manual syncs do. Two things make
+that survivable:
 
-Re-running is safe: everything is matched by exact name and updated in place.
-`node figma-plugin/test.js` executes the generator against a mock Plugin API
-and asserts, among other things, that a second run adds nothing.
+- The variables are **aliased**, not copied. Changing a primitive moves every
+  semantic that points at it, so a palette change is a handful of edits rather
+  than 125.
+- Every variable carries the real CSS variable name as its code syntax, so a
+  drift is visible in Dev Mode rather than silent.
+
+If the sync becomes a burden, the durable fix is a Figma development plugin
+driving the Plugin API — it has no rate limit and no seat gate, unlike the
+hosted MCP server, which allows **6 tool calls per month** on a Starter plan
+with a View seat.
 
 ### Plan constraints worth knowing
 
@@ -131,14 +140,9 @@ Professional:
    file is Cover / Foundations / Components, with sections carrying the
    separation.
 3. **MCP call limit — 6 per month** on a View seat, which is what stopped the
-   original build after Button and Status Badge. The remaining primitives are
-   built by the plugin above instead, which is not subject to it.
-
-### Keeping it in sync
-
-The codebase is the source of truth; Figma follows. When a token changes in
-`index.css`, update the matching variable's value — the aliases and bound
-styles propagate the rest. Do not fix a drift by editing a swatch's fill.
+   build. Button and Status Badge are in the file; Input, Badge, Alert, Avatar,
+   Tab and Card are specified in [`components.md`](components.md) and not yet
+   drawn. Drawing them needs either an upgraded seat or a plugin.
 
 ---
 
@@ -156,8 +160,8 @@ Catalogued rather than hidden.
 | Contrast failures in the running app | 3 | **Cleared** — see [Auditing](#auditing-the-running-app) |
 | Geist Mono not installed | — | **Cleared** — [`typography.md`](typography.md#the-mono-face) |
 | No vector logo asset | — | Open — [`../brand/README.md`](../brand/README.md#6-logo--marks) |
-| Figma tokens transcribed by hand | — | Open — [`figma-plugin/README.md`](../../figma-plugin/README.md#keeping-tokens-in-sync) |
-| Figma library covers 8 of N components | — | Open — [The Figma library](#the-figma-library) |
+| Figma kept in step by hand | — | Open — [Keeping it in step](#keeping-it-in-step--by-hand-for-now) |
+| Figma library covers 8 components | — | Open — [The Figma library](#the-figma-library) |
 
 ## Auditing the running app
 
