@@ -147,6 +147,34 @@ export interface TaskPlan {
 }
 
 /** A board card as the host returns it. */
+/**
+ * Whether a card produces a one-off result or a reusable workflow (issue #580).
+ * The operator chooses explicitly — nothing infers it. Omitted on the wire when
+ * `once` (the default), so a one-off card is byte-identical to a pre-#580 card;
+ * treat an absent value as `"once"`.
+ */
+export type TaskDeliverable = "once" | "workflow";
+
+/**
+ * A workflow the builder pass proposed for a `workflow`-deliverable card,
+ * awaiting operator approval (issue #580).
+ *
+ * It is NOT a saved workflow: the graph reaches the workflow list only when a
+ * person applies it (see {@link applyWorkflowProposal}). `ops` is the stored
+ * `{ id, name, description, nodes, edges }` authoring payload the host rebuilds
+ * and re-validates from — treated as opaque here.
+ */
+export interface TaskWorkflowProposal {
+  /** One line on what the proposed workflow does — what a review panel leads with. */
+  summary: string;
+  /** The stored authoring graph. Opaque on the client; the host is its authority. */
+  ops: unknown;
+  /** Epoch-millis the builder pass produced it. */
+  generatedAtMillis: number;
+  /** The build attempt this proposal accounts for (issues #339 / #242). */
+  runId: string;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -181,6 +209,19 @@ export interface Task {
    * nobody has planned, which is every card until it is dragged into Planning.
    */
   plan?: TaskPlan;
+  /**
+   * Whether the card produces a one-off result or a reusable workflow
+   * (issue #580). Absent means `"once"` — the default and the historical
+   * behaviour, so a one-off card's wire shape is unchanged.
+   */
+  deliverable?: TaskDeliverable;
+  /**
+   * The workflow the builder pass proposed, awaiting approval (issue #580).
+   * Present only while a `workflow` card sits In Review with a built proposal;
+   * absent otherwise. Apply or reject it with {@link applyWorkflowProposal} /
+   * {@link rejectWorkflowProposal}.
+   */
+  workflowProposal?: TaskWorkflowProposal;
 }
 
 /** The create body; the host defaults column→`todo`, priority→`medium`. */
@@ -206,6 +247,12 @@ export interface CreateTask {
    * reached from this body.
    */
   originChatId?: string;
+  /**
+   * The operator's explicit once-vs-workflow choice (issue #580, decision D2a).
+   * Omitting it means `"once"`. A `"workflow"` card lands in To-do like any
+   * other; the builder pass fires only when it is dragged into In Progress.
+   */
+  deliverable?: TaskDeliverable;
 }
 
 /** A partial update; any omitted field is left as-is. A drag sends `{column}`. */
@@ -215,6 +262,12 @@ export interface PatchTask {
   column?: string;
   priority?: string;
   assignee?: string;
+  /**
+   * Flip the once-vs-workflow choice (issue #580). Omitting it leaves the choice
+   * untouched — so an operator can flip a To-do card to `"workflow"` before
+   * dragging it into In Progress.
+   */
+  deliverable?: TaskDeliverable;
 }
 
 export function listTasks(
@@ -643,6 +696,41 @@ export function deleteTask(
 ): Promise<void> {
   return client.del<void>(
     `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}`,
+  );
+}
+
+/**
+ * Approve the workflow the builder pass proposed for a card sitting In Review
+ * (issue #580). The host rebuilds the graph from the STORED proposal, runs it
+ * through the one workflow-authoring path (full validation, #276 create-disarm
+ * for a scheduled graph), links the card to the created workflow, and returns
+ * the card moved to Done. A refused create (roster drift, a name taken since)
+ * rejects with a 400 and leaves the card In Review with its proposal intact.
+ */
+export function applyWorkflowProposal(
+  client: OpenCompanyClient,
+  company: string | null,
+  id: string,
+): Promise<Task> {
+  return client.post<Task>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}/workflow-proposal/apply`,
+    {},
+  );
+}
+
+/**
+ * Reject the proposed workflow (issue #580, decision D2c): clears the proposal
+ * and returns the card to To-do. The card keeps its `workflow` deliverable, so
+ * dragging it back into In Progress builds again. Returns the updated card.
+ */
+export function rejectWorkflowProposal(
+  client: OpenCompanyClient,
+  company: string | null,
+  id: string,
+): Promise<Task> {
+  return client.post<Task>(
+    `${client.scopeFor(company)}/tasks/${encodeURIComponent(id)}/workflow-proposal/reject`,
+    {},
   );
 }
 
