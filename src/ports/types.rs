@@ -4146,6 +4146,37 @@ mod test {
         assert_eq!(parsed.desk_order, record.overlay_desk_order);
     }
 
+    /// The persisted overlay blob round-trips the `[policy]` override, and a
+    /// blob written before it existed still parses (issue #562).
+    ///
+    /// Both halves matter. Without the first, a serialization path that dropped
+    /// the field would move an operator's approval gate back to the manifest on
+    /// the next load, silently. Without the second, every company record written
+    /// before this feature would fail to parse at all.
+    #[test]
+    fn overlay_blob_round_trips_the_policy_override() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("auto"), Some(vec!["payment.send"])));
+
+        let blob = OverlayBlob::from_record(&record);
+        let json = serde_json::to_string(&blob).expect("serialize blob");
+        let parsed = OverlayBlob::parse(&json).expect("parse blob");
+        assert_eq!(parsed.policy, record.overlay_policy);
+
+        // A blob from before this field existed loads as "not overridden",
+        // which is the pre-#562 behaviour exactly.
+        let legacy = r#"{"agents":[],"desk_members":[],"budgets":[]}"#;
+        let blob = OverlayBlob::parse(legacy).expect("blob without a policy key");
+        assert!(
+            blob.policy.is_none(),
+            "an older record must load with the manifest's policy in charge"
+        );
+
+        // And so does the oldest form of all, the bare agent array.
+        let bare = OverlayBlob::parse("[]").expect("legacy array");
+        assert!(bare.policy.is_none());
+    }
+
     /// An object-form blob written before `desk_order` existed still parses, and
     /// the legacy bare-array form still parses — both with an empty order.
     #[test]

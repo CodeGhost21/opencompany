@@ -145,7 +145,20 @@ const TIER_TEXT: &[TierDto] = &[
 /// list authoritative about what exists; `TIER_TEXT` is only authoritative about
 /// how it reads.
 fn selectable_tiers() -> Vec<&'static TierDto> {
-    POLICY_MODES
+    tiers_for(POLICY_MODES)
+}
+
+/// [`selectable_tiers`] over an explicit mode list.
+///
+/// Split out so the filter can be tested against a list that is not
+/// `POLICY_MODES`. That is not ceremony: `TIER_TEXT` and `POLICY_MODES` now hold
+/// the same four tiers (issue #560 landed `auto`), so a test driven off
+/// `POLICY_MODES` alone can no longer tell a filtered list from an unfiltered
+/// one — deleting the filter would leave every such assertion passing. A test
+/// that has stopped discriminating looks exactly like coverage, which is worse
+/// than no test at all.
+fn tiers_for(modes: &[&str]) -> Vec<&'static TierDto> {
+    modes
         .iter()
         .filter_map(|mode| TIER_TEXT.iter().find(|tier| tier.value == *mode))
         .collect()
@@ -354,6 +367,170 @@ async fn save(company: &ScopedCompany, record: &CompanyRecord) -> Result<(), Res
 mod tests {
     use super::*;
 
+    use axum::body::{Body, to_bytes};
+    use axum::http::Request;
+    use serde_json::{Value, json};
+    use tower::ServiceExt;
+
+    use crate::company::CompanyManifest;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::CompanyId;
+    use crate::runtime::RuntimeBuilder;
+    use crate::server::router;
+    use crate::store::FsCompanyStore;
+    use crate::{AppConfig, AppState};
+
+    const MANIFEST: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+         [policy]\nmode = \"supervised\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-policy-")
+            .tempdir()
+            .expect("tempdir")
+    }
+
+    async fn state(home: &std::path::Path) -> AppState {
+        let manifest: CompanyManifest = toml::from_str(MANIFEST).unwrap();
+        let store = FsCompanyStore::new(home.to_path_buf());
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+        let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        state
+    }
+
+    async fn call(state: &AppState, method: &str, body: Option<Value>) -> (StatusCode, Value) {
+        let request = Request::builder()
+            .method(method)
+            .uri("/api/v1/company/policy")
+            .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+            .header("content-type", "application/json");
+        let request = match body {
+            Some(value) => request.body(Body::from(value.to_string())).unwrap(),
+            None => request.body(Body::empty()).unwrap(),
+        };
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+        (status, value)
+    }
+
+    /// `GET` reports the manifest's policy when nothing is overridden, and says
+    /// so — `overridden` is what the console keys the reset control off.
+    #[tokio::test]
+    async fn get_reports_the_manifest_policy_when_nothing_is_overridden() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "GET", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(body["manifestMode"], "supervised");
+        assert_eq!(body["overridden"], false);
+        assert!(body["setBy"].is_null());
+        assert!(!body["tiers"].as_array().unwrap().is_empty());
+    }
+
+    /// A tier `PUT` moves the tier and leaves the always-ask list on the
+    /// manifest's value — the independence the console's two controls rely on.
+    #[tokio::test]
+    async fn putting_a_tier_leaves_the_always_ask_list_alone() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "PUT", Some(json!({ "mode": "full" }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mode"], "full");
+        assert_eq!(body["overridden"], true);
+        assert_eq!(
+            body["alwaysApprove"],
+            json!(["payment.send", "filing.submit"]),
+            "setting the tier must not discard the manifest's always-ask list"
+        );
+        // And it persisted, rather than only being reflected in the response.
+        let (_, reread) = call(&state, "GET", None).await;
+        assert_eq!(reread["mode"], "full");
+    }
+
+    /// An emptied always-ask list is stored as empty, not resolved back to the
+    /// manifest's three defaults.
+    #[tokio::test]
+    async fn an_emptied_always_ask_list_is_stored_as_empty() {
+        let dir = home();
+        let state = state(dir.path()).await;
+        let (status, body) = call(&state, "PUT", Some(json!({ "alwaysApprove": [] }))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["alwaysApprove"], json!([]));
+        assert_eq!(body["mode"], "supervised", "the tier must not have moved");
+    }
+
+    /// A body that sets nothing is refused rather than stored, and an unknown
+    /// tier is refused rather than silently downgraded to `supervised`.
+    #[tokio::test]
+    async fn an_empty_body_and_an_unknown_tier_are_both_refused() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        let (status, _) = call(&state, "PUT", Some(json!({}))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+        let (status, _) = call(&state, "PUT", Some(json!({ "mode": "supervized" }))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "an unknown tier must be refused — accepting it would leave the console \
+             showing a tier the gate was not running"
+        );
+
+        // Neither refusal stored anything.
+        let (_, body) = call(&state, "GET", None).await;
+        assert_eq!(body["overridden"], false);
+    }
+
+    /// `DELETE` restores the manifest's policy and is a no-op when nothing is
+    /// stored.
+    #[tokio::test]
+    async fn delete_restores_the_manifest_policy() {
+        let dir = home();
+        let state = state(dir.path()).await;
+
+        call(&state, "PUT", Some(json!({ "mode": "full" }))).await;
+        let (status, body) = call(&state, "DELETE", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["mode"], "supervised");
+        assert_eq!(body["overridden"], false);
+
+        // Deleting again is a no-op, not a 404: the caller's intent is already
+        // satisfied.
+        let (status, _) = call(&state, "DELETE", None).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
     /// Every tier the runtime accepts has console text, so none is
     /// unselectable (issue #562).
     ///
@@ -389,11 +566,43 @@ mod tests {
     fn console_text_names_only_plausible_tiers() {
         for tier in TIER_TEXT {
             assert!(
-                POLICY_MODES.contains(&tier.value) || tier.value == "auto",
-                "`{}` is neither an accepted mode nor the known-pending `auto` — \
-                 a typo here silently drops the tier from the console",
+                POLICY_MODES.contains(&tier.value),
+                "`{}` is not an accepted mode — a typo here silently drops the \
+                 tier from the console",
                 tier.value
             );
         }
+    }
+
+    /// The host's mode list decides what is offered, not the text table.
+    ///
+    /// Driven off synthetic lists rather than `POLICY_MODES`, and that is the
+    /// whole point. `TIER_TEXT` and `POLICY_MODES` now hold the same four tiers,
+    /// so an assertion built on `POLICY_MODES` cannot distinguish a filtered
+    /// list from an unfiltered one, and deleting the filter would leave it
+    /// green. This one fails.
+    #[test]
+    fn a_tier_the_host_does_not_accept_is_not_offered() {
+        // A host without `auto` (every release before #560) must not be offered
+        // it, even though the text for it is compiled in.
+        let older_host = tiers_for(&["readonly", "supervised", "full"]);
+        assert_eq!(
+            older_host.iter().map(|t| t.value).collect::<Vec<_>>(),
+            vec!["readonly", "supervised", "full"],
+            "text for a tier the host does not accept must not be offered — the \
+             gate would silently downgrade it to `supervised`"
+        );
+
+        // Order follows the host's list, not the text table's.
+        let reordered = tiers_for(&["full", "readonly"]);
+        assert_eq!(
+            reordered.iter().map(|t| t.value).collect::<Vec<_>>(),
+            vec!["full", "readonly"]
+        );
+
+        // A mode with no text is skipped rather than panicking or rendering
+        // blank; `every_runtime_tier_has_console_text` is what stops that state
+        // reaching a release.
+        assert!(tiers_for(&["not_a_tier"]).is_empty());
     }
 }

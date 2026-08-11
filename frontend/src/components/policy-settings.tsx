@@ -54,6 +54,10 @@ export function PolicySettings({ client, company }: Props) {
   const [status, setStatus] = useState<PolicyStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  // Distinguishes "still loading" from "load finished and failed". Without it,
+  // `loading || !status` renders the spinner forever on a failed load and the
+  // operator has no way to retry.
+  const [loadError, setLoadError] = useState<string | null>(null);
   // The always-ask list is edited as text and only committed on Save, so a
   // half-typed effect kind never reaches the gate.
   const [draftAlways, setDraftAlways] = useState("");
@@ -61,15 +65,17 @@ export function PolicySettings({ client, company }: Props) {
 
   const load = useCallback(async () => {
     setLoading(true);
+    setLoadError(null);
     try {
       const next = await getPolicy(client, company);
       setStatus(next);
       setDraftAlways(next.alwaysApprove.join(", "));
       setDirty(false);
     } catch (error) {
-      toast.error(
-        error instanceof Error ? error.message : "Could not load the policy.",
-      );
+      const message =
+        error instanceof Error ? error.message : "Could not load the policy.";
+      setLoadError(message);
+      toast.error(message);
     } finally {
       setLoading(false);
     }
@@ -79,11 +85,21 @@ export function PolicySettings({ client, company }: Props) {
     void load();
   }, [load]);
 
-  /** Applies a server response, resyncing the draft so it cannot drift. */
-  const apply = (next: PolicyStatus, message: string) => {
+  /**
+   * Applies a server response.
+   *
+   * `resyncDraft` is false when the operator has unsaved always-ask edits: the
+   * server's list is authoritative for what the gate is enforcing, but
+   * overwriting the box would silently discard what they were part-way through
+   * typing. The tier request does not touch the list, so leaving the draft
+   * alone keeps the two independent — the same separation the `PUT` body has.
+   */
+  const apply = (next: PolicyStatus, message: string, resyncDraft = true) => {
     setStatus(next);
-    setDraftAlways(next.alwaysApprove.join(", "));
-    setDirty(false);
+    if (resyncDraft) {
+      setDraftAlways(next.alwaysApprove.join(", "));
+      setDirty(false);
+    }
     toast.success(message, { description: next.takesEffect });
   };
 
@@ -94,7 +110,12 @@ export function PolicySettings({ client, company }: Props) {
       // Only `mode` is sent: an omitted field leaves the always-ask list where
       // it is, so picking a tier cannot silently discard a list the operator
       // edited earlier.
-      apply(await setPolicy(client, company, { mode }), "Autonomy tier updated");
+      // `dirty` means the operator has unsaved list edits; keep them.
+      apply(
+        await setPolicy(client, company, { mode }),
+        "Autonomy tier updated",
+        !dirty,
+      );
     } catch (error) {
       toast.error(
         error instanceof Error ? error.message : "Could not change the tier.",
@@ -157,10 +178,19 @@ export function PolicySettings({ client, company }: Props) {
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-6">
-        {loading || !status ? (
+        {loading ? (
           <div className="flex items-center gap-2 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" />
             Loading the current policy…
+          </div>
+        ) : !status ? (
+          <div className="space-y-3">
+            <p className="text-sm text-muted-foreground">
+              {loadError ?? "Could not load the policy."}
+            </p>
+            <Button size="sm" variant="outline" onClick={() => void load()}>
+              Try again
+            </Button>
           </div>
         ) : (
           <>

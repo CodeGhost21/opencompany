@@ -1558,6 +1558,26 @@ mod test {
             !dst_record.workflow_enabled("digest"),
             "the bundle round-trip re-armed a paused workflow"
         );
+        // Issue #562: the console-set tier survives export→import, attribution
+        // included. Without this the seeded fixture proves nothing — a bundle
+        // path that dropped the field would still pass every other assertion
+        // here, and an imported company would silently run the manifest's gate.
+        let policy = dst_record
+            .overlay_policy
+            .as_ref()
+            .expect("the policy override was dropped by the bundle round-trip");
+        assert_eq!(policy.mode.as_deref(), Some("auto"));
+        assert_eq!(
+            policy.always_approve.as_deref(),
+            Some(["payment.send".to_string()].as_slice())
+        );
+        assert_eq!(policy.set_by, admin_actor());
+        assert_eq!(policy.at_millis, 1_700_000_000_002);
+        assert_eq!(
+            dst_record.effective_policy().mode,
+            "auto",
+            "the imported company must run the tier the operator set, not the manifest's"
+        );
 
         // Cap, attribution and timestamp, read the way every surface reads them.
         assert_eq!(

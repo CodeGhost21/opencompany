@@ -279,6 +279,21 @@ pub async fn assert_isolation_by_company(
             .any(|entry| entry.agent_id == "writer" && entry.budget_usd_daily.is_none()),
         "the explicitly-uncapped override decayed into an absent or zeroed entry"
     );
+    // The operator's `[policy]` override survives too (issue #562). Seeding the
+    // fixture is not enough on its own: without this assertion a backend that
+    // dropped the field would still pass, which is the failure the populated
+    // fixture exists to catch.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not survive save/load"
+    );
+    assert_eq!(
+        loaded.effective_policy().mode,
+        "auto",
+        "the effective tier did not survive the round-trip, so a restart would \
+         silently move the company back to the manifest's gate"
+    );
     // Issue #276: a paused workflow survives save/load. A backend that dropped
     // this field would re-arm every schedule an operator had switched off, and
     // the only symptom would be a workflow firing again after a restart.
@@ -662,6 +677,14 @@ pub async fn assert_export_totality(
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
     );
+    // Issue #562: the console-set tier round-trips on every backend, for the
+    // same reason — an approval gate that forgets across a restart is not a gate.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not round-trip through the store"
+    );
+    assert_eq!(loaded.effective_policy().mode, "auto");
     // Issue #276: the pause switch round-trips on every backend, for the same
     // reason the caps do — a switch that forgets across a restart is not a
     // safety switch.
