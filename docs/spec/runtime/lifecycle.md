@@ -85,6 +85,39 @@ re-runs them. Effects are executed at-most-once by the kernel — an effect is
 journaled *before* execution and marked after, so replay never re-fires a
 completed effect.
 
+### Which crash a journal record survives (issue #392)
+
+The runtime journal's durability is chosen **per record kind**, not once for the
+file. Each `JournalRecord` declares it, and `RuntimeJournal::append` — the single
+choke point every record goes through — honours the declaration:
+
+| Records | Survives | Why |
+|---|---|---|
+| `EffectExecuted`, `StandingGrantRevoked` | **Host crash / power loss.** Flushed to stable storage (`sync_data`, plus the parent directory on the file's first write) before the append returns. | These are the only kinds whose loss makes the runtime **repeat an external action**. `EffectExecuted` is written immediately before the side effect, so losing it re-fires that effect on the next boot; losing a revocation silently re-arms a standing grant an operator took back, letting it keep admitting calls until its own deadline. |
+| The other eleven | **Process crash.** In the kernel page cache when the append returns; a host crash can lose them. | Losing any of them makes the runtime **re-ask**, never re-fire: an approval is parked again, an operator is prompted again, a cycle bracket reads as interrupted. That is the safe direction, and it is a decision rather than an omission. |
+
+The split is affordable because the frequency runs the helpful way. The two
+flushed kinds are written at operator-decision scale — `EffectExecuted` sits in
+front of a network call costing 100ms–2s, so a flush ahead of it is invisible —
+while the highest-volume records (`CycleStarted`/`CycleFinished`, a pair per
+cycle) are pure observability. A blanket flush would tax the hottest cosmetic
+record to protect the rarest dangerous one.
+
+A failed flush **fails the append**, which aborts the effect before it runs: no
+record means no effect, so the failure cannot produce the duplicate it guards
+against. The flush is never retried, because a failed `fsync` may already have
+dropped the dirty pages and a retry would report success over lost data.
+
+**This guarantee is bounded by the volume underneath.** The journal is built on
+the filesystem path unconditionally, outside the storage ports, so a hosted
+tenant whose `/data` is ephemeral scratch — the documented arrangement under
+`OPENCOMPANY_STORAGE=mongodb`, see
+[storage.md](storage.md) — loses its journal to a container replacement and
+gains nothing from these flushes. Where the data directory is a real volume (the
+reference ECS deployment mounts EFS at `/data`, whose NFS client page cache is
+exactly what `sync_data` forces through) the flush buys real durability. Moving
+the journal behind the ports is tracked separately as issue #726.
+
 ## The fs bundle (default store)
 
 ```text
