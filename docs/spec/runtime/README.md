@@ -45,6 +45,9 @@ Supporting docs:
 - [config.md](config.md) — configuration and the one-key story
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
+- [company-setup.md](company-setup.md) — first-run company setup: three
+  questions asked once, turned into a real roster and running workflows before
+  the operator touches the console (proposed; written for a general reader)
 
 ## Responsibilities
 
