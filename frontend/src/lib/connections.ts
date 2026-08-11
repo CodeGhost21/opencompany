@@ -1,6 +1,19 @@
-// The catalog of third-party accounts a company can act through. This is the
-// console's view of what *can* be connected; whether a host can actually run
-// the OAuth handshake depends on its `/connections` surface (see the client).
+// Metadata for the providers this console knows natively, and the rule that
+// decides how a tile's button behaves.
+//
+// ## Not the page's provider list (issue #582)
+//
+// It used to be one, rendered as a categorised grid of eleven tiles *alongside*
+// a second grid built from the backend's live Composio catalog — two lists, two
+// status routes, and a page that could say a provider was both connected and
+// not connected. The page now renders one grid (`lib/provider-grid.ts`), whose
+// membership is the backend catalog and whose status is `GET …/connections`.
+//
+// What `CONNECTION_PROVIDERS` still owns is what only the console can know:
+// which ids the host's `well_known` table can run a native handshake for, the
+// Composio slug each maps to, and the brand colours. It also supplies the tiles
+// on a host with no Composio at all, where the backend catalog comes back empty
+// and these eleven are the whole page.
 //
 // ## Two routes, one tile (issue #599)
 //
@@ -248,7 +261,14 @@ export function connectionStateFor<T extends { provider: string; connected?: boo
 export interface ComposioReach {
   /** Whether the `composio` feature is compiled into this build. */
   inBuild: boolean;
-  /** Whether the company explicitly grants `composio`. */
+  /**
+   * Whether the company explicitly grants the `composio` tool namespace.
+   *
+   * **Not part of the routing decision** (issue #582) — carried so the grid can
+   * caveat a connection the agents cannot use yet. See
+   * {@link composioCanAuthorize} for why gating on it was the page's
+   * contradiction rather than a safeguard.
+   */
   granted: boolean;
   /**
    * Whether a credential of **any** tier resolves; `none` means there is
@@ -277,9 +297,27 @@ export interface ComposioReach {
  * it would just move the 400 from one backend to the other. In open mode the
  * effective list is a *display* list, not a limit — any slug the backend permits
  * is reachable — so it is deliberately not consulted (issue #397).
+ *
+ * ## The `composio` grant is deliberately not consulted (issue #582)
+ *
+ * It used to be, and that was half of the page's self-contradiction. The grant
+ * governs whether **agents receive Composio tools** — it is not a property of
+ * whether a sign-in can complete. `POST …/composio/authorize` never checked it
+ * (`resolve_tenant` in `src/server/ops/composio.rs` reads the credential and the
+ * toolkit allowlist, and nothing else), so the sign-in this predicate refused to
+ * offer worked perfectly well from the provider list that ignored the grant.
+ * One surface said "connect me", the other said "no route" — for the same
+ * account, on the same screen.
+ *
+ * Reinstating the gate on the other surface instead would have been the wrong
+ * repair: it would take away a sign-in operators use today and leave them no
+ * way to connect an account before granting the namespace. So the grant stops
+ * being a route decision and becomes what it always described — a caveat the
+ * grid states plainly ("connected, but agents will not receive its tools until
+ * `composio` is granted"), sourced from {@link ComposioReach.granted}.
  */
 export function composioCanAuthorize(reach: ComposioReach | null, toolkit: string): boolean {
-  if (!reach || !reach.inBuild || !reach.granted || !reach.hasCredential) return false;
+  if (!reach || !reach.inBuild || !reach.hasCredential) return false;
   if (reach.openMode) return true;
   const wanted = toolkitSlug(toolkit);
   return reach.effectiveToolkits.some((slug) => toolkitSlug(slug) === wanted);
@@ -342,7 +380,11 @@ export type ConnectRoute =
  * Connect — which is exactly the outcome #599 is about.
  */
 export function connectRoute(
-  provider: ConnectionProvider,
+  // Only the toolkit slug is read, and the merged grid (issue #582) routes tiles
+  // that have no `ConnectionProvider` entry at all — every provider the backend
+  // catalog offers, not just the eleven with local metadata. Narrowing the
+  // parameter to what the rule actually uses is what lets one rule serve both.
+  provider: Pick<ConnectionProvider, "toolkit">,
   state: { credentialSource?: string } | undefined,
   reach: ComposioReach | null,
 ): ConnectRoute {
