@@ -281,25 +281,6 @@ async fn write_payload(
     }
 }
 
-/// Removes a staged replacement that will not be used, leaving the workspace as
-/// it was found.
-///
-/// Best-effort and never returns: every caller already has an error that
-/// explains the publish, and a cleanup failure must not replace it with a less
-/// informative one. The staged name is logged so an operator can find the node
-/// if the removal did fail.
-async fn discard_staged(workspace: &dyn WorkspaceStore, company: &CompanyId, staged: &str) {
-    if let Err(cleanup) = workspace.delete(company, staged).await {
-        tracing::warn!(
-            company = %company,
-            staged = %staged,
-            error = %cleanup,
-            "[publish] could not remove a staged replacement that will not be used; it remains \
-             in the workspace under its staging name"
-        );
-    }
-}
-
 /// Replaces the node at a path with one of the **other** kind — prose becoming
 /// bytes, or the reverse — without a window in which the deliverable does not
 /// exist (issue #662).
@@ -331,20 +312,19 @@ async fn discard_staged(workspace: &dyn WorkspaceStore, company: &CompanyId, sta
 /// publish to that path, for every agent. Staging under a name nothing resolves
 /// keeps the path unambiguous at every instant.
 ///
-/// # What each failure leaves behind
+/// # The store owns the compare-and-swap
 ///
 /// * **The create fails** — the common case, and the one this issue is about.
 ///   Nothing has changed: the old deliverable is intact, the path still resolves
 ///   to it, and the error propagates. Publishing is refused rather than
 ///   destructive.
-/// * **The delete fails** — the old deliverable is still intact. The staged node
-///   is removed so the workspace is left exactly as it was found, and the
-///   original error propagates.
-/// * **The rename fails** — the only arm that loses the old node, and the
-///   replacement survives it: the new payload is durable under the staging name,
-///   the path is free rather than ambiguous, and the error names the node so it
-///   can be found. Strictly better than the old behaviour, which lost the
-///   payload outright.
+/// * **Another publisher wins** — [`WorkspaceStore::swap_files`] consumes this
+///   publisher's staging node and returns `None`; the caller receives a conflict
+///   and the final path still names exactly the winner.
+/// * **The store fails** — the old node remains the compare-and-swap authority.
+///   The staging id is logged rather than blindly deleted: a distributed store
+///   error can be an indeterminate response to a committed write, and deleting
+///   that id could destroy the successful replacement.
 async fn replace_payload(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
@@ -352,7 +332,7 @@ async fn replace_payload(
     filename: &str,
     superseded: &str,
     target: PublishTarget<'_>,
-) -> Result<String> {
+) -> Result<Mirrored> {
     // A name no publish can produce and `resolve_file` will never match, so the
     // path keeps resolving to exactly one node while the swap is in flight.
     let staged_name = format!("{filename}.publishing-{}", crate::ports::generate_id());
@@ -365,50 +345,30 @@ async fn replace_payload(
     )
     .await?;
 
-    match workspace.delete(company, superseded).await {
-        Ok(true) => {}
-        // `delete` reports *whether a node was removed*, and "already gone" is
-        // `Ok(false)`, not an error. Reading only the `Err` arm would let a
-        // second publish that superseded this same path while ours was staging
-        // go undetected — and then BOTH renames land on `filename`, which is the
-        // two-nodes-one-path `Conflict` this staging exists to prevent, reached
-        // through the one return value the code did not read.
-        //
-        // Not hypothetical: workflow runs are spawned rather than serialized
-        // behind the cycle lock, and `materialize` is reached from the publish
-        // drain rather than from a `company_write_lock`ed write plane, so two
-        // publishes of one path genuinely overlap.
-        Ok(false) => {
-            discard_staged(workspace, company, &staged).await;
-            return Err(OpenCompanyError::Conflict(format!(
-                "the deliverable at `{filename}` was replaced by another publish while this one \
-                 was being prepared; nothing was overwritten — publish again"
-            )));
-        }
-        Err(err) => {
-            // The old deliverable is still there, so the only thing to undo is
-            // the node just staged. A failure to clean it up is logged rather
-            // than returned: the caller's error explains the publish.
-            discard_staged(workspace, company, &staged).await;
-            return Err(err);
-        }
-    }
-
-    workspace
-        .rename_move(company, &staged, Some(filename), None)
+    match workspace
+        .swap_files(company, superseded, &staged.node_id, filename)
         .await
-        .map_err(|err| {
+    {
+        Ok(Some(node)) => Ok(Mirrored {
+            node_id: node.id,
+            sha256: node.sha256,
+        }),
+        Ok(None) => Err(OpenCompanyError::Conflict(format!(
+            "the deliverable at `{filename}` was replaced by another publish while this one \
+             was being prepared; nothing was overwritten — publish again"
+        ))),
+        Err(err) => {
             tracing::error!(
                 company = %company,
-                staged = %staged,
+                staged = %staged.node_id,
                 name = %staged_name,
                 error = %err,
-                "[publish] the replacement was stored but could not be renamed onto the \
-                 deliverable's path; it is in the workspace under its staging name"
+                "[publish] the store could not decide the staged replacement; its id is logged \
+                 for recovery rather than deleted after an indeterminate write"
             );
-            err
-        })?;
-    Ok(staged)
+            Err(err)
+        }
+    }
 }
 
 /// Creates a fresh node of the right kind holding `target`'s payload.
@@ -744,7 +704,7 @@ mod test {
             _company: &CompanyId,
             _node: &WorkspaceNode,
             _bytes: &[u8],
-        ) -> Result<()> {
+        ) -> Result<WorkspaceNode> {
             Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
         }
         async fn write_binary(
@@ -772,6 +732,15 @@ mod test {
             parent: Option<Option<&str>>,
         ) -> Result<WorkspaceNode> {
             WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+        }
+        async fn swap_files(
+            &self,
+            company: &CompanyId,
+            expected_id: &str,
+            replacement_id: &str,
+            name: &str,
+        ) -> Result<Option<WorkspaceNode>> {
+            WorkspaceStore::swap_files(&*self.0, company, expected_id, replacement_id, name).await
         }
         async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
             WorkspaceStore::delete(&*self.0, company, id).await
@@ -960,13 +929,57 @@ mod test {
         );
     }
 
-    /// A store that delegates everything but reports **no node removed** from
-    /// `delete` — the state a concurrent publish leaves behind when it
-    /// supersedes the same path first.
-    struct VanishingDelete(Arc<FsOps>);
+    /// The reverse shape change is equally important: a generated payload can
+    /// later be republished as editable prose without asking either write API
+    /// to violate its type guard.
+    #[tokio::test]
+    async fn republishing_a_payload_as_a_note_replaces_the_node() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x25, 0x50, 0x44, 0x46],
+                    mime: "application/pdf",
+                },
+                ..target("report.md", "")
+            },
+        )
+        .await
+        .unwrap()
+        .node_id;
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                existing_node_id: Some(&first),
+                ..target("report.md", "# Editable")
+            },
+        )
+        .await
+        .expect("a binary-to-text shape change must succeed")
+        .node_id;
+
+        let (node, body) = ws.read(&co, &second).await.unwrap().unwrap();
+        assert_eq!(body, "# Editable");
+        assert!(!node.is_binary());
+        assert_eq!(
+            path_of(ws, &co, &second).await,
+            format!("{AGENTS_ROOT}/cmo/t-1/report.md")
+        );
+        assert!(ws.read_bytes(&co, &first).await.unwrap().is_none());
+    }
+
+    /// A real store whose swap boundary pauses until two publishers have both
+    /// staged their payloads. This makes the race deterministic without
+    /// replacing the compare-and-swap implementation under test.
+    struct PausedSwap(Arc<FsOps>, Arc<tokio::sync::Barrier>);
 
     #[async_trait::async_trait]
-    impl WorkspaceStore for VanishingDelete {
+    impl WorkspaceStore for PausedSwap {
         async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
             WorkspaceStore::tree(&*self.0, company).await
         }
@@ -999,7 +1012,7 @@ mod test {
             company: &CompanyId,
             node: &WorkspaceNode,
             bytes: &[u8],
-        ) -> Result<()> {
+        ) -> Result<WorkspaceNode> {
             WorkspaceStore::create_binary(&*self.0, company, node, bytes).await
         }
         async fn write_binary(
@@ -1028,37 +1041,40 @@ mod test {
         ) -> Result<WorkspaceNode> {
             WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
         }
-        /// The whole point: the node is really removed, but the caller is told
-        /// nothing was — exactly what the loser of a concurrent supersede sees.
+        async fn swap_files(
+            &self,
+            company: &CompanyId,
+            expected_id: &str,
+            replacement_id: &str,
+            name: &str,
+        ) -> Result<Option<WorkspaceNode>> {
+            self.1.wait().await;
+            WorkspaceStore::swap_files(&*self.0, company, expected_id, replacement_id, name).await
+        }
         async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
-            WorkspaceStore::delete(&*self.0, company, id).await?;
-            Ok(false)
+            WorkspaceStore::delete(&*self.0, company, id).await
         }
         async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
             WorkspaceStore::is_empty(&*self.0, company).await
         }
     }
 
-    /// A `delete` that reports `Ok(false)` means somebody else already
-    /// superseded this path. Renaming onto it anyway would put TWO nodes on one
-    /// name — and `resolve_file` answers a duplicate with `Conflict`, so that
-    /// state never decays: every future publish to the deliverable is refused,
-    /// for every agent.
-    ///
-    /// The staging design exists to make that state unreachable, and reading
-    /// only `delete`'s `Err` arm would have reopened it through its return
-    /// value.
+    /// Two publishers can prepare the same shape-changing path concurrently.
+    /// Both must reach the real store's swap boundary before either proceeds;
+    /// exactly one wins, and the loser cannot create a duplicate final path or
+    /// leak its staging node.
     #[tokio::test]
-    async fn a_delete_that_removed_nothing_refuses_rather_than_duplicating_the_path() {
+    async fn concurrent_shape_changes_have_one_winner_and_no_duplicate_path() {
         let (_dir, ops, co) = stores();
         let ws: &dyn WorkspaceStore = ops.as_ref();
 
         let first = materialize(ws, &co, target("report.md", "# Draft"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
 
-        let racing = VanishingDelete(ops.clone());
-        let err = materialize(
+        let racing = PausedSwap(ops.clone(), Arc::new(tokio::sync::Barrier::new(2)));
+        let left = materialize(
             &racing,
             &co,
             PublishTarget {
@@ -1069,25 +1085,45 @@ mod test {
                 existing_node_id: Some(&first),
                 ..target("report.md", "")
             },
-        )
-        .await
-        .expect_err("a superseded path must refuse rather than rename onto it");
+        );
+        let right = materialize(
+            &racing,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x89, b'P', b'N', b'G'],
+                    mime: "image/png",
+                },
+                existing_node_id: Some(&first),
+                ..target("report.md", "")
+            },
+        );
+        let (left, right) = tokio::join!(left, right);
+        let outcomes = [left, right];
+        assert_eq!(
+            outcomes.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "exactly one compare-and-swap must win: {outcomes:?}"
+        );
+        let loser = outcomes
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("one publisher loses");
         assert!(
-            err.to_string().contains("another publish"),
-            "the refusal must say what happened: {err}"
+            loser.to_string().contains("another publish"),
+            "the refusal must say what happened: {loser}"
         );
 
-        // The invariant this protects: at most one node carries the name.
         let nodes = ws.tree(&co).await.unwrap();
         let named: Vec<&WorkspaceNode> = nodes.iter().filter(|n| n.name == "report.md").collect();
-        assert!(
-            named.len() <= 1,
-            "the path must never carry two nodes: {named:?}"
+        assert_eq!(
+            named.len(),
+            1,
+            "the final path must continuously have one winner: {named:?}"
         );
-        // And no staged node is left behind under its staging name.
         assert!(
             !nodes.iter().any(|n| n.name.contains(".publishing-")),
-            "a refused supersede must not leak its staged node: {nodes:?}"
+            "the losing compare-and-swap must consume its staged node: {nodes:?}"
         );
     }
 
@@ -1106,7 +1142,8 @@ mod test {
 
         let first = materialize(ws, &co, target("report.md", "# Draft"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         let before = path_of(ws, &co, &first).await;
 
         // The same publish as the test above, but the store refuses to create
@@ -1155,7 +1192,8 @@ mod test {
 
         let first = materialize(ws, &co, target("report.md", "# Draft"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         // Sorted: `tree` promises the set, not an order, so comparing raw
         // sequences would fail on a reshuffle that changed nothing.
         let before = sorted_ids(ws, &co).await;
@@ -1195,7 +1233,8 @@ mod test {
 
         let first = materialize(ws, &co, target("report.md", "# Draft"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         let second = materialize(
             ws,
             &co,
@@ -1209,7 +1248,8 @@ mod test {
             },
         )
         .await
-        .expect("the replacement lands");
+        .expect("the replacement lands")
+        .node_id;
 
         let nodes = ws.tree(&co).await.unwrap();
         let parent = nodes

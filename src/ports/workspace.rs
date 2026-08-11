@@ -409,6 +409,29 @@ pub trait WorkspaceStore: Send + Sync {
         name: Option<&str>,
         parent: Option<Option<&str>>,
     ) -> Result<WorkspaceNode>;
+    /// Atomically promotes a staged file over the file it supersedes.
+    ///
+    /// Both ids must name files under the same parent. `replacement_id` is
+    /// renamed to `name` as part of the swap; `expected_id` is removed. The
+    /// operation is conditional on `expected_id` still naming the node being
+    /// replaced, so concurrent publishers cannot both win the same path.
+    ///
+    /// Returns the promoted node on success. If the expected node has already
+    /// gone, returns `None` **and consumes the staged replacement**, including
+    /// any binary payload. That cleanup is part of the port contract: a caller
+    /// losing the compare-and-swap must not leak its private staging node.
+    ///
+    /// Backends must make the logical tree transition without an observable
+    /// delete-then-rename gap. This is deliberately a store primitive rather
+    /// than two existing calls: a process-local lock cannot protect MongoDB
+    /// when two server instances publish concurrently.
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceNode>>;
     /// Deletes a node; folders are removed recursively. Returns whether a node
     /// was removed.
     ///

@@ -2984,6 +2984,15 @@ mod tests {
         ) -> crate::Result<WorkspaceNode> {
             unreachable!("the listing never renames")
         }
+        async fn swap_files(
+            &self,
+            _company: &CompanyId,
+            _expected_id: &str,
+            _replacement_id: &str,
+            _name: &str,
+        ) -> crate::Result<Option<WorkspaceNode>> {
+            unreachable!("the listing never swaps files")
+        }
         async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
             unreachable!("the listing never deletes")
         }

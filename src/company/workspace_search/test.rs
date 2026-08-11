@@ -614,6 +614,15 @@ impl WorkspaceStore for FixedTree {
     ) -> crate::Result<WorkspaceNode> {
         unreachable!("search never renames")
     }
+    async fn swap_files(
+        &self,
+        _company: &CompanyId,
+        _expected_id: &str,
+        _replacement_id: &str,
+        _name: &str,
+    ) -> crate::Result<Option<WorkspaceNode>> {
+        unreachable!("search never swaps files")
+    }
     async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
         unreachable!("search never deletes")
     }
