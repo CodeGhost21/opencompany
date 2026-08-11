@@ -2018,6 +2018,65 @@ to = "done"
         );
     }
 
+    /// T-output_parser AUTO-FIX (issue #661, M4) — the vendored-engine drift
+    /// catcher. With `auto_fix` DEFAULTED (true) and no roster LLM wired, a
+    /// schema failure sends the engine to the `llm` capability to *repair* the
+    /// value. The unwired `llm` must surface the SCHEMA failure, so the
+    /// `on_error = continue` error item names the missing property — NOT the
+    /// generic "no roster agent" message that used to mask it.
+    ///
+    /// This exercises the real request the engine builds
+    /// (`task = "coerce_to_schema"` with the schema `errors`), so a future
+    /// tinyflows pin that reshapes that request fails here rather than silently
+    /// reverting to the masked message.
+    #[tokio::test]
+    async fn t_output_parser_auto_fix_surfaces_schema_failure_not_no_roster_agent() {
+        // Note: NO `auto_fix = false` — the default (true) is exactly the path
+        // that reaches the `llm` auto-fix capability.
+        let src = r#"
+id = "op_af_wf"
+name = "Parser Auto-fix WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "parse"
+kind = "output_parser"
+name = "Parse"
+on_error = "continue"
+[node.config.schema]
+type = "object"
+required = ["name"]
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "parse"
+[[edge]]
+from = "parse"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_src(dir.path(), src, serde_json::json!({ "other": 1 }))
+            .await
+            .expect("run completes despite the schema failure");
+
+        let message = run.output["nodes"]["parse"]["items"][0]["json"]["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected a routed error item: {}", run.output));
+        assert!(
+            message.contains("schema validation") && message.contains("name"),
+            "the auto-fix path must surface the schema failure: {message}"
+        );
+        assert!(
+            !message.contains("no roster agent"),
+            "the schema failure must not be masked by the bare-LLM message: {message}"
+        );
+    }
+
     /// T-sub_workflow — a `sub_workflow` node runs a child saved on disk (depth
     /// 1), resolved by id through the wired source directory.
     #[tokio::test]

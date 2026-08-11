@@ -36,7 +36,10 @@
 //! Still **not wired**: the bare-completion `LlmProvider` fallback and `code`
 //! nodes. They are explicit stubs that return a clear capability error rather
 //! than a silent no-op, so a workflow that reaches one fails loudly; a workflow
-//! that never reaches one is unaffected.
+//! that never reaches one is unaffected. The `llm` stub takes care to report the
+//! *right* failure: the engine's output_parser auto-fix (default on) calls `llm`
+//! to repair a schema mismatch, so that stub surfaces the schema errors rather
+//! than masking them behind "bare LLM completion is not wired" (issue #661).
 //!
 //! Also not wired, and for a different reason: **memory**, which tinyflows 0.6
 //! added with the #499 pin bump. The other two are unbuilt; this one is
@@ -640,20 +643,76 @@ pub(super) fn run_request_text(input: &Value) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed.to_string())
 }
 
-/// The bare-completion fallback. An `agent` node with no `agent_ref` would land
-/// here; [`translate`](crate::workflows::translate) always sets `agent_ref` for a
-/// roster agent, so reaching this means an agent node with no teammate assigned.
+/// The message a bare-LLM call that is NOT the engine's schema auto-fix gets: an
+/// `agent` node reached `llm` with no `agent_ref`.
+/// [`translate`](crate::workflows::translate) always sets `agent_ref` for a roster
+/// agent, so reaching that path means an agent node with no teammate assigned.
+const BARE_LLM_UNWIRED_MESSAGE: &str = "workflow agent node has no roster agent; bare LLM \
+     completion is not wired for company workflows";
+
+/// The bare-completion fallback (`llm` capability), left unwired for company
+/// workflows.
+///
+/// Two distinct callers reach this, and issue #661 (M4) is that they used to get
+/// the same message:
+///
+/// * The engine's **output_parser auto-fix** (default on) calls `llm` to *repair*
+///   a value that failed schema validation — handing us
+///   `{ "task": "coerce_to_schema", "schema", "value", "errors": [ … ] }`. Because
+///   this path errors here, the generic "bare LLM completion is not wired"
+///   message used to **mask** the real failure (the schema errors) the operator
+///   needed to see. Now that shape surfaces the schema failures and merely *notes*
+///   that the repair path is unavailable.
+/// * An **`agent` node with no `agent_ref`** lands here with the node config as
+///   the request. That genuinely is "no roster agent", and keeps the original
+///   message byte-identical.
 struct UnwiredLlm;
 
 #[async_trait]
 impl LlmProvider for UnwiredLlm {
-    async fn complete(&self, _request: Value, _conn: Option<&str>) -> TfResult<Value> {
+    async fn complete(&self, request: Value, _conn: Option<&str>) -> TfResult<Value> {
+        // The engine's output-parser auto-fix asked us to coerce a value to a
+        // schema and handed us the schema failures. Surface THOSE — the real
+        // cause — rather than a message about the (unavailable) repair path,
+        // which is what masked them before #661. Same `output_parser: value
+        // failed schema validation:` lead the engine's non-auto-fix arm uses, so
+        // the on_error-routed error reads identically whichever arm produced it.
+        if let Some(errors) = auto_fix_schema_errors(&request) {
+            return Err(EngineError::Capability(format!(
+                "output_parser: value failed schema validation: {errors} (LLM auto-fix is not \
+                 available: bare LLM completion is not wired for company workflows)"
+            )));
+        }
+        // Any other request — an agent node with no `agent_ref`, whose request is
+        // the node config — keeps the original message unchanged.
         Err(EngineError::Capability(
-            "workflow agent node has no roster agent; bare LLM completion is not wired for \
-             company workflows"
-                .to_string(),
+            BARE_LLM_UNWIRED_MESSAGE.to_string(),
         ))
     }
+}
+
+/// Extracts the joined schema-validation failures from the engine's output-parser
+/// auto-fix request, if this is one.
+///
+/// The engine's `schema::parse_and_validate` asks `llm` to coerce a value to a
+/// schema with `{ "task": "coerce_to_schema", "schema", "value", "errors": [ … ] }`,
+/// where `errors` is the non-empty list of human-readable schema failures. Returns
+/// those failures joined by `; ` for exactly that shape, and `None` for anything
+/// else — including a `coerce_to_schema` request with a missing / empty / non-string
+/// `errors` — so the caller falls back to the generic bare-LLM message. Matching on
+/// the request shape (not the node kind) also covers the `agent` node's own
+/// output-parser sub-port, which routes through the same engine helper.
+fn auto_fix_schema_errors(request: &Value) -> Option<String> {
+    if request.get("task").and_then(Value::as_str) != Some("coerce_to_schema") {
+        return None;
+    }
+    let errors: Vec<&str> = request
+        .get("errors")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    (!errors.is_empty()).then(|| errors.join("; "))
 }
 
 /// `code` nodes are not part of the OpenCompany model and never emitted by
@@ -902,6 +961,89 @@ mod tests {
             None,
             "dry state must be the inert NoopState, never durable"
         );
+    }
+
+    // ── Issue #661 (M4): the unwired `llm` stub reports the RIGHT failure ──
+
+    /// T1 — the engine's output_parser auto-fix request (it calls `llm` to repair
+    /// a schema mismatch) surfaces the SCHEMA errors, not the generic bare-LLM
+    /// lead that used to mask them.
+    #[tokio::test]
+    async fn unwired_llm_surfaces_schema_errors_on_auto_fix_request() {
+        let request = json!({
+            "task": "coerce_to_schema",
+            "schema": { "type": "object", "required": ["name", "age"] },
+            "value": { "other": 1 },
+            "errors": [
+                "$: missing required property `name`",
+                "$: missing required property `age`",
+            ],
+        });
+        let EngineError::Capability(msg) = UnwiredLlm
+            .complete(request, None)
+            .await
+            .expect_err("an unwired llm must error")
+        else {
+            panic!("expected a capability error");
+        };
+        // The real cause is present…
+        assert!(
+            msg.contains("failed schema validation"),
+            "should carry the schema-validation lead: {msg}"
+        );
+        assert!(
+            msg.contains("missing required property `name`")
+                && msg.contains("missing required property `age`"),
+            "should carry the specific schema failures: {msg}"
+        );
+        // …and it does NOT lead with the generic bare-LLM message that hid them.
+        assert!(
+            !msg.starts_with("workflow agent node has no roster agent"),
+            "the schema failure must not be masked by the generic lead: {msg}"
+        );
+    }
+
+    /// T2 — any other request (here an agent node with no `agent_ref`, whose
+    /// request is the node config) keeps the generic message byte-identical.
+    #[tokio::test]
+    async fn unwired_llm_keeps_generic_message_for_non_auto_fix_request() {
+        let EngineError::Capability(msg) = UnwiredLlm
+            .complete(json!({ "prompt": "hi" }), None)
+            .await
+            .expect_err("an unwired llm must error")
+        else {
+            panic!("expected a capability error");
+        };
+        assert_eq!(
+            msg, BARE_LLM_UNWIRED_MESSAGE,
+            "a non-auto-fix request must get the byte-identical generic message"
+        );
+    }
+
+    /// T4 — a `coerce_to_schema` request whose `errors` is empty or missing (or
+    /// not an array of strings) falls back to the generic message rather than
+    /// emitting an empty schema-error string or panicking.
+    #[tokio::test]
+    async fn unwired_llm_falls_back_when_auto_fix_carries_no_errors() {
+        for request in [
+            json!({ "task": "coerce_to_schema" }),
+            json!({ "task": "coerce_to_schema", "errors": [] }),
+            json!({ "task": "coerce_to_schema", "errors": "oops" }),
+            json!({ "task": "coerce_to_schema", "errors": [1, 2] }),
+        ] {
+            let EngineError::Capability(msg) = UnwiredLlm
+                .complete(request.clone(), None)
+                .await
+                .expect_err("an unwired llm must error")
+            else {
+                panic!("expected a capability error for {request}");
+            };
+            assert_eq!(
+                msg, BARE_LLM_UNWIRED_MESSAGE,
+                "a coerce_to_schema request with no usable errors must fall back \
+                 to the generic message: {request}"
+            );
+        }
     }
 
     // ── Issue #661 (L2): a workspace mkdir failure aborts the live build ──
