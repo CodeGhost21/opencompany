@@ -174,16 +174,18 @@ const DECLARED: &[Declared] = &[
     // this layer cannot see. It parks, and it stays a per-call decision.
     d("run_workflow", EffectGroup::Other, Reach::Consequence),
     // ---- The agent's own sandboxed workspace: reads ------------------------
-    // All four are pure reads inside the workspace the agent is pinned to.
+    // All six are pure reads inside the workspace the agent is pinned to.
     // `file_read`, `glob`, `grep` and `image_info` PARKED before this table
     // existed — not by anyone's decision, but because the read-only-prefix
     // heuristic keys on the *start* of the name and none of them begins with
-    // one. `list`, `read_workspace_state` and `memory_recall` happened to.
+    // one. `list` and `memory_recall` happened to.
+    //
+    // `read_workspace_state` was the seventh member of this list until issue
+    // #459; it is classified with `shell` below, for the reason given there.
     d("file_read", EffectGroup::Other, Reach::Nothing),
     d("glob", EffectGroup::Other, Reach::Nothing),
     d("grep", EffectGroup::Other, Reach::Nothing),
     d("list", EffectGroup::Other, Reach::Nothing),
-    d("read_workspace_state", EffectGroup::Other, Reach::Nothing),
     d("memory_recall", EffectGroup::Other, Reach::Nothing),
     d("image_info", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: writes -----------------------
@@ -208,6 +210,33 @@ const DECLARED: &[Declared] = &[
     // grant on "anything the sandbox permits", which is not a sentence an
     // operator can consent to.
     d("shell", EffectGroup::Other, Reach::Consequence),
+    // `read_workspace_state` sits here rather than with its fellow workspace
+    // reads because of what it does, not what it is called (issue #459). It
+    // shells out to `git status` and `git log` in
+    // `{root}/{company}/{agent}/workspace` — the same directory `file_write`
+    // writes into — and the vendored `run_git` sets no `GIT_CONFIG_NOSYSTEM`,
+    // no `-c` overrides and no environment scrub. Several git config keys name
+    // a command to run and `git status` invokes `core.fsmonitor`, so a
+    // `.git/config` the agent authored decides what executes. That is the
+    // `shell` shape wearing a read's name, and `namespace_of` already maps it
+    // into the `shell` namespace for capability gating.
+    //
+    // THIS IS A STOPGAP, and deliberately the blunt one: it costs an approval
+    // on a routine orientation step. The fix that restores the ergonomics is
+    // upstream, in openhuman's `run_git`
+    // (`src/openhuman/tools/impl/system/workspace_state.rs`). It is not merely
+    // unwritten — it is not straightforward: the exposure is the *repository*
+    // config in an agent-writable directory, which `GIT_CONFIG_NOSYSTEM` and
+    // `GIT_CONFIG_GLOBAL` do not reach, so a real fix has to refuse unknown
+    // config rather than scrub a list of known-bad keys. That path is
+    // byte-identical on openhuman `main` today, so there is no pin to bump to.
+    // Revert this to `Reach::Nothing` once a hardened `run_git` is vendored,
+    // and not before.
+    d(
+        "read_workspace_state",
+        EffectGroup::Other,
+        Reach::Consequence,
+    ),
     d("http_request", EffectGroup::Other, Reach::Consequence),
     d("curl", EffectGroup::Other, Reach::Consequence),
     d("web_fetch", EffectGroup::Other, Reach::Consequence),
@@ -732,6 +761,10 @@ mod tests {
     /// The sibling defects the same sweep turned up: four pure reads of the
     /// agent's own workspace that parked because the read-only-prefix rule
     /// keys on the *start* of a name and none of them begins with one.
+    ///
+    /// `read_workspace_state` was in this list until issue #459 showed it is
+    /// not a read at all — see
+    /// [`reading_workspace_state_is_classified_with_shell_because_it_runs_git`].
     #[test]
     fn a_workspace_read_never_parks_whatever_its_name_begins_with() {
         for tool in [
@@ -740,7 +773,6 @@ mod tests {
             "grep",
             "image_info",
             "list",
-            "read_workspace_state",
             "memory_recall",
             "workspace_list",
             "workspace_read",
@@ -751,6 +783,41 @@ mod tests {
         ] {
             assert_eq!(c(tool).reach, Reach::Nothing, "`{tool}` is a read");
         }
+    }
+
+    /// Issue #459: `read_workspace_state` is not the read its name promises.
+    /// It runs `git` in `{root}/{company}/{agent}/workspace`, and git reads
+    /// `.git/config` from that directory — a file the agent's own `file_write`
+    /// can author, and one whose keys can name a command to run. Until the
+    /// vendored `run_git` refuses untrusted repository config, it is
+    /// classified with `shell`.
+    ///
+    /// The standing assertion is the one that matters most: `file_write` is
+    /// grantable, so if this were grantable too, the pair could be handed over
+    /// together for a week and the hole would be open for the length of the
+    /// grant with nobody watching.
+    #[test]
+    fn reading_workspace_state_is_classified_with_shell_because_it_runs_git() {
+        let verdict = c("read_workspace_state");
+        assert_eq!(verdict.reach, Reach::Consequence);
+        assert!(
+            verdict.reach.parks_under_supervision(),
+            "running git under config the agent wrote must reach an operator"
+        );
+        assert!(
+            verdict.reach.denied_under_readonly(),
+            "`readonly` promises nothing runs; a config key can name a command"
+        );
+        assert_eq!(
+            verdict.standing,
+            Standing::PerCall,
+            "a standing grant here would reopen the hole for its whole duration"
+        );
+        assert_eq!(
+            verdict.reach,
+            c("shell").reach,
+            "it is the `shell` shape and should stay pinned to `shell`'s verdict"
+        );
     }
 
     /// The feature keeps its point: the tools an agent uses to actually do work

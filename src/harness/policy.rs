@@ -2763,6 +2763,9 @@ mod tests {
     /// read-only rule matched a *prefix* and none of these names begins with a
     /// read-only word. Nobody had reported them; they were found by asking the
     /// same question of every registered tool.
+    ///
+    /// `read_workspace_state` was in this list until issue #459 — see
+    /// [`reading_workspace_state_parks_supervised_and_denies_readonly`].
     #[tokio::test]
     async fn a_workspace_read_runs_without_asking_whatever_its_name_begins_with() {
         let p = policy("supervised", &[], None);
@@ -2772,7 +2775,6 @@ mod tests {
             "grep",
             "image_info",
             "list",
-            "read_workspace_state",
             "memory_recall",
         ] {
             assert_eq!(
@@ -2781,6 +2783,34 @@ mod tests {
                 "`{tool}` reads the agent's own workspace"
             );
         }
+    }
+
+    /// Issue #459: the sibling that turned out not to be a read at all. It
+    /// shells out to `git status` in the agent's own workspace, and the
+    /// vendored `run_git` lets that directory's `.git/config` — which
+    /// `file_write` can author — decide what git executes. So it goes through
+    /// the gate the way `shell` does, and this is the assertion an operator
+    /// actually feels.
+    #[tokio::test]
+    async fn reading_workspace_state_parks_supervised_and_denies_readonly() {
+        assert!(
+            matches!(
+                policy("supervised", &[], None)
+                    .check(&request("read_workspace_state", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "running git under agent-authored config must reach an operator"
+        );
+        assert!(
+            matches!(
+                policy("readonly", &[], None)
+                    .check(&request("read_workspace_state", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::Deny { .. }
+            ),
+            "`readonly` promises nothing runs; a git config key can name a command"
+        );
     }
 
     /// A standing grant admits any arguments, which was a fair summary of a
