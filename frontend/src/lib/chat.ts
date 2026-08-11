@@ -1,5 +1,16 @@
 import type { ChatHistoryMessageDto, TurnStep } from "@/api/types";
 
+/**
+ * The company's main line, by thread id.
+ *
+ * Mirrors the host's `MAIN_THREAD_ID` (`src/server/chat_history.rs`), whose
+ * `is_general_chat` folds this id, `"General"` and the **empty string** into a
+ * single conversation. Named rather than spelled inline because
+ * {@link dispatchMarkerPlacement} has to resolve an empty origin to *this*
+ * thread rather than to nothing — see the rules on that function.
+ */
+export const MAIN_THREAD_ID = "main";
+
 /** One person's reaction on one line. Mirrors `ChatReactionDto` on the host. */
 export interface Reaction {
   emoji: string;
@@ -216,6 +227,17 @@ export interface DispatchMarkerPlacement {
  *   one. The host already declines to file such a card into any desk's history;
  *   this is the live half of the same rule, and the two must agree or a marker
  *   would appear live and vanish on reload.
+ * - **An empty `chatId` is the General thread, not an absent one.** The host
+ *   folds `""` into General (`is_general_chat` treats an empty id, `"main"` and
+ *   `"General"` as one conversation), and the chat route takes `chat` straight
+ *   off the request body without normalising it — so a client posting
+ *   `chat: ""` stores `origin_chat_id: Some("")` and the projection emits
+ *   `chatId: ""`. Treating that as absent would drop the live marker while
+ *   `chat/history` still served the rehydrated twin: the marker would appear
+ *   only after a reload, which is the live-vs-history split the whole
+ *   identity-dedupe exists to prevent. Absent means `undefined`, and only
+ *   `undefined`. (The REST create path already normalises a blank field away
+ *   for the same reason — issue #246.)
  * - **`channelId: null` when the thread matches no channel** — never a fall
  *   back to whatever channel the operator has open. The shell's `noteInChannel`
  *   does fall back, deliberately, because an approval decision has to be seen;
@@ -231,10 +253,12 @@ export function dispatchMarkerPlacement(
   event: DispatchTerminalFrame,
   chatChannelByThread: Record<string, string>,
 ): DispatchMarkerPlacement | null {
-  if (!event.chatId) return null;
+  if (event.chatId === undefined) return null;
+  // `""` is the General thread spelled empty, not a missing origin — see above.
+  const threadId = event.chatId === "" ? MAIN_THREAD_ID : event.chatId;
   return {
-    threadId: event.chatId,
-    channelId: chatChannelByThread[event.chatId] ?? null,
+    threadId,
+    channelId: chatChannelByThread[threadId] ?? null,
     message: makeMessage("system", dispatchMarkerText(event.column), {
       taskId: event.taskId,
       messageId: String(event.seq),

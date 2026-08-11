@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ChatHistoryMessageDto } from "@/api/types";
 import {
+  MAIN_THREAD_ID,
   dispatchMarkerPlacement,
   dispatchMarkerText,
   fromHistory,
@@ -107,7 +108,24 @@ describe("where a settled dispatch's marker goes", () => {
    */
   it("nowhere, for a card no conversation raised", () => {
     expect(dispatchMarkerPlacement(terminal({ chatId: undefined }), CHANNELS)).toBeNull();
-    expect(dispatchMarkerPlacement(terminal({ chatId: "" }), CHANNELS)).toBeNull();
+  });
+
+  /**
+   * **An empty origin is the General thread, not a missing one.**
+   *
+   * The host's `is_general_chat` folds `""`, `"main"` and `"General"` into one
+   * conversation, and the chat route takes `chat` straight off the request body
+   * without normalising it — so `chat: ""` stores `origin_chat_id: Some("")`
+   * and the projection emits `chatId: ""`. Reading that as absent dropped the
+   * live marker while `chat/history` still served the rehydrated twin: the
+   * marker appeared only after a reload, which is exactly the live-vs-history
+   * split the identity-dedupe exists to close.
+   */
+  it("into the main thread when the origin is the empty string", () => {
+    const placement = dispatchMarkerPlacement(terminal({ chatId: "" }), CHANNELS);
+
+    expect(placement).not.toBeNull();
+    expect(placement?.threadId).toBe(MAIN_THREAD_ID);
   });
 
   /**
