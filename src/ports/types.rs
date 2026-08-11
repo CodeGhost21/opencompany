@@ -2707,11 +2707,19 @@ impl CompanyRecord {
     /// `name_key` case-insensitively.
     ///
     /// The companion to [`Self::resolve_roster_agent_id`] for the half of the
-    /// roster that has no typable id. `server::ops::team` mints an overlay
-    /// teammate with `id: generate_id()`, so an operator who adds "Shane" never
-    /// sees anything but the name — matching on ids alone made every teammate
-    /// they added unassignable, on a board whose Assignee field is free text
-    /// with no picker. Manifest agents keep their id-only namespace: their ids
+    /// roster that has no typable id. `server::ops::team` minted an overlay
+    /// teammate with `id: generate_id()` before #686, so an operator who added
+    /// "Shane" never saw anything but the name — matching on ids alone made
+    /// every teammate they added unassignable, on a board whose Assignee field
+    /// is free text with no picker.
+    ///
+    /// A teammate added since #686 carries a readable slug and resolves by id,
+    /// but this stays load-bearing: records written before it keep their
+    /// generated ids (nothing migrates them), and
+    /// [`Self::mint_agent_id`] deliberately does not re-mint on a rename, so a
+    /// renamed teammate's current name is reachable only here.
+    ///
+    /// Manifest agents keep their id-only namespace: their ids
     /// (`ceo`, `engineer`) are human-authored and typable, and
     /// [`Self::resolve_roster_agent_id`] is tried first, so a display name can
     /// never shadow a real id.
