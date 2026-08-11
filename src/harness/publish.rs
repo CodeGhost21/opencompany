@@ -543,6 +543,27 @@ pub enum PublishPayload {
     },
 }
 
+/// What the workspace did with a published payload, as the artifact version has
+/// to describe it (issues #663, #668).
+///
+/// Three states rather than a `bool` because "not stored yet" and "refused" are
+/// different things to tell an operator, and collapsing them is how a record
+/// came to assert storage that never happened.
+#[derive(Debug, Clone, Copy)]
+pub enum PayloadStorage<'a> {
+    /// The store has not been asked yet — the body composed before the mirror.
+    Pending,
+    /// The store wrote it, and returned this digest (`None` for prose, or a
+    /// backend that recorded none).
+    Stored {
+        /// The `sha256` **the store** computed. Never hashed on this side; see
+        /// [`WorkspaceStore::create_binary`](crate::ports::workspace::WorkspaceStore::create_binary).
+        sha256: Option<&'a str>,
+    },
+    /// The store refused it. The reason is logged, never written to the record.
+    Refused,
+}
+
 impl PublishPayload {
     /// What the artifact chain records as this version's body.
     ///
@@ -557,13 +578,55 @@ impl PublishPayload {
     /// writes the node, and a second hash on this path would be a second
     /// opportunity for the two to disagree about what was published.
     pub fn artifact_body(&self) -> String {
+        self.artifact_body_for(PayloadStorage::Pending)
+    }
+
+    /// The version body for a payload whose storage outcome is `storage`
+    /// (issues #663, #668).
+    ///
+    /// One function for all three wordings so they cannot drift into
+    /// contradicting each other, which is the defect #663 is about: the body
+    /// used to assert "stored as a file in the company workspace"
+    /// unconditionally, and was composed *before* the store was asked. When the
+    /// workspace refused the file, the record went on saying it was there.
+    ///
+    /// Prose ignores `storage` entirely: for text the version **is** the
+    /// content, so it is complete whatever the tree does.
+    pub fn artifact_body_for(&self, storage: PayloadStorage<'_>) -> String {
         match self {
             Self::Text(text) => text.clone(),
-            Self::Bytes { bytes, mime } => format!(
-                "{mime}, {} bytes — stored as a file in the company workspace. Open it there; \
-                 this record is the version history, not the content.",
-                bytes.len()
-            ),
+            Self::Bytes { bytes, mime } => {
+                let head = format!("{mime}, {} bytes", bytes.len());
+                match storage {
+                    // Written before the store is asked, and true at that
+                    // instant. It survives only if the process dies mid-drain;
+                    // otherwise the outcome below replaces it.
+                    PayloadStorage::Pending => format!(
+                        "{head} — a binary payload being filed into the company workspace. This \
+                         record is the version history, not the content."
+                    ),
+                    PayloadStorage::Stored { sha256: Some(sha) } => format!(
+                        "{head}, sha256 {sha} — stored as a file in the company workspace. Open \
+                         it there; this record is the version history, not the content."
+                    ),
+                    // A store that returned no digest: say so rather than
+                    // implying the version is identified when it is not.
+                    PayloadStorage::Stored { sha256: None } => format!(
+                        "{head} — stored as a file in the company workspace, with no digest \
+                         recorded. Open it there; this record is the version history, not the \
+                         content."
+                    ),
+                    // Deliberately does NOT carry the store's error text. This
+                    // string is permanent, and a backend error can name host
+                    // paths; the operator needs to know the file is not there,
+                    // and the diagnosis belongs in the log.
+                    PayloadStorage::Refused => format!(
+                        "{head} — NOT stored: the company workspace refused this file, so there \
+                         is nothing to open there. This record is the version history, not the \
+                         content."
+                    ),
+                }
+            }
         }
     }
 

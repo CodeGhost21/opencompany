@@ -2345,7 +2345,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         company: &CompanyId,
         node: &crate::ports::workspace::WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         let node = crate::ports::workspace::stamped_binary(node, bytes)?;
         let nodes = self.workspace_nodes(company).await?;
@@ -2381,7 +2381,9 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             })
             .await
             .map_err(mongo_err)?;
-        Ok(())
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
     }
 
     async fn write_binary(

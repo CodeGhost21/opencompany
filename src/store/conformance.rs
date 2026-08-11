@@ -2374,13 +2374,38 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     ws.create(&alpha, &folder_node("shots", "Shots"), None)
         .await
         .unwrap();
-    ws.create_binary(
-        &alpha,
-        &node("img", "hero.png", Some("image/png"), Some("shots")),
-        &png,
-    )
-    .await
-    .unwrap();
+    let stamped = ws
+        .create_binary(
+            &alpha,
+            &node("img", "hero.png", Some("image/png"), Some("shots")),
+            &png,
+        )
+        .await
+        .unwrap();
+
+    // -- The create RETURNS the stamped node (issue #668) ------------------
+    //
+    // Asserted with populated values, never `None`: a `None` here would pass
+    // against a backend that dropped the field entirely, which is the one thing
+    // this is meant to catch. The digest is the reason the signature returns a
+    // node at all — a caller that records it must be unable to obtain it from
+    // anywhere but the store.
+    let (expected_size, expected_sha) = crate::ports::workspace::blob_metadata(&png);
+    assert_eq!(
+        stamped.sha256.as_deref(),
+        Some(expected_sha.as_str()),
+        "create_binary must hand back the digest it computed, not an empty field"
+    );
+    assert_eq!(
+        stamped.size,
+        Some(expected_size),
+        "and the size it computed with it"
+    );
+    assert_eq!(
+        stamped.id, "img",
+        "the returned node is the one just created"
+    );
+    assert_eq!(stamped.mime.as_deref(), Some("image/png"));
 
     // -- Metadata is computed, not accepted -------------------------------
     let (meta, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
@@ -2390,7 +2415,6 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         Some(png.len() as u64),
         "size must come from the bytes, not from the caller's claim"
     );
-    let (_, expected_sha) = crate::ports::workspace::blob_metadata(&png);
     assert_eq!(
         meta.sha256.as_deref(),
         Some(expected_sha.as_str()),

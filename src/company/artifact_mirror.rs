@@ -125,7 +125,24 @@ pub enum MirrorPayload<'a> {
     },
 }
 
-/// Put `target`'s body into the shared tree and return the node id holding it.
+/// What a publish left in the tree: the node holding it, and — for bytes — the
+/// digest **the store computed** while writing it (issue #668).
+///
+/// The digest is `None` for prose, whose version body is the content itself, so
+/// there is nothing a hash would add. For bytes it is the only thing that tells
+/// two versions of one deliverable apart, and it comes back from
+/// [`WorkspaceStore::create_binary`] / [`write_binary`](WorkspaceStore::write_binary)
+/// rather than being computed here — see those methods for why the provenance
+/// matters more than the value.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Mirrored {
+    /// The workspace node now holding the deliverable.
+    pub node_id: String,
+    /// The store's `sha256` of the bytes it wrote, when the payload was bytes.
+    pub sha256: Option<String>,
+}
+
+/// Put `target`'s body into the shared tree and return what it left there.
 ///
 /// The layout is `Agents/<agent-id>/<task-id>/<source…>`. The agent's folder is
 /// minted on demand by
@@ -161,7 +178,7 @@ pub async fn materialize(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
     target: PublishTarget<'_>,
-) -> Result<String> {
+) -> Result<Mirrored> {
     // The cheap path, and the common one on a re-publish: the node from last
     // time still exists, so revise it in place and keep every reference to it
     // (the console's deep link, an operator's bookmark) working.
@@ -178,8 +195,11 @@ pub async fn materialize(
         && node.kind == NodeKind::File
         && node.is_binary() == matches!(target.payload, MirrorPayload::Bytes { .. })
     {
-        write_payload(workspace, company, existing, target).await?;
-        return Ok(existing.to_string());
+        let sha256 = write_payload(workspace, company, existing, target).await?;
+        return Ok(Mirrored {
+            node_id: existing.to_string(),
+            sha256,
+        });
     }
 
     let segments = split_source(target.source)?;
@@ -231,8 +251,11 @@ pub async fn materialize(
                 workspace.delete(company, &id).await?;
                 return create_payload(workspace, company, Some(parent), filename, target).await;
             }
-            write_payload(workspace, company, &id, target).await?;
-            Ok(id)
+            let sha256 = write_payload(workspace, company, &id, target).await?;
+            Ok(Mirrored {
+                node_id: id,
+                sha256,
+            })
         }
         None => create_payload(workspace, company, Some(parent), filename, target).await,
     }
@@ -244,20 +267,21 @@ async fn write_payload(
     company: &CompanyId,
     node_id: &str,
     target: PublishTarget<'_>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     match target.payload {
         MirrorPayload::Text(body) => {
             workspace
                 .write(company, node_id, body, origin(target.agent_id))
                 .await?;
+            Ok(None)
         }
         MirrorPayload::Bytes { bytes, mime } => {
-            workspace
+            let node = workspace
                 .write_binary(company, node_id, bytes, Some(mime), origin(target.agent_id))
                 .await?;
+            Ok(node.sha256)
         }
     }
-    Ok(())
 }
 
 /// Creates a fresh node of the right kind holding `target`'s payload.
@@ -267,7 +291,7 @@ async fn create_payload(
     parent: Option<String>,
     filename: &str,
     target: PublishTarget<'_>,
-) -> Result<String> {
+) -> Result<Mirrored> {
     let mut node = WorkspaceNode {
         id: crate::ports::generate_id(),
         name: filename.to_string(),
@@ -283,13 +307,20 @@ async fn create_payload(
     match target.payload {
         MirrorPayload::Text(body) => {
             workspace.create(company, &node, Some(body)).await?;
+            Ok(Mirrored {
+                node_id: node.id,
+                sha256: None,
+            })
         }
         MirrorPayload::Bytes { bytes, mime } => {
             node.mime = Some(mime.to_string());
-            workspace.create_binary(company, &node, bytes).await?;
+            let stamped = workspace.create_binary(company, &node, bytes).await?;
+            Ok(Mirrored {
+                node_id: stamped.id,
+                sha256: stamped.sha256,
+            })
         }
     }
-    Ok(node.id)
 }
 
 /// Record an edit to `node_id` on the artifact chain that owns it, when one
@@ -578,7 +609,8 @@ mod test {
 
         let id = materialize(ws, &co, target("launch.md", "# Launch"))
             .await
-            .expect("materialize");
+            .expect("materialize")
+            .node_id;
 
         assert_eq!(
             path_of(ws, &co, &id).await,
@@ -620,7 +652,8 @@ mod test {
             },
         )
         .await
-        .expect("materialize");
+        .expect("materialize")
+        .node_id;
 
         assert_eq!(
             path_of(ws, &co, &id).await,
@@ -665,7 +698,8 @@ mod test {
 
         let first = materialize(ws, &co, target("report.md", "# Draft"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         let second = materialize(
             ws,
             &co,
@@ -679,7 +713,8 @@ mod test {
             },
         )
         .await
-        .expect("a shape change must not fail the publish");
+        .expect("a shape change must not fail the publish")
+        .node_id;
 
         let (node, _) = ws
             .read_bytes(&co, &second)
@@ -708,10 +743,12 @@ mod test {
 
         let spec = materialize(ws, &co, target("specs/a.md", "spec body"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         let doc = materialize(ws, &co, target("docs/a.md", "doc body"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
 
         assert_ne!(spec, doc, "one node for two paths would lose a deliverable");
         assert_eq!(
@@ -736,7 +773,8 @@ mod test {
 
         let first = materialize(ws, &co, target("launch.md", "draft one"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         let before = ws.tree(&co).await.unwrap().len();
 
         let again = materialize(
@@ -748,7 +786,8 @@ mod test {
             },
         )
         .await
-        .unwrap();
+        .unwrap()
+        .node_id;
 
         assert_eq!(again, first, "a re-publish must not open a rival node");
         assert_eq!(ws.tree(&co).await.unwrap().len(), before, "nothing created");
@@ -765,7 +804,8 @@ mod test {
 
         let first = materialize(ws, &co, target("launch.md", "draft one"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         assert!(ws.delete(&co, &first).await.unwrap());
 
         let again = materialize(
@@ -777,7 +817,8 @@ mod test {
             },
         )
         .await
-        .unwrap();
+        .unwrap()
+        .node_id;
 
         assert_ne!(again, first, "a deleted node must not be resurrected by id");
         assert_eq!(
@@ -799,11 +840,13 @@ mod test {
 
         let first = materialize(ws, &co, target("launch.md", "draft one"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
         // `existing_node_id: None` is exactly what a pre-#552 artifact carries.
         let again = materialize(ws, &co, target("launch.md", "draft two"))
             .await
-            .unwrap();
+            .unwrap()
+            .node_id;
 
         assert_eq!(again, first, "the node already at the path must be adopted");
         assert_eq!(ws.read(&co, &first).await.unwrap().unwrap().1, "draft two");
@@ -819,7 +862,10 @@ mod test {
 
         // Publish once to lay down `Agents/cmo/t-1/`, then put a folder where
         // the next publish's note wants to be.
-        let sibling = materialize(ws, &co, target("other.md", "x")).await.unwrap();
+        let sibling = materialize(ws, &co, target("other.md", "x"))
+            .await
+            .unwrap()
+            .node_id;
         let parent = ws
             .read(&co, &sibling)
             .await

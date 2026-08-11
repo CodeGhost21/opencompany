@@ -299,7 +299,7 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<WorkspaceNode> {
         self.admit(company, &node.name, bytes.len() as u64, None)
             .await?;
         self.inner.create_binary(company, node, bytes).await

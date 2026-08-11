@@ -585,7 +585,7 @@ impl WorkspaceStore for FixedTree {
         _company: &CompanyId,
         _node: &WorkspaceNode,
         _bytes: &[u8],
-    ) -> crate::Result<()> {
+    ) -> crate::Result<WorkspaceNode> {
         unreachable!("search never creates")
     }
     async fn write_binary(
