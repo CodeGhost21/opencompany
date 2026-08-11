@@ -296,6 +296,21 @@ async fn write_payload(
 /// longer resolved, and the previous deliverable — which was fine — destroyed by
 /// a publish that did not succeed.
 ///
+/// # The staging window costs quota, and that changes who succeeds
+///
+/// The replacement is minted while the superseded node still exists, so both
+/// payloads are charged against `tree_quota_gb` until the swap. Delete-first
+/// freed the old bytes before asking for the new ones. A company close to its
+/// quota republishing a large deliverable is therefore **refused where it
+/// previously succeeded** — the end state of a successful publish is unchanged,
+/// but which publishes succeed is not.
+///
+/// That is the right trade, and it is the same one the rest of this doc argues:
+/// a refusal leaves the previous deliverable intact and is recoverable by
+/// raising the quota or deleting something, where the old behaviour destroyed
+/// it. Recorded here because the operator-visible symptom — a quota error on a
+/// republish of something that already fits — is otherwise unexplainable.
+///
 /// The old code argued the deletion was safe because "its history lives on the
 /// artifact chain". That holds when the replacement lands and not otherwise, and
 /// nothing distinguished the two. It is also **false for a binary**, whose
@@ -971,6 +986,30 @@ mod test {
             format!("{AGENTS_ROOT}/cmo/t-1/report.md")
         );
         assert!(ws.read_bytes(&co, &first).await.unwrap().is_none());
+
+        // …and the staging name does not survive. The text side stages through
+        // plain `create` rather than `create_binary`, so it is a different pair
+        // of store calls from the text→bytes case above: a swap that promoted
+        // the node but left a sibling behind would satisfy every assertion
+        // before this one.
+        let nodes = ws.tree(&co).await.unwrap();
+        let parent = node
+            .parent_id
+            .clone()
+            .expect("the replacement has a parent");
+        let siblings: Vec<&WorkspaceNode> = nodes
+            .iter()
+            .filter(|n| n.parent_id.as_deref() == Some(parent.as_str()))
+            .collect();
+        assert_eq!(
+            siblings.iter().filter(|n| n.name == "report.md").count(),
+            1,
+            "exactly one node carries the deliverable's name: {siblings:?}"
+        );
+        assert!(
+            !siblings.iter().any(|n| n.name.contains(".publishing-")),
+            "no staging name may survive a successful publish: {siblings:?}"
+        );
     }
 
     /// A real store whose swap boundary pauses until two publishers have both
