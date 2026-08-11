@@ -1584,42 +1584,99 @@ impl HarnessBrain {
                 match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
                     .await
                 {
-                    Ok(node_id) => {
-                        // A second write only when the link actually changed:
-                        // a fresh publish (nothing was inherited) or a
-                        // re-publish whose node the operator deleted, which
-                        // `materialize` replaces with a new one. The ordinary
-                        // re-publish reuses its node and stores once.
-                        if record.workspace_node_id() != Some(node_id.as_str()) {
+                    Ok(mirrored) => {
+                        let node_id = mirrored.node_id;
+                        // Issue #663/#668: the version body was composed before
+                        // the store was asked, so it describes an outcome that
+                        // had not happened. Now it has — say what it was, and
+                        // record the digest the STORE computed so two versions
+                        // of one binary can be told apart.
+                        //
+                        // Always re-composed, never conditional on the link
+                        // having changed: an ordinary re-publish reuses its node
+                        // and would otherwise keep the previous version's
+                        // digest, which is precisely the "identical string"
+                        // failure #668 describes.
+                        let stored = pending.payload.artifact_body_for(
+                            crate::harness::publish::PayloadStorage::Stored {
+                                sha256: mirrored.sha256.as_deref(),
+                            },
+                        );
+                        // Only when it actually says something new. Prose is its
+                        // own body, so a text re-publish composes the identical
+                        // string and still stores once — the contract
+                        // `an_ordinary_republish_writes_the_artifact_once`
+                        // pins. A binary's body gains the store's digest, so it
+                        // differs and is worth the second write: without it the
+                        // version would keep the PREVIOUS digest, which is the
+                        // indistinguishable-versions defect (#668) with an extra
+                        // step.
+                        let body_changed =
+                            record.latest().is_some_and(|latest| latest.body != stored);
+                        if body_changed {
+                            record.amend_latest_body(stored);
+                        }
+                        let relinked = record.workspace_node_id() != Some(node_id.as_str());
+                        if relinked {
                             record.stamp_workspace_node(&node_id);
-                            // Warn rather than `?`: at this point BOTH surfaces
-                            // already hold this body and only the pointer
-                            // between them is missing, so failing the batch
-                            // would discard the remaining publishes' records to
-                            // report a link that heals on the next publish —
-                            // `materialize` finds an existing node by path and
-                            // re-adopts it rather than duplicating.
-                            if let Err(err) = artifacts.upsert(&self.record.id, &record).await {
-                                tracing::warn!(
-                                    task_id = %card.id,
-                                    source = %pending.source,
-                                    node = %node_id,
-                                    error = %err,
-                                    "[publish] the deliverable and its note are both stored but \
-                                     could not be linked; the next publish of this source \
-                                     re-adopts the note and repairs it"
-                                );
-                            }
+                        }
+                        // A second write only when the record actually changed:
+                        // a fresh publish, a re-publish whose node the operator
+                        // deleted, or a body that now carries an outcome it did
+                        // not before. Warn rather than `?` for the unchanged
+                        // reason — BOTH surfaces already hold this body and only
+                        // the record's copy is stale, so failing the batch would
+                        // discard the remaining publishes' records to report
+                        // something the next publish repairs.
+                        if (body_changed || relinked)
+                            && let Err(err) = artifacts.upsert(&self.record.id, &record).await
+                        {
+                            tracing::warn!(
+                                task_id = %card.id,
+                                source = %pending.source,
+                                node = %node_id,
+                                error = %err,
+                                "[publish] the deliverable and its note are both stored but the \
+                                 record could not be updated; the next publish of this source \
+                                 re-adopts the note and repairs it"
+                            );
                         }
                     }
-                    Err(err) => tracing::error!(
-                        task_id = %card.id,
-                        agent = %author,
-                        source = %pending.source,
-                        error = %err,
-                        "[publish] could not put the published file into the company workspace; \
-                         it is still recorded as an artifact"
-                    ),
+                    Err(err) => {
+                        // Issue #663. The record already claimed this file was
+                        // filed into the workspace. It was not, so the claim is
+                        // withdrawn rather than left standing — an operator who
+                        // opens the artifact and reads "open it there" and finds
+                        // nothing is the dangling-record failure #553 set out to
+                        // remove, arriving through the error path.
+                        //
+                        // The store's error is logged and NOT written to the
+                        // record: a version body is permanent and a backend
+                        // error can name host paths.
+                        tracing::error!(
+                            task_id = %card.id,
+                            agent = %author,
+                            source = %pending.source,
+                            error = %err,
+                            "[publish] could not put the published file into the company \
+                             workspace; the artifact record says so rather than promising a \
+                             file that is not there"
+                        );
+                        record.amend_latest_body(
+                            pending.payload.artifact_body_for(
+                                crate::harness::publish::PayloadStorage::Refused,
+                            ),
+                        );
+                        if let Err(err) = artifacts.upsert(&self.record.id, &record).await {
+                            tracing::error!(
+                                task_id = %card.id,
+                                source = %pending.source,
+                                error = %err,
+                                "[publish] the workspace refused the file AND the record could \
+                                 not be corrected; it still claims the file is stored"
+                            );
+                        }
+                    }
                 }
             }
             written.push(TaskOutputArtifact {

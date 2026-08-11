@@ -1123,7 +1123,7 @@ impl WorkspaceStore for FsOps {
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<WorkspaceNode> {
         let node = crate::ports::workspace::stamped_binary(node, bytes)?;
         reject_unsafe_name(&node.name)?;
         let bundle = self.bundle(company);
@@ -1165,7 +1165,10 @@ impl WorkspaceStore for FsOps {
         tokio::fs::write(&physical, bytes)
             .await
             .map_err(|e| io_err(&physical, e))?;
-        self.save_index(company, &index).await
+        self.save_index(company, &index).await?;
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
     }
 
     async fn write_binary(

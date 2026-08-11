@@ -342,12 +342,26 @@ pub trait WorkspaceStore: Send + Sync {
     /// `bytes` is a slice rather than a stream on purpose: the quota decorator
     /// has to know the full size before anything is written, so that a refused
     /// write leaves no partial blob and no node behind. See [`BlobStream`].
+    ///
+    /// # Returns the **stamped** node, and that is the point (issue #668)
+    ///
+    /// The node handed back is the one [`stamped_binary`] produced, carrying the
+    /// `size` and `sha256` the store computed from `bytes` — not the node the
+    /// caller passed in. [`write_binary`](Self::write_binary) already returned
+    /// its updated node; this makes the pair symmetric.
+    ///
+    /// It exists so a caller that needs the digest — the publish drain, which
+    /// records it on the artifact version — can only ever obtain it **from the
+    /// store**. Hashing the same bytes caller-side would give one algorithm
+    /// called twice, and two calls can disagree if the bytes differ between
+    /// them; a returned node makes the digest's provenance structural, so a
+    /// future backend cannot quietly substitute its own.
     async fn create_binary(
         &self,
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()>;
+    ) -> Result<WorkspaceNode>;
     /// Replaces a binary node's payload, returning the updated node.
     ///
     /// The binary twin of [`write`](Self::write), and the reason re-publishing a

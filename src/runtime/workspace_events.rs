@@ -177,10 +177,10 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
-        self.inner.create_binary(company, node, bytes).await?;
+    ) -> Result<WorkspaceNode> {
+        let stamped = self.inner.create_binary(company, node, bytes).await?;
         self.announce(company, &node.id, CHANGE_OPENED).await;
-        Ok(())
+        Ok(stamped)
     }
 
     /// Replaces a payload through, then announces `updated` — unconditionally,

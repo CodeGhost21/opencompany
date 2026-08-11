@@ -2409,7 +2409,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         company: &CompanyId,
         node: &crate::ports::workspace::WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         let node = crate::ports::workspace::stamped_binary(node, bytes)?;
         let conn = self.conn();
@@ -2447,7 +2447,9 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ],
         )
         .map_err(sql_err)?;
-        Ok(())
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
     }
 
     async fn write_binary(
