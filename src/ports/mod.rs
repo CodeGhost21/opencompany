@@ -29,6 +29,7 @@ pub mod tools;
 pub mod types;
 pub mod usage;
 pub mod users;
+pub mod workflow_revisions;
 pub mod workflow_runner;
 pub mod workspace;
 
@@ -60,6 +61,9 @@ pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
 pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
+pub use workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+};
 pub use workflow_runner::{
     DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowRun, WorkflowRunContext,
     WorkflowRunNodeRow, WorkflowRunner,
@@ -98,6 +102,7 @@ mod test {
         _sessions: &dyn crate::ports::sessions::SessionStore,
         _login_codes: &dyn crate::ports::login_codes::LoginCodeStore,
         _runs: &dyn crate::ports::runs::RunStore,
+        _workflow_revisions: &dyn crate::ports::workflow_revisions::WorkflowRevisionStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
     ) {
     }
