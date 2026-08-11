@@ -26,10 +26,10 @@ function approval(kind: string): ApprovalSummary {
   return {
     id: "a1",
     kind,
+    amount_usd: null,
+    at_millis: 1_700_000_000_000,
     agent: "ceo",
-    status: "pending",
-    createdAtMillis: 1_700_000_000_000,
-  } as ApprovalSummary;
+  };
 }
 
 const BOUND: Repo = {
