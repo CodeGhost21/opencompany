@@ -281,6 +281,25 @@ async fn write_payload(
     }
 }
 
+/// Removes a staged replacement that will not be used, leaving the workspace as
+/// it was found.
+///
+/// Best-effort and never returns: every caller already has an error that
+/// explains the publish, and a cleanup failure must not replace it with a less
+/// informative one. The staged name is logged so an operator can find the node
+/// if the removal did fail.
+async fn discard_staged(workspace: &dyn WorkspaceStore, company: &CompanyId, staged: &str) {
+    if let Err(cleanup) = workspace.delete(company, staged).await {
+        tracing::warn!(
+            company = %company,
+            staged = %staged,
+            error = %cleanup,
+            "[publish] could not remove a staged replacement that will not be used; it remains \
+             in the workspace under its staging name"
+        );
+    }
+}
+
 /// Replaces the node at a path with one of the **other** kind — prose becoming
 /// bytes, or the reverse — without a window in which the deliverable does not
 /// exist (issue #662).
@@ -346,20 +365,33 @@ async fn replace_payload(
     )
     .await?;
 
-    if let Err(err) = workspace.delete(company, superseded).await {
-        // The old deliverable is still there, so the only thing to undo is the
-        // node just staged. A failure to clean it up is logged rather than
-        // returned: the caller's error is the one that explains the publish.
-        if let Err(cleanup) = workspace.delete(company, &staged).await {
-            tracing::warn!(
-                company = %company,
-                staged = %staged,
-                error = %cleanup,
-                "[publish] could not remove a staged replacement after a failed supersede; it \
-                 remains in the workspace under its staging name"
-            );
+    match workspace.delete(company, superseded).await {
+        Ok(true) => {}
+        // `delete` reports *whether a node was removed*, and "already gone" is
+        // `Ok(false)`, not an error. Reading only the `Err` arm would let a
+        // second publish that superseded this same path while ours was staging
+        // go undetected — and then BOTH renames land on `filename`, which is the
+        // two-nodes-one-path `Conflict` this staging exists to prevent, reached
+        // through the one return value the code did not read.
+        //
+        // Not hypothetical: workflow runs are spawned rather than serialized
+        // behind the cycle lock, and `materialize` is reached from the publish
+        // drain rather than from a `company_write_lock`ed write plane, so two
+        // publishes of one path genuinely overlap.
+        Ok(false) => {
+            discard_staged(workspace, company, &staged).await;
+            return Err(OpenCompanyError::Conflict(format!(
+                "the deliverable at `{filename}` was replaced by another publish while this one \
+                 was being prepared; nothing was overwritten — publish again"
+            )));
         }
-        return Err(err);
+        Err(err) => {
+            // The old deliverable is still there, so the only thing to undo is
+            // the node just staged. A failure to clean it up is logged rather
+            // than returned: the caller's error explains the publish.
+            discard_staged(workspace, company, &staged).await;
+            return Err(err);
+        }
     }
 
     workspace
@@ -925,6 +957,137 @@ mod test {
         assert!(
             ws.read(&co, &first).await.unwrap().is_none(),
             "the superseded node is gone, not left beside its replacement"
+        );
+    }
+
+    /// A store that delegates everything but reports **no node removed** from
+    /// `delete` — the state a concurrent publish leaves behind when it
+    /// supersedes the same path first.
+    struct VanishingDelete(Arc<FsOps>);
+
+    #[async_trait::async_trait]
+    impl WorkspaceStore for VanishingDelete {
+        async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
+            WorkspaceStore::tree(&*self.0, company).await
+        }
+        async fn read(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, String)>> {
+            WorkspaceStore::read(&*self.0, company, id).await
+        }
+        async fn write(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            content: &str,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write(&*self.0, company, id, content, author).await
+        }
+        async fn create(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            content: Option<&str>,
+        ) -> Result<()> {
+            WorkspaceStore::create(&*self.0, company, node, content).await
+        }
+        async fn create_binary(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            bytes: &[u8],
+        ) -> Result<()> {
+            WorkspaceStore::create_binary(&*self.0, company, node, bytes).await
+        }
+        async fn write_binary(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            bytes: &[u8],
+            mime: Option<&str>,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write_binary(&*self.0, company, id, bytes, mime, author).await
+        }
+        async fn read_bytes(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_bytes(&*self.0, company, id).await
+        }
+        async fn rename_move(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            name: Option<&str>,
+            parent: Option<Option<&str>>,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+        }
+        /// The whole point: the node is really removed, but the caller is told
+        /// nothing was — exactly what the loser of a concurrent supersede sees.
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            WorkspaceStore::delete(&*self.0, company, id).await?;
+            Ok(false)
+        }
+        async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
+            WorkspaceStore::is_empty(&*self.0, company).await
+        }
+    }
+
+    /// A `delete` that reports `Ok(false)` means somebody else already
+    /// superseded this path. Renaming onto it anyway would put TWO nodes on one
+    /// name — and `resolve_file` answers a duplicate with `Conflict`, so that
+    /// state never decays: every future publish to the deliverable is refused,
+    /// for every agent.
+    ///
+    /// The staging design exists to make that state unreachable, and reading
+    /// only `delete`'s `Err` arm would have reopened it through its return
+    /// value.
+    #[tokio::test]
+    async fn a_delete_that_removed_nothing_refuses_rather_than_duplicating_the_path() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("report.md", "# Draft"))
+            .await
+            .unwrap();
+
+        let racing = VanishingDelete(ops.clone());
+        let err = materialize(
+            &racing,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x25, 0x50, 0x44, 0x46],
+                    mime: "application/pdf",
+                },
+                existing_node_id: Some(&first),
+                ..target("report.md", "")
+            },
+        )
+        .await
+        .expect_err("a superseded path must refuse rather than rename onto it");
+        assert!(
+            err.to_string().contains("another publish"),
+            "the refusal must say what happened: {err}"
+        );
+
+        // The invariant this protects: at most one node carries the name.
+        let nodes = ws.tree(&co).await.unwrap();
+        let named: Vec<&WorkspaceNode> = nodes.iter().filter(|n| n.name == "report.md").collect();
+        assert!(
+            named.len() <= 1,
+            "the path must never carry two nodes: {named:?}"
+        );
+        // And no staged node is left behind under its staging name.
+        assert!(
+            !nodes.iter().any(|n| n.name.contains(".publishing-")),
+            "a refused supersede must not leak its staged node: {nodes:?}"
         );
     }
 
