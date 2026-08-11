@@ -66,8 +66,8 @@ use openhuman_core::openhuman as oh;
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
-    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowFile, create_company_workflow,
-    list_workflows_union, load_workflow_union,
+    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
+    create_company_workflow, list_workflows_union, load_workflow_union,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
@@ -2694,6 +2694,18 @@ struct CreateWorkflowArgNode {
     summary: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// Free-form, kind-specific node config carried as JSON on the wire and
+    /// converted to a `toml::Value` on the way into [`RawNode`] (issue #661): a
+    /// `tool_call`'s `slug` (+ `args`), an `http_request`'s `method`/`url`, a
+    /// `condition`'s `field` expression. A JSON `null` anywhere inside is a
+    /// caller error — TOML has no null — refused in [`TryFrom`] below.
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+    /// Where an `output` node's report goes (`owner`/`email`/`channel` + an
+    /// optional `target`). Reuses the REST route's [`WorkflowDestinationDef`];
+    /// the shared create core enforces each kind's target contract.
+    #[serde(default)]
+    destination: Option<WorkflowDestinationDef>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2707,29 +2719,49 @@ struct CreateWorkflowArgEdge {
     label: Option<String>,
 }
 
-impl From<CreateWorkflowArgs> for RawWorkflow {
-    fn from(args: CreateWorkflowArgs) -> Self {
-        Self {
+impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
+    /// A prosumer-language conversion error — the only fallible step is a node's
+    /// JSON `config`, which is refused when it can't be represented in TOML. The
+    /// caller maps it straight onto a [`ToolResult::error`].
+    type Error = String;
+
+    fn try_from(args: CreateWorkflowArgs) -> Result<Self, String> {
+        let mut nodes = Vec::with_capacity(args.nodes.len());
+        for n in args.nodes {
+            // JSON config → TOML value. TOML has no `null`, so a `null` anywhere
+            // in the config is a caller error, not a 500 on write — the same rule
+            // the REST create route and the workflow builder apply.
+            let config = match n.config {
+                Some(json) => Some(toml::Value::try_from(json).map_err(|err| {
+                    format!(
+                        "node `{}` has config that can't be stored ({err}) — TOML has no null; \
+                         drop null-valued keys.",
+                        n.id
+                    )
+                })?),
+                None => None,
+            };
+            nodes.push(RawNode {
+                id: n.id,
+                kind: n.kind,
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                // Policy fields stay omitted — agent-authored graphs are
+                // manual-run only (see the struct doc above).
+                schedule: None,
+                config,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                destination: n.destination,
+            });
+        }
+        Ok(Self {
             id: args.id,
             name: args.name,
             description: args.description,
-            nodes: args
-                .nodes
-                .into_iter()
-                .map(|n| RawNode {
-                    id: n.id,
-                    kind: n.kind,
-                    name: n.name,
-                    summary: n.summary,
-                    agent: n.agent,
-                    schedule: None,
-                    config: None,
-                    on_error: None,
-                    retry: None,
-                    requires_approval: None,
-                    destination: None,
-                })
-                .collect(),
+            nodes,
             edges: args
                 .edges
                 .into_iter()
@@ -2739,7 +2771,7 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     label: e.label,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -2837,7 +2869,25 @@ impl Tool for CreateWorkflowTool {
                             },
                             "name": { "type": "string", "description": "Human-readable node name." },
                             "summary": { "type": "string", "description": "Optional short description of the step." },
-                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." }
+                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
+                            "config": {
+                                "type": "object",
+                                "description": "Kind-specific settings. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
+                            },
+                            "destination": {
+                                "type": "object",
+                                "description": "On an `output` node only: where the report goes.",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["owner", "email", "channel"],
+                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
+                                    },
+                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
+                                },
+                                "required": ["kind"],
+                                "additionalProperties": false
+                            }
                         },
                         "required": ["id", "kind", "name"],
                         "additionalProperties": false
@@ -2872,13 +2922,22 @@ impl Tool for CreateWorkflowTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let draft: RawWorkflow = match serde_json::from_value::<CreateWorkflowArgs>(args) {
-            Ok(args) => args.into(),
+        let parsed = match serde_json::from_value::<CreateWorkflowArgs>(args) {
+            Ok(parsed) => parsed,
             Err(err) => {
                 tracing::debug!(company = %self.company, error = %err, "create_workflow: unreadable args");
                 return Ok(ToolResult::error(format!(
                     "Couldn't read the workflow definition: {err}. Provide `id`, `name`, and `nodes` (with an `edges` list)."
                 )));
+            }
+        };
+        // The only fallible conversion step is a node's JSON `config` (TOML has
+        // no null). Surface it as an agent-actionable error, never a panic.
+        let draft: RawWorkflow = match RawWorkflow::try_from(parsed) {
+            Ok(draft) => draft,
+            Err(msg) => {
+                tracing::debug!(company = %self.company, error = %msg, "create_workflow: unstorable config");
+                return Ok(ToolResult::error(msg));
             }
         };
 
