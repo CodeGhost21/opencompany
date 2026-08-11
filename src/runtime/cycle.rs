@@ -4468,6 +4468,38 @@ mod test {
             cycle_task_id(&[dispatched("t-1"), resolved("appr-none")], approval_task),
             None,
         );
+
+        // Issue #327: a workspace write is a record of something that already
+        // happened, so it is neutral on both counts. Alone it names no card…
+        assert_eq!(cycle_task_id(&[workspace_changed()], approval_task), None);
+        // …and — the arm that actually matters — it must not *disqualify* a
+        // dispatch it happens to share a batch with. An agent writing a note
+        // while its cycle runs is the ordinary case, and treating that write as
+        // a rival trigger would strip the card off its own stamp.
+        assert_eq!(
+            cycle_task_id(&[dispatched("t-1"), workspace_changed()], approval_task),
+            Some("t-1".into()),
+            "a workspace write must not disqualify the dispatch beside it",
+        );
+        assert_eq!(
+            cycle_task_id(
+                &[workspace_changed(), dispatched("t-1"), workspace_changed()],
+                approval_task
+            ),
+            Some("t-1".into()),
+            "and not from either side of it",
+        );
+    }
+
+    /// One workspace write (issue #327), for the neutrality assertions in both
+    /// `cycle_*_id` tests. Shared because it is the same claim made twice: an
+    /// event neutral for the card but not for the thread would mis-stamp every
+    /// cycle that answered a message and touched the tree.
+    fn workspace_changed() -> CompanyEvent {
+        CompanyEvent::WorkspaceChanged {
+            node_id: "n-1".into(),
+            change: "updated".into(),
+        }
     }
 
     /// The conversation key (#379): which chat thread a cycle is answering, read
@@ -4633,6 +4665,10 @@ mod test {
                 steps: Vec::new(),
                 task_id: None,
             },
+            // Issue #327: appended by the workspace store after the write it
+            // describes. An agent that answers a message and touches the tree
+            // in the same turn must keep its channel stamp.
+            workspace_changed(),
         ] {
             assert_eq!(
                 cycle_thread_id(
@@ -4643,6 +4679,11 @@ mod test {
                 "{record:?} is a record, not a trigger, and must not disqualify the batch",
             );
         }
+        // And alone it claims no conversation of its own.
+        assert_eq!(
+            cycle_thread_id(&[workspace_changed()], approval_thread),
+            None,
+        );
     }
 
     #[tokio::test]
