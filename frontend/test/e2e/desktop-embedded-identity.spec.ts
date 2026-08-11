@@ -220,7 +220,14 @@ test("a relaunch at a new port re-addresses the connection instead of adding one
   // Stated as a count of the whole store as well, because that is the shape the
   // bug had: the bootstrap host plus one row per launch. Three launches meant
   // four rows, two of them permanently unreachable.
-  expect(await profiles(page), "the bootstrap host and one embedded host").toHaveLength(2);
+  //
+  // One row now, not two: issue #613 stopped the desktop writing a same-origin
+  // bootstrap host and forgets any it finds, so the row this used to count
+  // alongside the embedded host no longer exists on a desktop launch. The
+  // property under test is unchanged — three launches leave one row — and the
+  // count is simply one smaller because the other row is gone for its own
+  // reason.
+  expect(await profiles(page), "one embedded host and nothing else").toHaveLength(1);
 
   // And the row that survived is the working one: this status comes back from a
   // real request to the real host, through the console's own probe.
@@ -262,8 +269,13 @@ test("the rows an older version left behind collapse on the next launch", async 
   expect(adopted.baseUrl).toBe(live);
   expect(adopted.instanceId).toBe(instanceId);
 
-  // The bootstrap connection is not this application's host and is untouched —
-  // whatever else is wrong with it belongs to #613.
+  // The bootstrap connection is not this application's host, so adoption leaves
+  // it alone — and #613, which this test's original form deferred to by name,
+  // then forgets it: an unreachable same-origin row is dropped on restore
+  // rather than carried forever. So the launch ends with the adopted host and
+  // nothing else. Both halves are asserted here rather than only the count,
+  // because "it was adopted" and "the dead row went" are different claims and
+  // one row could satisfy a bare length check either way.
   const all = await profiles(page);
-  expect(all.map((p) => p.id).sort()).toEqual([adopted.id, "5pnbp7zfx7w6"].sort());
+  expect(all.map((p) => p.id)).toEqual([adopted.id]);
 });
