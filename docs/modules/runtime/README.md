@@ -129,18 +129,17 @@ The workspace store seeds a new company from its `companies/<name>/workspace/**`
 template on first use (`WorkspaceStore::is_empty` gates the seed); skills read
 the company's `skills/<id>/SKILL.md` plus the repo-level shared registry.
 
-Boot also scaffolds the two reserved system roots, `Agents/` and `Desks/`
-(issue #551), via `company::workspace_scaffold::ensure_workspace_scaffold`.
-That call is gated on "this is not a rebuild" and on **nothing else** —
-deliberately not on `seed_dir`, since a provisioned tenant and the desktop
-build have no company bundle to seed from and their workspace needs the same
-shape; deliberately not on `is_empty`, since that gate exists to make operator
-deletions stick against re-seeding, and an existing company only ever picks the
-roots up on a later boot; and deliberately not on the roster, since the roots
-are part of what a workspace is. It is idempotent, so it costs one tree read
-per boot.
+Boot also scaffolds the reserved system root `Agents/` (issue #551), via
+`company::workspace_scaffold::ensure_workspace_scaffold`. That call is gated on
+"this is not a rebuild" and on **nothing else** — deliberately not on
+`seed_dir`, since a provisioned tenant and the desktop build have no company
+bundle to seed from and their workspace needs the same shape; deliberately not
+on `is_empty`, since that gate exists to make operator deletions stick against
+re-seeding, and an existing company only ever picks the root up on a later
+boot; and deliberately not on the roster, since the root is part of what a
+workspace is. It is idempotent, so it costs one tree read per boot.
 
-The roots are created **empty**. `Agents/<agent-id>/` and `Desks/<desk-id>/`
+The root is created **empty**. `Agents/<agent-id>/` and `Desks/<desk-id>/`
 are minted on demand by `ensure_agent_folder` / `ensure_desk_folder`, at the
 moment that agent or desk first produces something — a folder per roster member
 would fill the tree with empty directories for teammates who have done nothing.
@@ -148,6 +147,16 @@ The minters find-or-create the root they need, so they double as the repair
 path if boot's fail-soft create ever misses. There is deliberately no
 roster-rebuild seam: `HarnessPool::ensure` writes nothing to the workspace,
 because a member folder is no longer a function of the roster.
+
+`Desks/` is **not** scaffolded (issue #645). It was until nothing turned out to
+write into it: `ensure_desk_folder` still has no callers (#552's publish path
+is the intended first producer), so every company carried an empty root
+promising a feature it does not yet have. Because the minter already creates an
+absent root on its way down, dropping it from `SYSTEM_ROOTS` was enough —
+`Desks/` now appears whole, root and member folder together, the first time a
+desk actually produces something. Existing companies keep whatever `Desks/`
+they already have: the scaffold resolves only the names in `SYSTEM_ROOTS`, so
+an unmanaged root is never inspected, deduplicated, warned about or removed.
 
 The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
 (`workspace`), so agents read and write the shared note tree through the tools
