@@ -62,8 +62,8 @@ from the wire, for the many tasks that produce no file; see
 neither carries the TOML body, deliberately, since the journal reaches readers
 that have no business holding agent prompts or destination addresses),
 `WorkflowRunFinished` (issue #228 — the durable record of what a run did, from
-every entry point) and, from issue #371, `WorkflowRunStarted` /
-`WorkflowNodeFinished` (the per-node progress trail; see
+every entry point) and, from issue #371/#382, `WorkflowRunStarted` /
+`WorkflowNodeStarted` / `WorkflowNodeFinished` (the per-node progress trail; see
 [Workflow run progress](#workflow-run-progress-issue-371)).
 
 ### Per-task event correlation (issue #185)
@@ -352,164 +352,14 @@ for a follow-up rather than half-gated here.
 
 ## Workflow run progress (issue #371)
 
-A workflow run used to journal exactly one line, `WorkflowRunFinished`, written
-after the run returned. Between pressing Run and that line there was no record
-at all: a long run was indistinguishable from a wedged one, and a run that died
-at the fourth of six nodes recorded only that it died.
+A workflow run brackets itself on the journal with four variants —
+`WorkflowRunStarted`, `WorkflowNodeStarted`, `WorkflowNodeFinished` and
+`WorkflowRunFinished` — under a run-id correlation rule and an ordering
+guarantee, with an interrupted-run boot sweep and operator stop/cancel
+semantics. That contract grew past this file's 500-line Markdown cap and now
+lives in its own focused file:
 
-Three variants now bracket a run:
-
-| Variant | Written by | When |
-| --- | --- | --- |
-| `WorkflowRunStarted` | the workflow runner | before the engine call |
-| `WorkflowNodeFinished` | the runner's `RunObserver` | as each non-trigger node finishes |
-| `WorkflowRunFinished` | the **caller**, via `record_run_finished` | after the run returns, on both arms |
-
-### Why the journal rather than a dedicated store
-
-A chat turn emits dozens of steps per message; a workflow run emits **one event
-per non-trigger node** — roughly eight for a six-node graph. At that volume the
-journal is the right carrier, and it already feeds the operator SSE
-projection — so **one append serves both the live half and the durable half**
-through a single write path. A dedicated store would need a second writer and a
-second read path to deliver the same two answers.
-
-The alternative considered and rejected was adopting issue #242's `RunRecord` /
-`RunStepRecord`. `RunRecord` requires a `task_id`, an `agent_id` and a per-task
-attempt ordinal; a workflow run has none of those, so it would need a synthetic
-task id — a lie leaking into every `RunStore` consumer, all of which assume a
-run keys to a board card. `RunStepRecord`'s payload is a `TurnStep`, which has
-no node-id field at all.
-
-The accepted cost is journal growth of ~(N+1) lines per run, and a
-`GET …/workflows/runs` fold that is already O(journal). A dedicated store stays
-the known escape hatch if cron volume ever demands it.
-
-### What these events deliberately do not carry
-
-**No node output and no error text.** The engine's `ExecutionStep` carries the
-node's output items; `WorkflowNodeFinished` carries a node id, a two-valued
-status and a duration, and `WorkflowNodeStatus` has no `String` arm — so there
-is no `format!` that could put a node's own words on the journal. This is the
-same stance the live turn-progress frames take on tool args, and it matters
-because the journal is read by the operator SSE projection *and* wired out to
-the inference sidecar.
-
-Nothing is lost: the run-level failure reason already lands on
-`WorkflowRunFinished.error`, which is a tenant-scoped surface.
-
-### Run-id correlation
-
-`WorkflowRunStarted` and `WorkflowNodeFinished` **require** a `run_id`;
-`WorkflowRunFinished` has always carried an optional one and now populates it.
-That shared id is what lets a reader group a run's node rows with its outcome,
-and what lets the console overlay one past run's states onto the canvas.
-
-**The entry point mints it, not the runner.** On the error arm the runner
-returns nothing that could carry an id, and that is exactly the run whose
-per-node trail is worth correlating — so the id is minted above the call, in a
-`WorkflowRunContext` threaded through `WorkflowRunner::run`. Every entry point
-(the console's run route, the cron scheduler, the orchestrator's `run_workflow`
-tool) therefore stamps one id across both halves on every path.
-
-`WorkflowRunContext` is a crate-internal port type with no serde impl. Putting
-it in the trait signature is deliberate: it makes the compiler enumerate every
-entry point, so one cannot quietly journal an uncorrelatable run.
-
-### Ordering guarantee
-
-A run's lines are always `Started < Node… < Finished`. The first part is
-ordering by construction; the last is enforced — the runner drops its progress
-channel and **joins the collector before returning**, so every node line is
-durable before the caller writes the outcome. Without that join the two would
-race and a fold could attach a node to a run it had already rendered as
-finished.
-
-Lines of *different* runs may interleave (two workflows can run at once), which
-is why the read-side fold groups on run id rather than on adjacency.
-
-### Interrupted runs (issue #371)
-
-Because the start is written before the engine call, a host that dies mid-run
-leaves a start with no finish. At boot that is provably dead work, on three
-invariants: every entry point drives its run future **in this process**, exactly
-one process owns the journal, and no entry point has run yet. So
-`sweep_interrupted_runs` settles each unmatched start with a synthetic
-`WorkflowRunFinished` carrying an "interrupted by a host restart" error — the
-start's own `workflow_id`, `scheduled` flag and `run_id` are carried over, so
-the nodes that did complete still group under it.
-
-This is what keeps the read side honest: `GET …/workflows/runs` folds a start
-without a finish as `running: true`, and that claim is only true because runs
-that will never finish are settled at the next boot.
-
-**It must not run on a rebuild.** The argument above holds at boot and is false
-once a company has been serving: a scheduler-spawned run survives a live runtime
-swap, so sweeping mid-life would stamp "interrupted" on a run still walking its
-graph, whose real outcome would then land afterwards — two contradictory
-finishes for one run id. The call site is gated on the handover being absent,
-exactly like `reap_orphaned_runs`. Same lesson as #290.
-
-### Stopping a run (issue #383)
-
-A run an operator stops is a **third terminal reading**, not a variant of the
-other two. `WorkflowRunFinished` gained a `cancelled` flag; a cancelled run
-carries that flag and **no `error` at all**.
-
-| Reading | `error` | `cancelled` |
-| --- | --- | --- |
-| finished | absent | absent |
-| failed | the reason, naming the node when the trail names one | absent |
-| interrupted by a host restart | the boot sweep's synthetic reason | absent |
-| stopped by an operator | absent | `true` |
-
-Keeping them apart is the whole point. Folding a stop into `error` would put
-every deliberate cancel in the failure count and make "this run failed" the
-console's answer to a button the operator just pressed; folding it into a clean
-finish — which is what any reader that only checks `error` does — would report
-a stopped run as a success. Both fields are `serde(default)` +
-`skip_serializing_if`, so every line written before #383 decodes as not
-cancelled and every non-cancelled line stays byte-identical.
-
-A cancelled run journals a **real finish**, which is what keeps
-`sweep_interrupted_runs` out of it: there is nothing left open to sweep, so the
-two never write contradictory outcomes for one run id.
-
-**The trail is truthful about how far it got.** The runner drains and joins its
-progress collector on the cancel path exactly as on the completion path, so the
-nodes that finished before the stop are durable ahead of the outcome. The node
-that was *executing* contributes no row — it never finished, and inventing one
-would answer "how far did it get" wrongly.
-
-**How the stop works, and what it costs.** tinyflows has a `CancellationToken`,
-but no public entry point accepts one together with a `RunObserver`:
-`run_cancellable` hardcodes a `NoopObserver`, `run_with_observer` hardcodes a
-fresh token, and `build_and_run` — which takes both — is private. Using the
-engine's token would therefore cost every cancellable run the per-node progress
-above. So the runner instead races the engine call against a host-side signal
-and **drops the engine future**, which stops the run mid-await rather than at a
-node boundary: a node part-way through an external side effect stays part-way
-through it. That is the same class of outcome as a host `SIGKILL`, which the
-boot sweep already handles — only operator-initiated, and so more frequent. Say
-"stopped", not "finished". A `run_cancellable_with_observer` upstream would let
-this become a clean node-boundary stop and is tracked separately.
-
-The engine future must be dropped **before** the observer, because it owns
-observer `Arc` clones inside its per-node handlers; dropping the observer alone
-would leave the progress channel open and stall every cancel until the drain
-timeout. Today the borrow checker enforces that ordering, but only incidentally
-(the engine borrows the observer), so a cancel-latency bound is asserted as
-well.
-
-### An engine constraint worth knowing
-
-tinyflows' `RunObserver` has `on_step_finish` and **no `on_step_start`**, so
-there is no "node started" event to journal. A console showing which node is
-*currently* executing derives it from the graph topology it already holds
-(mark the successors of a finished node), which is a good-faith frontier rather
-than ground truth — after a branch point it briefly marks both arms. A true
-start hook needs a vendored tinyflows change and is tracked separately.
-
-A failing node, by contrast, **is** reported exactly: a node that dies under the
-default `stop` policy still emits a step with `Error` status before the run
-ends, so failure attribution is exact rather than inferred.
+- [workflow-events.md](workflow-events.md) — the run brackets and why the
+  journal carries them, run-id correlation, the ordering guarantee, the
+  interrupted-run sweep (issue #371), the node-started bracket (issue #382), and
+  stopping a run (issues #383/#398).

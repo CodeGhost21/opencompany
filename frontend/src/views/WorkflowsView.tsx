@@ -722,10 +722,12 @@ export function WorkflowsView({
     // neither leaks into the new run's triage (issue #528).
     setRunRefusal(null);
     sawOwnRunStartRef.current = false;
-    // Issue #371: clear the previous run's marks and paint the opening frontier
-    // immediately, so the canvas responds to the click rather than waiting on
-    // the first frame. The `workflow_run_started` frame re-sets the same thing
-    // a moment later, which is idempotent.
+    // Issue #371/#382: clear the previous run's marks and seed the trigger as
+    // done immediately, so the canvas responds to the click rather than waiting
+    // on the first frame. The `workflow_run_started` frame re-sets the same thing
+    // a moment later, which is idempotent. The per-node "running" lights now
+    // arrive as reported `workflow_node_started` frames (#382) rather than being
+    // guessed from the trigger's successors.
     //
     // Issue #542: a dry run paints NO optimistic frontier. It journals nothing
     // and emits no SSE frames, so there is no live fold to hand the canvas back

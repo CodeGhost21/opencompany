@@ -1287,11 +1287,12 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowDeleted { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
-            // Issue #371: a run's start and its per-node finishes are records of
-            // a workflow walking its graph, not stimuli for a new cycle. They
-            // name no card and compete with none, so they pass through exactly
-            // like the run outcome they bracket.
+            // Issue #371/#382: a run's start and its per-node start/finish
+            // brackets are records of a workflow walking its graph, not stimuli
+            // for a new cycle. They name no card and compete with none, so they
+            // pass through exactly like the run outcome they bracket.
             | CompanyEvent::WorkflowRunStarted { .. }
+            | CompanyEvent::WorkflowNodeStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
             // Issue #529: a report that left the process is a record of a
             // dispatch a workflow already made, journaled write-behind so a
@@ -1422,6 +1423,7 @@ fn cycle_thread_id(
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
+            | CompanyEvent::WorkflowNodeStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
             // Issue #529: a record of a report already dispatched — names no
             // thread and rivals none, exactly like the run events it sits among.
@@ -4489,6 +4491,21 @@ mod test {
             Some("t-1".into()),
             "and not from either side of it",
         );
+
+        // Issue #382: a per-node start bracket is the same kind of record — a
+        // workflow walking its graph, not a stimulus. Alone it names no card…
+        assert_eq!(
+            cycle_task_id(&[workflow_node_started()], approval_task),
+            None,
+        );
+        // …and it must not disqualify a dispatch it shares a batch with (a
+        // workflow node beginning while a cycle's card runs is the ordinary
+        // case).
+        assert_eq!(
+            cycle_task_id(&[dispatched("t-1"), workflow_node_started()], approval_task),
+            Some("t-1".into()),
+            "a node-start bracket must not disqualify the dispatch beside it",
+        );
     }
 
     /// One workspace write (issue #327), for the neutrality assertions in both
@@ -4499,6 +4516,18 @@ mod test {
         CompanyEvent::WorkspaceChanged {
             node_id: "n-1".into(),
             change: "updated".into(),
+        }
+    }
+
+    /// One per-node start bracket (issue #382), for the neutrality assertions in
+    /// both `cycle_*_id` tests. Like `workspace_changed`, it is a record of a
+    /// workflow walking its graph — it names no card and no thread, so alone it
+    /// stamps neither, and beside a trigger it must not disqualify the batch.
+    fn workflow_node_started() -> CompanyEvent {
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            node_id: "n-1".into(),
         }
     }
 
@@ -4669,6 +4698,10 @@ mod test {
             // describes. An agent that answers a message and touches the tree
             // in the same turn must keep its channel stamp.
             workspace_changed(),
+            // Issue #382: a per-node start bracket is a workflow walking its
+            // graph — a record, not a trigger, so it must not steal the channel
+            // off an addressed message beside it either.
+            workflow_node_started(),
         ] {
             assert_eq!(
                 cycle_thread_id(
@@ -4679,9 +4712,13 @@ mod test {
                 "{record:?} is a record, not a trigger, and must not disqualify the batch",
             );
         }
-        // And alone it claims no conversation of its own.
+        // And alone neither claims a conversation of its own.
         assert_eq!(
             cycle_thread_id(&[workspace_changed()], approval_thread),
+            None,
+        );
+        assert_eq!(
+            cycle_thread_id(&[workflow_node_started()], approval_thread),
             None,
         );
     }

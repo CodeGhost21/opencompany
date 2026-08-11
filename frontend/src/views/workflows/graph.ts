@@ -72,28 +72,32 @@ export function foldLiveRun(
   const runId = started.runId;
   const scheduled = started.scheduled;
   // The trigger fired by definition, and the engine reports no step for it, so
-  // nothing else would ever mark it. Its successors are where execution is now.
+  // nothing else would ever mark it. Every other node's state is REPORTED by the
+  // host from here (#382), not derived.
   const states = initialRunState(graph);
   const elapsed: Record<string, number> = {};
   let active = true;
 
   for (let i = startIndex + 1; i < events.length; i++) {
     const e = events[i];
+    // Issue #382: the engine now reports when a node BEGINS, so "running" is a
+    // fact rather than the old topology-derived frontier guess. Light the node
+    // up; its later finished frame overwrites this with ok/error. Guarded so a
+    // frame that somehow arrived out of order cannot downgrade a settled node
+    // back to running.
+    if (e.type === "workflow_node_started") {
+      if (e.runId !== runId) continue;
+      if (states[e.nodeId] !== "ok" && states[e.nodeId] !== "error") {
+        states[e.nodeId] = "running";
+      }
+      continue;
+    }
     if (e.type === "workflow_node_finished") {
       if (e.runId !== runId) continue;
       // Anything that is not "ok" is treated as a failure: an unknown status
       // word from a newer host must never paint a node as succeeded.
-      const state: NodeRunState = e.status === "ok" ? "ok" : "error";
-      states[e.nodeId] = state;
+      states[e.nodeId] = e.status === "ok" ? "ok" : "error";
       elapsed[e.nodeId] = e.elapsedMs;
-      // Advance the frontier. Only a successful node hands execution on — a
-      // failed one under the default `stop` policy ends the run, and lighting
-      // up its successors would claim work that never happened.
-      if (state === "ok") {
-        for (const id of successorsOf(graph, e.nodeId)) {
-          if (!states[id]) states[id] = "running";
-        }
-      }
       continue;
     }
     if (e.type === "workflow_run_finished" && e.workflowId === selectedId) {
@@ -104,9 +108,10 @@ export function foldLiveRun(
   }
 
   if (!active) {
-    // Nothing is executing any more, so the derived marks go. The REPORTED
-    // ok/error ones stay — they are the answer to "how far did it get?" — until
-    // a reselect or a rerun.
+    // Nothing is executing any more, so any node still marked "running" is an
+    // ORPHAN — a start whose finish never arrived because the run was cancelled
+    // or crashed on it. Clear those; the REPORTED ok/error marks stay, as the
+    // answer to "how far did it get?", until a reselect or a rerun.
     for (const [id, state] of Object.entries(states)) {
       if (state === "running") delete states[id];
     }
@@ -121,25 +126,19 @@ export function nodeName(graph: WorkflowGraph | null, nodeId: string): string {
   return graph?.nodes.find((n) => n.id === nodeId)?.name ?? nodeId;
 }
 
-/** The node ids `from` hands execution to. */
-export function successorsOf(graph: WorkflowGraph, from: string): string[] {
-  return graph.edges.filter((e) => e.from === from).map((e) => e.to);
-}
-
-/** The canvas state a run starts in (issue #371): every trigger marked done,
- * its successors marked running.
+/** The canvas state a run starts in (issue #371): every trigger marked done.
  *
- * Both halves are derived rather than reported. The engine emits no step for a
- * trigger node — it is the thing that fired, not a thing that ran — and it has
- * no `on_step_start` hook at all, so "where is it now" has to come from the
- * graph. After a branch point this briefly marks more than one arm; that
- * corrects itself as the real finishes arrive. */
+ * Only the triggers are seeded, and that mark alone is derived: the engine emits
+ * no step for a trigger node — it is the thing that fired, not a thing that ran —
+ * so "it fired" has to come from the graph. Every OTHER node's "running" mark is
+ * now REPORTED by the host's `workflow_node_started` frame (issue #382), so this
+ * no longer guesses a frontier by lighting up a trigger's successors — that guess
+ * over-marked both arms of a branch until the real finishes corrected it. */
 export function initialRunState(graph: WorkflowGraph): Record<string, NodeRunState> {
   const state: Record<string, NodeRunState> = {};
   for (const node of graph.nodes) {
     if (node.kind !== "trigger") continue;
     state[node.id] = "ok";
-    for (const id of successorsOf(graph, node.id)) state[id] = "running";
   }
   return state;
 }
