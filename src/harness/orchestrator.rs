@@ -1776,7 +1776,12 @@ impl RunOutputCache {
         nodes: Value,
         name_to_id: Vec<(String, String)>,
     ) -> RunOutputStored {
-        let bytes = serde_json::to_string(&nodes).map(|s| s.len()).unwrap_or(0);
+        // An unserializable map can't be sized, so treat it as over the hard
+        // ceiling: refuse it rather than cache it at a false zero that never
+        // counts toward the byte ceiling and so never gets evicted.
+        let bytes = serde_json::to_string(&nodes)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
         if bytes > RUN_OUTPUT_ENTRY_MAX_BYTES {
             tracing::debug!(
                 run_id = %run_id,
