@@ -76,7 +76,7 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OverlayAgent};
-use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner, generate_id};
+use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
 ///
@@ -1634,7 +1634,11 @@ impl Tool for AddAgentTool {
         // existing overlay teammate, so a trigger-happy orchestrator can't
         // accumulate indistinguishable duplicates. Matching on name alone is
         // intentional — the orchestrator supplies display names, and an id
-        // collision with a manifest agent is handled by `build_roster`.
+        // collision with a manifest agent is handled by `mint_agent_id` below.
+        //
+        // It does not subsume that check: this compares overlay *names*, so a
+        // call naming "Backend Engineer" on a company whose manifest declares
+        // `backend_engineer` passes here and still needs a suffixed id.
         let name_lower = name.to_ascii_lowercase();
         if record
             .overlay_agents
@@ -1645,8 +1649,12 @@ impl Tool for AddAgentTool {
                 "A teammate named \"{name}\" already exists. Pick a different name, or remove the existing one first."
             )));
         }
+        // Same readable-id rule as the console route (issue #686), under the
+        // same per-company write lock, so the two minting sites cannot hand out
+        // one id twice.
+        let id = record.mint_agent_id(&name);
         let agent = OverlayAgent {
-            id: generate_id(),
+            id: id.clone(),
             name: name.clone(),
             role: role.clone(),
             description,
@@ -1654,8 +1662,13 @@ impl Tool for AddAgentTool {
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
 
+        // The id is in the result because the orchestrator has to be able to
+        // address the teammate it just created — delegating to it, or putting it
+        // on a desk, takes the id, not the display name. The console gets the
+        // same answer from `TeamMemberDto.id`; before this the agent-facing half
+        // had no way to learn it at all.
         Ok(ToolResult::success(format!(
-            "Added {name} as {role} to the team. They'll be reachable as a teammate starting next turn."
+            "Added {name} (id `{id}`) as {role} to the team. They'll be reachable as a teammate starting next turn."
         )))
     }
 }
@@ -4485,6 +4498,92 @@ name = "Morning"
             Some("Owns acquisition experiments.")
         );
         assert!(!added.id.is_empty(), "a stable id must be minted");
+    }
+
+    /// Issue #686 — the tool mints the same readable, name-derived id the
+    /// console route does, and hands it back in the result so the orchestrator
+    /// can delegate to the teammate it just created.
+    #[tokio::test]
+    async fn add_agent_tool_mints_a_readable_id_and_reports_it() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Dana Designer", "role": "Designer" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+        assert!(
+            result.text().contains("`dana_designer`"),
+            "the id must be in the result, not only in the record: {}",
+            result.text()
+        );
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(record.overlay_agents[0].id, "dana_designer");
+    }
+
+    /// The name guard still fires, and it fires *before* minting — so a
+    /// duplicate display name is refused rather than quietly given a `_2` id.
+    /// Two teammates the orchestrator cannot tell apart is the thing that guard
+    /// exists to stop, and readable ids do not make it less true.
+    #[tokio::test]
+    async fn add_agent_tool_still_refuses_a_duplicate_display_name() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        for _ in 0..1 {
+            let first = tool
+                .execute(json!({ "name": "Dana Designer", "role": "Designer" }))
+                .await
+                .expect("execute");
+            assert!(!first.is_error, "{}", first.text());
+        }
+
+        let second = tool
+            .execute(json!({ "name": "dana designer", "role": "Illustrator" }))
+            .await
+            .expect("execute");
+        assert!(second.is_error, "{}", second.text());
+        assert!(
+            second.text().contains("already exists"),
+            "{}",
+            second.text()
+        );
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(
+            record.overlay_agents.len(),
+            1,
+            "the refusal must not have persisted a `dana_designer_2`"
+        );
+    }
+
+    /// A name colliding with a **manifest** agent's id passes the name guard —
+    /// it compares overlay names — and is caught by the minter instead. The
+    /// roster-level consequence is pinned in `harness::tests`.
+    #[tokio::test]
+    async fn add_agent_tool_suffixes_past_a_manifest_agent_id() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"backend_engineer\"\nrole = \"Backend Engineer\"\n",
+        )
+        .expect("valid manifest");
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Backend Engineer", "role": "Platform" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(record.overlay_agents[0].id, "backend_engineer_2");
     }
 
     #[tokio::test]

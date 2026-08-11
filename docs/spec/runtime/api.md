@@ -223,6 +223,32 @@ is never rewritten. Overlay teammates are addressable: since issue #71 the
 harness builds a real agent for each one, with the company-wide tool grant, no
 cognition tier, and never the orchestrator.
 
+`POST …/team` and the orchestrator's `add_agent` tool both **derive the roster
+id from the display name** (issue #686): "Dana Designer" becomes
+`dana_designer`, in the same snake_case grammar the manifest validator enforces
+on a hand-authored `[[agent]].id`. They used to mint an opaque
+`{millis}-{counter}` id, which #570/#552/#607 render as a workspace folder and
+in search-hit paths — so half a company's tree read as
+`Agents/019fad5ada20-000000000003/` beside `Agents/backend_engineer/`.
+
+- **Collisions suffix, they do not refuse.** A slug already held by a manifest
+  agent, another teammate, a desk id or name, or a reserved word (`operator`,
+  `Agents`, `Desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
+  always been accepted here, and an unsuffixed collision with a *manifest* id is
+  worse than a refusal: the roster build skips it, so the teammate would persist
+  and never materialise.
+- **Minted once, never re-minted.** `PATCH …/team/{agentId}` renames a teammate
+  and leaves the id alone; a name-keyed id would orphan its workspace folder,
+  budget row, desk memberships and inbox on every correction.
+- **Removal frees the slug**, so re-adding the same name takes the id back and
+  **adopts the old `Agents/<slug>/` folder** — the intended remedy for a typo'd
+  name, and not a way to get a clean slate.
+
+Teammates carrying generated ids are **not migrated**: rewriting them would
+rewrite the `WorkspaceOrigin` stamps issue #326 keeps honest, and every path
+into their folders. They keep working, reachable by display name through
+`crate::runtime::assignee`.
+
 `GET …/team/{agentId}` is the **agent detail** read (issue #264). `GET …/team`
 answers "who is on the roster"; this answers "what is this agent", and before it
 existed neither the console nor any other client could reach an agent's tier,
