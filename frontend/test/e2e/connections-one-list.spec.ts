@@ -26,8 +26,11 @@ import { expect, test } from "@playwright/test";
  * is decidable instead: `test/unit/provider-grid.test.ts` for the merge, and
  * `src/server/ops/connections_read.rs` for the gate itself.
  *
- * Drives a running host (see `playwright.config.ts` — the harness brings it up,
- * there is no `webServer`). CI does not run Playwright.
+ * Drives a real host serving the built console bundle. `npm run e2e` brings one
+ * up itself; set `PW_BASE_URL` to drive one you started. CI runs this in the
+ * `Console E2E` lane (#428, #467), so these assertions gate merges — unlike the
+ * older specs in this directory, whose headers still say Playwright is not run
+ * in CI and predate those lanes.
  */
 
 type Page = import("@playwright/test").Page;
