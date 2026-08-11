@@ -211,6 +211,17 @@ impl MongoStore {
             .create_index(unique(doc! {"company_id": 1}))
             .await
             .map_err(mongo_err)?;
+        // Issue #241: the cross-replica arbiter. This unique compound index is
+        // what turns two replicas racing one schedule minute into one winning
+        // `insert_one` and one `E11000` — the case that actually matters, since
+        // hosted replicas share the tenant database. Created outside the array
+        // above so adding it does not disturb that array's fixed length.
+        self.collection("schedule_fires")
+            .create_index(unique(
+                doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1},
+            ))
+            .await
+            .map_err(mongo_err)?;
         Ok(())
     }
 
@@ -1638,6 +1649,69 @@ impl crate::ports::runs::RunStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::schedule_fires::ScheduleFireStore for MongoStore {
+    async fn claim_fire(
+        &self,
+        company: &CompanyId,
+        schedule_id: &str,
+        minute: u64,
+    ) -> Result<bool> {
+        // A plain `insert_one` against the unique `(company_id, schedule_id,
+        // scheduled_for)` index. Success means this caller won the race; an
+        // `E11000` duplicate-key means a peer — another replica, or this process
+        // before a restart — already claimed the instant, so the caller lost and
+        // must skip. Every OTHER driver error propagates: a claim store that
+        // cannot answer must fail closed at the scheduler, never be read as a win.
+        let result = self
+            .collection("schedule_fires")
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "schedule_id": schedule_id,
+                "scheduled_for": minute as i64,
+                "claimed_at_ms": now_millis() as i64,
+            })
+            .await;
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) if is_duplicate_key(&e) => Ok(false),
+            Err(e) => Err(mongo_err(e)),
+        }
+    }
+
+    async fn latest_fire(&self, company: &CompanyId, schedule_id: &str) -> Result<Option<u64>> {
+        // The single newest row for this schedule, straight off the compound
+        // index — no aggregation needed. A schedule that never fired matches
+        // nothing and yields `None`, the no-anchor case.
+        let found = self
+            .collection("schedule_fires")
+            .find_one(doc! {"company_id": company.as_ref(), "schedule_id": schedule_id})
+            .sort(doc! {"scheduled_for": -1})
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(get_i64(&doc, "scheduled_for")? as u64)),
+            None => Ok(None),
+        }
+    }
+
+    async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize> {
+        let result = self
+            .collection("schedule_fires")
+            .delete_many(doc! {
+                "company_id": company.as_ref(),
+                "scheduled_for": {"$lt": cutoff_minute as i64},
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count as usize)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UsageMeter
 // ---------------------------------------------------------------------------
 
@@ -2268,6 +2342,13 @@ mod test {
     async fn conformance_run_reaper() {
         let Some(s) = store().await else { return };
         conformance::assert_run_reaper(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_schedule_fire_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_schedule_fire_store(s.clone()).await;
         drop_db(&s).await;
     }
 
