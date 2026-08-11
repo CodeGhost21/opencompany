@@ -654,7 +654,10 @@ impl WorkflowScheduler {
         // still-present workflow leaves one stale entry, harmless: it is only a
         // "have I run catch-up for this" bit and a re-created workflow of the same
         // id is a first sight again only after this sweep — acceptable, since a
-        // re-created workflow's anchor is whatever it last durably fired.)
+        // re-created workflow's anchor is whatever it last durably fired. That the
+        // anchor survives a delete+recreate is the durable-identity reuse issue
+        // #708 documents on `workflow_schedule_id` — bounded by the catch-up
+        // window, fixed by purging the fire ledger at delete time, not re-keying.)
         self.caught_up
             .retain(|(company, _)| registry.get(company).is_some());
 
@@ -788,6 +791,43 @@ fn lock_in_flight(
 /// not depend on any positional index. The `workflow-` prefix (a hyphen, never a
 /// colon) keeps it readable in a log line; the fs backend hashes it before it
 /// can address the filesystem, so a console-chosen `<workflow_id>` is safe.
+///
+/// # Identity reuse across delete+recreate (issue #708)
+///
+/// Because this key is the workflow id alone, deleting a workflow and recreating
+/// one with the **same id** makes the new workflow **inherit the old one's fire
+/// ledger** — its durable `claim_fire` / [`latest_fire`] rows survive the delete
+/// (`delete_workflow` in `src/server/ops/workflows.rs` tears down the graph,
+/// revisions, and events, but not the schedule's claim rows). Two effects, each
+/// bounded by [`CATCHUP_WINDOW_MINUTES`]:
+///
+/// * **one suppressed minute** — if the recreated schedule matches a minute the
+///   old id already claimed, `claim_fire` returns `false` and that single
+///   occurrence is skipped; and
+/// * **one inherited make-up** — the first-sight catch-up reads the stale anchor,
+///   so it may fire (or decline) a make-up on the *deleted* workflow's history.
+///   The `caught_up` sweep note in [`tick`](WorkflowScheduler::tick) already
+///   spells this out: a re-created workflow's anchor is whatever it last durably
+///   fired, so it is a first sight against a non-empty ledger.
+///
+/// The key is **deliberately not re-keyed** to erase that history, for three
+/// reasons — the re-key was considered for #661 and rejected:
+///
+/// 1. **Per-deploy catch-up loss** — a new key orphans every deployed tenant's
+///    existing anchors, so the first boot after the change treats every armed
+///    schedule as a fresh install and forfeits its legitimate restart catch-up.
+/// 2. **Rolling-deploy double-fire (a #241 regression)** — during a rolling
+///    deploy, mixed-version replicas would key the same minute under two ids and
+///    both could win a claim: the exact cross-replica double-fire the #241
+///    durable claim exists to prevent.
+/// 3. It is the natural, restart-stable `(company, workflow)` identity that
+///    survives a restart without depending on a positional index.
+///
+/// The real fix purges the fire-ledger rows at delete time instead (a new
+/// [`ScheduleFireStore`](crate::ports::ScheduleFireStore) delete method, called
+/// from `delete_company_workflow`), leaving the key as-is. Tracked in issue #708.
+///
+/// [`latest_fire`]: crate::ports::ScheduleFireStore::latest_fire
 fn workflow_schedule_id(workflow_id: &str) -> String {
     format!("workflow-{workflow_id}")
 }
