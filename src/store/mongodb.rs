@@ -3334,6 +3334,74 @@ mod test {
         drop_db(&s).await;
     }
 
+    /// The sqlite pin's mirror, on the other backend hosted tenants run
+    /// (issue #700).
+    ///
+    /// Both are needed: the guard exists because a backend accepts a node name
+    /// carrying a path separator, and "accepts it" is a fact about each backend
+    /// rather than about the port. A folder holding only such a child has no
+    /// renderable path to it, reads as empty by every path-shaped measure, and
+    /// would still lose it to the port's recursive `delete` (issue #671) — so
+    /// the sweep must leave that folder standing here too.
+    #[tokio::test]
+    async fn workspace_sweep_keeps_a_folder_whose_only_child_has_no_renderable_path() {
+        use crate::company::workspace_sweep::sweep_empty_agent_folders;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, kind, parent: Option<&str>| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Seed,
+            updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+
+        for (id, name, kind, parent, body) in [
+            ("root", "Agents", NodeKind::Folder, None, None),
+            ("ghost", "ceo", NodeKind::Folder, Some("root"), None),
+            ("empty", "cto", NodeKind::Folder, Some("root"), None),
+            (
+                "hidden",
+                "q/r.md",
+                NodeKind::File,
+                Some("ghost"),
+                Some("# quarterly"),
+            ),
+        ] {
+            WorkspaceStore::create(s.as_ref(), &company, &node(id, name, kind, parent), body)
+                .await
+                .expect("mongodb accepts these names — that is why the guard exists");
+        }
+
+        let removed = sweep_empty_agent_folders(s.as_ref(), &company, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            removed.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["empty"],
+            "only the genuinely empty folder may go"
+        );
+        let ids: Vec<String> = WorkspaceStore::tree(s.as_ref(), &company)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(
+            ids.contains(&"ghost".to_string()) && ids.contains(&"hidden".to_string()),
+            "the folder and its unaddressable child must both survive, got {ids:?}"
+        );
+        drop_db(&s).await;
+    }
+
     #[tokio::test]
     async fn durable_ownership_round_trip() {
         let Some(s) = store().await else { return };
