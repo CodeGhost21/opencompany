@@ -72,6 +72,7 @@ pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, Token
 /// The roster-id grammar check, shared with the runtime id minter so a slug and
 /// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
 /// outside the crate the validator speaks through `CompanyManifest::validate`.
+#[cfg(test)]
 pub(crate) use manifest::is_snake_case;
 pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
