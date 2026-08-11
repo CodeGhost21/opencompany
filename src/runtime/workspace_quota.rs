@@ -348,7 +348,7 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
     async fn swap_files(
         &self,
         company: &CompanyId,
-        expected_id: &str,
+        expected_id: Option<&str>,
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<WorkspaceNode>> {

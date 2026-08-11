@@ -2584,7 +2584,7 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
     async fn swap_files(
         &self,
         company: &CompanyId,
-        expected_id: &str,
+        expected_id: Option<&str>,
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
@@ -2610,11 +2610,23 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             ));
         }
 
-        let still_current = nodes.get(expected_id).is_some_and(|node| {
-            node.kind == NodeKind::File
-                && node.name == name
-                && node.parent_id == replacement.parent_id
-        });
+        // Both readings of `expected_id`, decided inside the immediate
+        // transaction opened above so two writers cannot both see the name free.
+        let still_current = match expected_id {
+            Some(id) => nodes.get(id).is_some_and(|node| {
+                node.kind == NodeKind::File
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+            // Issue #697: `None` asserts the name is unoccupied. Any node
+            // already at it loses this caller the compare-and-swap; the staged
+            // node itself is excluded, since it is what is being installed.
+            None => !nodes.values().any(|node| {
+                node.id != replacement.id
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+        };
         if !still_current {
             tx.execute(
                 "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
@@ -2628,11 +2640,15 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         let mut promoted = replacement;
         promoted.name = name.to_string();
         promoted.updated_at_millis = now_millis();
-        tx.execute(
-            "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
-            params![company.as_ref(), expected_id],
-        )
-        .map_err(sql_err)?;
+        // Nothing to retire on a first publish: the name was free, which is
+        // exactly what the guard above established.
+        if let Some(id) = expected_id {
+            tx.execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+            )
+            .map_err(sql_err)?;
+        }
         tx.execute(
             "UPDATE workspace_nodes SET node_json = ?1, updated_ms = ?2 \
              WHERE company_id = ?3 AND id = ?4",

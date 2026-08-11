@@ -110,6 +110,33 @@ fn get_i64(doc: &Document, key: &str) -> Result<i64> {
         .map_err(|e| mongo_err(format!("missing field {key}: {e}")))
 }
 
+/// The uniqueness key for a **file's** path inside one company (issue #697).
+///
+/// Stored beside the node document so the partial unique index in
+/// [`MongoStore::ensure_indexes`] can enforce "one file per path" as a database
+/// invariant. That is what lets a first publish be a real compare-and-swap on
+/// this backend: fs and SQLite decide the race under a lock and a transaction
+/// respectively, and MongoDB has neither across two documents, so the insert
+/// either violates the index or it does not.
+///
+/// Files only. Folders deliberately carry no key, so the index never indexes
+/// them and a folder may still share a name with a file exactly as before —
+/// this is a race fix, not a new tree rule.
+///
+/// NUL is the separator because [`reject_unsafe_name`](crate::store::fs_ops)
+/// keeps it out of every node name, so no name can forge a different pair's
+/// key. The root is the empty string; a node parented at the root and one
+/// parented under a folder therefore never collide.
+fn file_path_key(parent_id: Option<&str>, name: &str) -> String {
+    format!("{}\u{0}{}", parent_id.unwrap_or(""), name)
+}
+
+/// The key a node should carry, or `None` when it is not a file.
+fn node_path_key(node: &crate::ports::workspace::WorkspaceNode) -> Option<String> {
+    (node.kind == crate::ports::workspace::NodeKind::File)
+        .then(|| file_path_key(node.parent_id.as_deref(), &node.name))
+}
+
 /// A single MongoDB database implementing all five storage ports.
 #[derive(Clone)]
 pub struct MongoStore {
@@ -161,7 +188,31 @@ impl MongoStore {
         // Not every index can be unique: a user holds many sessions, and an
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
-        let plans: [(&str, IndexModel); 30] = [
+        // Unique only over the documents that carry the key at all (issue
+        // #697). MongoDB is the one backend with no transaction to decide a
+        // first publish under, so the uniqueness of a file's path has to be the
+        // database's own invariant rather than a read followed by a write.
+        //
+        // PARTIAL, and that is what makes it safe to add to a live tenant. A
+        // plain unique index is built over every existing document, so a
+        // company that already lost this race — the duplicate pair this issue
+        // is about — would fail index creation and take the store's startup
+        // down with it. Restricted to documents that *have* `file_path_key`,
+        // the index covers everything this code writes from now on and ignores
+        // history it cannot repair. Legacy duplicates keep being caught one
+        // level up, where `resolve_file` already answers them with `Conflict`.
+        let unique_partial = |keys: Document, present: &str| {
+            IndexModel::builder()
+                .keys(keys)
+                .options(
+                    IndexOptions::builder()
+                        .unique(true)
+                        .partial_filter_expression(doc! {present: {"$exists": true}})
+                        .build(),
+                )
+                .build()
+        };
+        let plans: [(&str, IndexModel); 31] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -178,6 +229,12 @@ impl MongoStore {
             (
                 "workspace_nodes",
                 unique(doc! {"company_id": 1, "node_id": 1}),
+            ),
+            // One file per path. This is the compare-and-swap a first publish
+            // wins or loses (issue #697); see `file_path_key`.
+            (
+                "workspace_nodes",
+                unique_partial(doc! {"company_id": 1, "file_path_key": 1}, "file_path_key"),
             ),
             ("users", unique(doc! {"company_id": 1, "user_id": 1})),
             // Enforces one account per address per company, and backs the login
@@ -2365,14 +2422,19 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 }
             }
         }
+        let mut document = doc! {
+            "company_id": company.as_ref(),
+            "node_id": &node.id,
+            "node_json": serde_json::to_string(node)?,
+            "content": content.unwrap_or(""),
+            "updated_ms": node.updated_at_millis as i64,
+        };
+        // Issue #697: claims this file's path against the partial unique index.
+        if let Some(key) = node_path_key(node) {
+            document.insert("file_path_key", key);
+        }
         self.collection("workspace_nodes")
-            .insert_one(doc! {
-                "company_id": company.as_ref(),
-                "node_id": &node.id,
-                "node_json": serde_json::to_string(node)?,
-                "content": content.unwrap_or(""),
-                "updated_ms": node.updated_at_millis as i64,
-            })
+            .insert_one(document)
             .await
             .map_err(mongo_err)?;
         Ok(())
@@ -2426,14 +2488,19 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             }
         }
         self.put_blob(company, &node.id, &node.name, bytes).await?;
+        let mut document = doc! {
+            "company_id": company.as_ref(),
+            "node_id": &node.id,
+            "node_json": serde_json::to_string(&node)?,
+            "content": "",
+            "updated_ms": node.updated_at_millis as i64,
+        };
+        // Issue #697, as above.
+        if let Some(key) = node_path_key(&node) {
+            document.insert("file_path_key", key);
+        }
         self.collection("workspace_nodes")
-            .insert_one(doc! {
-                "company_id": company.as_ref(),
-                "node_id": &node.id,
-                "node_json": serde_json::to_string(&node)?,
-                "content": "",
-                "updated_ms": node.updated_at_millis as i64,
-            })
+            .insert_one(document)
             .await
             .map_err(mongo_err)?;
         // The stamped node, so the digest a caller records can only have come
@@ -2585,14 +2652,25 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             node.parent_id = parent.map(str::to_string);
         }
         node.updated_at_millis = now_millis();
+        // A rename or a reparent moves the file to a different path, so its
+        // claim has to move with it (issue #697) or the index would keep
+        // guarding the path it left and ignore the one it took.
+        let mut set = doc! {
+            "node_json": serde_json::to_string(&node)?,
+            "updated_ms": node.updated_at_millis as i64,
+        };
+        let mut update = match node_path_key(&node) {
+            Some(key) => {
+                set.insert("file_path_key", key);
+                doc! {"$set": set}
+            }
+            None => doc! {"$set": set},
+        };
+        if node_path_key(&node).is_none() {
+            update.insert("$unset", doc! {"file_path_key": ""});
+        }
         self.collection("workspace_nodes")
-            .update_one(
-                doc! {"company_id": company.as_ref(), "node_id": id},
-                doc! {"$set": {
-                    "node_json": serde_json::to_string(&node)?,
-                    "updated_ms": node.updated_at_millis as i64,
-                }},
-            )
+            .update_one(doc! {"company_id": company.as_ref(), "node_id": id}, update)
             .await
             .map_err(mongo_err)?;
         Ok(node)
@@ -2601,7 +2679,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
     async fn swap_files(
         &self,
         company: &CompanyId,
-        expected_id: &str,
+        expected_id: Option<&str>,
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
@@ -2629,13 +2707,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             ));
         }
 
-        let expected_doc = nodes
-            .find_one(doc! {
-                "company_id": company.as_ref(),
-                "node_id": expected_id,
-            })
-            .await
-            .map_err(mongo_err)?;
+        let expected_doc = match expected_id {
+            Some(id) => nodes
+                .find_one(doc! {
+                    "company_id": company.as_ref(),
+                    "node_id": id,
+                })
+                .await
+                .map_err(mongo_err)?,
+            None => None,
+        };
         let expected = expected_doc
             .as_ref()
             .map(
@@ -2645,11 +2726,15 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 },
             )
             .transpose()?;
-        let still_current = expected.as_ref().is_some_and(|node| {
-            node.kind == NodeKind::File
-                && node.name == name
-                && node.parent_id == replacement.parent_id
-        });
+        // Only the replace arm can be decided by reading. The create arm is
+        // decided below, by the unique index, because a read here would be a
+        // check with a window after it.
+        let still_current = expected_id.is_none()
+            || expected.as_ref().is_some_and(|node| {
+                node.kind == NodeKind::File
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            });
 
         // Detach the private staging document before changing the expected
         // document's id: `(company_id, node_id)` is unique. The GridFS payload
@@ -2675,6 +2760,46 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             return Ok(None);
         }
 
+        let mut promoted = replacement.clone();
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+
+        // Issue #697, the first-publish arm. The staged document has just been
+        // detached, so re-inserting it under the final name is the whole
+        // operation — and the partial unique index on `file_path_key` is what
+        // decides it. Two publishers reaching here concurrently both attempt
+        // the insert; exactly one satisfies the index and the other is refused
+        // by the server, which is the only place this backend can hold that
+        // line without a transaction.
+        if expected_id.is_none() {
+            let staged_content = staged_doc
+                .get("content")
+                .cloned()
+                .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+            let mut document = doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+                "node_json": serde_json::to_string(&promoted)?,
+                "content": staged_content,
+                "updated_ms": promoted.updated_at_millis as i64,
+            };
+            document.insert(
+                "file_path_key",
+                file_path_key(promoted.parent_id.as_deref(), &promoted.name),
+            );
+            return match nodes.insert_one(document).await {
+                Ok(_) => Ok(Some(promoted)),
+                Err(err) if is_duplicate_key(&err) => {
+                    // Lost the race: somebody else holds this path. The staged
+                    // node is already detached, so only its payload remains to
+                    // reclaim — the same cleanup the replace arm owes.
+                    self.drop_blobs(company, replacement_id, None).await?;
+                    Ok(None)
+                }
+                Err(err) => Err(mongo_err(err)),
+            };
+        }
+
         let expected_doc = expected_doc.expect("still_current requires an expected document");
         let expected_json = get_str(&expected_doc, "node_json")?.to_string();
         let expected_content = expected_doc
@@ -2685,9 +2810,6 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             .get("content")
             .cloned()
             .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
-        let mut promoted = replacement;
-        promoted.name = name.to_string();
-        promoted.updated_at_millis = now_millis();
 
         // One document update is the compare-and-swap. Including the complete
         // old JSON and content makes an in-place writer count as a competing
@@ -2705,6 +2827,13 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                     "node_json": serde_json::to_string(&promoted)?,
                     "content": staged_content,
                     "updated_ms": promoted.updated_at_millis as i64,
+                    // The promoted node now holds the path, so it takes the
+                    // claim with it (issue #697). The superseded document is
+                    // this same document, so there is no stale key left behind.
+                    "file_path_key": file_path_key(
+                        promoted.parent_id.as_deref(),
+                        &promoted.name,
+                    ),
                 }},
             )
             .await
@@ -2718,10 +2847,11 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         // bytes are now unreachable; a cleanup failure must not turn a
         // successful atomic swap into a reported publish failure, because the
         // boot orphan sweep can safely finish this work later.
-        if let Err(err) = self.drop_blobs(company, expected_id, None).await {
+        let superseded = expected_id.expect("the replace arm has an expected id");
+        if let Err(err) = self.drop_blobs(company, superseded, None).await {
             tracing::warn!(
                 company = %company,
-                node_id = %expected_id,
+                node_id = %superseded,
                 error = %err,
                 "workspace file swap succeeded but old GridFS payload cleanup was deferred"
             );

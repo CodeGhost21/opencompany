@@ -1300,7 +1300,7 @@ impl WorkspaceStore for FsOps {
     async fn swap_files(
         &self,
         company: &CompanyId,
-        expected_id: &str,
+        expected_id: Option<&str>,
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<WorkspaceNode>> {
@@ -1320,12 +1320,27 @@ impl WorkspaceStore for FsOps {
             ));
         }
 
-        let expected = index.get(expected_id).cloned();
-        let still_current = expected.as_ref().is_some_and(|node| {
-            node.kind == NodeKind::File
-                && node.name == name
-                && node.parent_id == replacement.parent_id
-        });
+        // The two readings of `expected_id`, decided under the same index lock
+        // that the install below runs under — so a concurrent publisher cannot
+        // slip between the question and the answer.
+        let expected = expected_id.and_then(|id| index.get(id).cloned());
+        let still_current = match expected_id {
+            Some(_) => expected.as_ref().is_some_and(|node| {
+                node.kind == NodeKind::File
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+            // Issue #697: `None` asserts the name is unoccupied. Any node
+            // already holding it — of either kind, however it got there — loses
+            // this caller the compare-and-swap. The staged node is excluded
+            // because it is the thing being installed and still carries its
+            // staging name.
+            None => !index.values().any(|node| {
+                node.id != replacement.id
+                    && node.name == name
+                    && node.parent_id == replacement.parent_id
+            }),
+        };
         if !still_current {
             // The compare-and-swap lost. The staging node is private to this
             // operation, so consume it while the same index lock is held.
@@ -1340,22 +1355,36 @@ impl WorkspaceStore for FsOps {
             return Ok(None);
         }
 
-        let expected = expected.expect("still_current requires an expected node");
-        let old_physical = self.physical_path(company, &index, expected_id)?;
         let staged_physical = self.physical_path(company, &index, replacement_id)?;
         let mut promoted = replacement;
         promoted.name = name.to_string();
         promoted.updated_at_millis = now_millis();
 
+        // Where the staged payload lands differs by mode. Replacing, it is the
+        // superseded node's own path — that rename IS the swap boundary, which
+        // is why the destination is computed before the index changes.
+        // Creating, there is no such path yet, so the promoted node is named in
+        // the index first and its final path derived from that.
+        let destination = match expected.as_ref() {
+            Some(node) => self.physical_path(company, &index, &node.id)?,
+            None => {
+                index.insert(promoted.id.clone(), promoted.clone());
+                self.physical_path(company, &index, &promoted.id)?
+            }
+        };
+
         // `rename` is the filesystem compare-and-swap boundary: on the
         // supported Unix server platforms it replaces the destination in one
         // operation, so a payload reader sees either the old bytes or the new
         // bytes and never an absent final path. If it fails, the index is still
-        // untouched and the old deliverable remains authoritative.
-        tokio::fs::rename(&staged_physical, &old_physical)
+        // untouched on disk — nothing above here has been saved — and the old
+        // deliverable, where there was one, remains authoritative.
+        tokio::fs::rename(&staged_physical, &destination)
             .await
-            .map_err(|e| io_err(&old_physical, e))?;
-        index.remove(&expected.id);
+            .map_err(|e| io_err(&destination, e))?;
+        if let Some(node) = expected {
+            index.remove(&node.id);
+        }
         index.insert(promoted.id.clone(), promoted.clone());
         self.save_index(company, &index).await?;
         Ok(Some(promoted))
