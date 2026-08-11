@@ -438,7 +438,13 @@ function AddSkillDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>Add a skill</DialogTitle>
-          <DialogDescription>Describe a capability your company should have.</DialogDescription>
+          {/* Not "a capability your company should have" (issue #569): this is
+              where an operator authors one, so it is the earliest point the
+              console can frame a skill as the playbook a teammate reads rather
+              than as something the company will carry out. */}
+          <DialogDescription>
+            Describe a playbook your teammates should follow — what to do, and when.
+          </DialogDescription>
         </DialogHeader>
         <div className="grid gap-2">
           <Label htmlFor="skill-name">Name</Label>
