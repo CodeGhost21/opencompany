@@ -263,10 +263,58 @@ fn slug_toolkit(slug: &str) -> String {
     slug.split('_').next().unwrap_or("").to_ascii_lowercase()
 }
 
+/// One connected Composio account, projected for the console (issue #404).
+///
+/// Composio models a connection as an **account**, not as a boolean: a company
+/// can hold two Gmail connections, and telling them apart is the entire point of
+/// a detail view. [`list_connection_states`] deliberately folds this down to one
+/// `(toolkit, connected)` pair per toolkit for the tile grid and the
+/// reconciliation probe, both of which only ever ask "is this provider wired".
+/// Everything that needs to *manage* a connection reads these rows instead.
+///
+/// **Non-secret projection.** Composio returns no token material on this route,
+/// and nothing here is derived from the tenant bearer. The [`id`](Self::id) is a
+/// Composio-side handle, not a credential: it is the argument
+/// [`delete_connection`] takes, and it is useless without the bearer that scopes
+/// it to this company.
+///
+/// Always compiled, so the console DTO that mirrors it (`ops::composio`) can be
+/// defined in a build without the `composio` feature — only the functions that
+/// produce these rows are gated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposioConnectionRow {
+    /// Composio's connection id — what [`delete_connection`] revokes.
+    pub id: String,
+    /// Toolkit slug, normalized (`gmail`, `googlecalendar`).
+    pub toolkit: String,
+    /// Composio's raw status string (`ACTIVE`, `INITIATED`, `EXPIRED`, …).
+    ///
+    /// Forwarded verbatim rather than reduced to [`connected`](Self::connected),
+    /// because "connected: false" reads as *not set up* while an expired
+    /// connection was set up and needs re-authorizing — a different sentence and
+    /// a different button. The console maps the vocabulary; the host does not
+    /// pretend to know every value Composio may add.
+    pub status: String,
+    /// Whether this connection is usable — `ACTIVE` or `CONNECTED`,
+    /// case-insensitively, matching the vendored client's own `is_active`.
+    pub connected: bool,
+    /// When Composio recorded the connection, ISO-8601, when it says.
+    pub created_at: Option<String>,
+    /// The account label this connection acts as, when the provider published
+    /// one: the account email, else a workspace/team name, else a handle.
+    ///
+    /// Derived here rather than in the console so the precedence is stated once
+    /// and tested once — it mirrors OpenHuman's `deriveConnectionLabel`, which
+    /// is the experience this issue ports. `None` is honest: plenty of toolkits
+    /// publish no identity at all, and inventing one from the slug would render
+    /// as a fact the operator cannot check.
+    pub account: Option<String>,
+}
+
 #[cfg(feature = "composio")]
 pub use live::{
-    ComposioMetering, authorize_connect_url, composio_tools, list_catalog_toolkits,
-    list_connection_states,
+    ComposioMetering, authorize_connect_url, composio_tools, delete_connection,
+    list_catalog_toolkits, list_connection_states, list_connections_detailed,
 };
 
 #[cfg(feature = "composio")]
@@ -449,36 +497,116 @@ mod live {
         }
     }
 
-    /// The per-toolkit connected state the console renders as provider rows: one
-    /// `(toolkit, connected)` pair per toolkit that has at least one connection,
-    /// with `connected == true` when **any** connection for that toolkit is
-    /// active. Backs the console's `GET …/composio/connections` route.
+    /// Every connected account this company holds, one row per **connection**
+    /// rather than per toolkit (issue #404). Backs the console's provider detail
+    /// view and the disconnect it offers.
     ///
-    /// Filtered to the tenant allowlist (mirrors the `composio_list_connections`
-    /// agent tool) so a connection outside the company's grant is never
-    /// surfaced. Sorted by toolkit for a stable render order. Any upstream error
-    /// is scrubbed of the tenant bearer before it bubbles.
-    pub async fn list_connection_states(config: &TenantComposio) -> Result<Vec<(String, bool)>> {
-        tracing::debug!(allowlist = ?config.toolkits, "[composio] ops list_connections");
+    /// Filtered to the tenant allowlist exactly as [`list_connection_states`] is
+    /// — the two share this call, so a connection outside the company's grant is
+    /// invisible to both, and cannot be reached by guessing its id either (see
+    /// [`delete_connection`]). Sorted by `(toolkit, id)` for a stable render
+    /// order. Any upstream error is scrubbed of the tenant bearer before it
+    /// bubbles.
+    pub async fn list_connections_detailed(
+        config: &TenantComposio,
+    ) -> Result<Vec<ComposioConnectionRow>> {
+        tracing::debug!(allowlist = ?config.toolkits, "[composio] ops list_connections_detailed");
         let (client, secrets) = live_call(config).await?;
         let resp = match client.list_connections().await {
             Ok(resp) => resp,
             Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
         };
+        let mut rows: Vec<ComposioConnectionRow> = resp
+            .connections
+            .into_iter()
+            .filter_map(|conn| {
+                let toolkit = conn.normalized_toolkit();
+                if !toolkit_allowed(&config.toolkits, &toolkit) {
+                    return None;
+                }
+                let connected = conn.is_active();
+                Some(ComposioConnectionRow {
+                    id: conn.id,
+                    toolkit,
+                    status: conn.status,
+                    connected,
+                    created_at: conn.created_at,
+                    // Same precedence as OpenHuman's `deriveConnectionLabel`:
+                    // email, then workspace, then handle. A field present but
+                    // blank is treated as absent — a whitespace label would
+                    // render as an empty parenthetical, which reads as a bug.
+                    account: [conn.account_email, conn.workspace, conn.username]
+                        .into_iter()
+                        .flatten()
+                        .map(|v| v.trim().to_string())
+                        .find(|v| !v.is_empty()),
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| a.toolkit.cmp(&b.toolkit).then_with(|| a.id.cmp(&b.id)));
+        Ok(rows)
+    }
+
+    /// The per-toolkit connected state the console renders as provider tiles: one
+    /// `(toolkit, connected)` pair per toolkit that has at least one connection,
+    /// with `connected == true` when **any** connection for that toolkit is
+    /// active. Backs the console's `GET …/composio/connections` route and the
+    /// reconciliation probe in `ops::connections_read`.
+    ///
+    /// A projection over [`list_connections_detailed`] rather than a second call
+    /// shape: one network round-trip, one allowlist filter, one scrub. The fold
+    /// is what the tile grid wants and all the probe can use — both ask only
+    /// "is this provider wired" — but it is lossy, so anything that manages a
+    /// connection reads the rows instead.
+    pub async fn list_connection_states(config: &TenantComposio) -> Result<Vec<(String, bool)>> {
+        let rows = list_connections_detailed(config).await?;
         let mut states: std::collections::BTreeMap<String, bool> =
             std::collections::BTreeMap::new();
-        for conn in resp.connections {
-            let toolkit = conn.normalized_toolkit();
-            if !toolkit_allowed(&config.toolkits, &toolkit) {
-                continue;
-            }
-            let active = conn.is_active();
+        for row in rows {
             states
-                .entry(toolkit)
-                .and_modify(|c| *c = *c || active)
-                .or_insert(active);
+                .entry(row.toolkit)
+                .and_modify(|c| *c = *c || row.connected)
+                .or_insert(row.connected);
         }
         Ok(states.into_iter().collect())
+    }
+
+    /// Revoke one connected account by its Composio connection id (issue #404).
+    /// Backs the console's `DELETE …/composio/connections/{id}`.
+    ///
+    /// **The id is checked against this tenant's own filtered list first**, and
+    /// an unknown one fails before any delete is attempted. Two reasons, and the
+    /// second is the load-bearing one:
+    ///
+    /// * The backend scopes a delete to the caller's bearer, so another
+    ///   company's connection was never reachable — but a connection belonging
+    ///   to *this* company under a toolkit its manifest does **not** allow is
+    ///   reachable by that bearer, and is deliberately invisible to every read
+    ///   here. Letting an id delete what no read will show would make the
+    ///   allowlist a display filter rather than a boundary.
+    /// * It turns "already disconnected" into a clear answer instead of whatever
+    ///   the upstream returns for a stale id.
+    ///
+    /// Returns `Ok(())` on a completed revoke. A refusal (`deleted: false`) is an
+    /// error rather than a silent success: the console's next line tells the
+    /// operator the account is gone, and it must not say so on the strength of a
+    /// call the backend declined.
+    pub async fn delete_connection(config: &TenantComposio, connection_id: &str) -> Result<()> {
+        let connection_id = connection_id.trim();
+        if connection_id.is_empty() {
+            anyhow::bail!("composio disconnect: connection id must not be empty");
+        }
+        let known = list_connections_detailed(config).await?;
+        if !known.iter().any(|row| row.id == connection_id) {
+            anyhow::bail!("no such connection for this company");
+        }
+        tracing::debug!(connection_id = %connection_id, "[composio] ops delete_connection");
+        let (client, secrets) = live_call(config).await?;
+        match client.delete_connection(connection_id).await {
+            Ok(resp) if resp.deleted => Ok(()),
+            Ok(_) => anyhow::bail!("Composio declined to delete the connection"),
+            Err(err) => Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+        }
     }
 
     /// The backend's live Composio toolkit catalog — every slug it will let
@@ -1556,13 +1684,26 @@ mod ops_helper_tests {
     /// Mock `GET /agent-integrations/composio/connections` — gmail has one
     /// active + one pending row (→ connected), slack only pending (→ not
     /// connected), notion active (filtered out unless allowlisted).
+    ///
+    /// The identity fields exercise each arm of the account-label precedence
+    /// (issue #404): `c1` publishes an email, `c2` only a blank one plus a
+    /// workspace, `c3` only a username, `c4` nothing at all.
     async fn connections_handler() -> axum::Json<Value> {
         axum::Json(json!({
             "success": true,
             "data": { "connections": [
-                { "id": "c1", "toolkit": "gmail", "status": "ACTIVE" },
-                { "id": "c2", "toolkit": "gmail", "status": "INITIATED" },
-                { "id": "c3", "toolkit": "slack", "status": "INITIATED" },
+                {
+                    "id": "c1", "toolkit": "gmail", "status": "ACTIVE",
+                    "createdAt": "2026-08-01T10:00:00Z",
+                    "accountEmail": " ops@acme.test ",
+                    "username": "ignored-when-an-email-is-present"
+                },
+                {
+                    "id": "c2", "toolkit": "gmail", "status": "INITIATED",
+                    "accountEmail": "   ",
+                    "workspace": "Acme Workspace"
+                },
+                { "id": "c3", "toolkit": "slack", "status": "INITIATED", "username": "acme-bot" },
                 { "id": "c4", "toolkit": "notion", "status": "ACTIVE" }
             ] }
         }))
@@ -1678,6 +1819,131 @@ mod ops_helper_tests {
             states,
             vec![("gmail".to_string(), true), ("slack".to_string(), false)],
             "gmail active (one ACTIVE row), slack pending only, notion filtered out"
+        );
+    }
+
+    /// Issue #404: the detail view needs the account behind a connection, not
+    /// just that one exists. Pins the whole projection — per-connection rows
+    /// (two for gmail, where the fold gives one), the raw status, the account
+    /// label precedence, and the `(toolkit, id)` order — against the same
+    /// allowlist filter the fold applies.
+    #[tokio::test]
+    async fn list_connections_detailed_projects_each_account_with_its_identity() {
+        let url = spawn_backend().await;
+        let rows = list_connections_detailed(&config(&url, vec!["gmail".into(), "slack".into()]))
+            .await
+            .expect("list connections");
+
+        // Compared as whole rows rather than as a tuple projection, so a field
+        // added to `ComposioConnectionRow` later cannot slip past this
+        // assertion unexamined.
+        let expect = |id: &str,
+                      toolkit: &str,
+                      status: &str,
+                      connected: bool,
+                      created_at: Option<&str>,
+                      account: Option<&str>| ComposioConnectionRow {
+            id: id.to_string(),
+            toolkit: toolkit.to_string(),
+            status: status.to_string(),
+            connected,
+            created_at: created_at.map(str::to_string),
+            account: account.map(str::to_string),
+        };
+        assert_eq!(
+            rows,
+            vec![
+                // Email wins over the username the same row carries, and is
+                // trimmed.
+                expect(
+                    "c1",
+                    "gmail",
+                    "ACTIVE",
+                    true,
+                    Some("2026-08-01T10:00:00Z"),
+                    Some("ops@acme.test"),
+                ),
+                // A blank email is not an email: falls through to the workspace.
+                // Kept as its own row rather than folded into c1 — this is the
+                // "two Gmail accounts" case a disconnect has to tell apart.
+                expect(
+                    "c2",
+                    "gmail",
+                    "INITIATED",
+                    false,
+                    None,
+                    Some("Acme Workspace"),
+                ),
+                // Username is the last resort.
+                expect("c3", "slack", "INITIATED", false, None, Some("acme-bot")),
+            ],
+            "one row per connection, sorted by (toolkit, id); notion filtered out \
+             by the allowlist exactly as the fold filters it"
+        );
+    }
+
+    /// The fold the tile grid and the reconciliation probe read must keep
+    /// meaning what it meant before #404 widened the call underneath it —
+    /// `connected` is still "any account active", not "the first one".
+    #[tokio::test]
+    async fn the_per_toolkit_fold_still_summarises_the_detailed_rows() {
+        let url = spawn_backend().await;
+        let cfg = config(&url, vec!["gmail".into(), "slack".into()]);
+        let rows = list_connections_detailed(&cfg).await.expect("rows");
+        let states = list_connection_states(&cfg).await.expect("states");
+
+        let folded: std::collections::BTreeMap<String, bool> =
+            rows.into_iter().fold(Default::default(), |mut acc, r| {
+                let e = acc.entry(r.toolkit).or_insert(false);
+                *e = *e || r.connected;
+                acc
+            });
+        assert_eq!(
+            states,
+            folded.into_iter().collect::<Vec<_>>(),
+            "the states route is exactly the OR-fold of the detailed rows"
+        );
+    }
+
+    /// Issue #404 + #403: an id this company's own reads will not show must not
+    /// be deletable by naming it. The mock serves no DELETE route at all, so a
+    /// request that got as far as dialling would fail loudly rather than pass —
+    /// the refusal has to come from the guard, before the call.
+    #[tokio::test]
+    async fn disconnect_refuses_an_id_outside_this_companys_visible_connections() {
+        let url = spawn_backend().await;
+        // `c4` (notion) is a real, active connection upstream — but this
+        // company's manifest does not grant notion, so no read here surfaces
+        // it. That is the case the guard exists for: the bearer *could* delete
+        // it, and the allowlist must be a boundary rather than a display filter.
+        let err = delete_connection(&config(&url, vec!["gmail".into()]), "c4")
+            .await
+            .expect_err("a connection outside the grant is not deletable");
+        assert!(
+            err.to_string().contains("no such connection"),
+            "unexpected error: {err}"
+        );
+
+        // And an id that exists nowhere at all fails the same way.
+        let err = delete_connection(&config(&url, vec!["gmail".into()]), "nope")
+            .await
+            .expect_err("an unknown id is not deletable");
+        assert!(
+            err.to_string().contains("no such connection"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// An empty / whitespace id is refused before the list is even fetched.
+    #[tokio::test]
+    async fn disconnect_refuses_a_blank_id_before_any_network_call() {
+        // Unreachable backend — the argument check must fire first.
+        let err = delete_connection(&config("http://127.0.0.1:1", vec!["gmail".into()]), "  ")
+            .await
+            .expect_err("a blank id is refused");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "unexpected error: {err}"
         );
     }
 
