@@ -322,24 +322,25 @@ The three **policy** routes (issue #562) are the company-scoped twin of the
 budget pair. Before them the autonomy tier lived only in `[policy].mode` and
 nothing in the console read or wrote it, so an operator drowning in approval
 cards could change it only by redeploying an edited `company.toml` — or, on a
-hosted tenant whose manifest is a read-only snapshot, not at all.
+hosted tenant with a read-only manifest snapshot, not at all.
 
 `GET` returns the tier and always-ask list **in force**, what the manifest would
 restore, whether an override is set and by whom, and the selectable tiers with
 the host's own description of each (`POLICY_MODES` narrowed to tiers the console
-has text for, so it never offers one the host would downgrade). `PUT` takes
-`mode` and `alwaysApprove`, both optional and independent — `{"mode": "auto"}`
+has text for, so it never offers one the host would downgrade). `PUT` takes `mode`
+and `alwaysApprove`, both optional and independent — `{"mode": "auto"}`
 leaves the list alone, `{"alwaysApprove": []}` clears it (a real state, not a
 reset), `{"mode": null}` stops overriding the tier, and `{}` is a **`422`**
 because a body that sets nothing is never stored. An unknown `mode` is `422`
 too, not accepted-and-downgraded, or the console would show a tier the gate was
 not running. Both writes are admin-only and attributed. `DELETE` restores the
 manifest's `[policy]` — its own verb, since a `PUT` of the manifest's current
-values would pin them against a later `company.toml` edit. The change takes
-effect on the company's **next turn** (`ApprovalPolicy` is built per roster
-build, and this override is fingerprinted alongside the other freshness axes),
-and it survives a rebuild — so tightening `[policy]` in `company.toml` does not
-clear a looser tier set here.
+values would pin them. The change takes effect on the company's **next turn**
+(`ApprovalPolicy` is built per roster build, and this override is fingerprinted
+alongside the other freshness axes). It survives a rebuild unless the seed's
+`[policy]` itself changed: version control wins when it speaks, so tightening
+`company.toml` clears a looser tier set here, and a redeploy that changed
+nothing does not.
 
 ### Credential-bearing surfaces (feature-gated)
 

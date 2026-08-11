@@ -46,6 +46,9 @@ interface Props {
  *   so a turn already running finishes under the old one. Since stopping the
  *   flood *now* is exactly why an operator is here, that gap is stated instead
  *   of being left to discover.
+ * - **That version control outranks it.** The override is durable between seed
+ *   edits, but editing `[policy]` in `company.toml` clears it. An operator who
+ *   cannot see that would be surprised by a redeploy.
  */
 export function PolicySettings({ client, company }: Props) {
   const [status, setStatus] = useState<PolicyStatus | null>(null);
@@ -229,8 +232,9 @@ export function PolicySettings({ client, company }: Props) {
               <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-dashed p-3">
                 <p className="text-xs text-muted-foreground">
                   Set here{status.setBy ? ` by ${status.setBy}` : ""}, overriding
-                  the manifest ({status.manifestMode}). A{" "}
-                  <code>company.toml</code> edit will not clear it.
+                  the manifest ({status.manifestMode}). Editing{" "}
+                  <code>[policy]</code> in <code>company.toml</code> clears it —
+                  version control wins when it speaks.
                 </p>
                 <Button
                   size="sm"

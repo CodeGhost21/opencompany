@@ -28,9 +28,12 @@ fields are independently optional, so `None` means "not overridden" while
 rather than a manifest write **by necessity**: a rebuild re-persists
 `record.manifest` from the seed and merges only `[workflows].enabled`, because
 for `[tools]` / `[policy]` a record-wins merge would let a runtime grant outlive
-the operator revoking it in version control. The trade that leaves is real and
-deliberate — a tier loosened here outlives a `company.toml` edit, so it is
-attributed and clearing it is its own explicit operation.
+the operator revoking it in version control. It is cleared by either of two paths: the seed's
+`[policy]` **changing** across a rebuild (`carry_policy_override` — version
+control wins when it speaks, and stays quiet when it doesn't, so a redeploy that
+changed nothing does not silently revert the operator), or an explicit
+`DELETE …/policy`. Between seed edits it is durable, and attributed, so the
+console can show who moved the gate and when.
 And (issue #168) `overlay_workflows`: the
 workflow graph bodies authored at runtime through the console's create dialog or
 the orchestrator's `create_workflow` tool. These are persisted here rather than

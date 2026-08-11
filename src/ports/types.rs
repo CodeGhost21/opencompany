@@ -2388,16 +2388,26 @@ impl BudgetOverride {
 /// [`CompanyRecord::effective_policy`] resolves *ahead* of the manifest at read
 /// time.
 ///
-/// # It is still a live override of a security setting
+/// # Version control still wins when it speaks
 ///
-/// The invariant above is about the seed winning a *merge*; it does not make an
-/// operator override harmless. An admin who loosens the tier here has loosened
-/// it until someone explicitly resets it — editing `company.toml` and
-/// redeploying will **not** clear it. That is the same bargain #343 struck for
-/// spend caps, with the same two mitigations, and they are load-bearing rather
-/// than decorative: every override is **attributed** (`set_by` + `at_millis`),
-/// and "reset to the manifest" is a real, distinct operation (drop the row)
-/// rather than a value that has to be guessed at.
+/// The invariant above is about the seed winning a *merge*, and an override that
+/// simply outlived every seed edit would reproduce its named harm by another
+/// route: an operator tightens `[policy]` in `company.toml`, redeploys, and the
+/// looser console override silently wins — a runtime write outliving a seed
+/// rollback. #343 makes the opposite trade for spend caps and is right to; a cap
+/// is a number, not the gate.
+///
+/// So there are **two** clearing paths, and they answer different questions:
+///
+/// - `runtime::builder::carry_policy_override` drops the override when the
+///   seed's `[policy]` **changes** — and only then, so a routine redeploy that
+///   said nothing does not silently revert the operator.
+/// - `DELETE …/policy` is how an operator clears their own override without
+///   touching version control.
+///
+/// Between seed edits the override is durable, which is what makes it usable at
+/// all, and every one is **attributed** (`set_by` + `at_millis`) so the console
+/// can show who moved the gate and when.
 ///
 /// # Absent fields mean "not overridden"
 ///
