@@ -770,8 +770,28 @@ pub(crate) struct IrreversibleEffect {
     at_millis: u64,
     /// The USD amount involved, if any — what makes "sent a payment" into
     /// "sent a payment of $2,400".
+    ///
+    /// **Role-restricted (issue #705).** This is money, and it is the same
+    /// class of field [`ApprovalSummary::amount_usd`](crate::runtime::types::ApprovalSummary)
+    /// is restricted to admins by issue #618. It is redacted through the *same*
+    /// predicate, at the edge, by
+    /// [`effects_for_principal`](crate::server::approval_visibility::effects_for_principal)
+    /// — never here, because the projection does not know who is asking.
     #[serde(skip_serializing_if = "Option::is_none")]
-    amount_usd: Option<f64>,
+    pub(crate) amount_usd: Option<f64>,
+    /// Whether an amount was withheld from this reader.
+    ///
+    /// The same reasoning as
+    /// [`ApprovalSummary::contents_hidden`](crate::runtime::types::ApprovalSummary):
+    /// `amount_usd: None` already means "this effect involved no money", so
+    /// blanking alone would make a withheld payment and a free tool call the
+    /// same bytes on the wire. A console has to be able to say *hidden by your
+    /// role* rather than render a payment that looks like it cost nothing.
+    ///
+    /// Skipped when `false`, so an admin's response — and every response
+    /// produced before this field existed — serializes byte-identically.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub(crate) amount_hidden: bool,
 }
 
 impl From<crate::runtime::journal::ExecutedEffect> for IrreversibleEffect {
@@ -780,6 +800,9 @@ impl From<crate::runtime::journal::ExecutedEffect> for IrreversibleEffect {
             kind: e.kind,
             at_millis: e.at_millis,
             amount_usd: e.amount_usd,
+            // Never redacted at construction — the journal does not know who is
+            // asking. `effects_for_principal` is the only thing that sets this.
+            amount_hidden: false,
         }
     }
 }
@@ -1283,12 +1306,21 @@ async fn assemble_detail_with_cursor(
     // What a retry would re-do (issue #351). A pure journal read — one indexed
     // lookup, no event scan — so a task that did nothing irreversible costs
     // nothing extra however long the company has been running.
-    let irreversible_effects = company
-        .runtime
-        .irreversible_effects(&task_id)
-        .into_iter()
-        .map(IrreversibleEffect::from)
-        .collect();
+    //
+    // Redacted at the edge (issue #705): the amount is money, and a Member gets
+    // the row without it. Applied here rather than in the handler because this
+    // function is deliberately shared with the export document — see
+    // [`assemble_detail`] — so the guarantee holds for both readers by
+    // construction instead of by two callers remembering.
+    let irreversible_effects = crate::server::approval_visibility::effects_for_principal(
+        company.may_read_contents,
+        company
+            .runtime
+            .irreversible_effects(&task_id)
+            .into_iter()
+            .map(IrreversibleEffect::from)
+            .collect(),
+    );
 
     // An indexed store read, not another journal pass (issue #242).
     let runs = runs_for_task(company, &task_id).await?;
