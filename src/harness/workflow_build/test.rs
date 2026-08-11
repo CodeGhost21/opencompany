@@ -258,7 +258,10 @@ fn the_host_dedups_a_clashing_name() {
         "Monthly Report"
     );
     // A clash — case-insensitively — gets a suffix that clears the check.
-    assert_eq!(safe_workflow_name("weekly digest", &existing), "weekly digest 2");
+    assert_eq!(
+        safe_workflow_name("weekly digest", &existing),
+        "weekly digest 2"
+    );
     // The next suffix skips a taken one.
     let existing = vec!["Digest".to_string(), "Digest 2".to_string()];
     assert_eq!(safe_workflow_name("Digest", &existing), "Digest 3");
