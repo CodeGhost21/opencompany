@@ -10,8 +10,8 @@
 //! never echoed back — the read shape carries only an `authConfigured` bool.
 //!
 //! Both scope forms (`…/companies/{id}` and the single-company alias `…/company`)
-//! are registered by [`scoped`]. Agents pick up a change on their next harness
-//! rebuild; every mutating response says so via `note`.
+//! are registered by [`scoped`]. Agents pick up a change on their next turn with
+//! no restart; every mutating response says so via `note`.
 
 use axum::Router;
 use axum::extract::Path;
@@ -35,10 +35,11 @@ use crate::runtime::tools::grants_cover_server;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
-/// The reminder attached to every mutating response: a live agent's tool set is
-/// rebuilt lazily, so an edit reaches agents on the next harness rebuild.
-const REBUILD_NOTE: &str =
-    "Agents pick up this change on their next harness rebuild (restart the company).";
+/// The reminder attached to every mutating response: the effective MCP set is
+/// re-resolved and fingerprinted on every harness cycle (`HarnessPool::ensure`),
+/// so an edit reaches agents on the company's next turn with no restart. The
+/// `mcp_fingerprint` staleness term is what makes this a property of the design.
+const NEXT_TURN_NOTE: &str = "Agents pick up this change on their next turn — no restart needed.";
 
 /// Builds the MCP server management route fragment.
 pub fn router() -> Router<AppState> {
@@ -556,7 +557,7 @@ async fn mutation_response(
         .map_err(ApiError)?;
     Ok(Json(MutationResponse {
         server: dto_from_decl(decl, reachable_by, health),
-        note: REBUILD_NOTE.to_string(),
+        note: NEXT_TURN_NOTE.to_string(),
         test,
         warning,
     }))

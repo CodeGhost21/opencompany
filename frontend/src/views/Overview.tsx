@@ -7,7 +7,7 @@ import { discoverMcpTools, listMcpServers } from "@/api/mcp";
 import { listMemory, type MemoryEntry } from "@/api/memory";
 import { listSkills, type Skill } from "@/api/skills";
 import { listTasks, type Task } from "@/api/tasks";
-import { ApiError, type McpServer, type McpToolInfo } from "@/api/types";
+import { ApiError, type DeskDto, type McpServer, type McpToolInfo } from "@/api/types";
 import { fromDto, starterTeam, type TeamMember } from "@/lib/team";
 import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
 import { buildKnowledgeGraph } from "./overview/kg/model";
@@ -28,6 +28,16 @@ interface Props {
 interface Sources {
   tasks: Task[];
   team: TeamMember[];
+  /**
+   * The company's desks — ring 1 (issue #486).
+   *
+   * Best-effort like every other source here. A host that cannot serve them
+   * draws a graph with no pillars, which is the same picture as a company that
+   * declares no desks. The org chart treats a failed `/desks` as a hard error
+   * because desks *are* that page; here they are one ring of five, and failing
+   * the whole graph over them would take the real rings down with them.
+   */
+  desks: DeskDto[];
   people: Person[];
   skills: Skill[];
   memories: MemoryEntry[];
@@ -49,6 +59,7 @@ interface Sources {
 const EMPTY: Sources = {
   tasks: [],
   team: starterTeam(),
+  desks: [],
   people: [],
   skills: [],
   memories: [],
@@ -76,14 +87,15 @@ function worthAsking(server: McpServer): boolean {
  * The command centre: the company's knowledge graph, and nothing else.
  *
  * The page is the graph — no header, no strip, no top bar (the shell hides its
- * own for this view). The company sits at the core, its departments are the
- * pillars, the jobs hang off each pillar, the teammate who does each job sits
- * above it, and their tools are the outer ring.
+ * own for this view). The company sits at the core, its desks are the pillars,
+ * the jobs hang off each pillar, the teammate who does each job sits above it,
+ * and their tools are the outer ring.
  *
- * Two of those rings are **derived**, not declared: a company manifest carries
- * no department field and no per-agent tool list, so `kg/adapter.ts` invents a
- * plausible structure rather than leaving the graph three rings short. See
- * `DERIVED_NOTICE` there — it is the standing caveat on this whole surface.
+ * The pillars are **declared**: they are the company's own desks (issue #486),
+ * not the keyword-matched guess that used to stand there. What is still derived
+ * is the tool assignments and the workflow templates — there is no per-agent
+ * tool list and no flow API. See `DERIVED_NOTICE` in `kg/adapter.ts`; it is the
+ * standing caveat on what remains.
  */
 export function Overview({ client, company }: Props) {
   const [sources, setSources] = useState<Sources>(EMPTY);
@@ -91,9 +103,11 @@ export function Overview({ client, company }: Props) {
   useEffect(() => {
     let live = true;
     void (async () => {
-      const [tasks, roster, people, skills, memories, mcp] = await Promise.all([
+      const [tasks, roster, desks, people, skills, memories, mcp] = await Promise.all([
         listTasks(client, company).catch(() => [] as Task[]),
         client.listTeam(company).catch(() => null),
+        // Ring 1 (issue #486). Best-effort: see `Sources.desks`.
+        client.listDesks(company).catch(() => [] as DeskDto[]),
         // Only an admin may list people; a member just gets no humans on the
         // graph, which is the right amount of information for them to have.
         listPeople(client, company).catch(() => [] as Person[]),
@@ -138,6 +152,7 @@ export function Overview({ client, company }: Props) {
       setSources({
         tasks,
         team: roster?.length ? roster.map(fromDto) : starterTeam(),
+        desks,
         people,
         skills,
         memories,
@@ -155,6 +170,7 @@ export function Overview({ client, company }: Props) {
     () =>
       adapt({
         members: sources.team,
+        desks: sources.desks,
         tasks: sources.tasks,
         people: sources.people,
         skills: sources.skills,

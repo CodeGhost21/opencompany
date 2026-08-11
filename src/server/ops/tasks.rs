@@ -487,35 +487,42 @@ pub(crate) struct TimelineEntry {
 
 /// One approval that belongs to this task (issue #333).
 ///
-/// The Approvals tab's row. Distinct from the `approval` [`TimelineEntry`],
-/// which can only ever describe a *resolution* — an approval still parked has
-/// no `ApprovalResolved` event, so it cannot reach the timeline at all, and
-/// that is exactly the row an operator opening this screen needs: the one
-/// waiting on them right now.
+/// Distinct from the `approval` [`TimelineEntry`], which can only ever describe
+/// a *resolution* — an approval still parked has no `ApprovalResolved` event,
+/// so it cannot reach the timeline at all, and that is exactly the one the card
+/// needs to report: the sign-off a task is stalled on right now.
 ///
-/// Carries no payload. The parked effect can hold a recipient, a body or an
-/// amount, and this response is not the place to widen what a task read
-/// exposes — the Approvals page resolves the sign-off, and this is only the
-/// task's view of what it asked for.
+/// **Deliberately three fields (issue #468).** This used to back an Approvals
+/// tab on the task card that listed every sign-off with its kind and its
+/// park→resolve span. That tab is gone: approvals are decided in one place, and
+/// a second half-surface beside it was a maintenance cost with no payoff. What
+/// replaced it is a single "waiting on approval" line linking to the Approvals
+/// page, so this projection now carries what that line needs and stops there —
+/// whether anything is pending, and since when. `id` stays because it is the
+/// discriminator that makes "which approvals belong to which card" testable,
+/// which is #333's actual behaviour and outlives the tab.
+///
+/// Dropped with the tab: `kind`, `resolvedAtMillis`, `waitedMillis`. The
+/// park→resolve arithmetic is unchanged and still observable on the `approval`
+/// [`TimelineEntry`], which carries its own `waitedMillis`.
+///
+/// Still carries no payload, and the reason has changed. It used to be that a
+/// task read was the wrong place to widen exposure. That argument does not hold
+/// — `GET …/approvals` already returns the payload to any company member — so
+/// the honest reason is simply that this line does not need one. Whether
+/// membership is the right boundary for that sibling route is asked separately
+/// in issue #618 and is not decided here.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct TaskApproval {
     /// The approval's id — the same one the Approvals page resolves against.
     pub(crate) id: String,
-    /// The parked effect's dotted kind, e.g. `payment.send`.
-    pub(crate) kind: String,
-    /// Epoch-millis the effect parked.
+    /// Epoch-millis the effect parked. The card measures "waiting for N" from
+    /// here against its own clock, which is why a pending row needs no
+    /// server-side span.
     pub(crate) at_millis: u64,
     /// `pending`, `approved`, `denied`, or `expired`.
     pub(crate) status: String,
-    /// Epoch-millis the resolution landed. Absent while pending.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) resolved_at_millis: Option<u64>,
-    /// The park → resolve span. Absent while pending (the console runs that
-    /// clock itself from `atMillis`) and for an approval whose park instant the
-    /// journal cannot recover.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) waited_millis: Option<u64>,
 }
 
 /// One irreversible effect this task already executed (issue #351).
@@ -1051,11 +1058,8 @@ async fn assemble_detail_with_cursor(
 
     approvals.extend(pending.into_iter().map(|a| TaskApproval {
         id: a.id.as_ref().to_string(),
-        kind: a.kind,
         at_millis: a.at_millis,
         status: "pending".to_string(),
-        resolved_at_millis: None,
-        waited_millis: None,
     }));
     approvals.sort_by(|a, b| a.at_millis.cmp(&b.at_millis).then_with(|| a.id.cmp(&b.id)));
 
@@ -1562,18 +1566,14 @@ fn fold_page(
                 fold.approvals.push(TaskApproval {
                     id: approval_id.as_ref().to_string(),
                     // An origin is missing only for a park this journal never
-                    // saw. The row still belongs on the tab; it just cannot say
-                    // what the effect was.
-                    kind: origin
-                        .map_or_else(|| "unknown".to_string(), |origin| origin.kind.clone()),
+                    // saw; fall back to the resolution instant so the row still
+                    // sorts sanely among its siblings.
                     at_millis: origin.map_or(ev.at_millis, |origin| origin.at_millis),
                     status: if expired {
                         "expired".to_string()
                     } else {
                         crate::brain::medulla::effects::verdict_word(*verdict).to_string()
                     },
-                    resolved_at_millis: Some(ev.at_millis),
-                    waited_millis: waited,
                 });
                 Some(("approval", label, None, waited))
             }
