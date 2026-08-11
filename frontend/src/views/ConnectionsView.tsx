@@ -29,6 +29,7 @@ import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
 import { ComposioSection } from "@/views/connections/ComposioSection";
+import { RepositoriesCard } from "@/views/connections/RepositoriesCard";
 import { ChannelsSection } from "./connections/ChannelsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -364,6 +365,8 @@ export function ConnectionsView({ client, company }: Props) {
         <ComposioSection client={client} company={company} canManage={canManage} />
 
         <ChannelsSection client={client} company={company} canManage={canManage} />
+
+        <RepositoriesCard client={client} company={company} canManage={canManage} />
 
         {load === "ready" && (
           <Alert data-testid="connections-catalog-advisory">
