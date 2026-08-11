@@ -62,8 +62,8 @@ from the wire, for the many tasks that produce no file; see
 neither carries the TOML body, deliberately, since the journal reaches readers
 that have no business holding agent prompts or destination addresses),
 `WorkflowRunFinished` (issue #228 — the durable record of what a run did, from
-every entry point) and, from issue #371, `WorkflowRunStarted` /
-`WorkflowNodeFinished` (the per-node progress trail; see
+every entry point) and, from issue #371/#382, `WorkflowRunStarted` /
+`WorkflowNodeStarted` / `WorkflowNodeFinished` (the per-node progress trail; see
 [Workflow run progress](#workflow-run-progress-issue-371)).
 
 ### Per-task event correlation (issue #185)
@@ -357,13 +357,18 @@ after the run returned. Between pressing Run and that line there was no record
 at all: a long run was indistinguishable from a wedged one, and a run that died
 at the fourth of six nodes recorded only that it died.
 
-Three variants now bracket a run:
+Four variants now bracket a run:
 
 | Variant | Written by | When |
 | --- | --- | --- |
 | `WorkflowRunStarted` | the workflow runner | before the engine call |
+| `WorkflowNodeStarted` | the runner's `RunObserver` (issue #382) | as each non-trigger node begins |
 | `WorkflowNodeFinished` | the runner's `RunObserver` | as each non-trigger node finishes |
 | `WorkflowRunFinished` | the **caller**, via `record_run_finished` | after the run returns, on both arms |
+
+Each node's `WorkflowNodeStarted` and `WorkflowNodeFinished` ride the **same**
+unbounded observer channel, so the collector drains them in order and a node's
+start is always journaled ahead of its finish.
 
 ### Why the journal rather than a dedicated store
 
@@ -390,7 +395,9 @@ the known escape hatch if cron volume ever demands it.
 **No node output and no error text.** The engine's `ExecutionStep` carries the
 node's output items; `WorkflowNodeFinished` carries a node id, a two-valued
 status and a duration, and `WorkflowNodeStatus` has no `String` arm — so there
-is no `format!` that could put a node's own words on the journal. This is the
+is no `format!` that could put a node's own words on the journal.
+`WorkflowNodeStarted` (issue #382) is even thinner: the node has not run, so it
+carries the ids alone — no status, no duration, and never any input. This is the
 same stance the live turn-progress frames take on tool args, and it matters
 because the journal is read by the operator SSE projection *and* wired out to
 the inference sidecar.
@@ -400,8 +407,9 @@ Nothing is lost: the run-level failure reason already lands on
 
 ### Run-id correlation
 
-`WorkflowRunStarted` and `WorkflowNodeFinished` **require** a `run_id`;
-`WorkflowRunFinished` has always carried an optional one and now populates it.
+`WorkflowRunStarted`, `WorkflowNodeStarted` and `WorkflowNodeFinished`
+**require** a `run_id`; `WorkflowRunFinished` has always carried an optional one
+and now populates it.
 That shared id is what lets a reader group a run's node rows with its outcome,
 and what lets the console overlay one past run's states onto the canvas.
 
@@ -481,35 +489,40 @@ nodes that finished before the stop are durable ahead of the outcome. The node
 that was *executing* contributes no row — it never finished, and inventing one
 would answer "how far did it get" wrongly.
 
-**How the stop works, and what it costs.** tinyflows has a `CancellationToken`,
-but no public entry point accepts one together with a `RunObserver`:
-`run_cancellable` hardcodes a `NoopObserver`, `run_with_observer` hardcodes a
-fresh token, and `build_and_run` — which takes both — is private. Using the
-engine's token would therefore cost every cancellable run the per-node progress
-above. So the runner instead races the engine call against a host-side signal
-and **drops the engine future**, which stops the run mid-await rather than at a
-node boundary: a node part-way through an external side effect stays part-way
-through it. That is the same class of outcome as a host `SIGKILL`, which the
-boot sweep already handles — only operator-initiated, and so more frequent. Say
-"stopped", not "finished". A `run_cancellable_with_observer` upstream would let
-this become a clean node-boundary stop and is tracked separately.
+**How the stop works, and what it costs (issue #398).** The runner drives the
+engine through `run_cancellable_with_observer`, which takes a `CancellationToken`
+**and** a `RunObserver`, so a cancellable run keeps the per-node progress trail
+above instead of trading it away. When an operator stops a run, the runner flips
+that token: the engine checks it before each node, so a node already executing
+runs to completion and is journaled, then the run winds down at the next
+**boundary** carrying a real (partial) `RunOutcome` with `cancelled` set. That is
+the clean path — nothing is dropped mid-await, and the collected node rows ride
+back on the run response.
 
-The engine future must be dropped **before** the observer, because it owns
-observer `Arc` clones inside its per-node handlers; dropping the observer alone
-would leave the progress channel open and stall every cancel until the drain
-timeout. Today the borrow checker enforces that ordering, but only incidentally
-(the engine borrows the observer), so a cancel-latency bound is asserted as
-well.
+A node **wedged** mid-await on a stalled external call never reaches the next
+boundary, so the runner bounds the wait with `CANCEL_HARD_ABORT_GRACE` and, past
+it, falls back to the pre-#398 **hard abort**: it drops the engine future, which
+stops the run mid-await — a node part-way through a side effect stays part-way
+through it, the same class of outcome as a host `SIGKILL`, which the boot sweep
+already handles. Keeping this bounded fallback is what guarantees a wedged run
+stays killable. On that arm the run settles with an empty body (`cancelled_run()`)
+and its trail is the journal; on the clean arm the body carries the node rows.
 
-### An engine constraint worth knowing
+On the hard-abort arm the engine future must be dropped **before** the observer,
+because it owns observer `Arc` clones inside its per-node handlers; dropping the
+observer alone would leave the progress channel open and stall the cancel until
+the drain timeout, *on top of* the grace. Today the borrow checker enforces that
+ordering, but only incidentally (the engine borrows the observer), so a
+cancel-latency bound is asserted as well.
 
-tinyflows' `RunObserver` has `on_step_finish` and **no `on_step_start`**, so
-there is no "node started" event to journal. A console showing which node is
-*currently* executing derives it from the graph topology it already holds
-(mark the successors of a finished node), which is a good-faith frontier rather
-than ground truth — after a branch point it briefly marks both arms. A true
-start hook needs a vendored tinyflows change and is tracked separately.
+### The node-started bracket (issue #382)
 
-A failing node, by contrast, **is** reported exactly: a node that dies under the
-default `stop` policy still emits a step with `Error` status before the run
-ends, so failure attribution is exact rather than inferred.
+tinyflows' `RunObserver` gained an `on_step_start` hook, so the runner now
+journals a `WorkflowNodeStarted` immediately before each non-trigger node's first
+attempt. A console showing which node is *currently* executing therefore reads it
+straight off the stream rather than deriving a frontier from graph topology — the
+pre-#382 guess marked both arms of a branch until the real finishes corrected it.
+
+A failing node **is** reported exactly too: a node that dies under the default
+`stop` policy still emits a finish step with `Error` status before the run ends,
+so failure attribution is exact rather than inferred.
