@@ -1003,6 +1003,37 @@ pub enum CompanyEvent {
         /// Whether a cron schedule started this run rather than an operator.
         scheduled: bool,
     },
+    /// One non-trigger node of a workflow run began executing (issue #382),
+    /// reported by the engine's `RunObserver` immediately before the node's
+    /// first attempt.
+    ///
+    /// The opening bracket of a node the way
+    /// [`WorkflowNodeStarted`](Self::WorkflowNodeStarted)'s run-level sibling
+    /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) is the bracket of a run:
+    /// it turns "which node is executing right now" from a client-side guess
+    /// (derived from graph topology) into a fact the engine reports. It is
+    /// emitted on the **same** unbounded channel as this node's
+    /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) and always ahead of
+    /// it, so a reader folding the journal sees a node light up before it settles.
+    ///
+    /// **Structural ids only.** Unlike `WorkflowNodeFinished`, this carries no
+    /// status and no duration — the node has not run yet — and, like every event
+    /// on the progress trail, no node input. There is nothing here to scrub: a
+    /// node id is the whole payload, so the same operator-SSE / inference-sidecar
+    /// readers see only "node X of run R started".
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowNodeStarted {
+        /// The workflow graph that is running.
+        workflow_id: String,
+        /// The run this node belongs to — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) and
+        /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) carry.
+        run_id: String,
+        /// The graph node that just started executing.
+        node_id: String,
+    },
     /// One non-trigger node of a workflow run finished (issue #371), reported by
     /// the engine's `RunObserver` as the graph is walked.
     ///
@@ -1018,10 +1049,12 @@ pub enum CompanyEvent {
     /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished) — a tenant-scoped
     /// surface — so nothing is lost by keeping this one structural.
     ///
-    /// There is no matching *started* event, and that is an engine constraint
-    /// rather than a choice: tinyflows' `RunObserver` has `on_step_finish` but
-    /// no `on_step_start`, so "currently executing" is derived client-side from
-    /// the graph topology the console already holds.
+    /// Each node's matching *started* bracket is
+    /// [`WorkflowNodeStarted`](Self::WorkflowNodeStarted) (issue #382), emitted
+    /// on the same channel just before the node's first attempt. Before #382 the
+    /// engine's `RunObserver` had only `on_step_finish`, so "currently executing"
+    /// had to be derived client-side from the graph topology the console holds;
+    /// the engine now reports the start directly, so that derivation is gone.
     WorkflowNodeFinished {
         /// The workflow graph that is running.
         workflow_id: String,
@@ -1139,6 +1172,7 @@ impl CompanyEvent {
             Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
+            Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
         }
     }
@@ -1150,11 +1184,13 @@ impl CompanyEvent {
     /// for an unclassified entry is to keep it forever, and a wildcard would
     /// silently pick the other one.
     ///
-    /// Only four kinds are prunable, and each is high-volume machine exhaust
-    /// that no other entry addresses:
+    /// Only a handful of kinds are prunable, and each is high-volume machine
+    /// exhaust that no other entry addresses:
     ///
-    /// - the three workflow-run kinds — the growth the issue was filed for,
-    ///   left behind when #259 deletes a workflow, and
+    /// - the four workflow-run progress kinds — `WorkflowRunStarted`,
+    ///   `WorkflowNodeStarted` (issue #382), `WorkflowNodeFinished` and
+    ///   `WorkflowRunFinished` — the growth the issue was filed for, left behind
+    ///   when #259 deletes a workflow, and
     /// - `McpCallFailed`, a per-attempt tool failure whose durable meaning is
     ///   already carried by the run outcome it belongs to.
     ///
@@ -1178,6 +1214,7 @@ impl CompanyEvent {
         match self {
             Self::WorkflowRunStarted { .. }
             | Self::WorkflowRunFinished { .. }
+            | Self::WorkflowNodeStarted { .. }
             | Self::WorkflowNodeFinished { .. }
             | Self::McpCallFailed { .. }
             // Issue #327, and the one place this diverges from its sibling

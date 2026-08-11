@@ -1287,11 +1287,12 @@ fn cycle_task_id(
             | CompanyEvent::WorkflowDeleted { .. }
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
-            // Issue #371: a run's start and its per-node finishes are records of
-            // a workflow walking its graph, not stimuli for a new cycle. They
-            // name no card and compete with none, so they pass through exactly
-            // like the run outcome they bracket.
+            // Issue #371/#382: a run's start and its per-node start/finish
+            // brackets are records of a workflow walking its graph, not stimuli
+            // for a new cycle. They name no card and compete with none, so they
+            // pass through exactly like the run outcome they bracket.
             | CompanyEvent::WorkflowRunStarted { .. }
+            | CompanyEvent::WorkflowNodeStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
             // Issue #529: a report that left the process is a record of a
             // dispatch a workflow already made, journaled write-behind so a
@@ -1422,6 +1423,7 @@ fn cycle_thread_id(
             | CompanyEvent::WorkflowEnabledChanged { .. }
             | CompanyEvent::WorkflowRunFinished { .. }
             | CompanyEvent::WorkflowRunStarted { .. }
+            | CompanyEvent::WorkflowNodeStarted { .. }
             | CompanyEvent::WorkflowNodeFinished { .. }
             // Issue #529: a record of a report already dispatched — names no
             // thread and rivals none, exactly like the run events it sits among.

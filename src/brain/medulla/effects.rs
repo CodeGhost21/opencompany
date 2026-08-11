@@ -376,6 +376,19 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Run of workflow {workflow_id} started"),
             "workflow.run.started",
         ),
+        // Issue #382: the per-node start bracket. Structural, like the finish
+        // arm below — a node id and nothing else, so the sidecar reads "a node
+        // began" without any of the node's own payload.
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id,
+            node_id,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Workflow {workflow_id} started node {node_id}"),
+            "workflow.node",
+        ),
         CompanyEvent::WorkflowNodeFinished {
             workflow_id,
             node_id,
