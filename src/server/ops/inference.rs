@@ -263,12 +263,22 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
 /// ([`harness_inference_from_env`](crate::harness::provider::harness_inference_from_env)),
 /// read from the environment and never from a tenant secret.
 ///
-/// `None` off the `openhuman` feature, and `None` when no managed credential
-/// resolves — which is exactly when the harness resolves no env default either.
-/// Deriving it from that one function rather than reading
-/// `OPENCOMPANY_INFERENCE_URL` directly is what keeps display and routing
-/// honest in both directions: a bare URL with no credential routes nowhere, so
-/// the card must not advertise it as the endpoint in use.
+/// `None` when no managed credential resolves — which is exactly when the
+/// harness resolves no env default either. Deriving it from that one function
+/// rather than reading `OPENCOMPANY_INFERENCE_URL` directly is what keeps
+/// display and routing honest in both directions: a bare URL with no credential
+/// routes nowhere, so the card must not advertise it as the endpoint in use.
+///
+/// Also `None` off the `openhuman` feature, which is a shipped configuration
+/// (`Dockerfile`'s `FEATURES` arg defaults to empty, and `deploy/README.md`
+/// suggests sets like `medulla tinyplace sqlite`) — but not a gap. Nothing
+/// outside `src/harness/` reads `OPENCOMPANY_INFERENCE_URL`, so in such a build
+/// there is no injected endpoint for the card to misreport: the built-in
+/// constant is the only inference endpoint that exists, and the company is on
+/// the echo or hosted brain, which `cognition` reports on its own. The medulla
+/// hosted path talks to `DEFAULT_API_URL` over its own socket protocol rather
+/// than an OpenAI-compatible surface, so it is not an endpoint `baseUrl`
+/// describes either.
 fn platform_default(env: &dyn EnvSource) -> Option<EnvDefault> {
     #[cfg(feature = "openhuman")]
     {
@@ -691,6 +701,9 @@ mod tests {
 
     const NO_INFERENCE: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
 
+    const MANAGED_MANIFEST: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+         [inference]\nprovider = \"managed\"\n";
+
     #[tokio::test]
     async fn unconfigured_company_reports_the_platform_url_not_the_built_in_default() {
         let home_dir = home();
@@ -729,12 +742,7 @@ mod tests {
         // "managed"` printed the production URL too — under a `manifest` badge
         // rather than the `managed` one the report reproduced.
         let home_dir = home();
-        let runtime = runtime_with(
-            home_dir.path(),
-            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
-             [inference]\nprovider = \"managed\"\n",
-        )
-        .await;
+        let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
 
         let dto = effective_status_with(&runtime, None).await.unwrap();
         assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
@@ -748,6 +756,51 @@ mod tests {
             !dto.key_configured,
             "the platform token must not read as a tenant key on a managed manifest"
         );
+    }
+
+    /// Three inputs converge on `keyConfigured`, and exactly one of them must
+    /// never feed it. Today the tenant sources are a manifest `api_key_secret`
+    /// and a console `PUT`; #634 makes the console path the ordinary way an
+    /// admin sets the key on `managed`, which is precisely the provider that
+    /// inherits the platform credential. So the field has to keep answering
+    /// "did the *tenant* store a credential" and never "is there a credential",
+    /// on the one company where both are true at once.
+    ///
+    /// Pinned here rather than left to review: without it the distinction this
+    /// PR's two-resolve split exists to preserve is enforced by nothing.
+    #[tokio::test]
+    async fn a_platform_token_never_reads_as_a_console_set_key() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), MANAGED_MANIFEST).await;
+        let platform = staging_platform();
+
+        // The platform credential is doing the outbound work, and the card still
+        // says no key is configured — because none of it is the tenant's.
+        let dto = effective_status_with(&runtime, Some(&platform))
+            .await
+            .unwrap();
+        assert!(
+            !dto.key_configured,
+            "the platform token is not a stored tenant key"
+        );
+        assert_eq!(dto.base_url, STAGING_URL);
+
+        // An admin sets one from the console — the write #634's screen performs.
+        inference::store_key(runtime.id(), runtime.secrets().as_ref(), "sk-console-set")
+            .await
+            .unwrap();
+
+        let dto = effective_status_with(&runtime, Some(&platform))
+            .await
+            .unwrap();
+        assert!(
+            dto.key_configured,
+            "a console-set key must read as configured even on managed"
+        );
+        // Same company, same injected platform default, opposite answer — and the
+        // endpoint is unmoved either way: paying for your own agents on the
+        // managed brain does not take you off it.
+        assert_eq!(dto.base_url, STAGING_URL);
     }
 
     #[tokio::test]
