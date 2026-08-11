@@ -2276,13 +2276,23 @@ fn render_run_items(items: &[Value]) -> (String, usize) {
 /// returned offset always makes forward progress even against a pathological
 /// budget.
 fn page_run_output(full: &str, offset: usize, budget: usize) -> (String, Option<usize>) {
+    // Resolve the char `offset` to a byte index once, then walk from there — so
+    // reading a long output to its end is linear in the output, not quadratic in
+    // the page count (each call would otherwise rescan from index 0, and the
+    // caller re-renders the whole joined string per page).
+    let start_byte = full
+        .char_indices()
+        .nth(offset)
+        .map(|(b, _)| b)
+        .unwrap_or(full.len());
     let mut page = String::new();
-    for (i, c) in full.chars().enumerate() {
-        if i < offset {
-            continue;
-        }
+    for c in full[start_byte..].chars() {
         if !page.is_empty() && page.len() + c.len_utf8() > budget {
-            return (page, Some(i));
+            // `page` holds exactly the chars taken since `offset`, so the resume
+            // point is `offset` plus that count — and `c` starts the next page.
+            // Count before the move into the returned tuple.
+            let next = offset + page.chars().count();
+            return (page, Some(next));
         }
         page.push(c);
     }
