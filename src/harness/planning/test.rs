@@ -741,6 +741,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         origin_chat_id: None,
         parent_task_id: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
         // A card entering Planning has never run, so it has produced nothing
         // to link to (issue #339). Load-bearing rather than a default: the
         // re-plan test below starts from a card that HAS an output.

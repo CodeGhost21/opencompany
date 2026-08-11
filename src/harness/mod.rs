@@ -108,6 +108,12 @@ pub mod toolbelt;
 /// Issue #339: the staging queue the orchestrator's `run_workflow` /
 /// `create_workflow` tools push a workflow reference onto and the
 /// [`HarnessBrain`] drains at the end of a dispatch, so a card that built or
+/// Issue #580: the workflow builder pass — turns a `workflow`-deliverable card's
+/// plan into a proposed graph that lands In Review for approval. Modeled on the
+/// planning station (one card, one tool-less model call, one settled outcome),
+/// but it mints an attempt row because building the workflow is the card's work.
+/// See [`workflow_build`].
+pub mod workflow_build;
 /// ran a workflow can link to it. See [`workflow_refs`].
 pub mod workflow_refs;
 /// End-to-end proof that an agent granted `files` and **not** `shell` can write
@@ -273,6 +279,17 @@ pub struct HarnessDeps {
     /// workflow — the stamp falls back to the attempt's trace, which is a
     /// complete answer rather than a missing one.
     pub workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue,
+    /// The bounded, in-process cache the orchestrator's `run_workflow` tool fills
+    /// with each successful run's node output and the `read_run_output` companion
+    /// reads back (issue #418) — so a preview the run summary clipped is
+    /// reachable within the same turn.
+    ///
+    /// Same cheap-shared-handle pattern as [`Self::workflow_refs`]: the run tool
+    /// that stores and the read tool that serves are built in one `build_agent`
+    /// pass off the same deps clone, so they share one cache. Default is an empty
+    /// cache; nothing durable rides on it (the console run drawer is the durable
+    /// record), so a fresh process simply starts with nothing to read back.
+    pub run_outputs: crate::harness::orchestrator::RunOutputCache,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -2241,6 +2258,7 @@ description = "Builds the product."
                 mcp_failures: McpFailureQueue::default(),
                 pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -2307,6 +2325,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2910,6 +2929,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3044,10 +3064,17 @@ description = "Builds the product."
         }
     }
 
-    /// A console-added MCP server reaches the agent on the NEXT `ensure` — the
-    /// roster is rebuilt because the effective set re-resolved from the LIVE
-    /// secret store (not the boot snapshot) changed its fingerprint. This is the
-    /// Parallel-Search / BrowserBase freshness bug, proven end-to-end.
+    /// A console-added MCP server reaches the agent on the NEXT `ensure`, with no
+    /// restart — the roster rebuilds because the effective set, re-resolved from
+    /// the LIVE secret store (not the boot snapshot), changed its fingerprint.
+    /// This is the Parallel-Search / BrowserBase freshness bug proven end-to-end,
+    /// and the CI guard for issue #566: the effective-MCP fingerprint is a *term*
+    /// of [`HarnessPool::ensure`]'s staleness check. Both directions are pinned —
+    /// an unchanged set holds the fingerprint (no needless rebuild), an MCP-only
+    /// change moves it (rebuilt in place, without a restart). A refactor that
+    /// drops the term makes the post-change `ensure` early-return without storing
+    /// the new fingerprint: the value stops moving across the mutation and the
+    /// `assert_ne!` fails, rather than the restart requirement quietly returning.
     #[tokio::test]
     async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
@@ -3073,6 +3100,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -3096,6 +3124,16 @@ description = "Builds the product."
             .await
             .expect("fingerprinted");
 
+        // Stability direction: with no axis changed, a redundant `ensure` is a
+        // no-op — the gate reuses the cached roster and the fingerprint holds, so
+        // the change-direction assertion below can't pass by coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.mcp_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an unchanged MCP set must not move the fingerprint"
+        );
+
         // Console-add a runtime MCP server directly into the live secret store.
         crate::company::mcp::save_runtime_index(
             &rec.id,
@@ -3115,22 +3153,27 @@ description = "Builds the product."
         .await
         .unwrap();
 
-        // Next ensure re-resolves from the live store → fingerprint changes →
-        // roster rebuilt, so the new server reaches the agent without a restart.
-        pool.ensure(&rec, &deps).await.expect("second ensure");
+        // Change direction: the next ensure re-resolves from the live store →
+        // fingerprint changes → roster rebuilt, so the new server reaches the
+        // agent without a restart.
+        pool.ensure(&rec, &deps).await.expect("post-add ensure");
         let after = pool
             .mcp_fingerprint_of(&rec.id)
             .await
             .expect("fingerprinted");
-        assert_ne!(before, after, "adding a server must change the fingerprint");
+        assert_ne!(
+            before, after,
+            "an MCP-only change must move the staleness fingerprint (issue #566)"
+        );
         assert_eq!(
             pool.resident_companies().await,
             1,
-            "same company, rebuilt in place"
+            "same company, rebuilt in place — not a new residency"
         );
 
-        // A third ensure with no change is a no-op (fingerprint stable).
-        pool.ensure(&rec, &deps).await.expect("third ensure");
+        // Stability after the change too: a further ensure with no new change is
+        // a no-op and the fingerprint holds at its post-change value.
+        pool.ensure(&rec, &deps).await.expect("final no-op ensure");
         assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
     }
 
@@ -3388,6 +3431,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3549,6 +3593,7 @@ description = "Sets direction."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3693,6 +3738,7 @@ description = "Sets direction."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

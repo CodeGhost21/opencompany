@@ -237,6 +237,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS login_codes_hash
     ON login_codes (company_id, code_hash);
 CREATE INDEX IF NOT EXISTS login_codes_email
     ON login_codes (company_id, email);
+CREATE TABLE IF NOT EXISTS schedule_fires (
+    company_id    TEXT NOT NULL,
+    schedule_id   TEXT NOT NULL,
+    scheduled_for INTEGER NOT NULL,
+    claimed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (company_id, schedule_id, scheduled_for)
+);
+CREATE INDEX IF NOT EXISTS schedule_fires_by_schedule
+    ON schedule_fires (company_id, schedule_id, scheduled_for);
 "#;
 
 /// Maps a `rusqlite` failure onto the crate error type without a bare `?` on
@@ -1966,6 +1975,69 @@ impl crate::ports::runs::RunStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::schedule_fires::ScheduleFireStore for SqliteStore {
+    async fn claim_fire(
+        &self,
+        company: &CompanyId,
+        schedule_id: &str,
+        minute: u64,
+    ) -> Result<bool> {
+        let conn = self.conn();
+        // `INSERT OR IGNORE` against the `(company_id, schedule_id,
+        // scheduled_for)` primary key: the row lands for the first caller and is
+        // silently skipped for every later one. `changes()` (rows-affected) is
+        // therefore exactly "did I win the claim" — 1 = won, 0 = a peer already
+        // held it.
+        let changed = conn
+            .execute(
+                "INSERT OR IGNORE INTO schedule_fires \
+                 (company_id, schedule_id, scheduled_for, claimed_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    company.as_ref(),
+                    schedule_id,
+                    minute as i64,
+                    now_millis() as i64,
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(changed == 1)
+    }
+
+    async fn latest_fire(&self, company: &CompanyId, schedule_id: &str) -> Result<Option<u64>> {
+        let conn = self.conn();
+        // `MAX(scheduled_for)` over one schedule; a company that never fired it
+        // returns SQL `NULL`, mapped to `None` — the no-anchor / fresh-install
+        // case the schedulers read as "no catch-up".
+        let max: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(scheduled_for) FROM schedule_fires \
+                 WHERE company_id = ?1 AND schedule_id = ?2",
+                params![company.as_ref(), schedule_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(max.map(|m| m as u64))
+    }
+
+    async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize> {
+        let conn = self.conn();
+        let removed = conn
+            .execute(
+                "DELETE FROM schedule_fires \
+                 WHERE company_id = ?1 AND scheduled_for < ?2",
+                params![company.as_ref(), cutoff_minute as i64],
+            )
+            .map_err(sql_err)?;
+        Ok(removed)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UsageMeter
 // ---------------------------------------------------------------------------
 
@@ -2532,6 +2604,36 @@ mod test {
     #[tokio::test]
     async fn conformance_run_reaper() {
         conformance::assert_run_reaper(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_schedule_fire_store() {
+        conformance::assert_schedule_fire_store(store()).await;
+    }
+
+    /// A fire claim written to a file-backed database survives a reopen (issue
+    /// #241) — the restart durability the whole port exists for.
+    #[tokio::test]
+    async fn schedule_fire_claim_survives_reopen() {
+        use crate::ports::schedule_fires::ScheduleFireStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("company.db");
+        let id = CompanyId::new("acme");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            assert!(s.claim_fire(&id, "workflow-x", 42).await.unwrap());
+        }
+        // A fresh handle over the same file loses the repeat and reads the anchor.
+        let s = SqliteStore::open(&path).unwrap();
+        assert!(
+            !s.claim_fire(&id, "workflow-x", 42).await.unwrap(),
+            "a reopened database must see the earlier claim and lose the repeat"
+        );
+        assert_eq!(
+            s.latest_fire(&id, "workflow-x").await.unwrap(),
+            Some(42),
+            "the anchor is durable across a reopen"
+        );
     }
 
     #[tokio::test]

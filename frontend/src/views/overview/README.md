@@ -32,25 +32,46 @@ dragged, and re-framing (selecting a node, opening the core) resets it.
 
 ## The derived rings — read this before trusting the org chart
 
-A company manifest has **no department field and no per-agent tool list**, and
-`[tools] allow` is company-wide. Two of the five rings above are therefore
-invented by `kg/adapter.ts`:
+**Ring 1 is no longer one of them.** Departments are the company's **desks**
+(issue #486) — a `[[group_chat]]` in the manifest, or an operator-created
+overlay desk. That is the one place the company declares how it is organised,
+and it is the same source the Company org chart reads. `assignDepartment` and
+its keyword table are gone.
 
-- **Departments** come from keyword-matching each teammate's role, falling back
-  to Operations.
-- **Tool assignments** are a deterministic deal from the company-wide tool list.
-- **Workflows and their stages** are templates — one routine per department —
-  because the console has no flow API; the Workflows canvas draws a single
-  hard-coded sample. Stages are dealt round-robin across the department's
-  agents.
-- **A human's department** is derived too: signing in says who someone is, not
-  what they work on. Admins sit with Operations; everyone else is spread
-  deterministically by their address.
+What is still invented by `kg/adapter.ts`:
+
+- **Tool assignments** are a deterministic deal from the company-wide tool list,
+  because `[tools] allow` is company-wide and `[[agent]]` has no `tools` field.
+- **Workflows and their stages** are templates, because the console has no flow
+  API; the Workflows canvas draws a single hard-coded sample. One routine is
+  dealt to each desk **by position**, wrapping, and its stages are dealt
+  round-robin across that desk's agents. Nothing ties a routine to what the desk
+  actually does — the console does not know.
 
 Both are deterministic, so nothing jumps between renders — but neither is
 something the company declared. `DERIVED_NOTICE` in `kg/adapter.ts` is the
-standing caveat. When `[[agent]]` grows `department` and `tools`, delete
-`assignDepartment` and `assignTools` and read them straight through.
+standing caveat. When `[[agent]]` grows `tools` (issue #363), delete
+`assignTools` and read it straight through.
+
+### Who the graph does not place
+
+Ring 1 can only place somebody the company seats. Two kinds of teammate it
+cannot, and the graph says so rather than guessing:
+
+- **A teammate on no desk.** They are on the roster and nowhere in the
+  structure, so they hang off the company core in a sector of their own, with no
+  pillar above them. Their open board cards are dropped, because ring 2 hangs
+  off ring 1 and there is no honest desk to hang them from.
+- **A human.** Desks staff agents, so the company declares no desk for a person
+  and this graph does not guess one — the same answer the org chart gives, for
+  the same reason. `assignHumanDepartment` is gone with `assignDepartment`:
+  spreading humans across *invented* buckets was self-consistent fiction, but
+  spreading them across *real desks* would assert a membership the desk's own
+  member list contradicts.
+
+An empty declared desk draws no pillar: `buildKnowledgeGraph` only draws a
+department somebody claims. That is pre-existing behaviour, not a decision this
+made.
 
 Everything else is real: a card's assignee, a skill's category, the tools a
 connected MCP server advertises, and who can sign in.

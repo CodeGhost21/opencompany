@@ -173,6 +173,10 @@ const DECLARED: &[Declared] = &[
     // Running a saved workflow performs whatever that workflow performs, which
     // this layer cannot see. It parks, and it stays a per-call decision.
     d("run_workflow", EffectGroup::Other, Reach::Consequence),
+    // Reading a cached run's node output back (issue #418) reaches nothing: it
+    // is a pure read of this process's own in-memory cache, no counterparty and
+    // nothing an operator authored — same class as `query_company`.
+    d("read_run_output", EffectGroup::Other, Reach::Nothing),
     // ---- The agent's own sandboxed workspace: reads ------------------------
     // All four are pure reads inside the workspace the agent is pinned to.
     // `file_read`, `glob`, `grep` and `image_info` PARKED before this table

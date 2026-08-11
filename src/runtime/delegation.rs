@@ -816,6 +816,8 @@ impl<'a> DelegationRunner<'a> {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
         tasks.upsert(self.company, &card).await?;
         tracing::debug!(
@@ -1052,6 +1054,8 @@ impl<'a> DelegationRunner<'a> {
                     // at (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
                 };
                 tasks.upsert(self.company, &card).await?;
                 // Issue #246: report the card so the caller can surface it. The
@@ -2037,6 +2041,8 @@ members = ["engineer"]
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
         fx.tasks
             .upsert(&fx.record.id, &card)
@@ -2460,6 +2466,8 @@ members = ["engineer"]
                     parent_task_id: None,
                     output: None,
                     plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
                 },
             )
             .await

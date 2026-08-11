@@ -697,6 +697,8 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -2416,7 +2418,20 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(added["server"]["name"], "notion");
     assert_eq!(added["server"]["source"], "runtime");
     assert_eq!(added["server"]["authConfigured"], true);
-    assert!(added["note"].as_str().unwrap().contains("rebuild"));
+    // Issue #566: a mutating MCP change reaches agents on the company's next turn
+    // (the effective set is re-fingerprinted every `HarnessPool::ensure` cycle), so
+    // the note must state the no-restart contract outright — not merely avoid one
+    // stale phrase. Asserting the positive claim rejects any "restart required"
+    // variant too, which a bare `!contains("restart the company")` would let pass.
+    let note = added["note"].as_str().unwrap();
+    assert!(
+        note.contains("next turn"),
+        "note should promise next-turn pickup: {note}"
+    );
+    assert!(
+        note.contains("no restart needed"),
+        "mutating MCP response must state no restart is needed: {note}"
+    );
 
     // The token must NOT appear anywhere in the add response.
     assert!(
@@ -3400,6 +3415,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         parent_task_id: parent.map(str::to_string),
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     };
     for t in [
         card("t-parent", "Parent", None),
@@ -3584,6 +3601,8 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     }
 }
 
@@ -4247,6 +4266,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -4362,6 +4383,8 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -4462,6 +4485,8 @@ async fn dispatched_task(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -4863,12 +4888,15 @@ async fn a_parked_approval_appears_on_its_own_task() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["id"], "appr-mine");
     assert_eq!(approvals[0]["status"], "pending");
-    assert_eq!(approvals[0]["kind"], "filing.submit");
     assert_eq!(approvals[0]["atMillis"].as_u64().unwrap(), parked_at);
-    assert!(
-        approvals[0].get("resolvedAtMillis").is_none(),
-        "a pending approval has not resolved",
-    );
+    // #468 shrank this projection to what the card's one waiting line reads.
+    // `kind`, `resolvedAtMillis` and `waitedMillis` left with the Approvals tab.
+    for gone in ["kind", "resolvedAtMillis", "waitedMillis"] {
+        assert!(
+            approvals[0].get(gone).is_none(),
+            "`{gone}` was dropped with the Approvals tab (#468)",
+        );
+    }
     // The timeline is untouched — a parked approval still has no event.
     assert!(
         body["timeline"]
@@ -4912,6 +4940,8 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -5042,13 +5072,23 @@ async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     let row = &approvals[0];
     assert_eq!(row["status"], "denied");
-    // The row is anchored at the *park*, so the tab reads in the order things
+    // The row is anchored at the *park*, so approvals read in the order things
     // were asked rather than the order they were answered.
     assert_eq!(row["atMillis"].as_u64().unwrap(), parked_at);
-    let resolved_at = row["resolvedAtMillis"].as_u64().unwrap();
+    // The park→resolve span moved off this row with the Approvals tab (#468).
+    // It is unchanged, and still asserted here — on the `approval` timeline
+    // entry, which is where it now lives. Dropping the assertion along with the
+    // field would have quietly retired the arithmetic's only coverage.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
     assert!(resolved_at > parked_at);
     assert_eq!(
-        row["waitedMillis"].as_u64().unwrap(),
+        entry["waitedMillis"].as_u64().unwrap(),
         resolved_at - parked_at,
     );
     // Nothing is parked any more, so the card is not still waiting.
@@ -5302,9 +5342,17 @@ async fn a_pre_333_approval_falls_back_to_the_run_window() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["id"], "appr-legacy");
     assert_eq!(approvals[0]["status"], "approved");
-    let resolved_at = approvals[0]["resolvedAtMillis"].as_u64().unwrap();
+    // As above (#468): the span lives on the timeline entry now, and the legacy
+    // clamping behaviour is asserted there rather than dropped.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
     assert_eq!(
-        approvals[0]["waitedMillis"].as_u64().unwrap(),
+        entry["waitedMillis"].as_u64().unwrap(),
         resolved_at.saturating_sub(dispatched_at + 5),
         "the resolved legacy row keeps the original park-to-resolve wait",
     );
@@ -6133,4 +6181,285 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
         body, "the agent's draft",
         "the node must be untouched — writing it would strand the chain behind it"
     );
+}
+
+// ---------------------------------------------------------------------------
+// The plan → workflow bridge: apply / reject a proposal (issue #580)
+// ---------------------------------------------------------------------------
+
+/// Seeds a card sitting In Review with a `workflow` deliverable and the given
+/// proposal graph, straight through the task store (the builder pass that would
+/// normally mint it is behind the `openhuman` feature). Returns the card id.
+async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    let id = crate::ports::generate_id();
+    let record = TaskRecord {
+        id: id.clone(),
+        title: "Automate the weekly digest".to_string(),
+        note: None,
+        column: "in_review".to_string(),
+        priority: "medium".to_string(),
+        assignee: "ceo".to_string(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: None,
+        output: None,
+        plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
+        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
+            summary: "Email the digest".to_string(),
+            ops,
+            generated_at_millis: 1,
+            run_id: "run-build-1".to_string(),
+        }),
+    };
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &record)
+        .await
+        .expect("seed the proposal card");
+    id
+}
+
+/// A valid two-node graph (trigger → agent) whose agent names a real roster
+/// teammate. `schedule` arms the trigger when `Some`.
+fn digest_ops(schedule: Option<&str>) -> Value {
+    let mut trigger = json!({ "id": "start", "kind": "trigger", "name": "Start" });
+    if let Some(cron) = schedule {
+        trigger["schedule"] = json!(cron);
+    }
+    json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "description": "Email the weekly digest",
+        "nodes": [
+            trigger,
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ceo" }
+        ],
+        "edges": [{ "from": "start", "to": "write" }]
+    })
+}
+
+/// Applying a manual-trigger proposal creates the workflow, stamps the card's
+/// output link to the build attempt, finishes the card in Done, and clears the
+/// proposal — the whole happy path in one assertion set.
+#[tokio::test]
+async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    // Done is reached — the create path is the human approval the epic requires.
+    assert_eq!(card["column"], "done");
+    // The proposal is consumed, and the card links to the workflow it created and
+    // to the attempt that built it (issue #339).
+    assert!(card.get("workflowProposal").is_none(), "{card}");
+    assert_eq!(card["output"]["runId"], "run-build-1");
+    assert_eq!(
+        card["output"]["workflows"][0]["workflowId"],
+        "weekly-digest"
+    );
+    assert_eq!(card["output"]["workflows"][0]["action"], "created");
+
+    // The workflow now exists in the company's list — and, with no schedule, it
+    // is armed (nothing to disarm).
+    let (status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let created = workflows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "weekly-digest")
+        .expect("the created workflow is listed");
+    assert_eq!(created["enabled"], true, "a manual trigger is not disarmed");
+}
+
+/// #276: applying a proposal whose trigger carries a schedule creates the
+/// workflow **switched off** — armed only by a person, never by approving the
+/// proposal.
+#[tokio::test]
+async fn applying_a_scheduled_proposal_lands_it_disarmed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(Some("0 9 * * 1"))).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "done");
+
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    let created = workflows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "weekly-digest")
+        .expect("the created workflow is listed");
+    assert_eq!(
+        created["enabled"], false,
+        "a scheduled graph lands disarmed until a person arms it (#276)"
+    );
+}
+
+/// Roster drift (the proposal names a teammate no longer on the roster) is
+/// refused by the create's roster check: the card **stays In Review** with its
+/// proposal intact, and the refusal is a 400 the operator sees.
+#[tokio::test]
+async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let ops = json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Start" },
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ghost" }
+        ],
+        "edges": [{ "from": "start", "to": "write" }]
+    });
+    let id = seed_proposal_card(&state, ops).await;
+
+    let (status, _body) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The card is untouched save for the reason on its note: still In Review,
+    // still carrying the proposal to retry once the roster is fixed.
+    let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(card["task"]["column"], "in_review");
+    assert!(card["task"].get("workflowProposal").is_some(), "{card}");
+
+    // …and no workflow was created.
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert!(
+        workflows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["id"] != "weekly-digest"),
+        "a refused proposal must not leave a workflow behind"
+    );
+}
+
+/// Rejecting a proposal returns the card to To-do and clears the proposal
+/// (decision D2c). The card keeps its `workflow` deliverable, so it can be built
+/// again.
+#[tokio::test]
+async fn rejecting_a_proposal_returns_the_card_to_todo() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/reject"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "todo");
+    assert!(card.get("workflowProposal").is_none(), "{card}");
+    assert_eq!(
+        card["deliverable"], "workflow",
+        "reject keeps the deliverable"
+    );
+}
+
+/// Applying or rejecting a card that has no proposal is a 400, not a silent
+/// no-op — the operator asked for an action on something that is not there.
+#[tokio::test]
+async fn applying_with_no_proposal_is_a_bad_request() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let (_status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "Plain card" })),
+    )
+    .await;
+    let id = task["id"].as_str().unwrap().to_string();
+
+    for verb in ["apply", "reject"] {
+        let (status, _body) = send(
+            &state,
+            "POST",
+            &format!("/api/v1/company/tasks/{id}/workflow-proposal/{verb}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{verb} with no proposal");
+    }
+}
+
+/// The create route accepts an explicit `deliverable`, and it round-trips on the
+/// board read — the operator's once-vs-workflow choice (D2a), with `once` staying
+/// off the wire so a plain card is byte-identical to a pre-#580 one.
+#[tokio::test]
+async fn a_card_can_be_created_as_a_workflow_deliverable() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, workflow_card) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "Automate onboarding", "deliverable": "workflow" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workflow_card["deliverable"], "workflow");
+
+    let (_status, once_card) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "One-off note" })),
+    )
+    .await;
+    assert!(
+        once_card.get("deliverable").is_none(),
+        "a once card stays off the wire: {once_card}"
+    );
+
+    // A patch can flip a once card to workflow before it is dragged into In
+    // Progress.
+    let id = once_card["id"].as_str().unwrap();
+    let (status, flipped) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({ "deliverable": "workflow" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(flipped["deliverable"], "workflow");
 }

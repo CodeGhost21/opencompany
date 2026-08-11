@@ -149,11 +149,12 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::company::{
-    RawNode, RawWorkflow, WorkflowFile, list_workflows_union, parse_workflow,
-    raw_workflow_from_toml, render_workflow,
+    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, list_workflows_union,
+    parse_workflow, raw_workflow_from_toml, render_workflow,
 };
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
@@ -359,6 +360,167 @@ pub(crate) async fn create_company_workflow(
     }
 
     Ok(file)
+}
+
+// ---------------------------------------------------------------------------
+// The workflow proposal's authoring payload (issue #580)
+// ---------------------------------------------------------------------------
+
+/// The `{id, name, description, nodes, edges}` graph a
+/// [`TaskWorkflowProposal`](crate::ports::tasks::TaskWorkflowProposal) stores as
+/// its `ops` — the same shape `POST …/workflows` accepts, but owned by the
+/// company layer so the harness builder (which *produces* a proposal) and the
+/// apply route (which *persists* it) rebuild a [`RawWorkflow`] from it the SAME
+/// way.
+///
+/// **The host is the authority.** A proposal never stores a rendered graph; it
+/// stores this payload, and apply re-derives and re-validates a `RawWorkflow`
+/// from it through [`create_company_workflow`]. So a stored proposal is *input*
+/// to the create checks, never a substitute for them — a graph cannot reach the
+/// workflow list without passing exactly the validation a hand-authored one does.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowGraphSpec {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) nodes: Vec<WorkflowNodeSpec>,
+    #[serde(default)]
+    pub(crate) edges: Vec<WorkflowEdgeSpec>,
+}
+
+/// One node of a [`WorkflowGraphSpec`]. Mirrors the create route's node body —
+/// the subset a builder pass produces (`trigger`, `agent`, `tool_call`,
+/// `condition`, `output`). `on_error`/`retry` are omitted because the builder
+/// does not author them; they convert to `None` on a [`RawNode`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowNodeSpec {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schedule: Option<String>,
+    /// Free-form engine config as JSON (a `tool_call`'s `slug`, a condition's
+    /// expression). Converted to a TOML value on the way into [`RawNode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) requires_approval: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<WorkflowDestinationDef>,
+}
+
+/// One edge of a [`WorkflowGraphSpec`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowEdgeSpec {
+    #[serde(default)]
+    pub(crate) from: String,
+    #[serde(default)]
+    pub(crate) to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<String>,
+}
+
+/// Rebuilds a [`RawWorkflow`] from a stored proposal graph — the one conversion
+/// both the builder pass and the apply route use, so what the builder validated
+/// and what apply persists are the same graph.
+///
+/// The only fallible step is `config`: TOML (the node config's storage form) has
+/// no `null`, so a JSON config carrying one is refused here with an actionable
+/// message rather than silently dropped — the same rule the create route's own
+/// body conversion applies.
+pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWorkflow> {
+    let mut nodes = Vec::with_capacity(spec.nodes.len());
+    for n in &spec.nodes {
+        let config = match &n.config {
+            Some(json) => Some(toml::Value::try_from(json).map_err(|err| {
+                OpenCompanyError::InvalidRequest(format!(
+                    "node `{}` has config that can't be stored ({err}) — TOML has no null; drop \
+                     null-valued keys.",
+                    n.id
+                ))
+            })?),
+            None => None,
+        };
+        nodes.push(RawNode {
+            id: n.id.clone(),
+            kind: n.kind.clone(),
+            name: n.name.clone(),
+            summary: n.summary.clone(),
+            agent: n.agent.clone(),
+            schedule: n.schedule.clone(),
+            config,
+            on_error: None,
+            retry: None,
+            requires_approval: n.requires_approval,
+            destination: n.destination.clone(),
+        });
+    }
+    Ok(RawWorkflow {
+        id: spec.id.clone(),
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        nodes,
+        edges: spec
+            .edges
+            .iter()
+            .map(|e| RawEdge {
+                from: e.from.clone(),
+                to: e.to.clone(),
+                label: e.label.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Runs the full author-time validation on a candidate graph **without
+/// persisting it** — the builder pass's courtesy check (issue #580), so a
+/// proposal that could never be created never reaches In Review.
+///
+/// It runs exactly the checks [`create_company_workflow`] runs before its save —
+/// shape (id/name/size/one-trigger), the render → byte-cap → `parse_workflow`
+/// round trip, and the roster/tool cross-check against the loaded `record` — and
+/// then throws the result away. The one thing it deliberately does **not** check
+/// is id/name uniqueness, because that is a function of the live record at
+/// *apply* time, not build time: a name free when the proposal was built can be
+/// taken by the time it is approved, and that is the roster-drift case apply
+/// surfaces by keeping the card In Review.
+///
+/// Gated with the builder it serves: the only caller is
+/// `crate::harness::workflow_build`, so in the default build (no harness) this
+/// would be dead code.
+#[cfg(feature = "openhuman")]
+pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
+    validate_draft_shape(draft)?;
+    let toml_src = render_workflow(draft)?;
+    if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "the proposed workflow is {} bytes, over the {MAX_WORKFLOW_TOML_BYTES}-byte limit.",
+            toml_src.len()
+        )));
+    }
+    parse_workflow(&toml_src).map_err(|err| match err {
+        OpenCompanyError::DataInvalid { problems, .. } => {
+            OpenCompanyError::InvalidRequest(problems.join(" "))
+        }
+        OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
+        other => other,
+    })?;
+    validate_draft_against_record(draft, record)?;
+    Ok(())
 }
 
 /// Journals a best-effort [`WorkflowEnabledChanged`](CompanyEvent::WorkflowEnabledChanged).

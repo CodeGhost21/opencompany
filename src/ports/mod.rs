@@ -20,6 +20,7 @@ pub mod inbox;
 pub mod login_codes;
 pub mod memory;
 pub mod runs;
+pub mod schedule_fires;
 pub mod secrets;
 pub mod sessions;
 pub mod skills_state;
@@ -52,6 +53,7 @@ pub use runs::{
     NewRun, RunFilter, RunOutcome, RunRecord, RunStatus, RunStepRecord, RunStore,
     reap_orphaned_runs,
 };
+pub use schedule_fires::ScheduleFireStore;
 pub use secrets::SecretStore;
 pub use sessions::{SessionKind, SessionRecord, SessionStore};
 pub use skills_state::{SkillSource, SkillState, SkillStateStore};
@@ -103,6 +105,7 @@ mod test {
         _login_codes: &dyn crate::ports::login_codes::LoginCodeStore,
         _runs: &dyn crate::ports::runs::RunStore,
         _workflow_revisions: &dyn crate::ports::workflow_revisions::WorkflowRevisionStore,
+        _schedule_fires: &dyn crate::ports::schedule_fires::ScheduleFireStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
     ) {
     }

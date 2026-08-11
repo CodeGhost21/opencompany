@@ -25,6 +25,7 @@ use crate::ports::inbox::InboxStore;
 use crate::ports::login_codes::LoginCodeStore;
 use crate::ports::memory::MemoryStore;
 use crate::ports::runs::RunStore;
+use crate::ports::schedule_fires::ScheduleFireStore;
 use crate::ports::secrets::SecretStore;
 use crate::ports::sessions::SessionStore;
 use crate::ports::skills_state::SkillStateStore;
@@ -151,6 +152,8 @@ pub struct StorageHandles {
     pub runs: Arc<dyn RunStore>,
     /// Per-workflow edit history for rollback (#274).
     pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    /// Durable cross-replica scheduler fire claims (#241).
+    pub schedule_fires: Arc<dyn ScheduleFireStore>,
     pub usage: Arc<dyn UsageMeter>,
     pub skills: Arc<dyn SkillStateStore>,
     pub users: Arc<dyn UserStore>,
@@ -406,6 +409,7 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         artifacts: store.clone(),
         runs: store.clone(),
         workflow_revisions: store.clone(),
+        schedule_fires: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
         users: store.clone(),
@@ -444,6 +448,7 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         artifacts: store.clone(),
         runs: store.clone(),
         workflow_revisions: store.clone(),
+        schedule_fires: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
         users: store.clone(),

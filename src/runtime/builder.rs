@@ -45,6 +45,9 @@ use crate::ports::{
     SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
     WorkspaceStore,
 };
+// Separate line (#241) so this addition is a pure append, not a reflow of the
+// grouped import that sibling store-seam branches (#274, #596) also edit.
+use crate::ports::ScheduleFireStore;
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
@@ -225,6 +228,7 @@ pub struct RuntimeBuilder {
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
+    schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -316,6 +320,7 @@ impl RuntimeBuilder {
             artifacts: None,
             runs: None,
             workflow_revisions: None,
+            schedule_fires: None,
             usage: None,
             skills: None,
             users: None,
@@ -424,6 +429,7 @@ impl RuntimeBuilder {
         self.artifacts = Some(handles.artifacts.clone());
         self.runs = Some(handles.runs.clone());
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
+        self.schedule_fires = Some(handles.schedule_fires.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -502,6 +508,12 @@ impl RuntimeBuilder {
         workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     ) -> Self {
         self.workflow_revisions = Some(workflow_revisions);
+        self
+    }
+
+    /// Swaps the scheduler fire-claim store (default: fs-backed).
+    pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
+        self.schedule_fires = Some(schedule_fires);
         self
     }
 
@@ -831,6 +843,7 @@ impl RuntimeBuilder {
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
+                schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
@@ -1280,6 +1293,11 @@ impl RuntimeBuilder {
         // above already use.
         #[cfg(feature = "openhuman")]
         let mut planner: Option<Arc<crate::harness::planning::TaskPlanner>> = None;
+        // Issue #580: the company's workflow builder, built from the SAME deps as
+        // the planner (shared provider + model override) and installed the same
+        // way via `CompanyRuntime::set_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1542,6 +1560,8 @@ impl RuntimeBuilder {
                                 // dispatch settle that drains the publishes.
                                 workflow_refs:
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                                run_outputs: crate::harness::orchestrator::RunOutputCache::default(
+                                ),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.
@@ -1687,6 +1707,13 @@ impl RuntimeBuilder {
                             // that could drift from the roster's.
                             planner = Some(Arc::new(
                                 crate::harness::planning::TaskPlanner::from_deps(&deps),
+                            ));
+                            // Issue #580: built from the same deps, so it shares
+                            // the tenant provider and model override with the
+                            // roster and the planner rather than resolving a
+                            // second credential path.
+                            builder = Some(Arc::new(
+                                crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
@@ -1926,6 +1953,14 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(planner) = planner {
             runtime.set_planner(planner);
+        }
+        // Issue #580: same rebuild treatment as the planner — rebuilt from the
+        // successor's deps (so a BYOK switch reaches building), with an empty
+        // in-flight set that matters to nothing (a pass interrupted by a rebuild
+        // has no settle to reach the board; the boot reaper settles its run).
+        #[cfg(feature = "openhuman")]
+        if let Some(builder) = builder {
+            runtime.set_builder(builder);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —
@@ -2674,6 +2709,8 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())

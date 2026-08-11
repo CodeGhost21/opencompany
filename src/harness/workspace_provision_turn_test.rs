@@ -276,6 +276,7 @@ fn build_brain(
         mcp_failures: McpFailureQueue::default(),
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
+        run_outputs: Default::default(),
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -309,6 +310,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     }
 }
 

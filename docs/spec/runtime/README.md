@@ -35,6 +35,10 @@ Supporting docs:
 - [planning.md](planning.md) — the board's Planning station: one tool-less model
   call per card, the host-gathered evidence pack, the prerequisite verdict
   taxonomy, and the no-run/no-lock concurrency argument
+- [workflow-build.md](workflow-build.md) — the plan → workflow bridge: a
+  `workflow`-deliverable card builds a proposed graph that lands In Review for
+  approval before it exists, then apply/reject; host-authority conversion and
+  the one authoring path
 - [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — HTTP routes and auth

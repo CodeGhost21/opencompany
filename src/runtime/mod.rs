@@ -112,7 +112,10 @@ pub use handover::RuntimeHandover;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
 pub use run_supervisor::{RunGuard, RunSupervisor};
-pub use scheduler::{Clock, CompanyScheduler, FakeClock, SystemClock};
+pub use scheduler::{
+    CATCHUP_WINDOW_MINUTES, Clock, CompanyScheduler, FakeClock, PRUNE_CUTOFF_MINUTES, SystemClock,
+    missed_instant,
+};
 pub use tools::StubToolProvider;
 pub use types::{ApprovalSummary, CompanyStatus, CycleReport};
 pub use workflow_outcome::{

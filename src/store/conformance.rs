@@ -869,6 +869,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -2706,5 +2708,147 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+//
+// Imports for this suite are function-local rather than added to the module
+// header, keeping it a pure append to a file edited concurrently on other
+// branches.
+
+/// Asserts the
+/// [`ScheduleFireStore`](crate::ports::schedule_fires::ScheduleFireStore)
+/// contract: a claim is won exactly once; keys are isolated per minute, per
+/// schedule and per company; `latest_fire` is the max claimed minute (never the
+/// last written); pruning removes only rows strictly below the cutoff and never
+/// the anchor; and N concurrent claimers of one key produce exactly one winner —
+/// the cross-replica race the whole port exists to arbitrate.
+pub async fn assert_schedule_fire_store(
+    fires: Arc<dyn crate::ports::schedule_fires::ScheduleFireStore>,
+) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // -- first claim wins, a repeat loses -----------------------------------
+
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "the first claim on a key wins"
+    );
+    assert!(
+        !fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "a second claim on the same key loses"
+    );
+
+    // -- keys are distinct per minute, per schedule, per company ------------
+
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 101).await.unwrap(),
+        "a different minute is a different claim"
+    );
+    assert!(
+        fires.claim_fire(&alpha, "workflow-b", 100).await.unwrap(),
+        "a different schedule at the same minute is a different claim"
+    );
+    assert!(
+        fires.claim_fire(&beta, "workflow-a", 100).await.unwrap(),
+        "another company claiming the same key does not collide"
+    );
+
+    // -- latest_fire is the max claimed minute, or None ---------------------
+
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101),
+        "the anchor is the highest claimed minute"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-b").await.unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        fires.latest_fire(&beta, "workflow-a").await.unwrap(),
+        Some(100),
+        "company A's rows are invisible to company B's anchor"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "never").await.unwrap(),
+        None,
+        "a schedule that never fired has no anchor"
+    );
+
+    // Claiming an OLDER minute after a newer one does not move the anchor down:
+    // it is a max, not a last-write.
+    assert!(fires.claim_fire(&alpha, "workflow-a", 50).await.unwrap());
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101)
+    );
+
+    // -- prune removes only rows strictly below the cutoff, never the anchor -
+    //
+    // Prune is COMPANY-wide across every schedule, not per schedule. alpha holds
+    // workflow-a {50, 100, 101} and workflow-b {100}. Pruning below 101 drops
+    // workflow-a's 50 and 100 and workflow-b's 100 — three rows — and keeps
+    // workflow-a's 101, exactly the anchor-preservation invariant the 14-day
+    // cutoff / 7-day window gap guarantees in production.
+    let removed = fires.prune_fires_before(&alpha, 101).await.unwrap();
+    assert_eq!(
+        removed, 3,
+        "prune removes every row below the cutoff, across all schedules"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101),
+        "the newest row survives a prune whose cutoff equals it"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-b").await.unwrap(),
+        None,
+        "a schedule whose only row fell below the cutoff has no anchor left"
+    );
+    // A pruned minute no longer exists, so it can be claimed again.
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "a pruned minute can be re-claimed"
+    );
+    // Prune is per-company: beta's row is untouched.
+    assert_eq!(
+        fires.latest_fire(&beta, "workflow-a").await.unwrap(),
+        Some(100)
+    );
+    // A cutoff below everything removes nothing.
+    assert_eq!(fires.prune_fires_before(&alpha, 0).await.unwrap(), 0);
+
+    // -- N concurrent claimers of one key: exactly one winner ---------------
+    //
+    // Spawned tasks, so the claims genuinely contend rather than serialising on
+    // one await. This is the property hosted replicas depend on: two processes
+    // ticking the same minute must not both fire.
+    const N: usize = 16;
+    let key_minute = 777_u64;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..N {
+        let fires = fires.clone();
+        let company = alpha.clone();
+        set.spawn(async move {
+            fires
+                .claim_fire(&company, "race", key_minute)
+                .await
+                .unwrap()
+        });
+    }
+    let mut winners = 0;
+    while let Some(res) = set.join_next().await {
+        if res.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(
+        winners, 1,
+        "exactly one of {N} concurrent claimers may win the key"
     );
 }
