@@ -317,6 +317,50 @@ export function deleteNode(
   return client.del<void>(`${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`);
 }
 
+/** One folder the sweep removed, or would remove (issue #700). */
+export interface SweptFolder {
+  id: string;
+  name: string;
+}
+
+/**
+ * The sweep's answer. Exactly one list is present, and **which** one is what
+ * actually happened: a preview answers `wouldRemove`, a real run answers
+ * `removed`.
+ */
+interface SweepResult {
+  wouldRemove?: SweptFolder[];
+  removed?: SweptFolder[];
+}
+
+/**
+ * Remove the empty `Agents/<id>/` folders a pre-#570 company still carries
+ * (issue #700), or — with `dryRun` — find out which ones those are without
+ * touching anything.
+ *
+ * The two calls are the same request twice: the console previews, names every
+ * folder on a confirm dialog, and only then asks for the deletion. Nothing here
+ * decides emptiness; the host counts children structurally, over every node in
+ * the tree, because a folder whose only child has no renderable path reads as
+ * empty to anything that goes by paths while the store's recursive delete would
+ * still take it (issue #671).
+ *
+ * Reads the field that matches what was asked for, rather than whichever list
+ * turns up. If the host ever disagrees with this caller about `dryRun`, an
+ * absent field yields an empty list — so a preview cannot render as "17 folders
+ * deleted", and a real run cannot be mistaken for a preview.
+ */
+export async function sweepEmptyAgentFolders(
+  client: OpenCompanyClient,
+  company: string | null,
+  dryRun: boolean,
+): Promise<SweptFolder[]> {
+  const result = await client.post<SweepResult>(
+    `${client.scopeFor(company)}/workspace/sweep-empty-agent-folders?dry_run=${dryRun}`,
+  );
+  return (dryRun ? result.wouldRemove : result.removed) ?? [];
+}
+
 /**
  * Upload a file of any kind (issue #553).
  *
