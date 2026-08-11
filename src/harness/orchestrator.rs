@@ -66,8 +66,8 @@ use openhuman_core::openhuman as oh;
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
-    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowFile, create_company_workflow,
-    list_workflows_union, load_workflow_union,
+    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
+    WorkflowNodeKind, create_company_workflow, list_workflows_union, load_workflow_union,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
@@ -2656,22 +2656,55 @@ impl Tool for ReadRunOutputTool {
 /// routes return (`id`/`name`/`description?`/`nodes`/`edges`), so a graph the
 /// orchestrator authors is indistinguishable from one authored in the console.
 ///
-/// **This is deliberately a narrower surface than the REST body**, and the node
-/// shape below is where that shows: it accepts only `id`/`kind`/`name`/`summary`
-/// /`agent`, omitting `config`, `onError`, `retry`, `requiresApproval` — and
-/// `schedule` (issue #169). The omission is the policy, not an oversight:
+/// **This is deliberately a narrower surface than the REST body, but the
+/// narrowing is POLICY fields only** — the node shape below omits `schedule`
+/// (issue #169), `onError`, `retry`, and `requiresApproval`, and nothing else.
+/// Those four are unattended-run policy: a field the model cannot set is a field
+/// it cannot get wrong, and each carries real consequence — retry/error policy
+/// changes failure behavior, and a `schedule` makes a workflow run *on its own,
+/// forever*, with no operator in the loop at the moment it fires. So
+/// **agent-authored workflows stay manual-run only**: schedules are
+/// operator-authored, through the console's creator or `POST …/workflows`, where
+/// a human chose the cron. An agent can build the graph; a human decides whether
+/// it runs unattended.
 ///
-/// * A field the model cannot set is a field it cannot get wrong. Each of these
-///   carries real consequence — retry/error policy changes failure behavior, and
-///   a `schedule` makes a workflow run *on its own, forever*, with no operator
-///   in the loop at the moment it fires.
-/// * So **agent-authored workflows are manual-run only**. Schedules are
-///   operator-authored, through the console's creator or `POST …/workflows`,
-///   where a human chose the cron. An agent can build the graph; a human decides
-///   whether it runs unattended.
+/// The FUNCTIONAL fields `config` and `destination` are accepted (issue #661,
+/// H1): four of the six node kinds this tool advertises are inert without them.
+/// A `tool_call` names the tool to run in `config.slug`; an `http_request` puts
+/// its method/url in `config`; a `condition` branches on a `config` expression;
+/// an `output` may route its report via `destination`. Omitting these did not
+/// make the tool safer — it made the tool advertise `tool_call`/`http_request`/
+/// `condition`/`output` while being unable to author a working one (on current
+/// main `validate_draft_against_record` now *rejects* every config-less
+/// `tool_call` as "names no `slug`"). Both fields flow into the same validated
+/// `create_company_workflow` core the REST route and the builder use, so they
+/// inherit that core's validation rather than adding any of their own.
+///
+/// **`tool_call` args are LITERAL only — no templated `=`-expressions (issue
+/// #674).** At runtime a workflow `tool_call` node has *saved-node* position:
+/// #614's more-permissive rule (not #338's unbounded-reach agent rule) governs
+/// it, justified because a saved node passed TWO operator gates — a manifest
+/// `[tools].allow` grant AND an operator authoring the node. But a node this
+/// tool authors was authored by the *agent*, not an operator, so it reaches
+/// runtime with only ONE operator gate (the grant) while still being treated as
+/// a saved node. `config.args` passes through verbatim and `=`-expressions in
+/// args are a live runtime feature (see `workflows::gate`'s
+/// `every_reachable_workflow_tool_is_classified_by_name_alone`), so an agent
+/// could author `tool_call{slug:"shell", args:{command:"=<expr over upstream
+/// output>"}}` — clearing every author-time gate, taking saved-node position,
+/// with model-chosen templated args: exactly #674's carve-out for
+/// templated-from-upstream args, which are not pre-declared and must follow the
+/// stricter agent rule. To keep the two-operator-gate model intact, the
+/// [`TryFrom`] below **rejects any `tool_call` node whose `config` carries a
+/// string beginning with `=`** (tinyflows' `is_expression` convention). Literal
+/// args only here; templated wiring stays with the console + `POST …/workflows`,
+/// where an operator picks the args. NOTE: #674's templated-args carve-out is
+/// framed for saved (operator-authored) nodes; that it needs revisiting for
+/// agent-authored nodes *generally* — not only this tool — is flagged, not fixed
+/// here.
 ///
 /// Whether agents should be able to schedule themselves is an open product
-/// question. If the answer becomes yes, add the field here and to
+/// question. If the answer becomes yes, add the policy field here and to
 /// [`RawWorkflow`] construction below — the model and validation already support
 /// it, so nothing else has to change.
 #[derive(serde::Deserialize)]
@@ -2702,6 +2735,18 @@ struct CreateWorkflowArgNode {
     summary: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// Free-form, kind-specific node config carried as JSON on the wire and
+    /// converted to a `toml::Value` on the way into [`RawNode`] (issue #661): a
+    /// `tool_call`'s `slug` (+ `args`), an `http_request`'s `method`/`url`, a
+    /// `condition`'s `field` expression. A JSON `null` anywhere inside is a
+    /// caller error — TOML has no null — refused in [`TryFrom`] below.
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+    /// Where an `output` node's report goes (`owner`/`email`/`channel` + an
+    /// optional `target`). Reuses the REST route's [`WorkflowDestinationDef`];
+    /// the shared create core enforces each kind's target contract.
+    #[serde(default)]
+    destination: Option<WorkflowDestinationDef>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2715,29 +2760,133 @@ struct CreateWorkflowArgEdge {
     label: Option<String>,
 }
 
-impl From<CreateWorkflowArgs> for RawWorkflow {
-    fn from(args: CreateWorkflowArgs) -> Self {
-        Self {
+/// The dotted location of the first `=`-expression string found anywhere in
+/// `value`, or `None` when it holds only literal values.
+///
+/// Matches tinyflows' `expr::is_expression` convention exactly — a string that
+/// *starts with* `=` (no whitespace trim) is an expression the engine would
+/// resolve at run time. Walks nested objects and arrays; array elements are
+/// numeric segments, so a hit reads like `args.cc.0` — the same shape
+/// tinyflows' `NullResolution.location` uses.
+fn first_expression_location(value: &serde_json::Value, path: &str) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if s.starts_with('=') => Some(path.to_string()),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, child)| {
+            let next = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            first_expression_location(child, &next)
+        }),
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
+            let next = if path.is_empty() {
+                index.to_string()
+            } else {
+                format!("{path}.{index}")
+            };
+            first_expression_location(child, &next)
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a JSON `null` appears anywhere inside `value` (recursively).
+///
+/// The JSON→TOML conversion in [`TryFrom`] fails for more than one reason — a
+/// `null` (TOML has no null) but also, e.g., an integer outside `i64` range — so
+/// the caller uses this to only append the "drop null-valued keys" remedy when a
+/// null is actually the cause, and otherwise lets the raw converter error speak.
+fn json_contains_null(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.values().any(json_contains_null),
+        serde_json::Value::Array(items) => items.iter().any(json_contains_null),
+        _ => false,
+    }
+}
+
+impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
+    /// A prosumer-language conversion error. Every fallible step is a node's JSON
+    /// `config`: a non-object shape, a templated `=`-expression on a `tool_call`
+    /// (issue #674 — see the struct doc), or a value TOML cannot store (e.g. a
+    /// `null`). The caller maps each straight onto a [`ToolResult::error`].
+    type Error = String;
+
+    fn try_from(args: CreateWorkflowArgs) -> Result<Self, String> {
+        let mut nodes = Vec::with_capacity(args.nodes.len());
+        for n in args.nodes {
+            let config = match n.config {
+                Some(json) => {
+                    // The schema types `config` as an object; a scalar or array
+                    // (e.g. `"config": "web_fetch"`) would otherwise persist as an
+                    // inert TOML value — silently on an `http_request`/`condition`
+                    // node. Refuse it here as an agent-actionable error.
+                    if !json.is_object() {
+                        return Err(format!(
+                            "node `{}` has a non-object `config` — `config` must be a JSON object \
+                             (e.g. `{{\"slug\": \"web_fetch\"}}`), not a bare string, number, or \
+                             list.",
+                            n.id
+                        ));
+                    }
+                    // Issue #674 boundary: an agent-authored `tool_call` carries
+                    // saved-node runtime position, so templated `=`-expression
+                    // args would clear every author-time gate with model-chosen
+                    // values (see the struct doc). Literal args only — reject any
+                    // `=`-prefixed string anywhere in the config.
+                    if n.kind == WorkflowNodeKind::ToolCall.as_str()
+                        && let Some(location) = first_expression_location(&json, "")
+                    {
+                        return Err(format!(
+                            "node `{}` puts a templated `=`-expression at `config.{location}` — an \
+                             agent-authored `tool_call` accepts LITERAL args only, not \
+                             `=`-expressions over upstream output. Use the console (or `POST \
+                             …/workflows`) for templated wiring, where an operator picks the args.",
+                            n.id
+                        ));
+                    }
+                    // JSON config → TOML value. TOML has no `null`, so a `null`
+                    // anywhere in the config is a caller error, not a 500 on
+                    // write — the same rule the REST create route and the workflow
+                    // builder apply. Other conversion failures (e.g. an integer
+                    // outside `i64` range) get the converter's own message, with
+                    // the null hint appended only when a null is the cause.
+                    Some(toml::Value::try_from(&json).map_err(|err| {
+                        if json_contains_null(&json) {
+                            format!(
+                                "node `{}` has config that can't be stored ({err}) — TOML has no \
+                                 null; drop null-valued keys.",
+                                n.id
+                            )
+                        } else {
+                            format!("node `{}` has config that can't be stored ({err}).", n.id)
+                        }
+                    })?)
+                }
+                None => None,
+            };
+            nodes.push(RawNode {
+                id: n.id,
+                kind: n.kind,
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                // Policy fields stay omitted — agent-authored graphs are
+                // manual-run only (see the struct doc above).
+                schedule: None,
+                config,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                destination: n.destination,
+            });
+        }
+        Ok(Self {
             id: args.id,
             name: args.name,
             description: args.description,
-            nodes: args
-                .nodes
-                .into_iter()
-                .map(|n| RawNode {
-                    id: n.id,
-                    kind: n.kind,
-                    name: n.name,
-                    summary: n.summary,
-                    agent: n.agent,
-                    schedule: None,
-                    config: None,
-                    on_error: None,
-                    retry: None,
-                    requires_approval: None,
-                    destination: None,
-                })
-                .collect(),
+            nodes,
             edges: args
                 .edges
                 .into_iter()
@@ -2747,7 +2896,7 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     label: e.label,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -2812,7 +2961,7 @@ impl Tool for CreateWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Use this to capture a repeatable process; then run it with run_workflow."
+        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Per-kind config: a `tool_call` node REQUIRES `config.slug` and runs ONLY a wired shell/code/web/search tool (e.g. `shell`, `apply_patch`, `web_fetch`, `web_search`), with LITERAL `config.args` only (no `=`-expressions — use the console for templated wiring) — for Composio, GitHub, or media/image/video actions use an `agent` node instead, NOT a `tool_call` (those are agent-turn tool families; a non-wired slug is refused when the node runs). An `http_request` node needs `config.method` and `config.url`. A `condition` node needs a `config.field` boolean expression, with its outgoing edges labeled `yes`/`no`. An `output` node may carry a `destination` ({kind: `owner`/`email`/`channel`, and a `target` for email/channel). Never put a null value inside `config` — it can't be stored. Workflows authored here are manual-run only (no schedule). Use this to capture a repeatable process; then run it with run_workflow."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -2845,7 +2994,25 @@ impl Tool for CreateWorkflowTool {
                             },
                             "name": { "type": "string", "description": "Human-readable node name." },
                             "summary": { "type": "string", "description": "Optional short description of the step." },
-                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." }
+                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
+                            "config": {
+                                "type": "object",
+                                "description": "Kind-specific settings, a JSON object. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; `args` must be LITERAL values, not `=`-expressions; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
+                            },
+                            "destination": {
+                                "type": "object",
+                                "description": "On an `output` node only: where the report goes.",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["owner", "email", "channel"],
+                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
+                                    },
+                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
+                                },
+                                "required": ["kind"],
+                                "additionalProperties": false
+                            }
                         },
                         "required": ["id", "kind", "name"],
                         "additionalProperties": false
@@ -2880,13 +3047,22 @@ impl Tool for CreateWorkflowTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let draft: RawWorkflow = match serde_json::from_value::<CreateWorkflowArgs>(args) {
-            Ok(args) => args.into(),
+        let parsed = match serde_json::from_value::<CreateWorkflowArgs>(args) {
+            Ok(parsed) => parsed,
             Err(err) => {
                 tracing::debug!(company = %self.company, error = %err, "create_workflow: unreadable args");
                 return Ok(ToolResult::error(format!(
                     "Couldn't read the workflow definition: {err}. Provide `id`, `name`, and `nodes` (with an `edges` list)."
                 )));
+            }
+        };
+        // The only fallible conversion step is a node's JSON `config` (TOML has
+        // no null). Surface it as an agent-actionable error, never a panic.
+        let draft: RawWorkflow = match RawWorkflow::try_from(parsed) {
+            Ok(draft) => draft,
+            Err(msg) => {
+                tracing::debug!(company = %self.company, error = %msg, "create_workflow: unstorable config");
+                return Ok(ToolResult::error(msg));
             }
         };
 
@@ -5146,6 +5322,510 @@ name = "Morning"
             result.output_for_llm(false).contains("Couldn't read"),
             "{result:?}"
         );
+    }
+
+    /// Like [`record_with_assistant`], but the company `[tools].allow` grants the
+    /// `web` namespace so a `web_fetch` `tool_call` clears the author-time grant
+    /// gate under the `openhuman` build (issue #661).
+    fn record_granting_web(company: &CompanyId) -> CompanyRecord {
+        let mut record = record_with_assistant(company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[tools]\nallow = [\"web\"]\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
+        )
+        .expect("valid manifest");
+        record
+    }
+
+    /// Issue #661 (H1): a `tool_call` node authored with `config.slug` persists
+    /// the slug into the saved graph — the tool advertises `tool_call` and can
+    /// now actually author a working one. Round-trip proof: the rendered TOML on
+    /// the record carries `slug = "web_fetch"`.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_tool_call_config_slug() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "fetcher",
+                "name": "Fetcher",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "https://example.com" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            record.overlay_workflows[0]
+                .toml
+                .contains("slug = \"web_fetch\""),
+            "the persisted graph carries the tool slug: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #661 (H1): an `output` node's `destination` flows through into the
+    /// saved graph — the persisted TOML carries the routed address.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_output_destination() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "reporter",
+                "name": "Reporter",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "done",
+                        "kind": "output",
+                        "name": "Report",
+                        "destination": { "kind": "email", "target": "ada@example.com" }
+                    }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        let saved = &record.overlay_workflows[0].toml;
+        assert!(
+            saved.contains("target = \"ada@example.com\""),
+            "the persisted graph routes to the destination address: {saved}"
+        );
+    }
+
+    /// Issue #661 (H1): a `tool_call` with no `slug` is still rejected — the
+    /// inherited author-time gate, now reachable with a useful message instead of
+    /// the tool being unable to author a `tool_call` at all.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_tool_call_without_slug() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "bad",
+                "name": "Bad",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    { "id": "grab", "kind": "tool_call", "name": "Grab" },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("slug"),
+            "the refusal names the missing slug: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): the exact GitHub/Composio failure mode — a `tool_call`
+    /// naming an agent-turn tool family (`composio_execute`) can never run on a
+    /// workflow `tool_call` node, so it is refused at save. Gated on `openhuman`
+    /// because the namespace resolution (`namespace_of`) lives behind it.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_agent_turn_tool_call() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "gh",
+                "name": "GitHub",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "call",
+                        "kind": "tool_call",
+                        "name": "Call",
+                        "config": { "slug": "composio_execute" }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "call" },
+                    { "from": "call", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("agent-turn"),
+            "the refusal explains it is an agent-turn family, not a workflow tool: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): a JSON `null` inside a node's `config` can't be stored —
+    /// TOML has no null — so the fallible `TryFrom` conversion refuses it as an
+    /// agent-actionable error, never a panic or a silently-dropped key.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_null_config_value() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "nullish",
+                "name": "Nullish",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": null } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("TOML has no null"),
+            "the refusal explains why the config can't be stored: {result:?}"
+        );
+    }
+
+    /// Issue #674 boundary: an agent-authored `tool_call` whose `config.args`
+    /// carries a templated `=`-expression is rejected — that node would take
+    /// saved-node runtime position with model-chosen templated args, collapsing
+    /// the two-operator-gate model. The refusal names the node and points at the
+    /// console for templated wiring. Feature-independent: the check runs in the
+    /// `TryFrom`, before any namespace/grant gate.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_tool_call_expression_args() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "templated",
+                "name": "Templated",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "=item.url" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        let msg = result.output_for_llm(false);
+        assert!(
+            msg.contains("=`-expression") && msg.contains("config.args.url"),
+            "the refusal names the templated expression and its location: {result:?}"
+        );
+        // Nothing was persisted — the reject happens before the store write.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            record.overlay_workflows.is_empty(),
+            "a rejected draft persists nothing"
+        );
+    }
+
+    /// Issue #674 boundary, positive half: the same `tool_call` with a LITERAL
+    /// arg (no `=` prefix) persists — the restriction is on templated
+    /// `=`-expressions, not on args as such.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_tool_call_literal_args() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "literal",
+                "name": "Literal",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "https://example.com" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            record.overlay_workflows[0]
+                .toml
+                .contains("url = \"https://example.com\""),
+            "the persisted graph carries the literal arg: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #661 (H1): the `=`-expression restriction is scoped to `tool_call`.
+    /// A `condition` node legitimately branches on a `config.field` expression,
+    /// so a `=`-prefixed field must NOT be rejected — proving the guard doesn't
+    /// over-reach into the kinds that resolve expressions by design.
+    #[tokio::test]
+    async fn create_workflow_tool_allows_condition_expression_field() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "brancher",
+                "name": "Brancher",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "check",
+                        "kind": "condition",
+                        "name": "Check",
+                        "config": { "field": "=item.ok" }
+                    },
+                    { "id": "yes", "kind": "output", "name": "Yes" },
+                    { "id": "no", "kind": "output", "name": "No" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "check" },
+                    { "from": "check", "to": "yes", "label": "yes" },
+                    { "from": "check", "to": "no", "label": "no" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(
+            !result.is_error,
+            "a condition's `=`-expression field is allowed: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): a non-object `config` (here a bare string on an
+    /// `http_request` node — the path that would otherwise persist silently) is
+    /// refused with an agent-actionable message, not saved as an inert TOML
+    /// scalar.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_non_object_config() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "scalar",
+                "name": "Scalar",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "call",
+                        "kind": "http_request",
+                        "name": "Call",
+                        "config": "GET https://example.com"
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "call" },
+                    { "from": "call", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("non-object `config`"),
+            "the refusal explains config must be a JSON object: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1) — item #2: a `destination` on a non-`output` node is
+    /// already rejected end-to-end by the shared `validate` (`render_workflow` →
+    /// `parse_workflow` inside `create_company_workflow`), so the create_workflow
+    /// tool inherits the catch with no duplicated validation of its own. This
+    /// pins that end-to-end behaviour; the shared-validator hardening is #682's.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_destination_on_non_output() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "misrouted",
+                "name": "Misrouted",
+                "nodes": [
+                    {
+                        "id": "start",
+                        "kind": "trigger",
+                        "name": "Start",
+                        "destination": { "kind": "owner" }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("only `output` nodes route a report"),
+            "the shared validator's destination-placement message surfaces: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1) — item #3: the JSON→TOML conversion remedy is conditional.
+    /// A failure that is NOT about a null (here a `u64` beyond `i64` range) must
+    /// get the converter's own message WITHOUT the misleading "TOML has no null"
+    /// hint — the null case keeps that hint (`create_workflow_tool_rejects_null_config_value`).
+    #[tokio::test]
+    async fn create_workflow_tool_non_null_conversion_error_omits_null_hint() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "toobig",
+                "name": "TooBig",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "n": 18446744073709551615u64 } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        let msg = result.output_for_llm(false);
+        assert!(
+            msg.contains("can't be stored"),
+            "names the failure: {result:?}"
+        );
+        assert!(
+            !msg.contains("TOML has no null"),
+            "a non-null conversion failure must not misdirect to the null remedy: {result:?}"
+        );
+    }
+
+    #[test]
+    fn first_expression_location_walks_nested_config() {
+        // Matches tinyflows' `is_expression`: a leading `=` (no trim).
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "command": "=item.x" } }), ""),
+            Some("args.command".to_string())
+        );
+        // Array elements become numeric segments.
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "cc": ["a", "=item.y"] } }), ""),
+            Some("args.cc.1".to_string())
+        );
+        // Literals — including a `=` in the MIDDLE — are not expressions.
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "q": "a=b", "s": "ls -la" } }), ""),
+            None
+        );
+    }
+
+    #[test]
+    fn json_contains_null_is_recursive() {
+        assert!(json_contains_null(&json!({ "args": { "url": null } })));
+        assert!(json_contains_null(&json!(["ok", [null]])));
+        assert!(!json_contains_null(
+            &json!({ "args": { "url": "https://x" } })
+        ));
     }
 
     // ---- read_run_output (issue #418) ----
