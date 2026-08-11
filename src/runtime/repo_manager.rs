@@ -58,8 +58,9 @@ mod test;
 /// seam — each credential-aware by construction. See [`types`].
 pub mod types;
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock, Mutex as StdMutex};
 
 use tokio::sync::Mutex;
 
@@ -252,7 +253,6 @@ impl RepoManager {
     /// remembers installing.
     pub async fn bind(&self, request: BindRequest) -> Result<RepoBinding> {
         let coords = parse_repo_url(&request.url)?;
-        let key = coords.key();
         let token = request.token.trim().to_string();
         if token.is_empty() {
             return Err(OpenCompanyError::InvalidRequest(
@@ -270,6 +270,40 @@ impl RepoManager {
             ));
         }
         let branches = normalize_branches(&request.branches)?;
+        // What is fetched is the canonical URL rebuilt from the validated
+        // parts, never the submitted string.
+        let url = coords.canonical_url();
+        self.bind_validated(&coords, &url, &token, branches).await
+    }
+
+    /// The credentialed half of [`bind`](Self::bind), from the duplicate check
+    /// through to the index commit, under this key's bind lock.
+    ///
+    /// Split out where it is for two reasons. It is the whole critical section,
+    /// so the lock has exactly one scope to cover; and taking the fetch URL as a
+    /// parameter rather than deriving it lets a test drive the *real* path —
+    /// token write, rollback and all — against a local `file://` fixture with no
+    /// network, which is the only way the interleaving below can be exercised.
+    async fn bind_validated(
+        &self,
+        coords: &RepoCoordinates,
+        url: &str,
+        token: &str,
+        branches: Vec<String>,
+    ) -> Result<RepoBinding> {
+        let key = coords.key();
+        // Held across the duplicate check, the token write, the mirror build and
+        // the index commit — the entire span in which two binds of one key can
+        // see each other's half-finished work.
+        //
+        // Checking for a duplicate outside it is not a benign race. Both callers
+        // pass the check, both write to `repos/token/<key>`, both build the same
+        // mirror directory, and the one that loses the index commit calls
+        // `roll_back` — which blanks the credential and deletes the mirror that
+        // now belong to the *winner*, whose index entry survives. The operator is
+        // left with a binding that reads as installed and cannot fetch anything.
+        let lock = bind_lock(&self.company, &key);
+        let _guard = lock.lock().await;
 
         if self.list().await?.iter().any(|b| b.key == key) {
             return Err(OpenCompanyError::Conflict(format!(
@@ -289,7 +323,7 @@ impl RepoManager {
             .set(
                 &self.company,
                 &repo_token_key(&key),
-                SecretValue(token.clone()),
+                SecretValue(token.to_string()),
             )
             .await?;
 
@@ -297,7 +331,7 @@ impl RepoManager {
         // packfile or LFS bomb need not match what the API reports, which is
         // why the post-fetch cap in `install` exists regardless.
         if let (Some(host), Some(quota)) = (self.host.as_ref(), self.quota_bytes) {
-            match host.repo_meta(&coords, &token).await {
+            match host.repo_meta(coords, token).await {
                 Ok(meta) => {
                     let advertised = meta.size_kb.saturating_mul(1024);
                     let used = dir_bytes(&self.root).await?;
@@ -321,16 +355,13 @@ impl RepoManager {
             }
         }
 
-        // What is fetched is the canonical URL rebuilt from the validated
-        // parts, never the submitted string.
-        let url = coords.canonical_url();
         match self
             .install(
-                &url,
+                url,
                 &key,
                 &coords.owner,
                 &coords.repo,
-                Some(&token),
+                Some(token),
                 branches,
             )
             .await
@@ -697,6 +728,37 @@ impl RepoManager {
 }
 
 // -- helpers -----------------------------------------------------------------
+
+/// Per-binding write serialization, keyed by company **and** repository key.
+///
+/// The same shape as [`company_write_lock`](crate::ports::store::company_write_lock),
+/// and for the same reason: the thing being serialized is a read-modify-write
+/// against shared durable state, so the lock has to outlive whichever object
+/// happens to be performing it. A `Mutex` field on [`RepoManager`] would
+/// serialize only the callers that reached the same instance.
+///
+/// Deliberately *not* the company-wide lock. A bind holds this across a network
+/// fetch of a whole repository; taking the company write lock for that long
+/// would block every unrelated console write — a roster edit, a workflow save —
+/// for the duration.
+///
+/// **Lock order: this, then [`RepoManager::index_lock`], never the reverse.**
+/// Nothing acquires the index lock and then a bind lock, so the pair cannot
+/// deadlock.
+///
+/// Process-local, which is the whole scope that exists: a tenant is one
+/// container running one process, and `SecretStore` offers no compare-and-swap
+/// to build a cross-process equivalent on.
+static BIND_LOCKS: LazyLock<StdMutex<HashMap<(CompanyId, String), Arc<Mutex<()>>>>> =
+    LazyLock::new(|| StdMutex::new(HashMap::new()));
+
+/// Returns (or creates) the bind mutex for one company's repository key.
+fn bind_lock(company: &CompanyId, key: &str) -> Arc<Mutex<()>> {
+    let mut map = BIND_LOCKS.lock().expect("repository bind locks");
+    map.entry((company.clone(), key.to_string()))
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
 
 /// Validates and de-duplicates the submitted branch list.
 ///

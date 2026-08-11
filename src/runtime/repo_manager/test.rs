@@ -596,6 +596,79 @@ async fn binding_the_same_repository_twice_is_a_conflict() {
     assert_eq!(mgr.read_index().await.unwrap().bindings.len(), 1);
 }
 
+/// Two binds of the same repository, racing.
+///
+/// The duplicate check used to run outside any lock, so both callers passed it,
+/// both wrote `repos/token/<key>`, and both built the same mirror. The one that
+/// lost the index commit then called `roll_back` — which blanked the credential
+/// and deleted the mirror now belonging to the **winner**, whose index entry
+/// survived. The operator was left with a binding that reads as installed and
+/// cannot fetch anything.
+///
+/// Driven through `bind_validated` against the `file://` fixture so the real
+/// path runs — duplicate check, token write, mirror build, index commit,
+/// rollback — with no network.
+#[tokio::test]
+async fn two_concurrent_binds_of_one_repository_leave_exactly_one_intact() {
+    let scratch = Scratch::new("bindrace");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    let mgr = Arc::new(mgr);
+    let coords = parse_repo_url(WIDGETS_URL).unwrap();
+
+    // Both futures are spawned before either is awaited, so they interleave
+    // inside `bind_validated` rather than running end to end in turn.
+    let (a, b) = tokio::join!(
+        {
+            let mgr = mgr.clone();
+            let coords = coords.clone();
+            let url = url.clone();
+            async move {
+                mgr.bind_validated(&coords, &url, SENTINEL, vec!["main".into()])
+                    .await
+            }
+        },
+        {
+            let mgr = mgr.clone();
+            let coords = coords.clone();
+            let url = url.clone();
+            async move {
+                mgr.bind_validated(&coords, &url, SENTINEL, vec!["main".into()])
+                    .await
+            }
+        }
+    );
+
+    let winners = [&a, &b].iter().filter(|r| r.is_ok()).count();
+    assert_eq!(winners, 1, "exactly one bind may win: a={a:?} b={b:?}");
+    let loser = if a.is_err() {
+        a.unwrap_err()
+    } else {
+        b.unwrap_err()
+    };
+    assert!(
+        matches!(loser, OpenCompanyError::Conflict(_)),
+        "the loser must lose on the duplicate check, not on a corrupted mirror: {loser:?}"
+    );
+
+    // The survivor is whole: one index entry, its credential still stored, and
+    // its mirror still on disk. Before the lock, the loser's rollback took the
+    // last two while leaving the first.
+    let index = mgr.read_index().await.unwrap();
+    assert_eq!(index.bindings.len(), 1, "{index:?}");
+    let key = index.bindings[0].key.clone();
+    assert!(
+        secrets.get_now("acme", &repo_token_key(&key)).is_some(),
+        "the winner's credential was blanked by the loser's rollback"
+    );
+    assert!(
+        scratch
+            .join(&format!("data/companies/acme/repos/{key}.git"))
+            .exists(),
+        "the winner's mirror was deleted by the loser's rollback"
+    );
+}
+
 // -- rollback ----------------------------------------------------------------
 
 #[tokio::test]
