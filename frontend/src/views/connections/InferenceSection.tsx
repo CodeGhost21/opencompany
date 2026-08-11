@@ -323,6 +323,13 @@ export function InferenceSection({
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Inference (BYOK)
         </h3>
+        {/* Mirrors the Company credential card's own subtitle. Two cards in
+            Connections accept a key and one of them accepts a TinyHumans key,
+            so each says in one line which it is — the distinction is otherwise
+            only in a module doc no operator reads (#637). */}
+        <span className="text-xs text-muted-foreground">
+          the key your agents think with — not the company account key
+        </span>
       </div>
       <p className="text-sm text-muted-foreground">
         Choose which model provider your agents think with. Bring your own key for OpenRouter, a
