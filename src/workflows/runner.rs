@@ -221,7 +221,7 @@ async fn run_workflow_inner(
     let gated = if ctx.dry_run {
         Vec::new()
     } else {
-        super::gate::apply_tool_call_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+        super::gate::apply_policy_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
     };
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     // Issue #371: the caller's run id, not a freshly minted one. Correlating the
@@ -716,7 +716,7 @@ struct PausedGates<'a> {
     deliveries: &'a [crate::ports::DeliveryReport],
     /// The policy-raised gates, so a card can say which tool and why. An
     /// authored gate has no entry here and its card stays as #395 shipped it.
-    gated: &'a [super::gate::GatedToolCall],
+    gated: &'a [super::gate::GatedCall],
     /// Issue #596: the run's reached-node output and the graph's edges, so a
     /// parked gate's card can carry the verbatim upstream content awaiting
     /// sign-off. Additive to the #460 struct — the pre-existing fields are
@@ -799,17 +799,21 @@ async fn park_pending_gates(
         // Issue #460: when the policy is what stopped this node, the card says
         // which tool and why. An authored gate carries neither — nobody asked a
         // question on its behalf — so it stays exactly as #395 shipped it.
-        let tool = gated
+        let call = gated
             .iter()
             .find(|gate| gate.node_id == *node_id)
-            .map(|gate| (gate.slug.as_str(), gate.reason.as_str()));
+            .map(|gate| crate::runtime::workflow_resume::GateCall {
+                tool: gate.slug.as_str(),
+                reason: gate.reason.as_str(),
+                target: gate.target.as_deref(),
+            });
         let mut effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
-            tool,
+            call,
         );
         // Issue #596: enrich the card with the verbatim output of this gate's
         // upstream nodes — the content awaiting sign-off. A self-contained
