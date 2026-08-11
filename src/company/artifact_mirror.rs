@@ -236,11 +236,9 @@ pub async fn materialize(
         // for every agent.
         Some(id) => {
             // The same shape guard as above: a node already at this path whose
-            // kind disagrees with what is being published is deleted and
-            // replaced, because no write can turn one into the other. Deleting
-            // is safe here in a way it is not above — the path is the
-            // deliverable's identity, so this node IS the thing being
-            // superseded, and its history lives on the artifact chain.
+            // kind disagrees with what is being published cannot be revised,
+            // because no write path converts one kind into the other (and the
+            // store refuses if asked). It has to be replaced.
             let replace = match workspace.read(company, &id).await? {
                 Some((node, _)) => {
                     node.is_binary() != matches!(target.payload, MirrorPayload::Bytes { .. })
@@ -248,8 +246,7 @@ pub async fn materialize(
                 None => false,
             };
             if replace {
-                workspace.delete(company, &id).await?;
-                return create_payload(workspace, company, Some(parent), filename, target).await;
+                return replace_payload(workspace, company, &parent, filename, &id, target).await;
             }
             let sha256 = write_payload(workspace, company, &id, target).await?;
             Ok(Mirrored {
@@ -282,6 +279,104 @@ async fn write_payload(
             Ok(node.sha256)
         }
     }
+}
+
+/// Replaces the node at a path with one of the **other** kind — prose becoming
+/// bytes, or the reverse — without a window in which the deliverable does not
+/// exist (issue #662).
+///
+/// # Why not delete-then-create
+///
+/// That is what this used to do, and it turned a *refused* publish into a
+/// destructive one. `create_payload` fails for designed reasons — over
+/// `max_blob_mb`, over `tree_quota_gb`, a store error — and quota refusal is an
+/// intended outcome of the same work that introduced this path. When it failed,
+/// the old deliverable had already been deleted and nothing restored it: the
+/// operator was left with an artifact record pointing at a node id that no
+/// longer resolved, and the previous deliverable — which was fine — destroyed by
+/// a publish that did not succeed.
+///
+/// The old code argued the deletion was safe because "its history lives on the
+/// artifact chain". That holds when the replacement lands and not otherwise, and
+/// nothing distinguished the two. It is also **false for a binary**, whose
+/// artifact version records neither content nor digest (issue #668) — so the
+/// chain recovers nothing. Minting first removes the need for that argument
+/// rather than working around it.
+///
+/// # Why the replacement is staged under another name
+///
+/// The obvious create-then-delete — mint the replacement at the final path,
+/// then remove the old node — briefly puts **two** nodes at one path, and if the
+/// delete then fails they stay there. [`resolve_file`] answers a duplicated name
+/// with `Conflict`, so that state does not decay: it refuses every future
+/// publish to that path, for every agent. Staging under a name nothing resolves
+/// keeps the path unambiguous at every instant.
+///
+/// # What each failure leaves behind
+///
+/// * **The create fails** — the common case, and the one this issue is about.
+///   Nothing has changed: the old deliverable is intact, the path still resolves
+///   to it, and the error propagates. Publishing is refused rather than
+///   destructive.
+/// * **The delete fails** — the old deliverable is still intact. The staged node
+///   is removed so the workspace is left exactly as it was found, and the
+///   original error propagates.
+/// * **The rename fails** — the only arm that loses the old node, and the
+///   replacement survives it: the new payload is durable under the staging name,
+///   the path is free rather than ambiguous, and the error names the node so it
+///   can be found. Strictly better than the old behaviour, which lost the
+///   payload outright.
+async fn replace_payload(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    parent: &str,
+    filename: &str,
+    superseded: &str,
+    target: PublishTarget<'_>,
+) -> Result<String> {
+    // A name no publish can produce and `resolve_file` will never match, so the
+    // path keeps resolving to exactly one node while the swap is in flight.
+    let staged_name = format!("{filename}.publishing-{}", crate::ports::generate_id());
+    let staged = create_payload(
+        workspace,
+        company,
+        Some(parent.to_string()),
+        &staged_name,
+        target,
+    )
+    .await?;
+
+    if let Err(err) = workspace.delete(company, superseded).await {
+        // The old deliverable is still there, so the only thing to undo is the
+        // node just staged. A failure to clean it up is logged rather than
+        // returned: the caller's error is the one that explains the publish.
+        if let Err(cleanup) = workspace.delete(company, &staged).await {
+            tracing::warn!(
+                company = %company,
+                staged = %staged,
+                error = %cleanup,
+                "[publish] could not remove a staged replacement after a failed supersede; it \
+                 remains in the workspace under its staging name"
+            );
+        }
+        return Err(err);
+    }
+
+    workspace
+        .rename_move(company, &staged, Some(filename), None)
+        .await
+        .map_err(|err| {
+            tracing::error!(
+                company = %company,
+                staged = %staged,
+                name = %staged_name,
+                error = %err,
+                "[publish] the replacement was stored but could not be renamed onto the \
+                 deliverable's path; it is in the workspace under its staging name"
+            );
+            err
+        })?;
+    Ok(staged)
 }
 
 /// Creates a fresh node of the right kind holding `target`'s payload.
@@ -568,6 +663,106 @@ mod test {
         (dir, ops, CompanyId::new("mirror-co"))
     }
 
+    /// A store that delegates everything to a real backend but **refuses every
+    /// create**, which is the shape a quota refusal takes here.
+    ///
+    /// A wrapper rather than a configured quota because the assertion is about
+    /// what `materialize` does when the create fails, not about which limit
+    /// produced the failure — and a real limit would tie the test to whichever
+    /// cap happens to be tunable.
+    struct RefusingCreate(Arc<FsOps>);
+
+    #[async_trait::async_trait]
+    impl WorkspaceStore for RefusingCreate {
+        async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
+            WorkspaceStore::tree(&*self.0, company).await
+        }
+        async fn read(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, String)>> {
+            WorkspaceStore::read(&*self.0, company, id).await
+        }
+        async fn write(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            content: &str,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write(&*self.0, company, id, content, author).await
+        }
+        async fn create(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            content: Option<&str>,
+        ) -> Result<()> {
+            // Folders still have to be creatable: the scaffold mints the agent
+            // and task folders on the way in, and refusing those would fail the
+            // publish before it ever reaches the replacement.
+            if node.kind == NodeKind::Folder {
+                return WorkspaceStore::create(&*self.0, company, node, content).await;
+            }
+            Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
+        }
+        async fn create_binary(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _bytes: &[u8],
+        ) -> Result<()> {
+            Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
+        }
+        async fn write_binary(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            bytes: &[u8],
+            mime: Option<&str>,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write_binary(&*self.0, company, id, bytes, mime, author).await
+        }
+        async fn read_bytes(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_bytes(&*self.0, company, id).await
+        }
+        async fn rename_move(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            name: Option<&str>,
+            parent: Option<Option<&str>>,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            WorkspaceStore::delete(&*self.0, company, id).await
+        }
+        async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
+            WorkspaceStore::is_empty(&*self.0, company).await
+        }
+    }
+
+    /// Every node id in the workspace, sorted — the set, which is what `tree`
+    /// actually promises.
+    async fn sorted_ids(ws: &dyn WorkspaceStore, company: &CompanyId) -> Vec<String> {
+        let mut ids: Vec<String> = ws
+            .tree(company)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
     /// A node's rendered path, so an assertion reads as a path rather than a
     /// ULID.
     async fn path_of(ws: &dyn WorkspaceStore, company: &CompanyId, id: &str) -> String {
@@ -730,6 +925,147 @@ mod test {
         assert!(
             ws.read(&co, &first).await.unwrap().is_none(),
             "the superseded node is gone, not left beside its replacement"
+        );
+    }
+
+    /// Issue #662. A shape-changing publish whose replacement **fails** must
+    /// leave the previous deliverable exactly where it was.
+    ///
+    /// This is the defect: the old code deleted first, so a refused create —
+    /// over `max_blob_mb`, over `tree_quota_gb`, any store error — destroyed a
+    /// deliverable that was fine, and left the artifact record pointing at a
+    /// node id that no longer resolved. Quota refusal is a *designed* outcome of
+    /// this path, so the window was never theoretical.
+    #[tokio::test]
+    async fn a_failed_replacement_leaves_the_previous_deliverable_intact() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("report.md", "# Draft"))
+            .await
+            .unwrap();
+        let before = path_of(ws, &co, &first).await;
+
+        // The same publish as the test above, but the store refuses to create
+        // the binary node — the shape every quota refusal takes here.
+        let refusing = RefusingCreate(ops.clone());
+        let err = materialize(
+            &refusing,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x25, 0x50, 0x44, 0x46],
+                    mime: "application/pdf",
+                },
+                existing_node_id: Some(&first),
+                ..target("report.md", "")
+            },
+        )
+        .await
+        .expect_err("the refused create must fail the publish");
+        assert!(
+            err.to_string().contains("over quota"),
+            "the store's own refusal must reach the caller: {err}"
+        );
+
+        let (node, body) = ws
+            .read(&co, &first)
+            .await
+            .unwrap()
+            .expect("the previous deliverable must still exist");
+        assert_eq!(body, "# Draft", "its content is untouched");
+        assert_eq!(node.name, "report.md");
+        assert_eq!(
+            path_of(ws, &co, &first).await,
+            before,
+            "and it still sits at the deliverable's path"
+        );
+    }
+
+    /// The other half: a refused replacement must not leave the staged node
+    /// behind either. The workspace has to look exactly as it did before the
+    /// publish was attempted — one node at the path, and nothing beside it.
+    #[tokio::test]
+    async fn a_failed_replacement_leaves_no_staged_node_behind() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("report.md", "# Draft"))
+            .await
+            .unwrap();
+        // Sorted: `tree` promises the set, not an order, so comparing raw
+        // sequences would fail on a reshuffle that changed nothing.
+        let before = sorted_ids(ws, &co).await;
+
+        let refusing = RefusingCreate(ops.clone());
+        let _ = materialize(
+            &refusing,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x25, 0x50, 0x44, 0x46],
+                    mime: "application/pdf",
+                },
+                existing_node_id: Some(&first),
+                ..target("report.md", "")
+            },
+        )
+        .await;
+
+        let after = sorted_ids(ws, &co).await;
+        assert_eq!(
+            before, after,
+            "a refused publish must change nothing at all"
+        );
+    }
+
+    /// The success path still ends with exactly ONE node at the path — the
+    /// staging name is an implementation detail that must never survive.
+    ///
+    /// Without this, the staged replacement could silently ship under
+    /// `report.md.publishing-<id>` and every assertion about the failure paths
+    /// would still pass.
+    #[tokio::test]
+    async fn a_successful_replacement_leaves_one_node_at_the_path() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("report.md", "# Draft"))
+            .await
+            .unwrap();
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x25, 0x50, 0x44, 0x46],
+                    mime: "application/pdf",
+                },
+                existing_node_id: Some(&first),
+                ..target("report.md", "")
+            },
+        )
+        .await
+        .expect("the replacement lands");
+
+        let nodes = ws.tree(&co).await.unwrap();
+        let parent = nodes
+            .iter()
+            .find(|n| n.id == second)
+            .and_then(|n| n.parent_id.clone())
+            .expect("the replacement has a parent");
+        let named: Vec<&WorkspaceNode> = nodes
+            .iter()
+            .filter(|n| n.parent_id.as_deref() == Some(parent.as_str()))
+            .collect();
+        assert_eq!(
+            named.iter().filter(|n| n.name == "report.md").count(),
+            1,
+            "exactly one node carries the deliverable's name: {named:?}"
+        );
+        assert!(
+            !named.iter().any(|n| n.name.contains(".publishing-")),
+            "no staging name may survive a successful publish: {named:?}"
         );
     }
 
