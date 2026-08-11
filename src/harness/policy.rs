@@ -185,9 +185,37 @@ pub struct DrainedRequests {
     pub requests: Vec<ApprovalRequest>,
     /// How many were dropped for exceeding the cap. Zero on the ordinary path.
     pub discarded: usize,
+    /// The cap this drain was taken against.
+    ///
+    /// Kept rather than asked for again, so the notice cannot be rendered
+    /// against a different number than the one that did the discarding. A
+    /// caller holding a `DrainedRequests` from `drain(8)` could otherwise write
+    /// `overflow_notice(20)` and hand the operator a confidently-worded, wrong
+    /// sentence — the same shape of defect as the invisible discard this type
+    /// exists to fix, one level up. Private because the only honest value is
+    /// the one [`ApprovalRequestQueue::drain`] already had in hand.
+    cap: usize,
 }
 
 impl DrainedRequests {
+    /// A drain result, for callers that build one directly (tests, and any
+    /// future producer that is not the queue).
+    ///
+    /// Takes `cap` because rendering the notice needs it, and takes it *here*
+    /// so it arrives with the count it belongs to rather than at the sentence.
+    pub fn new(requests: Vec<ApprovalRequest>, discarded: usize, cap: usize) -> Self {
+        Self {
+            requests,
+            discarded,
+            cap,
+        }
+    }
+
+    /// The cap this drain was taken against.
+    pub fn cap(&self) -> usize {
+        self.cap
+    }
+
     /// The operator-facing sentence for a turn that overflowed the cap, or
     /// `None` when nothing was dropped.
     ///
@@ -199,9 +227,10 @@ impl DrainedRequests {
     /// discarded" alone invites the reading that the calls happened and only the
     /// records were lost; they did not happen, they were refused, and the only
     /// way to get them is to ask the agent again.
-    pub fn overflow_notice(&self, cap: usize) -> Option<String> {
+    pub fn overflow_notice(&self) -> Option<String> {
         (self.discarded > 0).then(|| {
             let n = self.discarded;
+            let cap = self.cap;
             let calls = if n == 1 { "call" } else { "calls" };
             let them = if n == 1 { "it" } else { "them" };
             format!(
@@ -254,6 +283,11 @@ impl ApprovalRequestQueue {
     /// caller that wants only the requests writes `.requests` and is at least
     /// choosing to; it can no longer happen by not knowing there was a second
     /// number.
+    ///
+    /// `cap` travels into the result rather than being asked for again when the
+    /// notice is rendered: the count and the number that produced it are then
+    /// one value, and a caller cannot pair a drain of eight with a sentence
+    /// that claims the limit is twenty.
     pub fn drain(&self, cap: usize) -> DrainedRequests {
         let mut guard = self.inner.lock().expect("approval request queue");
         let take = guard.len().min(cap);
@@ -263,6 +297,7 @@ impl ApprovalRequestQueue {
         DrainedRequests {
             requests,
             discarded,
+            cap,
         }
     }
 
@@ -1704,7 +1739,7 @@ mod tests {
             "12 gated calls, a cap of 8, so 4 were dropped"
         );
         let notice = drained
-            .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+            .overflow_notice()
             .expect("an overflowing drain has something to tell the operator");
         assert!(
             notice.contains('4'),
@@ -1733,11 +1768,7 @@ mod tests {
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN - 1);
         assert_eq!(drained.discarded, 0);
-        assert!(
-            drained
-                .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
-                .is_none()
-        );
+        assert!(drained.overflow_notice().is_none());
     }
 
     /// Exactly at the cap is not an overflow. An off-by-one here would cry wolf
@@ -1756,25 +1787,49 @@ mod tests {
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(drained.discarded, 0);
-        assert!(
-            drained
-                .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
-                .is_none()
-        );
+        assert!(drained.overflow_notice().is_none());
     }
 
     /// One dropped request reads as one, not as "1 calls".
     #[test]
     fn the_overflow_notice_is_singular_for_a_single_dropped_request() {
-        let drained = DrainedRequests {
-            requests: Vec::new(),
-            discarded: 1,
-        };
-        let notice = drained
-            .overflow_notice(8)
-            .expect("one is still an overflow");
+        let drained = DrainedRequests::new(Vec::new(), 1, 8);
+        let notice = drained.overflow_notice().expect("one is still an overflow");
         assert!(notice.contains("1 further gated tool call "), "{notice}");
         assert!(!notice.contains("calls"), "{notice}");
+    }
+
+    /// The notice names the cap the drain was actually taken against, not one a
+    /// caller supplied later.
+    ///
+    /// `discarded` was always captured at drain time while `cap` arrived at the
+    /// sentence, so `drain(8)` followed by `overflow_notice(20)` produced a
+    /// confidently-worded, wrong number for the operator — the same class of
+    /// defect as the invisible discard #561 fixes. Storing it makes that
+    /// unrepresentable, and this pins that the stored value is the one used.
+    #[tokio::test]
+    async fn the_notice_quotes_the_cap_the_drain_was_taken_against() {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..5 {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(3);
+        assert_eq!(drained.cap(), 3);
+        assert_eq!(drained.discarded, 2);
+        let notice = drained.overflow_notice().expect("2 were dropped");
+        assert!(
+            notice.contains("at most 3"),
+            "the sentence must quote the cap that did the discarding: {notice}"
+        );
+        assert!(
+            !notice.contains(&MAX_APPROVAL_REQUESTS_PER_TURN.to_string()),
+            "and not the constant the call site happened to have in scope: {notice}"
+        );
     }
 
     // --- Redeeming a grant (issue #243) --------------------------------------
