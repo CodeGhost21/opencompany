@@ -30,6 +30,7 @@ use opencompany::{AppConfig, AppState};
 /// A running in-process host.
 pub struct EmbeddedHost {
     address: std::net::SocketAddr,
+    instance_id: String,
     /// Holds the data root's exclusive lock for as long as the host runs.
     /// Dropping it would release the root while this process kept writing.
     _instance: EmbeddedInstance,
@@ -45,6 +46,17 @@ impl EmbeddedHost {
     /// The base URL for a connection record.
     pub fn base_url(&self) -> String {
         format!("http://{}", self.address)
+    }
+
+    /// This host's stable identity, from `instance-id` under the data root.
+    ///
+    /// The console needs this precisely *because* [`Self::base_url`] is not
+    /// stable: the port is ephemeral by design (see above), so a client that
+    /// recognises this host by its address recognises a new host on every
+    /// launch and accumulates a dead connection per run. The address says where
+    /// to knock; this says who answers.
+    pub fn instance_id(&self) -> &str {
+        &self.instance_id
     }
 }
 
@@ -76,6 +88,11 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
         ..AppConfig::default()
     };
     let state = AppState::new(config).with_home(instance.home().to_path_buf());
+    // Read before `state` moves into `bind`. Minting here rather than on the
+    // first `/spec` also means the console can be told who this host is without
+    // waiting to contact it — which is the whole point, since the address it
+    // would contact is what changed.
+    let instance_id = state.instance_id().to_string();
 
     let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
     let server = tokio::spawn(async move {
@@ -84,9 +101,15 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
         }
     });
 
-    tracing::info!(%address, home = %instance.home().display(), "embedded host listening");
+    tracing::info!(
+        %address,
+        %instance_id,
+        home = %instance.home().display(),
+        "embedded host listening"
+    );
     Ok(EmbeddedHost {
         address,
+        instance_id,
         _instance: instance,
         server,
     })
@@ -170,6 +193,46 @@ mod test {
                     assert_ne!(host.address().port(), 0);
                     return;
                 }
+                Err(error) => last = Some(error),
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("a released root must become takeable: {last:?}");
+    }
+
+    /// The property the console keys its connection list on (#615).
+    ///
+    /// The port deliberately changes on every launch, so a client that
+    /// recognises this host by address recognises a *new* host every run and
+    /// the dead ones pile up in its sidebar. The identity is what survives
+    /// exactly that restart, and this is the assertion the fix rests on.
+    ///
+    /// The complementary half — that the port does *not* survive — is left
+    /// unasserted on purpose: the OS is free to hand the same ephemeral port
+    /// back, so `assert_ne!` on it would be asserting a coincidence. Two
+    /// concurrent hosts differing is covered by
+    /// `two_embedded_hosts_over_different_roots_coexist`.
+    #[tokio::test]
+    async fn a_restarted_host_keeps_its_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = start(dir.path().to_path_buf()).await.unwrap();
+        let id = first.instance_id().to_string();
+        assert!(!id.is_empty(), "a host must report an identity");
+        drop(first);
+
+        let second = take_root(dir.path().to_path_buf()).await;
+        assert_eq!(second.instance_id(), id, "the same root is the same host");
+    }
+
+    /// Starts over `root`, retrying while a just-released `flock` clears.
+    ///
+    /// See `stopping_a_host_frees_its_root_and_its_port` for why the release is
+    /// not instantaneous.
+    async fn take_root(root: PathBuf) -> EmbeddedHost {
+        let mut last = None;
+        for _ in 0..50 {
+            match start(root.clone()).await {
+                Ok(host) => return host,
                 Err(error) => last = Some(error),
             }
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;

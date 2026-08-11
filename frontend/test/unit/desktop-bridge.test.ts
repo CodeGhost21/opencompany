@@ -250,13 +250,22 @@ describe("registering connections with the core", () => {
 });
 
 describe("the embedded host", () => {
-  it("comes back as an addressable base url", async () => {
+  it("comes back as an addressable base url, and an identity to key it on", async () => {
+    // The identity is the load-bearing half. The port is ephemeral by design,
+    // so a console keyed on the address recognises a new host every launch and
+    // leaves the previous one's row behind, dead (#615) — this is where the
+    // core's answer to "who is listening there" crosses into the console.
     installBridge({
-      embedded: { baseUrl: "http://127.0.0.1:52341", dataDir: "/tmp/oc" },
+      embedded: {
+        baseUrl: "http://127.0.0.1:52341",
+        dataDir: "/tmp/oc",
+        instanceId: "0f9d8c7b6a5e4f3d2c1b0a9988776655",
+      },
     });
     await expect(embeddedHost()).resolves.toEqual({
       baseUrl: "http://127.0.0.1:52341",
       dataDir: "/tmp/oc",
+      instanceId: "0f9d8c7b6a5e4f3d2c1b0a9988776655",
     });
   });
 
