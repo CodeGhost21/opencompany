@@ -1717,6 +1717,13 @@ struct CachedRunOutput {
     workflow_id: String,
     nodes: Value,
     bytes: usize,
+    /// Display-name → node-id pairs from the workflow file, captured at store
+    /// time so `read_run_output` can resolve a `node` argument that is the
+    /// display name the run summary prints. The engine's `nodes` map is keyed by
+    /// id (a slug); the summary shows the name (prose) — in real graphs the two
+    /// differ, so a name-only lookup would miss. Resolved case-insensitively at
+    /// read time, so keys are kept as authored.
+    name_to_id: Vec<(String, String)>,
 }
 
 /// What [`RunOutputCache::store`] did with a run's node map — the run summary
@@ -1762,7 +1769,13 @@ impl RunOutputCache {
     /// evicting oldest-first. A map that serializes past
     /// [`RUN_OUTPUT_ENTRY_MAX_BYTES`] is refused (returned as
     /// [`RunOutputStored::Oversized`]) rather than cached.
-    fn store(&self, run_id: &str, workflow_id: &str, nodes: Value) -> RunOutputStored {
+    fn store(
+        &self,
+        run_id: &str,
+        workflow_id: &str,
+        nodes: Value,
+        name_to_id: Vec<(String, String)>,
+    ) -> RunOutputStored {
         let bytes = serde_json::to_string(&nodes).map(|s| s.len()).unwrap_or(0);
         if bytes > RUN_OUTPUT_ENTRY_MAX_BYTES {
             tracing::debug!(
@@ -1778,6 +1791,7 @@ impl RunOutputCache {
             workflow_id: workflow_id.to_string(),
             nodes,
             bytes,
+            name_to_id,
         };
         let mut q = self.inner.lock().expect("run output cache");
         q.push_back(entry);
@@ -2085,7 +2099,16 @@ impl Tool for RunWorkflowTool {
                 // refused oversized run points at the console, not at a
                 // `read_run_output` call that would find nothing.
                 let nodes_map = run.output.get("nodes").cloned().unwrap_or(Value::Null);
-                let cache_outcome = self.run_outputs.store(&ctx.run_id, &file.id, nodes_map);
+                // Capture display-name → id so `read_run_output` resolves the
+                // name the summary prints back to the id the cache is keyed on.
+                let name_to_id: Vec<(String, String)> = file
+                    .nodes
+                    .iter()
+                    .map(|n| (n.name.trim().to_string(), n.id.clone()))
+                    .collect();
+                let cache_outcome =
+                    self.run_outputs
+                        .store(&ctx.run_id, &file.id, nodes_map, name_to_id);
                 let md = summarize_run(&file, &run, &ctx.run_id, cache_outcome);
                 Ok(ToolResult::success_with_markdown(
                     json!({
@@ -2150,6 +2173,12 @@ fn summarize_run(
         Some(nodes) if !file.nodes.is_empty() => {
             for node in &file.nodes {
                 let name = node.name.trim();
+                // Surface the node id alongside the display name: `read_run_output`
+                // keys the cache by id, but the summary is the only place the agent
+                // sees a node, and in real graphs ids are slugs while names are
+                // prose. Printing `(`id`, kind)` makes the footer's `node: <id>`
+                // instruction true without a wasted round trip.
+                let id = node.id.as_str();
                 let kind = node.kind.as_str();
                 match nodes.get(&node.id) {
                     Some(state) => {
@@ -2166,21 +2195,21 @@ fn summarize_run(
                             Some(preview) if count > 1 => {
                                 rendered_output = true;
                                 md.push_str(&format!(
-                                    "- **{name}** ({kind}): last of {count} items — {preview}\n"
+                                    "- **{name}** (`{id}`, {kind}): last of {count} items — {preview}\n"
                                 ))
                             }
                             Some(preview) => {
                                 rendered_output = true;
                                 md.push_str(&format!(
-                                    "- **{name}** ({kind}): {count} item(s) — {preview}\n"
+                                    "- **{name}** (`{id}`, {kind}): {count} item(s) — {preview}\n"
                                 ))
                             }
-                            None => {
-                                md.push_str(&format!("- **{name}** ({kind}): {count} item(s)\n"))
-                            }
+                            None => md.push_str(&format!(
+                                "- **{name}** (`{id}`, {kind}): {count} item(s)\n"
+                            )),
                         }
                     }
-                    None => md.push_str(&format!("- **{name}** ({kind}): not reached\n")),
+                    None => md.push_str(&format!("- **{name}** (`{id}`, {kind}): not reached\n")),
                 }
             }
         }
@@ -2204,7 +2233,7 @@ fn summarize_run(
     if rendered_output {
         match cache {
             RunOutputStored::Stored => md.push_str(&format!(
-                "\n_Previews are clipped. Read any node's full output with `{READ_RUN_OUTPUT_TOOL}` (run_id: `{run_id}`, node: <name>)._\n"
+                "\n_Previews are clipped. Read any node's full output with `{READ_RUN_OUTPUT_TOOL}` (run_id: `{run_id}`, node: <id>) — the `id` in each line above._\n"
             )),
             RunOutputStored::Oversized { bytes } => md.push_str(&format!(
                 "\n_This run's output ({bytes} bytes) was too large to keep in memory, so `{READ_RUN_OUTPUT_TOOL}` can't reach it — open run `{run_id}` in the console's run drawer to read it in full._\n"
@@ -2342,7 +2371,7 @@ impl Tool for ReadRunOutputTool {
     }
 
     fn description(&self) -> &str {
-        "Read the full, unclipped output of one node from a recent workflow run — use this when a `run_workflow` summary previewed only a node's last item (clipped). Provide the `run_id` from that summary and the node's name; pass `offset` to continue reading a long output where a previous page stopped. Only recent runs of this running company are cached; older runs are in the console's run drawer."
+        "Read the full, unclipped output of one node from a recent workflow run — use this when a `run_workflow` summary previewed only a node's last item (clipped). Provide the `run_id` from that summary and the node's id (the `id` shown in each summary line; the node's display name also resolves); pass `offset` to continue reading a long output where a previous page stopped. Only recent runs of this running company are cached; older runs are in the console's run drawer."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -2355,7 +2384,7 @@ impl Tool for ReadRunOutputTool {
                 },
                 "node": {
                     "type": "string",
-                    "description": "The node whose full output to read, as named in the run summary."
+                    "description": "The node whose full output to read — its `id` from the run summary line (the node's display name also resolves)."
                 },
                 "offset": {
                     "type": "integer",
@@ -2413,16 +2442,26 @@ impl Tool for ReadRunOutputTool {
             )));
         };
 
-        // The run summary lists each node by its display name, so accept a
-        // case-insensitive match on the map's keys (which are node ids) as well
-        // as an exact one — the agent copying "Worker" from the summary should
-        // reach id `worker` rather than bounce off the error path.
-        let state = nodes.get(node).or_else(|| {
-            nodes
-                .iter()
-                .find(|(id, _)| id.eq_ignore_ascii_case(node))
-                .map(|(_, st)| st)
-        });
+        // Resolve the `node` argument three ways, so passing either the id or the
+        // display name the run summary prints both land: an exact id match, a
+        // case-insensitive id match, then — since ids are slugs but the summary
+        // shows prose names — the display name resolved to its id through the
+        // name→id map captured at store time.
+        let state = nodes
+            .get(node)
+            .or_else(|| {
+                nodes
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(node))
+                    .map(|(_, st)| st)
+            })
+            .or_else(|| {
+                entry
+                    .name_to_id
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(node))
+                    .and_then(|(_, id)| nodes.get(id))
+            });
         let Some(state) = state else {
             // Name the valid ids + their item counts, so the agent can retry
             // with a real node rather than guess.
@@ -4885,6 +4924,69 @@ name = "Morning"
         assert!(text.contains(&"b".repeat(500)), "item 2 must be verbatim");
     }
 
+    /// T4b: the run summary lists a node by its display name but the cache is
+    /// keyed by id, and in `DEMO_WF` the two genuinely differ — `id = "done"`,
+    /// `name = "Report"`. Both the display name the summary prints ("Report")
+    /// and the raw id ("done") must resolve through `read_run_output`. This is
+    /// the non-degenerate name/id pair the case-only fallback never covered.
+    #[tokio::test]
+    async fn read_run_output_resolves_display_name_and_id() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let cache = RunOutputCache::default();
+        let (run, _runner) = run_tool_over(
+            dir.path(),
+            WorkflowRun {
+                // The terminal node's id is `done`; the summary shows its name,
+                // "Report".
+                output: json!({ "nodes": { "done": { "items": ["the report body"] } } }),
+                pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+            },
+            WorkflowRefQueue::default(),
+            cache.clone(),
+        );
+        let summary = run.execute(json!({ "id": "demo" })).await.expect("execute");
+        // The summary prints the display name and now the id alongside it.
+        let md = summary.output_for_llm(true);
+        assert!(md.contains("**Report**"), "{md}");
+        assert!(md.contains("`done`"), "{md}");
+        let run_id = match &summary.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
+            other => panic!("{other:?}"),
+        };
+        let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
+
+        // The display name from the summary resolves to id `done`.
+        let by_name = reader
+            .execute(json!({ "run_id": run_id, "node": "Report" }))
+            .await
+            .expect("execute");
+        assert!(!by_name.is_error, "display name must resolve: {by_name:?}");
+        assert!(
+            by_name.output_for_llm(false).contains("the report body"),
+            "{by_name:?}"
+        );
+
+        // The raw id resolves too, so both paths are live.
+        let by_id = reader
+            .execute(json!({ "run_id": run_id, "node": "done" }))
+            .await
+            .expect("execute");
+        assert!(!by_id.is_error, "id must resolve: {by_id:?}");
+        assert!(
+            by_id.output_for_llm(false).contains("the report body"),
+            "{by_id:?}"
+        );
+    }
+
     /// T5: paging. Two windows concatenate to the original, each page stays
     /// within budget, and a boundary that lands on a multibyte char never
     /// splits a codepoint.
@@ -4926,7 +5028,12 @@ name = "Morning"
         // One item far larger than the 16 KiB tool-result budget.
         let huge = "z".repeat(40_000);
         let cache = RunOutputCache::default();
-        cache.store("run-huge", "demo", json!({ "worker": { "items": [huge] } }));
+        cache.store(
+            "run-huge",
+            "demo",
+            json!({ "worker": { "items": [huge] } }),
+            Vec::new(),
+        );
         let _ = dir;
         let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
 
@@ -4971,6 +5078,7 @@ name = "Morning"
                 "worker": { "items": ["one", "two"] },
                 "done": { "items": [] }
             }),
+            Vec::new(),
         );
         let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
 
@@ -5016,6 +5124,7 @@ name = "Morning"
                 &format!("run-{i}"),
                 "demo",
                 json!({ "worker": { "items": [format!("item-{i}")] } }),
+                Vec::new(),
             );
             assert!(matches!(outcome, RunOutputStored::Stored));
         }
@@ -5037,6 +5146,7 @@ name = "Morning"
             "run-giant",
             "demo",
             json!({ "worker": { "items": [giant] } }),
+            Vec::new(),
         );
         assert!(
             matches!(outcome, RunOutputStored::Oversized { .. }),
