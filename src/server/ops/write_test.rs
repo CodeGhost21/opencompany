@@ -1469,6 +1469,122 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
 
+/// `GET …/workspace/search` (issue #607): the hit body, both scope forms, and
+/// the two refusals stated rather than guessed.
+#[tokio::test]
+async fn workspace_search_returns_hits_with_paths_and_excerpts() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Standards", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "Support.md",
+            "kind": "file",
+            "parentId": folder_id,
+            "content": "# Support\n\nEscalate a REFUND request to the CEO."
+        })),
+    )
+    .await;
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // A content hit carries the path the tree view would have to derive, the
+    // excerpt, the origins the console badges, and what matched.
+    let (status, results) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=refund",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(results["total"], json!(1));
+    let hits = results["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], json!(note_id));
+    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["matched"], "content");
+    assert_eq!(hits[0]["kind"], "file");
+    assert_eq!(hits[0]["updatedBy"], json!({"kind": "operator"}));
+    assert!(
+        hits[0]["excerpt"].as_str().unwrap().contains("REFUND"),
+        "{:?}",
+        hits[0]["excerpt"]
+    );
+
+    // A folder is a hit in its own right, matched by name and with no excerpt
+    // promising a body it does not have.
+    let (status, results) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=standards",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let hits = results["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], json!(folder_id));
+    assert_eq!(hits[0]["kind"], "folder");
+    assert_eq!(hits[0]["matched"], "name");
+    assert!(hits[0].get("excerpt").is_none(), "{:?}", hits[0]);
+
+    // `prefix` scopes to a subtree.
+    let (status, scoped) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=support&prefix=Standards",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["total"], json!(1));
+    let (_, elsewhere) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/search?q=support&prefix=Desks",
+        None,
+    )
+    .await;
+    assert_eq!(elsewhere["total"], json!(0));
+
+    // Both refusals are 400 and say what is wrong. An empty `q` is NOT "match
+    // everything" — a cleared search box must not fetch the whole tree.
+    for uri in [
+        "/api/v1/company/workspace/search",
+        "/api/v1/company/workspace/search?q=",
+        "/api/v1/company/workspace/search?q=%20%20",
+        "/api/v1/company/workspace/search?q=refund&limit=0",
+    ] {
+        let (status, body) = send(&state, "GET", uri, None).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri} → {body}");
+        assert_eq!(body["code"], "invalid_request", "{uri} → {body}");
+    }
+
+    // The route resolves under the platform scope form too, and `search` is
+    // never captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, results) = send(
+        &state,
+        "GET",
+        "/api/v1/companies/acme/workspace/search?q=refund",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(results["total"], json!(1));
+}
+
 #[tokio::test]
 async fn skills_install_persists_the_registry_document_not_the_client_metadata() {
     let home_dir = home();
