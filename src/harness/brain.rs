@@ -1972,7 +1972,9 @@ impl HarnessBrain {
             );
         }
 
-        let notice = drained.overflow_notice(cap);
+        // No `cap` argument: the drain carries the one it was taken against, so
+        // the sentence cannot name a limit this turn was not held to.
+        let notice = drained.overflow_notice();
         for request in drained.requests {
             match host.park_effect(request.effect).await {
                 Ok(approval_id) => log::info!(
