@@ -211,7 +211,13 @@ which is fixed at agent-build time and never taken from tool arguments. Agents
 reach the same tree through `workspace_list` / `workspace_search` /
 `workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
 in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
-brief steers toward, not a boundary the routes enforce. Boot scaffolds the
+brief steers toward, not a boundary the routes enforce. `workspace_rename` and
+`workspace_delete` (#671) are the exception: those two *are* bounded to
+`Agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
+exactly as its path would. Neither restamps authorship; a delete leaves any
+artifact version that pointed at the node with a dangling `workspaceNodeId`,
+which is the same state the `DELETE` route above produces and is read-guarded
+before reuse. Boot scaffolds the
 `Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
 time that agent writes into it, and the `Desks/` root is minted whole the first
 time a desk produces something (#645) — so a tree read on a fresh company shows

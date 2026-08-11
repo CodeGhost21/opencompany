@@ -228,7 +228,8 @@ So the two questions are now separate answers from one declaration
   that can execute arbitrary code (`shell`), reach an arbitrary address
   (`http_request`, `curl`, `web_fetch`, `git_operations`), act through a
   third-party server (`mcp_call_tool`), change the company's shared note tree
-  (`workspace_write`, `workspace_create`), or run a saved workflow; refused for
+  (`workspace_write`, `workspace_create`, `workspace_rename`,
+  `workspace_delete`), or run a saved workflow; refused for
   every named
   consequence — Spend, Send, Sign, Publish, Hire, Identity; and refused for any
   tool nobody has declared.
