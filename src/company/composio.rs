@@ -92,25 +92,26 @@ pub async fn store_token(
 /// [`company_key::resolve`] answers — the company's own TinyHumans key, else this
 /// instance's platform identity, else nothing.
 ///
-/// A secret-store read error degrades to the next tier rather than bubbling: a
-/// transient hiccup must not brick a roster build.
+/// A store read error **propagates** rather than degrading to the next tier —
+/// see [`company_key::resolve`] for why an unreadable store must not silently
+/// change which account a call is attributed to.
 pub async fn resolve_credential(
     company: &CompanyId,
     secrets: &dyn SecretStore,
     token_source: Option<Arc<TinyhumansTokenSource>>,
-) -> Credential {
-    let byo = match secrets.get(company, TOKEN_KEY).await {
-        Ok(Some(SecretValue(token))) => Credential::from_value(token),
-        _ => Credential::None,
+) -> Result<Credential> {
+    let byo = match secrets.get(company, TOKEN_KEY).await? {
+        Some(SecretValue(token)) => Credential::from_value(token),
+        None => Credential::None,
     };
-    match byo {
+    Ok(match byo {
         // The company's own Composio token always wins.
         byo @ Credential::Value(_) => byo,
         // Everything else is the shared seam's answer, so a rotated company key
         // reaches Composio the same cycle it reaches every other brokered
         // surface.
-        _ => company_key::resolve(company, secrets, token_source).await,
-    }
+        _ => company_key::resolve(company, secrets, token_source).await?,
+    })
 }
 
 /// Whether a non-empty per-tenant token is stored — never the token itself.

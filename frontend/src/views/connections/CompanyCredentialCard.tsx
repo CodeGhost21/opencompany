@@ -104,6 +104,9 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
         <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
           Company credential
         </h3>
+        <span className="text-xs text-muted-foreground">
+          for connecting providers — not the model key
+        </span>
       </div>
 
       {load === "loading" ? (
@@ -137,13 +140,14 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
               <>
                 <div className="space-y-1">
                   <Label htmlFor="company-credential" className="text-xs">
-                    TinyHumans API key {configured ? "— set (paste a new value to rotate)" : ""}
+                    TinyHumans account key{" "}
+                    {configured ? "— set (paste a new value to rotate)" : ""}
                   </Label>
                   <Input
                     id="company-credential"
                     type="password"
                     autoComplete="off"
-                    placeholder="paste this company's TinyHumans API key"
+                    placeholder="paste this company's TinyHumans account key"
                     value={key}
                     onChange={(e) => setKey(e.target.value)}
                   />

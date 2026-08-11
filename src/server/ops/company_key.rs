@@ -39,15 +39,27 @@ const SWITCH_NOTE: &str = "Agents present the new credential on their next cycle
 
 /// What an admin most needs to understand before pasting: this key is the
 /// company's wallet, and membership in the company is what grants access to it.
-const CONSEQUENCE: &str = "This is the company's TinyHumans credential. Every member's agents act and spend through \
-     it, and every provider connected with it belongs to the company rather than to the person \
-     who connected it. Spend arrives as one account, so it cannot be attributed per member.";
+///
+/// The last sentence is load-bearing. The Connections screen renders this card
+/// next to the Inference one, both read "configured / not configured", and the
+/// two keys are different in kind — pasting one into the other's field is the
+/// exact mistake the `tinyhumans/key`-vs-`inference/key` split exists to
+/// prevent. An admin will not have read that reasoning in the module docs, so
+/// the card has to carry it. See [`company_key`](crate::company::company_key).
+const CONSEQUENCE: &str = "This is the company's TinyHumans account key — the identity the platform presents when it \
+     connects providers like Gmail or Slack on your behalf. Every member's agents act and spend \
+     through it, and a provider connected with it belongs to the company rather than to the \
+     person who connected it. Spend arrives as one account, so it cannot be attributed per \
+     member. It is not the model-provider key on the Inference card: that one is whatever your \
+     chosen provider issues (an OpenRouter key, or your own endpoint's), and the two are stored \
+     separately on purpose.";
 
 /// Said instead when nothing is configured and the instance carries no identity
 /// either — the honest degraded state, rather than a picker that will fail.
 const DEGRADED: &str = "No credential is set for this company and this instance carries no \
      platform identity, so providers cannot be connected or used. Set the company's TinyHumans \
-     key to enable them.";
+     account key to enable them — not the model-provider key from the Inference card, which is a \
+     different credential.";
 
 /// Builds the company-credential route fragment.
 pub fn router() -> Router<AppState> {
@@ -103,6 +115,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CredentialStatusDt
         crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await
+    .map_err(ApiError)?
     .source();
     Ok(CredentialStatusDto {
         configured,

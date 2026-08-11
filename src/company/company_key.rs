@@ -76,23 +76,23 @@ pub async fn store_key(company: &CompanyId, secrets: &dyn SecretStore, key: &str
 /// thing the read planes ever surface about it.
 pub async fn key_configured(company: &CompanyId, secrets: &dyn SecretStore) -> Result<bool> {
     Ok(matches!(
-        load(company, secrets).await,
+        load(company, secrets).await?,
         Credential::Company(_)
     ))
 }
 
-/// The company's own key as a [`Credential`], or [`Credential::None`] when unset,
-/// blank, or unreadable.
+/// The company's own key as a [`Credential`], or [`Credential::None`] when unset
+/// or blank.
 ///
-/// A secret-store read error degrades to `None` rather than bubbling: a
-/// transient store hiccup must fall through to the instance identity for that
-/// cycle, not brick a roster build. Mirrors the same choice in
-/// [`TenantComposio::resolve`](crate::harness::composio::TenantComposio::resolve).
-pub async fn load(company: &CompanyId, secrets: &dyn SecretStore) -> Credential {
-    match secrets.get(company, KEY_KEY).await {
-        Ok(Some(SecretValue(key))) => Credential::from_company_key(key),
-        _ => Credential::None,
-    }
+/// A store read error **propagates**. It is tempting to map it to `None` —
+/// "degrade rather than brick a roster build" — but `None` here does not mean
+/// "no credential", it means *fall through to the instance identity*, and those
+/// are different answers to different questions. See [`resolve`].
+pub async fn load(company: &CompanyId, secrets: &dyn SecretStore) -> Result<Credential> {
+    Ok(match secrets.get(company, KEY_KEY).await? {
+        Some(SecretValue(key)) => Credential::from_company_key(key),
+        None => Credential::None,
+    })
 }
 
 /// The credential a brokered call presents for this company — **the** seam.
@@ -100,16 +100,36 @@ pub async fn load(company: &CompanyId, secrets: &dyn SecretStore) -> Credential 
 /// The company's own key wins; failing that this instance's platform identity;
 /// failing that [`Credential::None`], which every caller treats as fail-closed.
 /// See the module docs for why there is exactly one of these.
+///
+/// ## Why a store error is not a fallthrough
+///
+/// An unreadable store means *we do not know who this company is*. Treating that
+/// as "no key set" would silently resolve a company that **has** a key to the
+/// instance's identity — and because a provider connection lives on the backend
+/// keyed by the account the bearer resolves to, a connection established in that
+/// window would belong to the instance's account rather than the company's. When
+/// the store recovered, resolution would return the company key, the bearer would
+/// resolve to a different entity, and the connection made under the fallback
+/// would no longer be the one the company sees. The same "connect Gmail" click
+/// would produce a different owner depending on store health at that instant,
+/// with no signal in either direction.
+///
+/// Availability-degrade and identity-degrade are different decisions, and only
+/// the first is safe to make silently. So the error propagates, and each caller
+/// answers it in the way its own surface can afford: the roster build withholds
+/// the tools for that cycle (fail closed — an unknown credential must never mean
+/// a borrowed identity, exactly as an absent one must not), while the console
+/// planes surface the failure instead of reporting a confident "not configured".
 pub async fn resolve(
     company: &CompanyId,
     secrets: &dyn SecretStore,
     token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
-) -> Credential {
-    match (load(company, secrets).await, token_source) {
+) -> Result<Credential> {
+    Ok(match (load(company, secrets).await?, token_source) {
         (company_key @ Credential::Company(_), _) => company_key,
         (_, Some(source)) => Credential::from_source(source),
         (_, None) => Credential::None,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -166,7 +186,7 @@ mod tests {
 
         // Nothing set: the tenant borrows the instance's identity, exactly as
         // it did before this seam existed.
-        let credential = resolve(&company, &secrets, Some(source())).await;
+        let credential = resolve(&company, &secrets, Some(source())).await.unwrap();
         assert_eq!(credential.source(), CredentialSource::Static);
         assert_eq!(
             credential.current().await.unwrap().as_deref(),
@@ -177,7 +197,7 @@ mod tests {
         store_key(&company, &secrets, "th_company_key")
             .await
             .unwrap();
-        let credential = resolve(&company, &secrets, Some(source())).await;
+        let credential = resolve(&company, &secrets, Some(source())).await.unwrap();
         assert_eq!(credential.source(), CredentialSource::Company);
         assert_eq!(
             credential.current().await.unwrap().as_deref(),
@@ -189,7 +209,7 @@ mod tests {
     async fn no_key_and_no_instance_identity_fails_closed() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
-        let credential = resolve(&company, &secrets, None).await;
+        let credential = resolve(&company, &secrets, None).await.unwrap();
         assert_eq!(credential.source(), CredentialSource::None);
         assert!(!credential.configured());
     }
@@ -208,7 +228,10 @@ mod tests {
         store_key(&company, &secrets, "").await.unwrap();
         assert!(!key_configured(&company, &secrets).await.unwrap());
         assert_eq!(
-            resolve(&company, &secrets, Some(source())).await.source(),
+            resolve(&company, &secrets, Some(source()))
+                .await
+                .unwrap()
+                .source(),
             CredentialSource::Static
         );
     }
@@ -220,21 +243,48 @@ mod tests {
         store_key(&company, &secrets, "   ").await.unwrap();
         assert!(!key_configured(&company, &secrets).await.unwrap());
         assert_eq!(
-            resolve(&company, &secrets, None).await.source(),
+            resolve(&company, &secrets, None).await.unwrap().source(),
             CredentialSource::None
         );
     }
 
-    /// A store read that fails must degrade to the instance identity for that
-    /// cycle, never bubble into the roster build.
+    /// A store read that fails must **not** silently resolve to the instance
+    /// identity.
+    ///
+    /// The tempting reading is "degrade rather than brick the roster build", and
+    /// that is the right instinct about availability — but it is the wrong
+    /// answer about attribution. A connection lives on the backend keyed by the
+    /// account the bearer resolves to, so a company that *has* a key silently
+    /// borrowing the instance's identity during a hiccup would attribute its
+    /// Gmail to the wrong account, and the operator would get no signal in
+    /// either direction. The error surfaces here; each caller then decides what
+    /// its own surface can afford.
     #[tokio::test]
-    async fn an_unreadable_store_degrades_to_the_instance_identity() {
+    async fn an_unreadable_store_never_borrows_another_identity() {
         let company = CompanyId::new("acme");
-        assert!(!key_configured(&company, &BrokenSecrets).await.unwrap());
-        let credential = resolve(&company, &BrokenSecrets, Some(source())).await;
-        assert!(credential.configured());
+
+        assert!(
+            key_configured(&company, &BrokenSecrets).await.is_err(),
+            "an unreadable store is not the same answer as `not configured`"
+        );
+        assert!(
+            resolve(&company, &BrokenSecrets, Some(source()))
+                .await
+                .is_err(),
+            "an unreadable store must never resolve to the instance identity"
+        );
+
+        // And an *absent* key still falls through as it always did — the two
+        // cases are now distinguishable, which is the whole point.
+        let secrets = MemSecrets::default();
         assert_eq!(
-            credential.current().await.unwrap().as_deref(),
+            resolve(&company, &secrets, Some(source()))
+                .await
+                .unwrap()
+                .current()
+                .await
+                .unwrap()
+                .as_deref(),
             Some("instance-identity")
         );
     }
@@ -254,10 +304,10 @@ mod tests {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
         store_key(&company, &secrets, "key-a").await.unwrap();
-        let before = identity_of(&resolve(&company, &secrets, Some(source())).await);
+        let before = identity_of(&resolve(&company, &secrets, Some(source())).await.unwrap());
 
         store_key(&company, &secrets, "key-b").await.unwrap();
-        let after = identity_of(&resolve(&company, &secrets, Some(source())).await);
+        let after = identity_of(&resolve(&company, &secrets, Some(source())).await.unwrap());
         assert_ne!(
             before, after,
             "a rotated company key must rebuild the roster"
@@ -278,7 +328,7 @@ mod tests {
         store_key(&company, &secrets, "th_super_secret")
             .await
             .unwrap();
-        let credential = resolve(&company, &secrets, None).await;
+        let credential = resolve(&company, &secrets, None).await.unwrap();
         let rendered = format!("{credential:?}");
         assert!(!rendered.contains("th_super_secret"), "{rendered}");
         assert!(rendered.contains("<redacted>"), "{rendered}");

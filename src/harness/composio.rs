@@ -142,9 +142,13 @@ impl TenantComposio {
     /// [`backend_url_or_default`]. `toolkits` is the manifest allowlist, threaded
     /// through unchanged.
     ///
-    /// A secret-store read error degrades to the next tier (and, failing all of
-    /// them, to `None`) rather than bubbling — a transient store hiccup must not
-    /// brick the roster build.
+    /// A secret-store read error yields `None` — **fail closed, no tools this
+    /// cycle** — rather than falling through to the instance identity. This is
+    /// the roster path, so it must not bubble and brick a build; but an *unknown*
+    /// credential must no more mean a borrowed identity than an absent one does.
+    /// A company whose store hiccups loses its Composio tools for a cycle and
+    /// gets them back on the next; it never quietly acts as somebody else. See
+    /// [`company_key::resolve`](crate::company::company_key::resolve).
     pub async fn resolve(
         company: &CompanyId,
         secrets: &dyn SecretStore,
@@ -153,7 +157,25 @@ impl TenantComposio {
         api_url_env: Option<String>,
         token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
-        match crate::company::composio::resolve_credential(company, secrets, token_source).await {
+        let credential = match crate::company::composio::resolve_credential(
+            company,
+            secrets,
+            token_source,
+        )
+        .await
+        {
+            Ok(credential) => credential,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company,
+                    error = %err,
+                    "[composio] could not read this company's credential; withholding tools \
+                     for this cycle rather than presenting another identity"
+                );
+                return None;
+            }
+        };
+        match credential {
             Credential::None => None,
             credential => Some(Self::new(
                 backend_url_or_default(backend_url_env, api_url_env),
@@ -190,6 +212,13 @@ impl TenantComposio {
     /// and the company's own TinyHumans key — does contribute its value, since
     /// an admin changing either is a real identity change and must reach the
     /// agents on the next cycle.
+    ///
+    /// **Internal only — never log, serialize, or journal this.** Because it is
+    /// value-derived over a live credential, anyone who can read it can confirm
+    /// a guessed key against it: cheap to check, expensive to discover has been
+    /// leaking. It is compared for equality inside [`HarnessPool`] and goes
+    /// nowhere else. If a rebuild needs explaining, say that the identity
+    /// changed — not what it hashes to.
     pub fn fingerprint(config: &Option<TenantComposio>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1310,6 +1339,58 @@ mod tests {
         assert_eq!(
             token_of(&resolved).await.as_deref(),
             Some("platform-identity")
+        );
+    }
+
+    /// The roster path's half of the store-error contract: it must **fail
+    /// closed** — no tools this cycle — rather than fall through to the
+    /// instance identity or bubble and brick the build.
+    ///
+    /// Fewer tools for a cycle is recoverable and visible. Silently presenting
+    /// a different identity is neither: it would attribute whatever the agents
+    /// did in that window to the wrong account.
+    #[tokio::test]
+    async fn an_unreadable_store_withholds_tools_rather_than_borrowing_an_identity() {
+        use crate::ports::types::CompanyId;
+
+        struct BrokenSecrets;
+
+        #[async_trait::async_trait]
+        impl SecretStore for BrokenSecrets {
+            async fn get(
+                &self,
+                _c: &CompanyId,
+                _key: &str,
+            ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store("boom".into()))
+            }
+            async fn set(
+                &self,
+                _c: &CompanyId,
+                _key: &str,
+                _v: crate::ports::types::SecretValue,
+            ) -> crate::Result<()> {
+                Err(crate::error::OpenCompanyError::Store("boom".into()))
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let resolved = TenantComposio::resolve(
+            &company,
+            &BrokenSecrets,
+            Vec::new(),
+            None,
+            None,
+            // An instance identity IS available — and must still not be used,
+            // because we cannot tell whether this company has a key of its own.
+            Some(Arc::new(TinyhumansTokenSource::static_key(
+                "platform-identity",
+            ))),
+        )
+        .await;
+        assert!(
+            resolved.is_none(),
+            "an unreadable store must withhold the tools, not present the instance's identity"
         );
     }
 

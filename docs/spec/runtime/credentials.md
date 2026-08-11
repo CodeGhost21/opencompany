@@ -44,6 +44,38 @@ resolved. Most specific first:
    degraded state rather than offering a picker that cannot work. An absent
    credential means "no tools", never a borrowed identity.
 
+### An unreadable store is not "no key"
+
+A `SecretStore` read error **propagates** rather than falling through to the next
+tier. The tempting shortcut is to map it to "nothing stored" so a transient
+hiccup cannot brick a roster build — right about availability, wrong about
+attribution.
+
+A connection lives on the backend keyed by the account the bearer resolves to.
+If an unreadable store silently resolved a company that *has* a key to the
+instance's identity, any connection established in that window would belong to
+the instance's account. When the store recovered, resolution would return the
+company key, the bearer would resolve to a different entity, and the connection
+made under the fallback would no longer be the one the company sees — the same
+"connect Gmail" click producing a different owner depending on store health at
+that instant, with no signal either way.
+
+Availability-degrade and identity-degrade are different decisions, and only the
+first is safe to make silently. So each caller answers the error in the way its
+own surface can afford:
+
+- **The roster build** (`TenantComposio::resolve`) logs a warning and withholds
+  the tools for that cycle. Fail closed: an *unknown* credential must no more
+  mean a borrowed identity than an absent one does. The company loses Composio
+  for a cycle and gets it back on the next.
+- **The console planes** (`GET …/composio`, `GET …/credential`) surface the
+  failure instead of reporting a confident "not configured" for a company that
+  may well have a key.
+- **`POST …/composio/authorize`** — the call that actually *establishes* a
+  connection — refuses outright. It resolves the credential itself rather than
+  through the roster path, precisely so a store error stays distinguishable from
+  "nothing configured" and cannot be guessed past.
+
 A surface may prepend its **own** escape hatch above that seam. Composio keeps
 its BYO `composio/token` for a company that insists on using its own Composio
 account, so its full order is `composio/token` → company key → instance
@@ -78,6 +110,15 @@ Two mechanics make it land without a restart:
   and hashing its value would rebuild every agent's roster on that schedule. A
   company key is rotated by a person, on purpose, and a new value really is a
   new identity.
+
+**The fingerprint is internal and must stay internal.** It is a value-derived
+hash of a live credential, which makes it a cheap confirmation oracle for anyone
+who can read it: given a guess at the key, you can confirm it. It lives only in
+`HarnessPool`'s in-memory `RwLock<HashMap<CompanyId, u64>>` and is compared for
+equality — no `tracing` call renders it, no DTO serializes it, and no journal
+event carries it. Do not log it, return it from a route, or put it in an event,
+even for debugging; if a rebuild needs explaining, log *that the identity
+changed*, never the hash.
 
 ## Write-only, and admin-only
 

@@ -356,14 +356,15 @@ struct ConnectionDto {
 async fn credential_source_for(
     runtime: &CompanyRuntime,
     token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
-) -> CredentialSource {
-    crate::company::composio::resolve_credential(
+) -> Result<CredentialSource, ApiError> {
+    Ok(crate::company::composio::resolve_credential(
         runtime.id(),
         runtime.secrets().as_ref(),
         token_source,
     )
     .await
-    .source()
+    .map_err(ApiError)?
+    .source())
 }
 
 /// Resolves the Composio status DTO for a company.
@@ -388,7 +389,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         runtime,
         TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
-    .await;
+    .await?;
     let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
@@ -536,22 +537,32 @@ pub(crate) async fn resolve_tenant(
     let env = crate::app::config::ProcessEnv;
     let backend_env = env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV);
     let api_env = env.get(crate::company::composio::TINYHUMANS_API_URL_ENV);
-    crate::harness::composio::TenantComposio::resolve(
+    // Resolved here rather than through `TenantComposio::resolve` so a store
+    // read failure stays distinguishable from "nothing configured". This is the
+    // path that *establishes* a connection, and a connection lives on the
+    // backend keyed by the account the bearer resolves to — so guessing here
+    // would attribute a company's Gmail to whichever identity happened to
+    // resolve during the outage. The roster path can afford to shrug and
+    // withhold tools; this one must say what went wrong and connect nothing.
+    let credential = crate::company::composio::resolve_credential(
         runtime.id(),
         runtime.secrets().as_ref(),
-        toolkits,
-        backend_env,
-        api_env,
         crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await
-    .ok_or_else(|| {
-        ApiError(crate::error::OpenCompanyError::Conflict(
-            "no Composio credential is available for this company — this instance has no platform \
-             identity, so paste the company's Composio token first"
+    .map_err(ApiError)?;
+    if !credential.configured() {
+        return Err(ApiError(crate::error::OpenCompanyError::Conflict(
+            "no Composio credential is available for this company — set the company's TinyHumans \
+             credential, or paste its own Composio token"
                 .to_string(),
-        ))
-    })
+        )));
+    }
+    Ok(crate::harness::composio::TenantComposio::new(
+        backend_url_or_default(backend_env, api_env),
+        credential,
+        toolkits,
+    ))
 }
 
 #[cfg(feature = "composio")]
@@ -1115,12 +1126,16 @@ mod tests {
 
         // Nothing stored + a projected instance identity → attested.
         assert_eq!(
-            credential_source_for(&runtime, source_of(&projected)).await,
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
             CredentialSource::Attested
         );
         // Nothing stored at all → nothing obtainable, so no tools.
         assert_eq!(
-            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
             CredentialSource::None
         );
         // A static instance key is the static tier.
@@ -1132,7 +1147,8 @@ mod tests {
                     "th_static"
                 )]))
             )
-            .await,
+            .await
+            .unwrap(),
             CredentialSource::Static
         );
 
@@ -1143,13 +1159,17 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            credential_source_for(&runtime, source_of(&projected)).await,
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
             CredentialSource::Company
         );
         // …and is the whole credential when the instance carries none, which is
         // the case this issue exists to fix.
         assert_eq!(
-            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
             CredentialSource::Company
         );
 
@@ -1158,18 +1178,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            credential_source_for(&runtime, source_of(&projected)).await,
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
             CredentialSource::Static
         );
         assert_eq!(
-            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
             CredentialSource::Static
         );
 
         // Clearing it falls back exactly one tier, not all the way to nothing.
         store_token(&id, secrets.as_ref(), "").await.unwrap();
         assert_eq!(
-            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
             CredentialSource::Company
         );
 

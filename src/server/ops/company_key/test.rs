@@ -152,6 +152,13 @@ async fn the_key_round_trips_write_only_and_reports_the_company_tier() {
     let notice = resp["status"]["notice"].as_str().unwrap_or_default();
     assert!(notice.contains("spend"), "{notice}");
     assert!(notice.contains("company"), "{notice}");
+    // …and so is the distinction from the model-provider key. These two cards
+    // sit next to each other and both read "configured"; the copy is the only
+    // thing standing between an admin and pasting an OpenRouter key here.
+    assert!(
+        notice.contains("Inference card"),
+        "the notice must say which key this is NOT: {notice}"
+    );
 
     // GET reflects it and still never carries the key.
     let (_, dto, raw) = send(&state, "acme", "GET", "/api/v1/company/credential", None).await;
