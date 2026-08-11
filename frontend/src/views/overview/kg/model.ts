@@ -191,8 +191,18 @@ export function buildKnowledgeGraph(
     nodes.push({ id: w.nodeId, kind: w.kind, label: w.label, ring: RING[w.kind] });
     // Workers reach their team through their task; only a worker with no task
     // (a data gap the seed tests forbid) falls back to a direct member edge.
-    if (!assignedWorkers.has(w.nodeId) && drawn.has(w.deptId)) {
-      edges.push({ source: w.nodeId, target: `team:${w.deptId}`, kind: 'member' });
+    if (!assignedWorkers.has(w.nodeId)) {
+      if (drawn.has(w.deptId)) {
+        edges.push({ source: w.nodeId, target: `team:${w.deptId}`, kind: 'member' });
+      } else {
+        // No pillar to belong to — the company declares no desk for them
+        // (`adapter.ts`'s `UNPLACED`), or the caller handed us a department id
+        // that has no `team:` node. Either way they hang off the core: being on
+        // the company's roster is a fact, and belonging to one of its desks is
+        // not. Without this they would be edgeless, which the force layout
+        // leaves drifting and a reader cannot tell from a rendering fault.
+        edges.push({ source: w.nodeId, target: SELF_ID, kind: 'member' });
+      }
     }
     for (const slug of w.tools) {
       edges.push({ source: w.nodeId, target: toolNodeId(slug, w.deptId), kind: 'uses' });
