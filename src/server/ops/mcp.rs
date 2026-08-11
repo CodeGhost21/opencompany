@@ -29,6 +29,9 @@ use crate::company::mcp::{
 };
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::types::CompanyRecord;
+use crate::runtime::builder::agent_effective_grants;
+use crate::runtime::tools::grants_cover_server;
 use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
@@ -66,6 +69,16 @@ struct McpServerDto {
     timeout_secs: u64,
     /// Whether an outbound credential is stored — never the credential itself.
     auth_configured: bool,
+    /// The ids of the company's agents whose effective tool grants cover this
+    /// server — who can actually call it (issue #568). Computed over the same
+    /// roster the harness builds (manifest agents + promoted overlay teammates),
+    /// through the shared
+    /// [`grants_cover_server`](crate::runtime::tools::grants_cover_server), so the
+    /// console cannot disagree with the harness about reachability. **An empty
+    /// list is meaningful**: a live, healthy server no teammate can reach is
+    /// almost always a misconfiguration, and the console flags it rather than
+    /// showing an empty list silently. Always serialized (even when empty).
+    reachable_by: Vec<String>,
     /// The last recorded probe outcome (scrubbed), or `None` when never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
     health: Option<McpHealth>,
@@ -215,9 +228,13 @@ async fn manifest_servers(runtime: &CompanyRuntime) -> Result<Vec<McpServer>, Ap
 }
 
 /// Projects an effective decl (already merged + auth-resolved) to the console
-/// DTO, reducing the resolved credential to a boolean and attaching the last
-/// (scrubbed) probe health.
-fn dto_from_decl(decl: &mcp::McpServerDecl, health: Option<McpHealth>) -> McpServerDto {
+/// DTO, reducing the resolved credential to a boolean, listing the agents that
+/// can reach it (issue #568), and attaching the last (scrubbed) probe health.
+fn dto_from_decl(
+    decl: &mcp::McpServerDecl,
+    reachable_by: Vec<String>,
+    health: Option<McpHealth>,
+) -> McpServerDto {
     McpServerDto {
         name: decl.name.clone(),
         endpoint: decl.endpoint.clone(),
@@ -228,24 +245,88 @@ fn dto_from_decl(decl: &mcp::McpServerDecl, health: Option<McpHealth>) -> McpSer
         disallowed_tools: decl.disallowed_tools.clone(),
         timeout_secs: decl.timeout_secs,
         auth_configured: decl.auth.is_configured(),
+        reachable_by,
         health,
     }
+}
+
+/// Every roster agent's *effective* tool grants (issue #568), as
+/// `(agent_id, grants)`. The roster is exactly what the harness builds in
+/// `build_roster`: the manifest agents (each with its own `tools` narrowed by
+/// the company `allow`), plus the promoted overlay teammates. An overlay
+/// teammate has no manifest `tools` row, so it inherits the full company `allow`
+/// — the standard grant `overlay_agent_to_manifest` gives it — and an overlay id
+/// already claimed by a manifest agent is skipped, both mirroring the harness so
+/// console reachability equals what an agent is actually granted.
+fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
+    let allow = &record.manifest.tools.allow;
+    let mut grants: Vec<(String, Vec<String>)> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|agent| {
+            (
+                agent.id.clone(),
+                agent_effective_grants(allow, &agent.tools),
+            )
+        })
+        .collect();
+    let manifest_ids: std::collections::HashSet<&str> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|agent| agent.id.as_str())
+        .collect();
+    for overlay in &record.overlay_agents {
+        if manifest_ids.contains(overlay.id.as_str()) {
+            continue;
+        }
+        // No manifest tools row → the company's standard grant (empty `tools`
+        // ⇒ inherit `allow`), matching `overlay_agent_to_manifest`.
+        grants.push((overlay.id.clone(), agent_effective_grants(allow, &[])));
+    }
+    grants
+}
+
+/// The ids of the agents whose effective `grants` reach the server `name`
+/// (issue #568), read through the shared [`grants_cover_server`] so this agrees
+/// with the harness registry. Empty ⇒ no teammate can reach the server.
+fn reachers_of(roster_grants: &[(String, Vec<String>)], name: &str) -> Vec<String> {
+    roster_grants
+        .iter()
+        .filter(|(_, grants)| grants_cover_server(grants, name))
+        .map(|(id, _)| id.clone())
+        .collect()
 }
 
 /// `GET …/mcp/servers` — the company's effective MCP servers, each with its last
 /// recorded (scrubbed) probe health.
 async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>, ApiError> {
     let runtime = company.runtime.as_ref();
-    let manifest = manifest_servers(runtime).await?;
+    // One record load feeds both the manifest servers (merged into the effective
+    // set) and the roster used for reachability (issue #568), rather than loading
+    // it twice.
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    let manifest = record
+        .as_ref()
+        .map(|r| r.manifest.mcp_servers.clone())
+        .unwrap_or_default();
     let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
+    // Resolve every agent's effective grants once, then ask per server who is
+    // covered — the wildcard-heavy work happens N(agents) times, not N×M.
+    let grants = record.as_ref().map(roster_grants).unwrap_or_default();
     let mut out = Vec::with_capacity(decls.len());
     for decl in &decls {
         let health = load_health(runtime.id(), &decl.name, runtime.secrets().as_ref())
             .await
             .map_err(ApiError)?;
-        out.push(dto_from_decl(decl, health));
+        out.push(dto_from_decl(
+            decl,
+            reachers_of(&grants, &decl.name),
+            health,
+        ));
     }
     Ok(Json(out))
 }
@@ -450,7 +531,13 @@ async fn mutation_response(
     // DTO so the response and a later `GET` agree.
     let test = probe_and_persist(runtime, name).await;
 
-    let manifest = manifest_servers(runtime).await?;
+    // One record load: the manifest servers merged into the effective set, and
+    // the roster the mutated server's reachability is computed against (#568).
+    let record = runtime.store().load(runtime.id()).await.map_err(ApiError)?;
+    let manifest = record
+        .as_ref()
+        .map(|r| r.manifest.mcp_servers.clone())
+        .unwrap_or_default();
     let decls = resolve_effective(runtime.id(), &manifest, runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
@@ -459,11 +546,16 @@ async fn mutation_response(
             "`{name}` not found"
         )))
     })?;
+    let reachable_by = record
+        .as_ref()
+        .map(roster_grants)
+        .map(|grants| reachers_of(&grants, name))
+        .unwrap_or_default();
     let health = load_health(runtime.id(), name, runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
     Ok(Json(MutationResponse {
-        server: dto_from_decl(decl, health),
+        server: dto_from_decl(decl, reachable_by, health),
         note: REBUILD_NOTE.to_string(),
         test,
         warning,

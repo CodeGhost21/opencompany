@@ -444,6 +444,30 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         </span>
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
+                      {/* Reachability (issue #568): who can actually call this server. A
+                          healthy server no agent reaches is almost always a misconfiguration,
+                          so the empty case is flagged loudly rather than shown as a blank list. */}
+                      {server.reachableBy !== undefined &&
+                        (server.reachableBy.length === 0 ? (
+                          <p
+                            data-testid="mcp-reachability-none"
+                            className="flex items-start gap-1.5 rounded-md border border-destructive/30 bg-destructive/10 px-2 py-1 text-xs font-medium text-destructive"
+                          >
+                            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+                            <span>
+                              No agent can reach this server — no teammate&apos;s tool grants cover{" "}
+                              <code className="font-mono">mcp:{server.name}</code>. Widen a company or
+                              per-agent tool grant, or this server is unused.
+                            </span>
+                          </p>
+                        ) : (
+                          <p data-testid="mcp-reachability" className="text-xs text-muted-foreground">
+                            Reachable by:{" "}
+                            <span className="font-medium text-foreground">
+                              {server.reachableBy.join(", ")}
+                            </span>
+                          </p>
+                        ))}
                       {health && health.status !== "ok" && health.message && (
                         <p className="text-xs text-muted-foreground">{health.message}</p>
                       )}

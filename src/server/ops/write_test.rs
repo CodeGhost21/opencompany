@@ -2388,6 +2388,45 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
     state
 }
 
+/// Like [`state_with_manifest`], but seeds operator-added overlay teammates too,
+/// so a test can assert MCP reachability over the full runtime roster — manifest
+/// agents plus overlay agents — the way `build_roster` composes it (issue #568).
+async fn state_with_manifest_and_overlays(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    overlay_agents: Vec<crate::ports::types::OverlayAgent>,
+) -> AppState {
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.to_path_buf());
+    let id = CompanyId::new("acme");
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents,
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    state
+}
+
 #[tokio::test]
 async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     let home_dir = home();
@@ -2503,6 +2542,104 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
+}
+
+/// Issue #568: each listed server carries the ids of the agents whose *effective*
+/// grants reach it — over the full runtime roster, manifest agents plus overlay
+/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
+/// (and every overlay teammate, which has no tools row) inherits the wildcard and
+/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
+/// that server.
+#[tokio::test]
+async fn mcp_reachability_lists_reaching_agents_including_overlay() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
+         [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
+         [[mcp_server]]\nname = \"linear\"\nendpoint = \"https://linear.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let overlay = crate::ports::types::OverlayAgent {
+        id: "helper".to_string(),
+        name: "Helper".to_string(),
+        role: "Assistant".to_string(),
+        description: None,
+    };
+    let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let reach = |name: &str| -> Vec<String> {
+        let row = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"));
+        let mut ids: Vec<String> = row["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // notion: the narrowed ceo, the wildcard-inheriting eng, and the overlay.
+    assert_eq!(reach("notion"), vec!["ceo", "eng", "helper"]);
+    // linear: only the wildcard holders — ceo scoped itself out of it.
+    assert_eq!(
+        reach("linear"),
+        vec!["eng", "helper"],
+        "ceo narrowed to mcp:notion, so it cannot reach linear"
+    );
+}
+
+/// Issue #568: a server no agent's grants cover comes back with an **empty**
+/// `reachableBy` — the signal the console flags loudly rather than showing a
+/// healthy server that is silently unreachable. Here a narrow company
+/// `allow = ["mcp:docs"]` reaches `docs` but never `notion`.
+#[tokio::test]
+async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"mcp:docs\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = |name: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"))
+            .clone()
+    };
+    assert_eq!(
+        row("docs")["reachableBy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ceo"],
+        "the company allow covers mcp:docs for the one agent"
+    );
+    assert!(
+        row("notion")["reachableBy"].as_array().unwrap().is_empty(),
+        "no agent's grants cover mcp:notion — the flagged zero case"
+    );
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery

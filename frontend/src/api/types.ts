@@ -751,6 +751,14 @@ export interface McpServer {
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
+  /**
+   * Ids of the company's agents whose effective tool grants cover this server —
+   * who can actually call it (issue #568). An empty array means no teammate can
+   * reach it, a probable misconfiguration the console flags loudly. Optional
+   * only for forward-compat with an older backend that does not send the field;
+   * `undefined` (unknown) is treated differently from `[]` (known-empty).
+   */
+  reachableBy?: string[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
 }
