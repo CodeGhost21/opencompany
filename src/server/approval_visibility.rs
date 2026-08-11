@@ -1,0 +1,176 @@
+//! Who may read an approval's *contents* (issue #618).
+//!
+//! Membership decides whether you may know an approval **exists**. It does not
+//! decide whether you may read what it is about. `payload` carries
+//! recipient-bearing tool arguments and `amount_usd` carries money; the rest of
+//! [`ApprovalSummary`] — the id, the kind, who asked, which task, when — is what
+//! makes stalled work visible, and every member needs it.
+//!
+//! This is the product's **first per-resource, per-role field restriction**.
+//! Everywhere else, role decides whether you may *act* (see
+//! [`AdminScopedCompany`](crate::server::ops::scope::AdminScopedCompany)); here
+//! it decides which fields of a read you receive. That is a new shape and worth
+//! knowing before it is copied.
+//!
+//! ## Why the split lands here and not on the whole route
+//!
+//! Refusing the route to non-admins was the obvious alternative and is worse: a
+//! Member would lose sight of *why* their work is stalled. Issue #468
+//! deliberately keeps a "waiting on approval" indicator on the task card, and
+//! that indicator has to survive for the people doing the work, not only for
+//! the people who can sign it off.
+//!
+//! ## Hidden is not absent
+//!
+//! Redaction does **not** simply blank the fields. `payload: None` already
+//! means "this effect carries no arguments", so blanking would make a withheld
+//! payment indistinguishable from a no-argument tool call — the console would
+//! render an approval that looks empty rather than one it may not show. So a
+//! redacted summary sets [`ApprovalSummary::contents_hidden`], and the console
+//! says "hidden by your role" instead of showing nothing.
+
+use crate::runtime::types::ApprovalSummary;
+use crate::server::graphql::auth::GqlAuth;
+
+/// May this principal read an approval's payload and amount?
+///
+/// Both arms are written out. `GqlAuth` has exactly two, and a wildcard here
+/// would silently grant contents to any arm added later — which is how a role
+/// guard decays into a deny-list.
+pub(crate) fn may_read_approval_contents(auth: &GqlAuth) -> bool {
+    match auth {
+        // The role already rides on the principal the route resolved, so
+        // nothing has to be threaded down into the domain layer to ask this.
+        GqlAuth::User(user) => user.may_administer(),
+        // **Fail closed, deliberately.** A platform bearer is the hosting
+        // control plane — it provisions and suspends containers and is not a
+        // person in the company. It has no need for a tenant's message bodies
+        // or payment amounts, and "the machine credential sees everything" is
+        // the assumption worth not making. This costs nothing today: the
+        // console authenticates as a user, and a prosumer deployment has no
+        // platform credential at all (`resolve_claims` requires
+        // `platform_auth` to be configured), so no human loses anything.
+        //
+        // If the hosting layer ever genuinely needs contents, that is a
+        // deliberate scope to add here, not a default to inherit.
+        GqlAuth::Platform(_) => false,
+    }
+}
+
+/// Applies [`may_read_approval_contents`] to a projection on its way out.
+///
+/// Takes the whole list rather than one summary because every caller has a
+/// list, and because doing it per-item at three call sites is three chances to
+/// forget one.
+pub(crate) fn for_principal(
+    auth: &GqlAuth,
+    mut approvals: Vec<ApprovalSummary>,
+) -> Vec<ApprovalSummary> {
+    if may_read_approval_contents(auth) {
+        return approvals;
+    }
+    for approval in &mut approvals {
+        hide_contents(approval);
+    }
+    approvals
+}
+
+/// Strips the two contents fields and records that it happened.
+///
+/// `contents_hidden` is what keeps this honest — see the module note.
+pub(crate) fn hide_contents(approval: &mut ApprovalSummary) {
+    approval.payload = None;
+    approval.amount_usd = None;
+    approval.contents_hidden = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ports::types::{ApprovalId, CompanyId};
+    use crate::ports::{SessionKind, UserRole};
+    use crate::server::graphql::auth::UserPrincipal;
+    use crate::server::platform_auth::PlatformClaims;
+
+    fn principal(role: UserRole) -> GqlAuth {
+        GqlAuth::User(UserPrincipal {
+            company: CompanyId::new("acme"),
+            user_id: "u-1".to_string(),
+            email: "who@example.test".to_string(),
+            role,
+            must_change_password: false,
+            session_token_hash: "hash".to_string(),
+            credential: SessionKind::Browser,
+        })
+    }
+
+    /// A summary with both contents fields populated — the only interesting
+    /// input, since redaction is a no-op on an approval that carries neither.
+    fn summary() -> ApprovalSummary {
+        ApprovalSummary {
+            id: ApprovalId::new("appr-1"),
+            kind: "email.send".to_string(),
+            amount_usd: Some(2400.0),
+            at_millis: 1_000,
+            task: None,
+            agent: Some("ops".to_string()),
+            payload: Some(serde_json::json!({ "to": "board@example.test" })),
+            thread: None,
+            broadly_grantable: false,
+            contents_hidden: false,
+        }
+    }
+
+    #[test]
+    fn an_admin_reads_the_contents_unchanged() {
+        let out = for_principal(&principal(UserRole::Admin), vec![summary()]);
+        assert!(out[0].payload.is_some(), "an admin decides the sign-off");
+        assert_eq!(out[0].amount_usd, Some(2400.0));
+        assert!(!out[0].contents_hidden);
+    }
+
+    /// The case the issue exists for. Membership still gets the row — that is
+    /// #468's stalled-work signal — but not what is inside it.
+    #[test]
+    fn a_member_gets_the_approval_without_its_contents() {
+        let out = for_principal(&principal(UserRole::Member), vec![summary()]);
+        assert!(out[0].payload.is_none(), "the recipient must not reach a member");
+        assert!(out[0].amount_usd.is_none(), "nor the amount");
+        assert!(
+            out[0].contents_hidden,
+            "and the console must be able to say so, rather than render an empty card"
+        );
+        // Everything that makes stalled work legible survives.
+        assert_eq!(out[0].kind, "email.send");
+        assert_eq!(out[0].agent.as_deref(), Some("ops"));
+        assert_eq!(out[0].at_millis, 1_000);
+    }
+
+    /// Issue #618's stated trap: a platform bearer carries no `UserRole`, and
+    /// whatever it gets must be a decision rather than a fallthrough. It is
+    /// **fail-closed** — see the comment on `may_read_approval_contents`.
+    #[test]
+    fn a_platform_bearer_is_refused_the_contents_explicitly() {
+        let claims = PlatformClaims {
+            tenant: "tenant:hosting".to_string(),
+            scopes: std::collections::HashSet::new(),
+            companies: None,
+        };
+        let out = for_principal(&GqlAuth::Platform(claims), vec![summary()]);
+        assert!(out[0].payload.is_none());
+        assert!(out[0].amount_usd.is_none());
+        assert!(out[0].contents_hidden);
+    }
+
+    /// Redaction must not invent contents where there were none: a no-argument
+    /// approval read by an admin still reports `contents_hidden == false`, so
+    /// "nothing to show" and "not shown to you" stay distinguishable.
+    #[test]
+    fn an_absent_payload_is_not_reported_as_hidden() {
+        let mut bare = summary();
+        bare.payload = None;
+        bare.amount_usd = None;
+        let out = for_principal(&principal(UserRole::Admin), vec![bare]);
+        assert!(!out[0].contents_hidden);
+    }
+}

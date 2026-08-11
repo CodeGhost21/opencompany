@@ -1699,7 +1699,12 @@ async fn list_approvals(
         return Err(resp);
     }
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    Ok(Json(runtime.pending_approvals()))
+    // Membership got you the list; role decides whether you may read what is in
+    // it (issue #618).
+    Ok(Json(crate::server::approval_visibility::for_principal(
+        &auth,
+        runtime.pending_approvals(),
+    )))
 }
 
 /// `GET /api/v1/company/approvals` (single-company alias).
@@ -1713,7 +1718,13 @@ async fn list_approvals_single(
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp);
     }
-    Ok(Json(runtime.pending_approvals()))
+    // Same contents rule as the `{id}` form (issue #618) — the two handlers are
+    // the same read behind two addressing forms, and a redaction applied to one
+    // of them would be a hole rather than a boundary.
+    Ok(Json(crate::server::approval_visibility::for_principal(
+        &auth,
+        runtime.pending_approvals(),
+    )))
 }
 
 /// The operator's resolution of a parked approval.
