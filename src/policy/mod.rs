@@ -14,5 +14,12 @@
 pub mod consequence;
 pub mod gate;
 
+/// Shared `composio_execute` call fixtures (issue #470). Test-only, and
+/// deliberately here rather than in any one test module: the key they build
+/// their arguments under is the classifier's own constant, which is what stops
+/// a fixture and the code under test from drifting apart again.
+#[cfg(test)]
+pub(crate) mod test_support;
+
 pub use consequence::{Consequence, Reach, Standing, consequence_of};
 pub use gate::{DEFAULT_TTL_MILLIS, ManifestApprovalGate};

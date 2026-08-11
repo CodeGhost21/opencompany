@@ -172,6 +172,48 @@ pub struct ApprovalRequestQueue {
     grants: GrantSet,
 }
 
+/// What one cycle-end drain took, and what it threw away (issue #561).
+///
+/// Two numbers rather than one, because the second one is the one an operator
+/// needs and never got: `requests` is what they will be asked about, and
+/// `discarded` is how many gated calls this turn made that they will **not** be
+/// asked about and cannot discover any other way — the queue entries are gone
+/// and the turn that produced them is over.
+#[derive(Debug, Default)]
+pub struct DrainedRequests {
+    /// The requests to park, oldest first, at most `cap` of them.
+    pub requests: Vec<ApprovalRequest>,
+    /// How many were dropped for exceeding the cap. Zero on the ordinary path.
+    pub discarded: usize,
+}
+
+impl DrainedRequests {
+    /// The operator-facing sentence for a turn that overflowed the cap, or
+    /// `None` when nothing was dropped.
+    ///
+    /// Lives here rather than at the call site so the chat drain and any future
+    /// consumer word it the same way, and so the count and the sentence cannot
+    /// drift apart.
+    ///
+    /// It deliberately says what the operator must do about it. "Requests were
+    /// discarded" alone invites the reading that the calls happened and only the
+    /// records were lost; they did not happen, they were refused, and the only
+    /// way to get them is to ask the agent again.
+    pub fn overflow_notice(&self, cap: usize) -> Option<String> {
+        (self.discarded > 0).then(|| {
+            let n = self.discarded;
+            let calls = if n == 1 { "call" } else { "calls" };
+            let them = if n == 1 { "it" } else { "them" };
+            format!(
+                "Heads up: {n} further gated tool {calls} from this turn were not raised for \
+                 approval. A single turn can raise at most {cap}, and {n} more needed your \
+                 sign-off than that. They were **not** run and they are **not** on the \
+                 Approvals page — ask the agent again to get {them} back."
+            )
+        })
+    }
+}
+
 impl ApprovalRequestQueue {
     /// Records a gated call, ignoring one already queued for the same tool and
     /// arguments.
@@ -197,12 +239,31 @@ impl ApprovalRequestQueue {
 
     /// Drains up to `cap` queued requests (FIFO) and discards the rest, so one
     /// turn can never flood the operator's queue.
-    pub fn drain(&self, cap: usize) -> Vec<ApprovalRequest> {
+    ///
+    /// # Why this returns a struct rather than a `Vec`
+    ///
+    /// The discard is the whole point of the cap and it used to be invisible:
+    /// this method dropped the overflow on the floor and handed back a `Vec`
+    /// that looked exactly like a complete one. A caller could not tell a turn
+    /// that parked everything from a turn that parked eight of thirteen, so the
+    /// operator was shown eight cards and no indication that five more calls had
+    /// been gated — a queue that quietly truncates reads as "nothing else needed
+    /// approving", which is the opposite of true (issue #561).
+    ///
+    /// Returning [`DrainedRequests`] makes the overflow part of the value. A
+    /// caller that wants only the requests writes `.requests` and is at least
+    /// choosing to; it can no longer happen by not knowing there was a second
+    /// number.
+    pub fn drain(&self, cap: usize) -> DrainedRequests {
         let mut guard = self.inner.lock().expect("approval request queue");
         let take = guard.len().min(cap);
-        let drained: Vec<ApprovalRequest> = guard.drain(..take).collect();
+        let requests: Vec<ApprovalRequest> = guard.drain(..take).collect();
+        let discarded = guard.len();
         guard.clear();
-        drained
+        DrainedRequests {
+            requests,
+            discarded,
+        }
     }
 
     /// Splits off every request queued **at or after** `from`, leaving the ones
@@ -950,6 +1011,15 @@ mod tests {
     use super::*;
     use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 
+    // Issue #470: the `composio_execute` fixtures are built here, from the same
+    // key the classifier reads, so a call in a test reaches the same catalogue
+    // lookup a call in production does.
+    use crate::policy::test_support::{
+        COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
+        composio_read_args, composio_send_args, composio_unclassified_args,
+        composio_unclassified_args_numbered,
+    };
+
     fn policy(mode: &str, always: &[&str], auto_under: Option<f64>) -> ApprovalPolicy {
         let p = Policy {
             mode: mode.to_string(),
@@ -1397,13 +1467,13 @@ mod tests {
     #[tokio::test]
     async fn require_approval_records_the_request_to_park() {
         let (p, queue) = queued_policy("supervised", &[]);
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         assert!(matches!(
             p.check(&request("composio_execute", args.clone())).await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
 
-        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
         assert_eq!(queued.len(), 1, "the gated call was recorded");
         assert_eq!(queued[0].tool, "composio_execute");
         assert_eq!(queued[0].effect.kind, "composio_execute");
@@ -1414,6 +1484,125 @@ mod tests {
             "the operator-facing reason rides along: {}",
             queued[0].reason
         );
+    }
+
+    /// Issue #470, at the layer that projects a blocked call onto the effect
+    /// the operator's card is built from.
+    ///
+    /// The fixtures above used to name their action under a key nothing reads,
+    /// so every Composio test in this module classified through the
+    /// unknown-is-a-send fallback and none of them ever reached the catalogue.
+    /// Read and send came out identical, and a regression in the split would
+    /// have failed nothing here. This asserts they come out different, and
+    /// asserts the classification rather than the parking decision — so it
+    /// stays honest across issue #559, which changes whether a read parks but
+    /// not what it is.
+    #[tokio::test]
+    async fn a_composio_read_and_a_composio_send_are_classified_differently() {
+        let read = composio_read_args();
+        let send = composio_send_args();
+
+        assert_eq!(
+            classify_group("composio_execute", &read),
+            EffectGroup::Other,
+            "`{COMPOSIO_READ_SLUG}` is tagged `Read` in the vendored catalogue; \
+             if this fails the lookup is not being reached"
+        );
+        assert!(
+            grantable("composio_execute", &read),
+            "a read scoped to one connected account is what a standing grant \
+             can honestly describe"
+        );
+
+        assert_eq!(
+            classify_group("composio_execute", &send),
+            EffectGroup::Send,
+            "`{COMPOSIO_SEND_SLUG}` is tagged `Write`"
+        );
+        assert!(!grantable("composio_execute", &send));
+
+        // The cautious fallback still has its own coverage, and still says
+        // send — but now because the catalogue was asked and had no answer,
+        // not because the classifier never saw an action at all.
+        let unknown = composio_unclassified_args();
+        assert_eq!(
+            classify_group("composio_execute", &unknown),
+            EffectGroup::Send
+        );
+        assert!(!grantable("composio_execute", &unknown));
+
+        // And the split survives the round trip through the park queue: the
+        // group asserted above is the one the operator's card is built from.
+        let (p, queue) = queued_policy("supervised", &[]);
+        let _ = p.check(&request("composio_execute", send.clone())).await;
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].effect.group, EffectGroup::Send);
+        assert_eq!(
+            queued[0].effect.payload, send,
+            "the card shows the arguments the agent actually sent, action key \
+             included"
+        );
+    }
+
+    /// Issue #559, at the gate an agent actually hits: a Composio read runs
+    /// under `supervised` instead of parking, and nothing is queued for a
+    /// human — while a send on the same tool still parks.
+    ///
+    /// This is the behaviour the issue is about. `a_composio_read_and_a_
+    /// composio_send_are_classified_differently` above pins what the two calls
+    /// *are*; this pins what the desk *does* with them, which is the part an
+    /// operator notices when every page of a mailbox raises a card.
+    #[tokio::test]
+    async fn a_composio_read_runs_under_supervision_without_parking() {
+        let (p, queue) = queued_policy("supervised", &[]);
+
+        assert_eq!(
+            p.check(&request("composio_execute", composio_read_args()))
+                .await,
+            ToolPolicyDecision::Allow,
+            "reading a connected account changes nothing and costs nothing"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "no card was raised, so no human was interrupted"
+        );
+
+        // Paging the same list is not a second decision, because there was
+        // never a first one. This is the symptom the issue opens with.
+        for _ in 0..5 {
+            let _ = p
+                .check(&request("composio_execute", composio_read_args()))
+                .await;
+        }
+        assert_eq!(queue.queued(), 0);
+
+        // The send half is untouched: same tool, same desk, still parks.
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_send_args()))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(queue.queued(), 1);
+    }
+
+    /// A `readonly` desk still denies the read. That tier's contract is that
+    /// nothing outside the company is reached at all — #559 moves the read out
+    /// of the parking bucket, not out of the reaching-outward one.
+    #[tokio::test]
+    async fn a_readonly_desk_still_denies_a_composio_read() {
+        let p = policy("readonly", &[], None);
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_read_args()))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_send_args()))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
     }
 
     /// `always_approve` parks regardless of tier — including under `full` — so
@@ -1429,7 +1618,7 @@ mod tests {
             .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
-        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].effect.kind, "payment.send");
         assert_eq!(queued[0].effect.amount_usd, Some(40.0));
@@ -1467,23 +1656,32 @@ mod tests {
     #[tokio::test]
     async fn a_retried_call_is_recorded_once() {
         let (p, queue) = queued_policy("supervised", &[]);
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         for _ in 0..3 {
             let _ = p.check(&request("composio_execute", args.clone())).await;
         }
         assert_eq!(queue.queued(), 1, "the same call parks once");
 
-        // A different call to the same tool is a distinct request.
+        // A different call to the same tool is a distinct request. Another
+        // catalogued send, so the second call is classified rather than merely
+        // unrecognised.
         let _ = p
             .check(&request(
                 "composio_execute",
-                serde_json::json!({ "tool_slug": "SLACK_POST" }),
+                composio_args(COMPOSIO_OTHER_SEND_SLUG),
             ))
             .await;
         assert_eq!(queue.queued(), 2);
     }
 
     /// The drain is capped, so a runaway turn can't flood the operator's queue.
+    ///
+    /// The slugs here are deliberately uncatalogued (issue #470): this test
+    /// wants many calls the queue treats as distinct and is indifferent to what
+    /// any of them classify as, so naming real actions would only invite a
+    /// reader to think the classification mattered. They do still land under
+    /// the real action key, so each one reaches the catalogue lookup and misses
+    /// it — the honest fallback, rather than a call carrying no action at all.
     #[tokio::test]
     async fn the_drain_is_capped_and_empties_the_queue() {
         let (p, queue) = queued_policy("supervised", &[]);
@@ -1491,13 +1689,92 @@ mod tests {
             let _ = p
                 .check(&request(
                     "composio_execute",
-                    serde_json::json!({ "tool_slug": format!("TOOL_{i}") }),
+                    composio_unclassified_args_numbered(i),
                 ))
                 .await;
         }
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
-        assert_eq!(drained.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(queue.queued(), 0, "the overflow is discarded, not carried");
+
+        // Issue #561: and the drain says how many it threw away, rather than
+        // handing back a `Vec` indistinguishable from a complete one.
+        assert_eq!(
+            drained.discarded, 4,
+            "12 gated calls, a cap of 8, so 4 were dropped"
+        );
+        let notice = drained
+            .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+            .expect("an overflowing drain has something to tell the operator");
+        assert!(
+            notice.contains('4'),
+            "the count is in the sentence: {notice}"
+        );
+        assert!(
+            notice.contains("not** run") || notice.contains("not run"),
+            "the operator must not read this as 'the calls happened, the records \
+             were lost': {notice}"
+        );
+    }
+
+    /// The ordinary path says nothing. A notice on every turn would train the
+    /// operator to ignore the one that matters.
+    #[tokio::test]
+    async fn a_drain_under_the_cap_reports_no_overflow() {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN - 1) {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN - 1);
+        assert_eq!(drained.discarded, 0);
+        assert!(
+            drained
+                .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+                .is_none()
+        );
+    }
+
+    /// Exactly at the cap is not an overflow. An off-by-one here would cry wolf
+    /// on the commonest boundary case.
+    #[tokio::test]
+    async fn a_drain_exactly_at_the_cap_reports_no_overflow() {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.discarded, 0);
+        assert!(
+            drained
+                .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+                .is_none()
+        );
+    }
+
+    /// One dropped request reads as one, not as "1 calls".
+    #[test]
+    fn the_overflow_notice_is_singular_for_a_single_dropped_request() {
+        let drained = DrainedRequests {
+            requests: Vec::new(),
+            discarded: 1,
+        };
+        let notice = drained
+            .overflow_notice(8)
+            .expect("one is still an overflow");
+        assert!(notice.contains("1 further gated tool call "), "{notice}");
+        assert!(!notice.contains("calls"), "{notice}");
     }
 
     // --- Redeeming a grant (issue #243) --------------------------------------
@@ -1538,7 +1815,7 @@ mod tests {
     #[tokio::test]
     async fn a_granted_call_is_allowed_once_and_then_parks_again() {
         let (p, grants) = granting_policy("supervised", &[], "finance");
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         grants.grant(granted("finance", "composio_execute", args.clone()));
 
         assert_eq!(
@@ -1593,7 +1870,7 @@ mod tests {
     #[tokio::test]
     async fn a_grant_does_not_travel_to_another_agent() {
         let (marketing, grants) = granting_policy("supervised", &[], "marketing");
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         // The grant belongs to `finance`.
         grants.grant(granted("finance", "composio_execute", args.clone()));
 
@@ -1727,7 +2004,7 @@ mod tests {
     fn grants_survive_a_queue_clear() {
         let queue = ApprovalRequestQueue::default();
         let grants = queue.grants();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         grants.grant(crate::runtime::grants::GrantedCall {
             approval_id: crate::ports::types::ApprovalId::new("appr-1"),
             agent: "finance".into(),
@@ -1786,7 +2063,7 @@ mod tests {
 
         assert_eq!(queue.stamp_run(boundary, "run-1"), 2);
 
-        let drained = queue.drain(10);
+        let drained = queue.drain(10).requests;
         assert_eq!(drained.len(), 3);
         assert_eq!(
             drained[0].effect.run_id, None,
@@ -1847,7 +2124,7 @@ mod tests {
             "the chat cycle's entry is still queued for its own drain"
         );
         assert_eq!(
-            queue.drain(10)[0].tool,
+            queue.drain(10).requests[0].tool,
             "chat.thing",
             "…and it is the same entry, not a survivor of a clear-and-rebuild"
         );
@@ -2819,11 +3096,25 @@ mod tests {
         );
     }
 
-    /// Issue #457, through the real admission path. Re-classifying the live
-    /// action (the test above) separates a read from a send; it cannot separate
-    /// one provider's read from another's, because both are reads under the same
-    /// tool name for the same teammate. The card said "read from GitHub" and the
-    /// grant has to mean that.
+    /// Issue #457's scope check, pinned **directly** rather than through
+    /// `check()`.
+    ///
+    /// It used to run through the real admission path, asserting that a grant
+    /// scoped to `github` admitted a GitHub read and re-parked a Gmail one.
+    /// Issue #559 made that unobservable from `check()`, and the honest thing
+    /// is to say so rather than relax the assertion until it passes:
+    ///
+    /// * under `supervised` a catalogue read no longer parks at all, so it is
+    ///   allowed by the tier long before the scope is consulted;
+    /// * under `readonly` the brake at step 1 denies every external effect
+    ///   *above* the grant checks, so the scope is not consulted there either;
+    /// * under `full` everything is allowed.
+    ///
+    /// So `standing_grant_allows` is still correct and still worth pinning —
+    /// this test does that — but no tier currently routes a Composio read to
+    /// it. See the note in the PR for #559; the issue's claim that
+    /// `Standing::Grantable` "still governs `readonly`" does not hold against
+    /// the ordering in `check()`.
     #[tokio::test]
     async fn a_grant_scoped_to_one_provider_does_not_admit_another_providers_read() {
         let queue = ApprovalRequestQueue::default();
@@ -2839,41 +3130,47 @@ mod tests {
         ));
 
         // A *different* GitHub read: the operator consented to the provider, so
-        // this is inside the sentence and must keep running. Scoping by action
-        // slug instead would have re-parked here and made the grant worthless.
-        assert_eq!(
-            p.check(&request(
+        // this is inside the sentence. Scoping by action slug instead would
+        // have refused here and made the grant worthless.
+        assert!(
+            p.standing_grant_allows(
                 "composio_execute",
-                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" })
-            ))
-            .await,
-            ToolPolicyDecision::Allow
+                &composio_args("GITHUB_LIST_PULL_REQUESTS")
+            ),
+            "the operator consented to a provider, not to one action slug"
         );
 
         // A mailbox read. Also a catalogue read, also grantable, also `ops`,
-        // also `composio_execute` — every check upstream of the scope says yes.
+        // also `composio_execute` — every check upstream of the scope says yes,
+        // and the scope is the one thing that says no.
         assert!(
-            matches!(
-                p.check(&request(
-                    "composio_execute",
-                    serde_json::json!({ "tool": "GMAIL_FETCH_EMAILS" })
-                ))
-                .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
+            !p.standing_grant_allows("composio_execute", &composio_args("GMAIL_FETCH_EMAILS")),
             "'read from GitHub' is not consent to read the company's mail"
         );
 
-        // An action the catalogue cannot place has no scope to compare, so the
-        // scoped grant refuses it and it parks — unknown is a send, here too.
+        // An action the catalogue cannot place carries no scope, so a scoped
+        // grant refuses it — unknown is a send, here too.
+        assert!(
+            !p.standing_grant_allows("composio_execute", &composio_unclassified_args()),
+            "an unplaceable action has no scope for a scoped grant to admit"
+        );
+
+        // Through the real gate, the unknown action still parks: it is a send,
+        // so the tier does not wave it through and the scoped grant will not
+        // admit it either. This half of the original test survives #559
+        // unchanged, because only the *read* branch moved.
         assert!(matches!(
-            p.check(&request(
-                "composio_execute",
-                serde_json::json!({ "tool": "NOTAREALTOOLKIT_LIST_THINGS" })
-            ))
-            .await,
+            p.check(&request("composio_execute", composio_unclassified_args()))
+                .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
+
+        // Deliberately NOT asserting `check(read) == Allow` here. It would pass
+        // whether or not #559 landed — this policy holds a standing grant that
+        // admits a GitHub read at step 2b, so the tier never gets a say, and
+        // the assertion would prove nothing while looking like it proved the
+        // change. `a_composio_read_runs_under_supervision_without_parking` is
+        // the test for that, and it uses a policy with no grant at all.
 
         assert_eq!(
             grants.standing_count(),
