@@ -32,12 +32,77 @@ import { Skeleton } from "@/components/ui/skeleton";
 const TIERS = ["chat-v1", "reasoning-v1", "agentic-v1", "vision-v1"] as const;
 type Tier = (typeof TIERS)[number];
 
-const PROVIDER_LABELS: Record<InferenceProvider, string> = {
-  managed: "Managed (TinyHumans)",
-  openrouter: "OpenRouter",
-  ollama: "Ollama (local)",
-  openai_compatible: "Custom (OpenAI-compatible)",
+/**
+ * What each provider is, as data rather than as name comparisons scattered
+ * through the view.
+ *
+ * `acceptsKey` / `requiresBaseUrl` used to be written inline as
+ * `provider !== "ollama"` and `provider === "ollama" || provider ===
+ * "openai_compatible"`. Both were deny-lists over a closed set: a future local
+ * or credential-less provider would have inherited a key input nobody wanted
+ * simply by not being named in them. Asking the descriptor means a new provider
+ * declares what it needs when it is added here, and the view stops caring.
+ *
+ * `keyKind` is the other half of that. The credential a provider wants is
+ * vendor-specific, and this field is not the only place in Connections that
+ * accepts a TinyHumans key — so saying which vendor's key belongs here, per
+ * provider, is what stops one being pasted into the other.
+ */
+const PROVIDERS: Record<
+  InferenceProvider,
+  {
+    label: string;
+    /** Whether this provider authenticates with a bearer at all. */
+    acceptsKey: boolean;
+    /** Whether the endpoint must be given explicitly (no useful default). */
+    requiresBaseUrl: boolean;
+    /** Which vendor's credential belongs in the key field, in the operator's words. */
+    keyKind: string;
+    /** Form defaults applied when the operator picks this provider. */
+    preset: { baseUrl: string; models: Partial<Record<Tier, string>> };
+  }
+> = {
+  managed: {
+    label: "Managed (TinyHumans)",
+    acceptsKey: true,
+    requiresBaseUrl: false,
+    keyKind: "a TinyHumans API key",
+    preset: { baseUrl: "", models: {} },
+  },
+  openrouter: {
+    label: "OpenRouter",
+    acceptsKey: true,
+    requiresBaseUrl: false,
+    keyKind: "an OpenRouter key (`sk-or-…`)",
+    // OpenRouter's recommended DeepSeek pairing, prefilled.
+    preset: {
+      baseUrl: "",
+      models: { "chat-v1": "deepseek/deepseek-chat", "reasoning-v1": "deepseek/deepseek-r1" },
+    },
+  },
+  ollama: {
+    label: "Ollama (local)",
+    acceptsKey: false,
+    requiresBaseUrl: true,
+    keyKind: "no key — Ollama takes no bearer",
+    preset: { baseUrl: "http://localhost:11434/v1", models: { "chat-v1": "llama3.1" } },
+  },
+  openai_compatible: {
+    label: "Custom (OpenAI-compatible)",
+    acceptsKey: true,
+    requiresBaseUrl: true,
+    keyKind: "whatever key the endpoint below expects",
+    preset: { baseUrl: "", models: {} },
+  },
 };
+
+/**
+ * The base-ui `Select` wants a plain id -> label map for its `items` prop, so
+ * project one out of the descriptor rather than maintaining a second list.
+ */
+const PROVIDER_LABEL_ITEMS: Record<InferenceProvider, string> = Object.fromEntries(
+  (Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => [p, PROVIDERS[p].label]),
+) as Record<InferenceProvider, string>;
 
 /**
  * What the live cognition path's metering mode means for the Usage view — so a
@@ -54,20 +119,7 @@ function presetFor(provider: InferenceProvider): {
   baseUrl: string;
   models: Partial<Record<Tier, string>>;
 } {
-  switch (provider) {
-    case "openrouter":
-      return {
-        baseUrl: "",
-        // OpenRouter's recommended DeepSeek pairing, prefilled.
-        models: { "chat-v1": "deepseek/deepseek-chat", "reasoning-v1": "deepseek/deepseek-r1" },
-      };
-    case "ollama":
-      return { baseUrl: "http://localhost:11434/v1", models: { "chat-v1": "llama3.1" } };
-    case "openai_compatible":
-      return { baseUrl: "", models: {} };
-    case "managed":
-      return { baseUrl: "", models: {} };
-  }
+  return PROVIDERS[provider].preset;
 }
 
 type Load = "loading" | "ready" | "unavailable";
@@ -209,10 +261,7 @@ export function InferenceSection({
         // one. `managed` and `openrouter` resolve theirs from the environment or
         // a well-known default, and persisting the *displayed* value would pin
         // the company to it — silently overriding `OPENCOMPANY_INFERENCE_URL`.
-        baseUrl:
-          effective === "ollama" || effective === "openai_compatible"
-            ? status?.baseUrl || undefined
-            : undefined,
+        baseUrl: PROVIDERS[effective]?.requiresBaseUrl ? status?.baseUrl || undefined : undefined,
         models: status && Object.keys(status.models).length ? status.models : undefined,
         key: "",
       });
@@ -292,7 +341,7 @@ export function InferenceSection({
             {status && (
               <div className="space-y-2">
                 <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">{PROVIDER_LABELS[status.provider as InferenceProvider] ?? status.provider}</span>
+                  <span className="font-medium">{PROVIDERS[status.provider as InferenceProvider]?.label ?? status.provider}</span>
                   <Badge variant={status.source === "runtime" ? "outline" : "secondary"}>
                     {status.source}
                   </Badge>
@@ -379,21 +428,21 @@ export function InferenceSection({
                     <Select
                       value={provider}
                       onValueChange={(v) => pickProvider(v as InferenceProvider)}
-                      items={PROVIDER_LABELS}
+                      items={PROVIDER_LABEL_ITEMS}
                     >
                       <SelectTrigger id="inference-provider" className="w-full">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
-                        {(Object.keys(PROVIDER_LABELS) as InferenceProvider[]).map((p) => (
+                        {(Object.keys(PROVIDERS) as InferenceProvider[]).map((p) => (
                           <SelectItem key={p} value={p}>
-                            {PROVIDER_LABELS[p]}
+                            {PROVIDERS[p].label}
                           </SelectItem>
                         ))}
                       </SelectContent>
                     </Select>
                   </div>
-                  {(provider === "ollama" || provider === "openai_compatible") && (
+                  {PROVIDERS[provider].requiresBaseUrl && (
                     <div className="space-y-1">
                       <Label htmlFor="inference-base-url" className="text-xs">
                         Base URL
@@ -434,7 +483,7 @@ export function InferenceSection({
                   always preferred a stored key over the env default on this
                   provider. Ollama is the one provider that takes no bearer.
                 */}
-                {provider !== "ollama" && (
+                {PROVIDERS[provider].acceptsKey && (
                   <div className="space-y-1">
                     <Label htmlFor="inference-key" className="text-xs">
                       API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
@@ -448,13 +497,17 @@ export function InferenceSection({
                       onChange={(e) => setKey(e.target.value)}
                     />
                     <p className="text-xs text-muted-foreground" data-testid="inference-key-note">
-                      {provider === "managed"
-                        ? "Leave this blank to run on the platform credential. Set it and this key becomes the company's wallet:"
-                        : "This key is the company's wallet:"}{" "}
-                      everyone you invite to this company spends against it — inference, embeddings,
-                      tools and capabilities all bill to this one account, and spend cannot be
-                      attributed back to individual members. Removing someone from the roster stops
-                      their future access; it does not separate what they already spent.
+                      Paste {PROVIDERS[provider].keyKind}. This field is scoped to the provider
+                      selected above and is stored against it — a key for any other vendor will
+                      fail at the first turn, so it is not the place for one.
+                      {provider === "managed" && " Leave it blank to keep running on the platform credential."}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Whatever you set here is what the company spends against: everyone you invite
+                      spends on it — inference, embeddings, tools and capabilities all bill to this
+                      one account, and spend cannot be attributed back to individual members.
+                      Removing someone from the roster stops their future access; it does not
+                      separate what they already spent.
                     </p>
                   </div>
                 )}
