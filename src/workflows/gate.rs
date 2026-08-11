@@ -130,8 +130,9 @@ use tinyflows::model::{NodeKind, WorkflowGraph};
 use oh::agent::tool_policy::{ToolCallContext, ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 use openhuman_core::openhuman as oh;
 
+use crate::company::Policy;
 use crate::harness::policy::ApprovalPolicy;
-use crate::ports::types::CompanyRecord;
+use crate::ports::types::{CompanyId, CompanyRecord};
 
 /// The tool name an `http_request` node's call is classified as (issue #614).
 ///
@@ -200,14 +201,55 @@ pub(crate) async fn apply_policy_gates(
     workflow_id: &str,
     run_id: &str,
 ) -> Vec<GatedCall> {
+    let gated = policy_gates(
+        graph,
+        &record.manifest.policy,
+        &record.id,
+        workflow_id,
+        run_id,
+    )
+    .await;
+
+    // Written LAST and unconditionally: the policy's gate outranks an authored
+    // `requires_approval`, in both directions. An author may add a gate the
+    // policy does not require; they may not remove one it does.
+    for node in &mut graph.nodes {
+        if gated.iter().any(|call| call.node_id == node.id)
+            && let Value::Object(config) = &mut node.config
+        {
+            config.insert("requires_approval".to_string(), json!(true));
+        }
+    }
+
+    gated
+}
+
+/// Which of `graph`'s nodes the company's policy would stop — **classification
+/// only**, no mutation.
+///
+/// Split out from [`apply_policy_gates`] for issue #617's audit line: a
+/// `sub_workflow` child is resolved and run inside the engine, so its nodes
+/// never reach the gate pass and a call the policy would park at the top level
+/// runs unparked one level down. The resolver cannot *fix* that — the engine
+/// cannot resume across the boundary — but it can ask the same question and say
+/// what it found, so an operator reviewing what was approved is not left with a
+/// hole they cannot account for. One classifier, so the audit line and the gate
+/// can never disagree about the same call.
+pub(crate) async fn policy_gates(
+    graph: &WorkflowGraph,
+    company_policy: &Policy,
+    company: &CompanyId,
+    workflow_id: &str,
+    run_id: &str,
+) -> Vec<GatedCall> {
     // The manifest's `[policy]` verbatim — same mode, same `always_approve`,
     // same `auto_approve_under_usd` the roster runs under. No per-agent budget:
     // a workflow node is not a teammate, and the company-wide ceiling is
     // enforced elsewhere.
-    let policy = ApprovalPolicy::new(&record.manifest.policy, None);
+    let policy = ApprovalPolicy::new(company_policy, None);
     let mut gated = Vec::new();
 
-    for node in &mut graph.nodes {
+    for node in &graph.nodes {
         let Some((slug, args, target)) = call_of(node) else {
             continue;
         };
@@ -229,18 +271,12 @@ pub(crate) async fn apply_policy_gates(
         };
 
         tracing::debug!(
-            company = %record.id,
+            company = %company,
             workflow = workflow_id,
             node = %node.id,
             tool = %slug,
             "workflow: the company's policy stops this node's call for an operator"
         );
-        // Written LAST and unconditionally: the policy's gate outranks an
-        // authored `requires_approval`, in both directions. An author may add a
-        // gate the policy does not require; they may not remove one it does.
-        if let Value::Object(config) = &mut node.config {
-            config.insert("requires_approval".to_string(), json!(true));
-        }
         gated.push(GatedCall {
             node_id: node.id.clone(),
             slug,

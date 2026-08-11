@@ -131,11 +131,21 @@ pub async fn build_capabilities(
     // created (issue #168). Read before `deps` may move into the agent runner.
     // REAL in both modes: it is a read, and a dry sub_workflow child runs under
     // this same (dry) bundle, so dry propagates rather than stopping here.
+    // Issue #617: a child's nodes never reach the gate pass, so the resolver
+    // carries the policy in order to *say* which of its calls were never
+    // offered for approval. `None` for a dry run — nothing executes, so there
+    // is nothing to disclose, and the resolver behaves exactly as before.
+    let audit = (!dry_run).then(|| self::resolver::ChildCallAudit {
+        policy: record.manifest.policy.clone(),
+        run_id: run_id.to_string(),
+        events: deps.events.clone(),
+    });
     let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
         deps.workflow_source_dir.clone(),
         deps.store.clone(),
         company.clone(),
         workflow_id.to_string(),
+        audit,
     ));
 
     // The four effectful slots, chosen by mode at this one point.

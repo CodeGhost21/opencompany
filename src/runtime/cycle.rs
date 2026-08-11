@@ -1410,6 +1410,11 @@ fn cycle_task_id(
             // re-run can skip it. Like the run outcome it precedes, it starts no
             // cycle and rivals no card.
             | CompanyEvent::WorkflowReportDelivered { .. }
+            // Issue #617: a disclosure that a child's call was never offered for
+            // approval. It records something a run already did; it names no card
+            // and asks nothing of anyone, so it starts no cycle. Neutral for the
+            // same reason the run bracket above is.
+            | CompanyEvent::WorkflowChildCallNotOffered { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             // A withdrawal (#358) is a record about a record: it starts no
@@ -1579,6 +1584,9 @@ fn cycle_conversation(
             // Issue #529: a record of a report already dispatched — names no
             // thread and rivals none, exactly like the run events it sits among.
             | CompanyEvent::WorkflowReportDelivered { .. }
+            // Issue #617: likewise a record, not a message. It belongs to no
+            // conversation and rivals none.
+            | CompanyEvent::WorkflowChildCallNotOffered { .. }
             | CompanyEvent::TaskSteered { .. }
             | CompanyEvent::TaskDiscussionPosted { .. }
             // A withdrawal (#358) is a record about a record: it starts no
