@@ -5528,6 +5528,298 @@ name = "Morning"
         );
     }
 
+    /// Issue #674 boundary: an agent-authored `tool_call` whose `config.args`
+    /// carries a templated `=`-expression is rejected — that node would take
+    /// saved-node runtime position with model-chosen templated args, collapsing
+    /// the two-operator-gate model. The refusal names the node and points at the
+    /// console for templated wiring. Feature-independent: the check runs in the
+    /// `TryFrom`, before any namespace/grant gate.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_tool_call_expression_args() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "templated",
+                "name": "Templated",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "=item.url" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        let msg = result.output_for_llm(false);
+        assert!(
+            msg.contains("=`-expression") && msg.contains("config.args.url"),
+            "the refusal names the templated expression and its location: {result:?}"
+        );
+        // Nothing was persisted — the reject happens before the store write.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            record.overlay_workflows.is_empty(),
+            "a rejected draft persists nothing"
+        );
+    }
+
+    /// Issue #674 boundary, positive half: the same `tool_call` with a LITERAL
+    /// arg (no `=` prefix) persists — the restriction is on templated
+    /// `=`-expressions, not on args as such.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_tool_call_literal_args() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "literal",
+                "name": "Literal",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "https://example.com" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            record.overlay_workflows[0]
+                .toml
+                .contains("url = \"https://example.com\""),
+            "the persisted graph carries the literal arg: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #661 (H1): the `=`-expression restriction is scoped to `tool_call`.
+    /// A `condition` node legitimately branches on a `config.field` expression,
+    /// so a `=`-prefixed field must NOT be rejected — proving the guard doesn't
+    /// over-reach into the kinds that resolve expressions by design.
+    #[tokio::test]
+    async fn create_workflow_tool_allows_condition_expression_field() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "brancher",
+                "name": "Brancher",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "check",
+                        "kind": "condition",
+                        "name": "Check",
+                        "config": { "field": "=item.ok" }
+                    },
+                    { "id": "yes", "kind": "output", "name": "Yes" },
+                    { "id": "no", "kind": "output", "name": "No" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "check" },
+                    { "from": "check", "to": "yes", "label": "yes" },
+                    { "from": "check", "to": "no", "label": "no" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(
+            !result.is_error,
+            "a condition's `=`-expression field is allowed: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): a non-object `config` (here a bare string on an
+    /// `http_request` node — the path that would otherwise persist silently) is
+    /// refused with an agent-actionable message, not saved as an inert TOML
+    /// scalar.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_non_object_config() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "scalar",
+                "name": "Scalar",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "call",
+                        "kind": "http_request",
+                        "name": "Call",
+                        "config": "GET https://example.com"
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "call" },
+                    { "from": "call", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("non-object `config`"),
+            "the refusal explains config must be a JSON object: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1) — item #2: a `destination` on a non-`output` node is
+    /// already rejected end-to-end by the shared `validate` (`render_workflow` →
+    /// `parse_workflow` inside `create_company_workflow`), so the create_workflow
+    /// tool inherits the catch with no duplicated validation of its own. This
+    /// pins that end-to-end behaviour; the shared-validator hardening is #682's.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_destination_on_non_output() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "misrouted",
+                "name": "Misrouted",
+                "nodes": [
+                    {
+                        "id": "start",
+                        "kind": "trigger",
+                        "name": "Start",
+                        "destination": { "kind": "owner" }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("only `output` nodes route a report"),
+            "the shared validator's destination-placement message surfaces: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1) — item #3: the JSON→TOML conversion remedy is conditional.
+    /// A failure that is NOT about a null (here a `u64` beyond `i64` range) must
+    /// get the converter's own message WITHOUT the misleading "TOML has no null"
+    /// hint — the null case keeps that hint (`create_workflow_tool_rejects_null_config_value`).
+    #[tokio::test]
+    async fn create_workflow_tool_non_null_conversion_error_omits_null_hint() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "toobig",
+                "name": "TooBig",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "n": 18446744073709551615u64 } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        let msg = result.output_for_llm(false);
+        assert!(
+            msg.contains("can't be stored"),
+            "names the failure: {result:?}"
+        );
+        assert!(
+            !msg.contains("TOML has no null"),
+            "a non-null conversion failure must not misdirect to the null remedy: {result:?}"
+        );
+    }
+
+    #[test]
+    fn first_expression_location_walks_nested_config() {
+        // Matches tinyflows' `is_expression`: a leading `=` (no trim).
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "command": "=item.x" } }), ""),
+            Some("args.command".to_string())
+        );
+        // Array elements become numeric segments.
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "cc": ["a", "=item.y"] } }), ""),
+            Some("args.cc.1".to_string())
+        );
+        // Literals — including a `=` in the MIDDLE — are not expressions.
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "q": "a=b", "s": "ls -la" } }), ""),
+            None
+        );
+    }
+
+    #[test]
+    fn json_contains_null_is_recursive() {
+        assert!(json_contains_null(&json!({ "args": { "url": null } })));
+        assert!(json_contains_null(&json!(["ok", [null]])));
+        assert!(!json_contains_null(
+            &json!({ "args": { "url": "https://x" } })
+        ));
+    }
+
     // ---- read_run_output (issue #418) ----
 
     /// Builds a `RunWorkflowTool` over the demo graph in `dir`, a stub runner
