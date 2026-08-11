@@ -599,10 +599,15 @@ impl Tool for QueryCompanyTool {
         };
         let mut recent: Vec<String> = Vec::new();
         let mut discussion_posts = 0usize;
+        // Events actually visited before the tail filled. Anything past this is
+        // strictly older than everything shown (we walk newest-first), so it is
+        // the exact count of activity dropped off the far end.
+        let mut consumed = 0usize;
         for event in stored.iter().rev() {
             if recent.len() == RECENT_EVENTS {
                 break;
             }
+            consumed += 1;
             if matches!(event.event, CompanyEvent::TaskDiscussionPosted { .. }) {
                 // Counted over the same span the tail covers, not over all of
                 // history: this line reads as "recent activity" like the rows
@@ -616,7 +621,19 @@ impl Tool for QueryCompanyTool {
                 summarize_event(&event.event)
             ));
         }
+        // Older events the tail could not reach. The facts section one block
+        // down already announces its own cut (issue #410); this is the same
+        // silent-cut class on the activity tail — a full log handed the
+        // orchestrator only its last ten rows and read as complete. `stored`
+        // holds the whole log, so the drop is exactly countable. No remediation
+        // clause: `query_company` has no pagination argument to point at.
+        let older = stored.len() - consumed;
         recent.reverse(); // back to chronological order
+        if older > 0 {
+            // Dropped rows are older than everything below; the list renders
+            // oldest→newest, so the notice belongs at the top.
+            recent.insert(0, format!("- […{older} earlier event(s) not shown]"));
+        }
         if discussion_posts > 0 {
             let plural = if discussion_posts == 1 { "" } else { "s" };
             recent.push(format!(
@@ -764,6 +781,7 @@ impl Tool for QueryCompanyTool {
             json!({
                 "facts": facts.len(),
                 "recent_events": recent.len(),
+                "events_not_shown": older,
                 "workflows": workflows.len(),
                 "team": roster.len(),
                 "desks": desks.len(),
@@ -3704,6 +3722,151 @@ members = ["nobody"]
             out.matches("discussion post").count(),
             1,
             "a post must not hold a slot of its own: {out}"
+        );
+    }
+
+    /// Issue #420: the recent-activity tail keeps only [`RECENT_EVENTS`] rows,
+    /// and it used to drop everything older in silence — a full log read as
+    /// complete, the same silent-cut class the facts section one block down
+    /// already announces. The tail now names how many rows fell off the far end
+    /// (in the markdown) and reports the count (in the JSON summary). Discussion
+    /// posts pushed past the tail are dropped rows too, so they count toward it
+    /// rather than folding into their own line.
+    #[tokio::test]
+    async fn query_company_announces_the_dropped_event_tail() {
+        use crate::ports::types::StoredEvent;
+        use futures::stream::{self, BoxStream};
+
+        /// A log that replays a fixed history.
+        struct FixedLog(Vec<StoredEvent>);
+
+        #[async_trait]
+        impl EventLog for FixedLog {
+            async fn append(
+                &self,
+                _id: &CompanyId,
+                _event: CompanyEvent,
+            ) -> crate::Result<EventSeq> {
+                unreachable!("the insight surface only reads")
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                Ok(self
+                    .0
+                    .iter()
+                    .filter(|e| e.seq.value() >= seq.value())
+                    .take(limit)
+                    .cloned()
+                    .collect())
+            }
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+
+        // A distinct, non-discussion event so every row occupies a tail slot.
+        let dispatch = |seq: u64| StoredEvent {
+            seq: EventSeq::new(seq),
+            company: company.clone(),
+            event: CompanyEvent::TaskDispatched {
+                task_id: format!("t-{seq}"),
+                run_id: None,
+            },
+            at_millis: seq + 1,
+        };
+
+        // (a) Five more row-events than the tail is wide: the five oldest fall
+        // off, the notice sits at the top, and the JSON summary counts them.
+        let over: Vec<StoredEvent> = (0..(RECENT_EVENTS as u64 + 5)).map(dispatch).collect();
+        let log: Arc<dyn EventLog> = Arc::new(FixedLog(over));
+        let tool = QueryCompanyTool::new(company.clone(), None, Some(log), None, None);
+        let result = tool.execute(json!({})).await.expect("execute");
+        let md = result.output_for_llm(true);
+        let activity = md
+            .split("## Recent activity\n")
+            .nth(1)
+            .expect("recent activity section");
+        assert!(
+            activity.starts_with("- […5 earlier event(s) not shown]"),
+            "the dropped tail must be announced at the top: {md}"
+        );
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("\"events_not_shown\": 5"),
+            "the JSON summary must count the drop: {}",
+            result.output_for_llm(false)
+        );
+
+        // (b) Exactly the tail width: nothing was dropped, so nothing is said.
+        let exact: Vec<StoredEvent> = (0..RECENT_EVENTS as u64).map(dispatch).collect();
+        let log: Arc<dyn EventLog> = Arc::new(FixedLog(exact));
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+            .execute(json!({}))
+            .await
+            .expect("execute");
+        assert!(
+            !result
+                .output_for_llm(true)
+                .contains("earlier event(s) not shown"),
+            "a complete tail must stay silent: {}",
+            result.output_for_llm(true)
+        );
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("\"events_not_shown\": 0"),
+            "a complete tail reports zero dropped: {}",
+            result.output_for_llm(false)
+        );
+
+        // (c) Discussion posts older than the tail are dropped rows: they count
+        // toward the drop, not toward the fold line. Three posts (oldest) then
+        // enough dispatches to fill the tail — the posts never get visited.
+        let mut mixed: Vec<StoredEvent> = Vec::new();
+        for seq in 0..3u64 {
+            mixed.push(StoredEvent {
+                seq: EventSeq::new(seq),
+                company: company.clone(),
+                event: CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t-1".to_string(),
+                    text: format!("older chatter {seq}"),
+                    by: None,
+                },
+                at_millis: seq + 1,
+            });
+        }
+        for seq in 3..(RECENT_EVENTS as u64 + 5) {
+            mixed.push(dispatch(seq));
+        }
+        // total = 3 posts + (RECENT_EVENTS + 2) dispatches; the tail holds
+        // RECENT_EVENTS dispatches, so 2 dispatches + 3 posts = 5 fall off.
+        let log: Arc<dyn EventLog> = Arc::new(FixedLog(mixed));
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+            .execute(json!({}))
+            .await
+            .expect("execute");
+        let md = result.output_for_llm(true);
+        assert!(
+            md.contains("- […5 earlier event(s) not shown]"),
+            "dropped discussion posts must count toward the tail drop: {md}"
+        );
+        assert!(
+            !md.contains("discussion post"),
+            "an unvisited post must not also fold into its own line: {md}"
+        );
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("\"events_not_shown\": 5"),
+            "{}",
+            result.output_for_llm(false)
         );
     }
 
