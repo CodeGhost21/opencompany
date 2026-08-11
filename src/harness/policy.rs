@@ -69,6 +69,7 @@
 //! where it does, why an at-cap call **parks** rather than being denied, and
 //! what the cap does not see.
 
+use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -172,6 +173,39 @@ pub struct ApprovalRequest {
     pub effect: Effect,
 }
 
+/// Which turn a queued approval request belongs to (issue #439).
+///
+/// The queue handle is one per company and cannot be otherwise — see
+/// [`ApprovalRequestQueue`] — so the separation between turns lives here, in
+/// the key, rather than in separate queues.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum ApprovalScope {
+    /// A request pushed outside any [`claim`](ApprovalRequestQueue::claim).
+    ///
+    /// The default, and deliberately **not** an error. Every production turn
+    /// runs under a claim, so this bucket should stay empty there; making an
+    /// unclaimed push panic or drop would trade a mis-attribution bug for a
+    /// lost-approval bug, and #395 exists because a lost approval is the worse
+    /// one. It is drained by the chat cycle alongside [`Cycle`](Self::Unscoped)
+    /// — which is exactly the pre-#439 behaviour for anything unclaimed.
+    #[default]
+    Unscoped,
+    /// The company's chat cycle, including every dispatched card and delegated
+    /// turn that runs inside it.
+    ///
+    /// One at a time per company: `CycleRunner` holds a serial lock, so this
+    /// bucket has a single writer. It is still concurrent with any number of
+    /// workflow runs, which is the race #439 is about.
+    Cycle,
+    /// One workflow run, keyed by its run id.
+    ///
+    /// Workflow runs are `tokio::spawn`ed and are **not** under the cycle lock,
+    /// so two of them genuinely overlap. That is the race a boundary index
+    /// could never fix: both runs take a boundary against one shared vector and
+    /// the later `split_off` swallows the earlier run's tail.
+    Run(String),
+}
+
 /// A shared, in-memory queue of approval-gated tool calls — the exact
 /// [`DelegationQueue`](crate::harness::orchestrator::DelegationQueue) /
 /// [`McpFailureQueue`](crate::harness::mcp_probe::McpFailureQueue) pattern.
@@ -179,9 +213,24 @@ pub struct ApprovalRequest {
 /// every roster agent and the [`HarnessBrain`](crate::harness::HarnessBrain)
 /// that drains it see the same queue because
 /// [`HarnessDeps`](crate::harness::HarnessDeps) clones share this handle.
-#[derive(Clone, Default)]
+///
+/// # One handle, many turns (issue #439)
+///
+/// The handle is shared and **has to be**. `ApprovalPolicy` is installed once
+/// per roster agent inside [`build_roster`](crate::harness::build_roster),
+/// which runs in a fingerprint-cached, per-company `HarnessPool::ensure` with
+/// no run id in scope, and the policy is then sealed into the vendored agent
+/// with no setter. So "one queue per run" cannot be built by handing each run
+/// its own queue — there is nowhere to hand it to.
+///
+/// The separation is therefore in the **key**, not the handle: entries are
+/// bucketed by [`ApprovalScope`], a turn declares its scope by taking a
+/// [`claim`](Self::claim), and [`push`](Self::push) files into whichever bucket
+/// the surrounding claim named. A turn can then only ever see its own entries,
+/// which is the property the issue asks for.
+#[derive(Clone)]
 pub struct ApprovalRequestQueue {
-    inner: Arc<Mutex<Vec<ApprovalRequest>>>,
+    inner: Arc<Mutex<BTreeMap<ApprovalScope, Vec<ApprovalRequest>>>>,
     /// The live single-use grants (issue #243), riding along so the whole
     /// approval round-trip travels on one handle.
     ///
@@ -196,6 +245,15 @@ pub struct ApprovalRequestQueue {
     /// by the very cycle that was dispatched to redeem it, so the feature would
     /// fail in exactly its own happy path. The test
     /// `grants_survive_a_queue_clear` pins this.
+    ///
+    /// **Issue #439 made this sharper, not looser.** Buckets come and go with
+    /// the turns that claim them; grants outlive every one of them. A grant is
+    /// minted by one turn's decision, redeemed by a *different, later* turn,
+    /// swept by a periodic pass, and rehydrated from the journal on boot — so
+    /// it belongs to the company, never to a scope. Folding it into the
+    /// per-scope map would break redemption in exactly its own happy path, the
+    /// same way folding it into `inner` would have. `grants_outlive_a_scope`
+    /// pins the #439 half of that alongside `grants_survive_a_queue_clear`.
     grants: GrantSet,
 }
 
@@ -254,6 +312,26 @@ impl DrainedRequests {
     /// discarded" alone invites the reading that the calls happened and only the
     /// records were lost; they did not happen, they were refused, and the only
     /// way to get them is to ask the agent again.
+    ///
+    /// # "this turn" (issue #439)
+    ///
+    /// The original wording said "from this turn" and "a single turn", which
+    /// was true while the cap only ever bounded a chat cycle. A drain is now
+    /// taken per [`ApprovalScope`], and a workflow run's scope spans that run
+    /// rather than a turn — so for [`ApprovalScope::Run`] the sentence named
+    /// the wrong unit of work.
+    ///
+    /// It says "one batch" instead: the set of requests this drain took, which
+    /// is true of a cycle and of a run alike. The alternative — branching the
+    /// sentence on the scope — would put the notice back in the business of
+    /// being worded twice, which is precisely what putting it on this type
+    /// avoided.
+    ///
+    /// "at most {cap}" stays lowercase and mid-sentence deliberately:
+    /// `the_notice_quotes_the_cap_the_drain_was_taken_against` matches on it,
+    /// and that assertion is #561's real guarantee — the cap quoted is the one
+    /// the drain was taken against, never a constant the call site had lying
+    /// around. Rewording around it beat loosening it.
     pub fn overflow_notice(&self) -> Option<String> {
         (self.discarded > 0).then(|| {
             let n = self.discarded;
@@ -261,12 +339,109 @@ impl DrainedRequests {
             let calls = if n == 1 { "call" } else { "calls" };
             let them = if n == 1 { "it" } else { "them" };
             format!(
-                "Heads up: {n} further gated tool {calls} from this turn were not raised for \
-                 approval. A single turn can raise at most {cap}, and {n} more needed your \
-                 sign-off than that. They were **not** run and they are **not** on the \
-                 Approvals page — ask the agent again to get {them} back."
+                "Heads up: {n} further gated tool {calls} were not raised for approval. One \
+                 batch can raise at most {cap}, and {n} more needed your sign-off than that. \
+                 They were **not** run and they are **not** on the Approvals page — ask the \
+                 agent again to get {them} back."
             )
         })
+    }
+}
+
+/// A queue with **its own, unshared** [`GrantSet`] — an isolated fixture, never
+/// the company's queue.
+///
+/// Spelled out by hand rather than derived, because the derive made a real trap
+/// look like a default. `GrantSet` is a shared handle whose whole purpose is
+/// that the runtime that *mints* a grant and the policy that *redeems* it see
+/// one set; a queue built here sees neither. Redemption through it silently
+/// never matches, so every approval re-parks forever — the feature failing in
+/// exactly its own happy path, with no error anywhere.
+///
+/// Production must use [`with_grants`](ApprovalRequestQueue::with_grants), and
+/// does: `RuntimeBuilder` is the single construction site and hands in the
+/// runtime's own set. `grants_are_not_shared_by_default` pins the difference so
+/// the trap is a stated property rather than a footgun.
+///
+/// This matters more after issue #439, not less. The obvious way to build a
+/// per-run queue is one `default()` per run — which would have scoped grants
+/// per run and broken every approval. The chosen design keeps one handle for
+/// exactly this reason; see [`ApprovalRequestQueue`].
+impl Default for ApprovalRequestQueue {
+    fn default() -> Self {
+        Self {
+            inner: Arc::default(),
+            grants: GrantSet::default(),
+        }
+    }
+}
+
+tokio::task_local! {
+    /// The scope [`ApprovalRequestQueue::push`] files into, set for the
+    /// duration of a turn by [`ApprovalRequestQueue::claim`] (issue #439).
+    ///
+    /// # Why ambient, and why that is safe here
+    ///
+    /// `push` happens deep inside `ApprovalPolicy::require_approval`, which
+    /// openhuman calls synchronously from the tool loop. The policy is
+    /// per-agent, cached, and outlives every run, so it cannot hold a run id —
+    /// and there is no parameter to thread one through, because the call comes
+    /// from the vendored engine rather than from us.
+    ///
+    /// A task-local is sound on this path because the turn does not leave its
+    /// task: `run_background` → `run_inner` is awaited directly (the one
+    /// `tokio::spawn` nearby collects progress events, not the turn), and the
+    /// turn body runs inside `with_stop_hooks` on that same task. This is also
+    /// not a new dependency — `with_stop_hooks` is itself a task-local scope on
+    /// this exact path.
+    static CURRENT_SCOPE: ApprovalScope;
+}
+
+/// A turn's exclusive claim on one [`ApprovalScope`]'s bucket (issue #439).
+///
+/// Modelled on [`PublishClaim`](crate::harness::publish::PublishClaim) and
+/// [`DelegationClaim`](crate::harness::orchestrator::DelegationClaim), which
+/// solve the same problem one queue over: the claim's scope **is** the window
+/// in which the queue means anything, and `Drop` closes it on the way out so a
+/// turn that returned early cannot leave entries behind for the next one to
+/// find.
+///
+/// Obtained from [`ApprovalRequestQueue::claim`]. The turn must run inside
+/// [`ApprovalClaim::scoped`] for pushes to be routed to it.
+pub struct ApprovalClaim {
+    queue: ApprovalRequestQueue,
+    scope: ApprovalScope,
+}
+
+impl ApprovalClaim {
+    /// The scope this claim owns.
+    pub fn scope(&self) -> &ApprovalScope {
+        &self.scope
+    }
+
+    /// Runs `fut` with this claim's scope installed, so every
+    /// [`push`](ApprovalRequestQueue::push) inside it files into this bucket.
+    ///
+    /// The whole turn goes inside. A push that escapes the future lands in
+    /// [`ApprovalScope::Unscoped`] rather than in another turn's bucket — the
+    /// conservative direction, since the cycle drains that too.
+    pub async fn scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        CURRENT_SCOPE.scope(self.scope.clone(), fut).await
+    }
+}
+
+impl Drop for ApprovalClaim {
+    fn drop(&mut self) {
+        // The exit half, and the load-bearing one: a turn that returned early —
+        // an error, a steer, a panic unwinding through here — must not leave
+        // its entries for whoever claims this scope next. A workflow run id is
+        // unique, so this is belt-and-braces there; for `Cycle` it is the
+        // guarantee that replaced the explicit `clear()` at the top of
+        // `run_cycle`.
+        self.queue.discard(&self.scope);
     }
 }
 
@@ -277,87 +452,125 @@ impl ApprovalRequestQueue {
     /// openhuman blocks the call but lets the turn continue, so a model that
     /// re-tries the same tool would otherwise park the identical request several
     /// times over and show the operator a queue of duplicates.
+    /// Records a gated call **in the surrounding claim's scope** (issue #439),
+    /// ignoring one already queued in that same scope for the same tool and
+    /// arguments.
+    ///
+    /// openhuman blocks the call but lets the turn continue, so a model that
+    /// re-tries the same tool would otherwise park the identical request several
+    /// times over and show the operator a queue of duplicates. De-duplication is
+    /// per scope, which is the only reading that makes sense once buckets are
+    /// separate: two different turns asking for the same tool are two requests,
+    /// and collapsing them would hide one turn's ask behind another's.
     pub fn push(&self, request: ApprovalRequest) {
+        let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        if guard.iter().any(|q| {
+        let bucket = guard.entry(scope).or_default();
+        if bucket.iter().any(|q| {
             q.effect.kind == request.effect.kind && q.effect.payload == request.effect.payload
         }) {
             return;
         }
-        guard.push(request);
+        bucket.push(request);
     }
 
-    /// Empties the queue (called before a turn so a request from a prior turn —
-    /// or from a workflow run that shares these deps — never leaks into it).
-    pub fn clear(&self) {
-        self.inner.lock().expect("approval request queue").clear();
-    }
-
-    /// Drains up to `cap` queued requests (FIFO) and discards the rest, so one
-    /// turn can never flood the operator's queue.
+    /// The scope pushes are currently filing into.
     ///
-    /// # Why this returns a struct rather than a `Vec`
+    /// Outside any claim — every test that pushes directly, and any turn entry
+    /// point not yet under one — this is [`ApprovalScope::Unscoped`], which the
+    /// chat cycle drains. That fallback is why adding a scope cannot lose a
+    /// request.
+    fn current_scope() -> ApprovalScope {
+        CURRENT_SCOPE
+            .try_with(ApprovalScope::clone)
+            .unwrap_or_default()
+    }
+
+    /// Takes exclusive ownership of `scope`'s bucket for the life of the
+    /// returned claim (issue #439).
+    ///
+    /// Clears on the way in, and via [`Drop`] on the way out too, so the
+    /// claim's lifetime *is* the window in which the scope holds anything. Run
+    /// the turn inside [`ApprovalClaim::scoped`] to route its pushes here.
+    pub fn claim(&self, scope: ApprovalScope) -> ApprovalClaim {
+        self.discard(&scope);
+        ApprovalClaim {
+            queue: self.clone(),
+            scope,
+        }
+    }
+
+    /// Drops `scope`'s bucket entirely, so an empty scope costs no memory.
+    fn discard(&self, scope: &ApprovalScope) {
+        self.inner
+            .lock()
+            .expect("approval request queue")
+            .remove(scope);
+    }
+
+    /// How many requests sit in `scope`, observed **without** claiming it.
+    ///
+    /// Test-only, and it exists because claiming is not a neutral observation:
+    /// [`claim`](Self::claim) clears on entry, so asserting through a fresh
+    /// claim cannot distinguish "`Drop` emptied this" from "my own claim just
+    /// did". Reading the map directly is the only way to test the exit half.
+    #[cfg(test)]
+    fn len_in(&self, scope: &ApprovalScope) -> usize {
+        self.inner
+            .lock()
+            .expect("approval request queue")
+            .get(scope)
+            .map_or(0, Vec::len)
+    }
+
+    /// Empties the current scope's bucket.
+    ///
+    /// Retained for the callers that clear without claiming. Under a claim this
+    /// is redundant — [`claim`](Self::claim) already clears on entry and `Drop`
+    /// clears on exit.
+    pub fn clear(&self) {
+        self.discard(&Self::current_scope());
+    }
+
+    /// Drains up to `cap` requests (FIFO) from the **current scope**, discarding
+    /// that scope's remainder, so one turn can never flood the operator's queue.
+    ///
+    /// # Why this returns a struct rather than a `Vec` (issue #561)
     ///
     /// The discard is the whole point of the cap and it used to be invisible:
     /// this method dropped the overflow on the floor and handed back a `Vec`
-    /// that looked exactly like a complete one. A caller could not tell a turn
-    /// that parked everything from a turn that parked eight of thirteen, so the
-    /// operator was shown eight cards and no indication that five more calls had
-    /// been gated — a queue that quietly truncates reads as "nothing else needed
-    /// approving", which is the opposite of true (issue #561).
+    /// that looked exactly like a complete one, so the operator was shown eight
+    /// cards and no indication that five more calls had been gated. `cap`
+    /// travels into the result so the count and the number that produced it
+    /// stay one value — see [`DrainedRequests`].
     ///
-    /// Returning [`DrainedRequests`] makes the overflow part of the value. A
-    /// caller that wants only the requests writes `.requests` and is at least
-    /// choosing to; it can no longer happen by not knowing there was a second
-    /// number.
+    /// # What #439 changed, and what it did not
     ///
-    /// `cap` travels into the result rather than being asked for again when the
-    /// notice is rendered: the count and the number that produced it are then
-    /// one value, and a caller cannot pair a drain of eight with a sentence
-    /// that claims the limit is twenty.
+    /// The shape is #561's; only *which* requests it can see is #439's. It used
+    /// to drain one company-wide vector, which is why a concurrent turn's
+    /// entries could be taken by whoever drained first. It now sees the calling
+    /// turn's bucket and nothing else — **which also makes `discarded` mean
+    /// something it could not mean before**. A count taken off a shared vector
+    /// mixed in whatever a concurrent run had appended, so "this turn
+    /// overflowed" was never reliably this turn's fact. Scoped, it is.
+    ///
+    /// From the chat cycle this also drains [`ApprovalScope::Unscoped`], so a
+    /// push from any turn entry point not yet under a claim still reaches the
+    /// operator exactly as it did before — the fallback that makes #439
+    /// non-lossy. A workflow run drains only its own bucket and can no longer
+    /// swallow anyone else's.
     pub fn drain(&self, cap: usize) -> DrainedRequests {
+        let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
-        let take = guard.len().min(cap);
-        let requests: Vec<ApprovalRequest> = guard.drain(..take).collect();
-        let discarded = guard.len();
-        guard.clear();
-        DrainedRequests {
-            requests,
-            discarded,
-            cap,
+        let mut queued: Vec<ApprovalRequest> = guard.remove(&scope).unwrap_or_default();
+        // The cycle owns anything nobody claimed. A workflow run must not take
+        // it: that would be the shared-queue theft this issue removes.
+        if scope == ApprovalScope::Cycle {
+            queued.extend(guard.remove(&ApprovalScope::Unscoped).unwrap_or_default());
         }
-    }
-
-    /// Splits off every request queued **at or after** `from`, leaving the ones
-    /// below it in place (issue #395).
-    ///
-    /// # Why this exists next to [`drain`](Self::drain)
-    ///
-    /// `drain` is a *cycle-end* verb: it takes the front of the queue and
-    /// **clears whatever is left**, which is correct when the cycle owns the
-    /// whole queue and is about to finish with it. A workflow agent node owns
-    /// no such thing. It runs on the same shared
-    /// [`HarnessDeps`](crate::harness::HarnessDeps) as the chat cycles, and a
-    /// cycle may be part-way through its own turn when the node's turn parks a
-    /// request. Calling `drain` there would steal that cycle's entries and then
-    /// wipe the rest — one workflow node silently swallowing another
-    /// conversation's pending approvals.
-    ///
-    /// So this takes only the tail the caller is entitled to. The boundary is
-    /// valid for exactly the reason [`queued`](Self::queued) is documented to
-    /// be one: [`push`](Self::push) only ever appends, so a position taken
-    /// before the turn stays the line between "somebody else parked that" and
-    /// "this turn did".
-    ///
-    /// A `from` past the end yields nothing rather than panicking, so a caller
-    /// that raced a [`clear`](Self::clear) degrades to parking nothing instead
-    /// of aborting the run.
-    pub fn take_from(&self, from: usize) -> Vec<ApprovalRequest> {
-        let mut guard = self.inner.lock().expect("approval request queue");
-        if from >= guard.len() {
-            return Vec::new();
-        }
-        guard.split_off(from)
+        let discarded = queued.len().saturating_sub(cap);
+        queued.truncate(cap);
+        DrainedRequests::new(queued, discarded, cap)
     }
 
     /// Builds a queue whose grant set is one the caller already holds.
@@ -377,14 +590,24 @@ impl ApprovalRequestQueue {
         self.grants.clone()
     }
 
-    /// The number of queued requests.
+    /// The number of requests queued **in the current scope**.
     ///
     /// Read by a dispatched card **before** its turns run, so it can tell which
-    /// of the queue's entries are its own (issue #242) — the queue is shared
-    /// with the cycle's chat turns, and [`push`](Self::push) only ever appends,
-    /// so a position taken now stays a valid boundary until the cycle-end drain.
+    /// of the entries are its own (issue #242) — [`push`](Self::push) only ever
+    /// appends, so a position taken now stays a valid boundary until the
+    /// cycle-end drain.
+    ///
+    /// Issue #439 narrowed what this counts, which is what finally makes the
+    /// boundary sound: it used to index into a vector a concurrent workflow run
+    /// could append to between the read and the turn, so the position meant
+    /// "everything so far, from anyone". Within a scope there is one writer, so
+    /// it now means what #242 always assumed it did.
     pub fn queued(&self) -> usize {
-        self.inner.lock().expect("approval request queue").len()
+        self.inner
+            .lock()
+            .expect("approval request queue")
+            .get(&Self::current_scope())
+            .map_or(0, Vec::len)
     }
 
     /// Stamps `run_id` onto every request queued at or after `from`, returning
@@ -397,10 +620,18 @@ impl ApprovalRequestQueue {
     /// dispatched card knows exactly which of the queue's entries its own turns
     /// added. Requests below `from` belong to a chat turn earlier in the same
     /// cycle and are deliberately left `None`.
+    ///
+    /// Scoped to the current bucket since #439, so "the entries its own turns
+    /// added" is now true by construction rather than by a boundary that a
+    /// concurrent run could invalidate.
     pub fn stamp_run(&self, from: usize, run_id: &str) -> usize {
+        let scope = Self::current_scope();
         let mut guard = self.inner.lock().expect("approval request queue");
+        let Some(bucket) = guard.get_mut(&scope) else {
+            return 0;
+        };
         let mut stamped = 0;
-        for request in guard.iter_mut().skip(from) {
+        for request in bucket.iter_mut().skip(from) {
             request.effect.run_id = Some(run_id.to_string());
             stamped += 1;
         }
@@ -826,8 +1057,15 @@ impl ApprovalPolicy {
     }
 
     /// The one construction site for a `RequireApproval` decision (issue #172):
-    /// record the projected effect on the shared queue so the brain can park it
-    /// after the turn, then return the decision openhuman blocks the call with.
+    /// record the projected effect on the approval queue so the brain can park
+    /// it after the turn, then return the decision openhuman blocks the call
+    /// with.
+    ///
+    /// The entry lands in the surrounding turn's
+    /// [`ApprovalScope`] (issue #439). This function is the reason the scope is
+    /// ambient rather than a parameter: it is called synchronously by the
+    /// vendored tool loop, through a per-agent policy that outlives every run,
+    /// so there is no argument here that could carry a run id.
     ///
     /// Every `RequireApproval` arm of [`check`](ToolPolicy::check) goes through
     /// here — a decision that skipped it would refuse the tool without ever
@@ -2377,16 +2615,10 @@ mod tests {
         assert_eq!(queue.stamp_run(queue.queued(), "run-1"), 0);
     }
 
-    // --- `take_from`: a workflow node's own tail, and nobody else's (#395) ----
+    // --- scopes: a turn's entries are its own, and nobody else's (#439) ------
 
-    /// The regression this method exists for. A workflow agent node parks its
-    /// gated calls while a chat cycle is part-way through its own turn; taking
-    /// the tail must leave that cycle's entries exactly where they were, and
-    /// `drain` would not — it takes from the front and clears the rest.
-    #[test]
-    fn taking_from_a_boundary_leaves_everything_below_it_untouched() {
-        let queue = ApprovalRequestQueue::default();
-        let queued = |kind: &str| ApprovalRequest {
+    fn gated(kind: &str) -> ApprovalRequest {
+        ApprovalRequest {
             tool: kind.to_string(),
             reason: "gated".to_string(),
             effect: Effect {
@@ -2399,74 +2631,246 @@ mod tests {
                 agent: Some("ceo".to_string()),
                 run_id: None,
             },
-        };
+        }
+    }
+
+    /// The regression #395 narrowed and #439 removes: a workflow node parks its
+    /// gated calls while a chat cycle is part-way through its own turn.
+    ///
+    /// #395 did this with a boundary index, which worked only because the queue
+    /// was append-only — it encoded a *guess* about who wrote what. The scope
+    /// encodes the fact, so the node cannot see the cycle's entry at all rather
+    /// than merely declining to take it.
+    #[tokio::test]
+    async fn a_run_drains_its_own_entries_and_cannot_see_another_turns() {
+        let queue = ApprovalRequestQueue::default();
 
         // A chat cycle's own turn parked this one and has not drained yet.
-        queue.push(queued("chat.thing"));
-        let boundary = queue.queued();
-        // The workflow node's turn parks two.
-        queue.push(queued("node.thing"));
-        queue.push(queued("node.other"));
+        let cycle = queue.claim(ApprovalScope::Cycle);
+        cycle
+            .scoped(async { queue.push(gated("chat.thing")) })
+            .await;
 
-        let taken = queue.take_from(boundary);
+        // The workflow node's turn parks two, concurrently.
+        let run = queue.claim(ApprovalScope::Run("run-1".into()));
+        let taken = run
+            .scoped(async {
+                queue.push(gated("node.thing"));
+                queue.push(gated("node.other"));
+                assert_eq!(queue.queued(), 2, "the run sees only its own");
+                queue.drain(10)
+            })
+            .await;
         assert_eq!(
-            taken.iter().map(|r| r.tool.as_str()).collect::<Vec<_>>(),
+            taken
+                .requests
+                .iter()
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>(),
             vec!["node.thing", "node.other"],
-            "only the node's own tail comes back"
+            "only the node's own entries come back"
         );
+
+        // The cycle's entry is untouched and still drains as its own.
+        let drained = cycle.scoped(async { queue.drain(10) }).await;
         assert_eq!(
-            queue.queued(),
-            1,
-            "the chat cycle's entry is still queued for its own drain"
-        );
-        assert_eq!(
-            queue.drain(10).requests[0].tool,
-            "chat.thing",
-            "…and it is the same entry, not a survivor of a clear-and-rebuild"
+            drained
+                .requests
+                .iter()
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["chat.thing"],
+            "the chat cycle's entry survived the run's drain, unmoved"
         );
     }
 
-    /// A node whose turn parked nothing takes nothing — and a boundary past the
-    /// end (a `clear` raced in between) yields nothing rather than panicking.
-    #[test]
-    fn taking_from_the_end_or_past_it_yields_nothing() {
+    /// The race a boundary index could never fix: **two concurrent workflow
+    /// runs**. Both took a boundary against one shared vector, so the later
+    /// `split_off` swallowed the earlier run's tail. Scopes make them disjoint.
+    #[tokio::test]
+    async fn two_concurrent_runs_cannot_take_each_others_entries() {
         let queue = ApprovalRequestQueue::default();
-        assert!(queue.take_from(queue.queued()).is_empty());
-        assert!(queue.take_from(0).is_empty());
+        let one = queue.claim(ApprovalScope::Run("run-1".into()));
+        let two = queue.claim(ApprovalScope::Run("run-2".into()));
+
+        // Interleaved exactly as two spawned runs would be.
+        one.scoped(async { queue.push(gated("one.a")) }).await;
+        two.scoped(async { queue.push(gated("two.a")) }).await;
+        one.scoped(async { queue.push(gated("one.b")) }).await;
+
+        let two_got = two.scoped(async { queue.drain(10) }).await;
+        assert_eq!(
+            two_got
+                .requests
+                .iter()
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["two.a"],
+            "run-2 must not swallow run-1's tail",
+        );
+        let one_got = one.scoped(async { queue.drain(10) }).await;
+        assert_eq!(
+            one_got
+                .requests
+                .iter()
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["one.a", "one.b"],
+            "and run-1 keeps both of its own, in order",
+        );
+    }
+
+    /// The non-lossy fallback. A push outside any claim is not dropped and not
+    /// an error — it lands in `Unscoped`, which the **chat cycle** drains and a
+    /// workflow run does not.
+    ///
+    /// This is the direction that matters: a missed turn entry point degrades
+    /// to today's behaviour (the operator is still asked) rather than to a
+    /// silently discarded approval, which is the failure #395 existed to fix.
+    #[tokio::test]
+    async fn an_unclaimed_push_is_drained_by_the_cycle_never_by_a_run() {
+        let queue = ApprovalRequestQueue::default();
+        queue.push(gated("orphan"));
+
+        let run = queue.claim(ApprovalScope::Run("run-1".into()));
         assert!(
-            queue.take_from(9_000).is_empty(),
-            "a boundary past the end must not panic — a raced clear degrades to \
-             parking nothing"
+            run.scoped(async { queue.drain(10) })
+                .await
+                .requests
+                .is_empty(),
+            "a run must not adopt an entry it did not raise",
+        );
+
+        let cycle = queue.claim(ApprovalScope::Cycle);
+        let drained = cycle.scoped(async { queue.drain(10) }).await;
+        assert_eq!(
+            drained
+                .requests
+                .iter()
+                .map(|r| r.tool.as_str())
+                .collect::<Vec<_>>(),
+            vec!["orphan"],
+            "the cycle owns whatever nobody claimed — the pre-#439 behaviour",
         );
     }
 
-    /// The append-only property the boundary rests on: a push while the node's
-    /// turn is running lands *after* the boundary, never before it, so the
-    /// entitlement split can never mis-attribute an entry downward.
-    #[test]
-    fn pushes_only_ever_append_so_a_boundary_stays_valid() {
+    /// The claim's exit half. A turn that returns early — an error, a steer, an
+    /// `?` — must not leave its entries for whoever claims that scope next.
+    /// `clear()` at the top of a cycle never gave this; `Drop` does.
+    #[tokio::test]
+    async fn dropping_a_claim_discards_that_scopes_entries() {
         let queue = ApprovalRequestQueue::default();
-        let queued = |kind: &str| ApprovalRequest {
-            tool: kind.to_string(),
-            reason: "gated".to_string(),
-            effect: Effect {
-                kind: kind.to_string(),
-                group: EffectGroup::Other,
-                amount_usd: None,
-                established_thread: false,
-                first_time_counterparty: false,
-                payload: serde_json::json!({ "kind": kind }),
-                agent: None,
-                run_id: None,
-            },
-        };
-        queue.push(queued("a"));
-        let boundary = queue.queued();
-        for kind in ["b", "c", "d"] {
-            queue.push(queued(kind));
+        {
+            let cycle = queue.claim(ApprovalScope::Cycle);
+            cycle.scoped(async { queue.push(gated("abandoned")) }).await;
+            assert_eq!(queue.len_in(&ApprovalScope::Cycle), 1, "parked mid-turn");
         }
-        assert_eq!(queue.take_from(boundary).len(), 3);
-        assert_eq!(queue.queued(), 1);
+        // Observed WITHOUT claiming. Asserting through a fresh claim would pass
+        // even with `Drop` removed, because `claim` clears on entry too — this
+        // assertion was vacuous until it read the bucket directly.
+        assert_eq!(
+            queue.len_in(&ApprovalScope::Cycle),
+            0,
+            "the abandoned entries must go when the claim does, not when the \
+             next claim happens to clear them",
+        );
+    }
+
+    /// De-duplication is per scope. Two turns asking for the same tool are two
+    /// asks; collapsing them would hide one turn's request behind another's.
+    #[tokio::test]
+    async fn duplicate_suppression_is_per_scope_not_global() {
+        let queue = ApprovalRequestQueue::default();
+        let cycle = queue.claim(ApprovalScope::Cycle);
+        let run = queue.claim(ApprovalScope::Run("run-1".into()));
+
+        cycle
+            .scoped(async {
+                queue.push(gated("same"));
+                queue.push(gated("same"));
+                assert_eq!(queue.queued(), 1, "a retry within one turn is one ask");
+            })
+            .await;
+        run.scoped(async {
+            queue.push(gated("same"));
+            assert_eq!(queue.queued(), 1, "the other turn's ask is its own");
+        })
+        .await;
+    }
+
+    /// Issue #439's half of the grant-lifetime guarantee, alongside
+    /// `grants_survive_a_queue_clear`.
+    ///
+    /// A grant is minted by one turn's decision and redeemed by a different,
+    /// later one, so it belongs to the company and never to a scope. If it had
+    /// been folded into the per-scope map, dropping the claim would take it —
+    /// and approvals would fail in exactly their own happy path.
+    #[tokio::test]
+    async fn grants_outlive_a_scope() {
+        let grants = GrantSet::default();
+        let queue = ApprovalRequestQueue::with_grants(grants.clone());
+        let args = serde_json::json!({ "to": "a@b.test" });
+        grants.grant(GrantedCall {
+            approval_id: crate::ports::types::ApprovalId::new("a1"),
+            agent: "finance".to_string(),
+            tool: "composio_execute".to_string(),
+            args: args.clone(),
+            at_millis: 1_000,
+            origin_thread: None,
+            origin_parent: None,
+        });
+
+        {
+            let cycle = queue.claim(ApprovalScope::Cycle);
+            cycle.scoped(async { queue.push(gated("whatever")) }).await;
+        }
+
+        assert!(
+            queue
+                .grants()
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "the scope went; the grant did not",
+        );
+    }
+
+    /// The trap the derived `Default` used to hide: a queue built with
+    /// `default()` has its **own** grant set, so a grant minted elsewhere can
+    /// never be redeemed through it and every approval re-parks forever.
+    ///
+    /// Production uses `with_grants` and is safe; this pins the difference so
+    /// the hazard is a stated property rather than a footgun — and so a future
+    /// per-scope refactor cannot reach for `default()` and silently scope
+    /// grants along with the requests.
+    #[test]
+    fn grants_are_not_shared_by_default() {
+        let shared = GrantSet::default();
+        let args = serde_json::json!({ "to": "a@b.test" });
+        let call = GrantedCall {
+            approval_id: crate::ports::types::ApprovalId::new("a1"),
+            agent: "finance".to_string(),
+            tool: "composio_execute".to_string(),
+            args: args.clone(),
+            at_millis: 1_000,
+            origin_thread: None,
+            origin_parent: None,
+        };
+        shared.grant(call.clone());
+
+        assert!(
+            ApprovalRequestQueue::default()
+                .grants()
+                .consume("finance", "composio_execute", &args)
+                .is_none(),
+            "a default queue cannot see a grant minted anywhere else",
+        );
+        assert!(
+            ApprovalRequestQueue::with_grants(shared)
+                .grants()
+                .consume("finance", "composio_execute", &args)
+                .is_some(),
+            "…and `with_grants` is the constructor that can — the one production uses",
+        );
     }
 
     /// A queue nobody installed stays inert — the default policy behaves exactly

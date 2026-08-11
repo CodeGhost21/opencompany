@@ -32,6 +32,7 @@ use crate::harness::confine;
 // two note formats depending on which path touched it last.
 use crate::harness::lifecycle::{self, TaskRunEnd};
 use crate::harness::orchestrator;
+use crate::harness::policy::ApprovalScope;
 use crate::harness::publish::{self, WorkspaceSnapshot};
 use crate::runtime::advance::append_result;
 // `Delegation` is only named by the test-only `run_delegation` wrapper and the
@@ -2094,15 +2095,45 @@ fn settle(card: &mut TaskRecord, end: TaskRunEnd, responder: &str, body: &str) {
 #[async_trait]
 impl Brain for HarnessBrain {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
+        // Issue #439: everything this cycle does runs inside its own approval
+        // scope, so a workflow run executing concurrently cannot see, take, or
+        // be taken by it.
+        //
+        // The claim replaces the `clear()` that used to open this function. It
+        // clears on the way in exactly as that did, and additionally on the way
+        // out via `Drop` — which is the half `clear()` never had. A cycle that
+        // returned early used to leave its entries for the *next* cycle to
+        // park; now the window is the claim's lifetime and nothing outlives it.
+        let claim = self.deps.approval_requests.claim(ApprovalScope::Cycle);
+        claim.scoped(self.run_cycle_scoped(req, host)).await
+    }
+
+    /// The harness meters itself per turn in [`HarnessPool::run`], against the
+    /// live provider slug the turn resolved to — which is why `run_cycle` reports
+    /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
+    fn cognition(&self) -> Cognition {
+        Cognition {
+            path: crate::ports::brain::HARNESS_PATH,
+            provider: "per-turn",
+            metering: UsageMetering::PerTurn,
+        }
+    }
+}
+
+impl HarnessBrain {
+    /// The cycle body, running inside its [`ApprovalScope::Cycle`] claim.
+    ///
+    /// Split out only so the claim can wrap the whole of it: every turn this
+    /// cycle runs — the operator turn, its delegated desk turns, a dispatched
+    /// card, a re-dispatch after an approval — happens in here, and therefore
+    /// files its gated calls into this cycle's bucket.
+    async fn run_cycle_scoped(
+        &self,
+        req: CycleRequest,
+        host: &dyn CycleHost,
+    ) -> Result<CycleResult> {
         // Idempotent — builds the roster on the first cycle, a no-op after.
         self.pool.ensure(&self.record, &self.deps).await?;
-
-        // Issue #172: start from an empty approval queue so nothing a prior
-        // cycle — or a workflow run sharing these deps — left behind is parked
-        // under this cycle. Every turn this cycle runs (the operator turn, its
-        // delegated desk turns, a dispatched card) pushes onto the same queue and
-        // is drained once at the end.
-        self.deps.approval_requests.clear();
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
@@ -2364,17 +2395,6 @@ impl Brain for HarnessBrain {
             ledger_deltas: Vec::new(),
             token_usage: TokenUsage::default(),
         })
-    }
-
-    /// The harness meters itself per turn in [`HarnessPool::run`], against the
-    /// live provider slug the turn resolved to — which is why `run_cycle` reports
-    /// zero `token_usage` and the runtime's cycle-level metering is a no-op here.
-    fn cognition(&self) -> Cognition {
-        Cognition {
-            path: crate::ports::brain::HARNESS_PATH,
-            provider: "per-turn",
-            metering: UsageMetering::PerTurn,
-        }
     }
 }
 

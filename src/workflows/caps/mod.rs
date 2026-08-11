@@ -62,7 +62,7 @@ use tinyflows::caps::{
 };
 use tinyflows::error::{EngineError, Result as TfResult};
 
-use crate::harness::policy::PolicyMode;
+use crate::harness::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN, PolicyMode};
 use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
 
@@ -361,22 +361,32 @@ impl HarnessAgentRunner {
     /// prevented; the parking was never added. That is why the Approvals page
     /// stayed "All clear" through a run an operator watched get gated.
     ///
-    /// # Boundary, not drain
+    /// # Scope, not boundary (issue #439)
     ///
-    /// `from` is taken *before* the turn, and only the tail above it is claimed
-    /// — see
-    /// [`take_from`](crate::harness::policy::ApprovalRequestQueue::take_from).
-    /// The queue is shared with whatever chat cycle happens to be running, and
-    /// `drain` would take that cycle's entries and clear the rest.
+    /// This block used to describe a boundary index: `from` taken before the
+    /// turn, only the tail above it claimed, because the queue was shared with
+    /// whatever chat cycle happened to be running and `drain` would have taken
+    /// that cycle's entries and cleared the rest.
     ///
-    /// This narrows the shared-queue race to a turn-sized window; it does not
-    /// eliminate it. If a chat turn pushes *while* this node's turn is running,
-    /// its request lands above the boundary and is parked here — with this
-    /// run's id stamped on it. The real fix is a per-run queue, which means
-    /// re-plumbing `ApprovalPolicy` installation out of `build_roster`; that is
-    /// deliberately out of scope for #395. The failure mode is a mis-attributed
-    /// `run_id` on a card that is otherwise correct and decidable, which is
-    /// strictly better than the request vanishing.
+    /// It also said, accurately, that this **narrowed** the race rather than
+    /// eliminating it — a chat turn pushing while this node ran landed above
+    /// the boundary and was parked here with this run's id on it — and that the
+    /// real fix was a per-run queue, deferred out of #395.
+    ///
+    /// That is now done, though **not** in the shape that sentence predicted.
+    /// One queue per run is unbuildable: `ApprovalPolicy` is installed by
+    /// `build_roster` inside a fingerprint-cached, per-company
+    /// `HarnessPool::ensure` with no run id in scope, and is then sealed into
+    /// the vendored agent with no setter, so there is nowhere to hand a
+    /// per-run queue *to*. The separation is in the key instead — the run takes
+    /// an [`ApprovalScope::Run`](crate::harness::policy::ApprovalScope) claim
+    /// and pushes route into its own bucket — which yields the same property
+    /// the issue asked for: a turn sees only its own requests.
+    ///
+    /// It also closes a race the boundary never addressed. Two workflow runs
+    /// overlap (they are spawned, not under the cycle lock), and both took a
+    /// boundary against the same vector, so the later `split_off` swallowed the
+    /// earlier run's tail. Scopes are disjoint, so that cannot happen.
     ///
     /// # Never fails the node
     ///
@@ -388,18 +398,36 @@ impl HarnessAgentRunner {
     /// # A run cancelled mid-turn parks nothing, deliberately
     ///
     /// Stopping a run drops the engine future *mid-await* (issue #383), which
-    /// takes this call with it — so a call the policy had already gated stays on
-    /// the shared queue and the next chat cycle's `clear` discards it. That is
-    /// the intended outcome, not a residual leak: an operator who stopped a run
-    /// is not asking to be asked about the work they stopped. It is the same
-    /// judgement `cancelled_run` makes in reporting no `pending_approvals`, and
-    /// the same one `park_pending_gates` makes in skipping a cancelled run.
-    async fn park_gated_calls(&self, from: usize) {
+    /// takes this call with it — so a call the policy had already gated is
+    /// discarded rather than parked. That is the intended outcome, not a
+    /// residual leak: an operator who stopped a run is not asking to be asked
+    /// about the work they stopped. It is the same judgement `cancelled_run`
+    /// makes in reporting no `pending_approvals`, and the same one
+    /// `park_pending_gates` makes in skipping a cancelled run.
+    ///
+    /// Issue #439 made this **cleaner, and no longer anyone else's business**.
+    /// The discard used to be performed by the next chat cycle's `clear`, which
+    /// only worked because the queue was shared — the cancelled run's leftovers
+    /// were sitting in the cycle's way. Now the claim's `Drop` takes them as the
+    /// dropped future unwinds, so the entries never outlive the run and no
+    /// other turn has to sweep up after it.
+    async fn park_gated_calls(&self) {
         let queue = &self.deps.approval_requests;
-        // Issue #242's stamp, applied at the boundary the run owns: this is
-        // where an approval learns which workflow run is waiting on it.
-        queue.stamp_run(from, &self.run_id);
-        let requests = queue.take_from(from);
+        // Issue #242's stamp. The `from` is now 0 because the scope *is* the
+        // entitlement: every entry in this bucket was pushed by this run's own
+        // turn, so there is no prefix belonging to anyone else to skip past.
+        // That is what #439 bought — the boundary index encoded a guess about
+        // who wrote what, and the scope encodes the fact.
+        queue.stamp_run(0, &self.run_id);
+        // The discard count comes off the drain itself (issue #561): `drain`
+        // caps and drops the remainder in one step, so by the time it returns,
+        // how many went is not recoverable from what came back. Reading it
+        // here is what keeps the overflow warning below reachable — without a
+        // count, a run that flooded the gate looks identical to one that did
+        // not.
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let discarded = drained.discarded;
+        let requests = drained.requests;
         if requests.is_empty() {
             return;
         }
@@ -422,8 +450,7 @@ impl HarnessAgentRunner {
             return;
         };
 
-        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
-        if requests.len() > cap {
+        if discarded > 0 {
             // Bounded exactly as the cycle drain is: a model that keeps
             // re-trying a blocked tool must not be able to flood the queue.
             //
@@ -436,12 +463,12 @@ impl HarnessAgentRunner {
             tracing::warn!(
                 company = %self.company,
                 run_id = %self.run_id,
-                discarded = requests.len() - cap,
-                "workflow agent node: more gated tool calls than one turn may park; the excess \
+                discarded,
+                "workflow agent node: more gated tool calls than one run may park; the excess \
                  was discarded"
             );
         }
-        for request in requests.into_iter().take(cap) {
+        for request in requests {
             // The delivery precedent: a workflow run has no board card behind it
             // and no conversation to raise the request in, so it is recorded
             // explicitly unlinked (#333) and stays Approvals-page-only (#379).
@@ -489,19 +516,32 @@ impl AgentRunner for HarnessAgentRunner {
             agent = agent_ref,
             "workflow agent node: routing to harness pool"
         );
-        // Issue #395: where this turn's own approval requests begin, taken
-        // BEFORE the turn so the queue's append-only property makes it a valid
-        // entitlement boundary.
-        let from = self.deps.approval_requests.queued();
-        let outcome = self
-            .pool
-            .run_background(&self.company, agent_ref, &message, &self.deps)
+        // Issue #439: this run's own approval scope, replacing #395's boundary
+        // index. The index was only ever a narrowing — it was taken against a
+        // vector any concurrent turn could append to, so a chat cycle pushing
+        // inside the window landed above the boundary and was parked here with
+        // this run's id on it, and two concurrent runs each took a boundary
+        // against the same vector so the later `split_off` swallowed the
+        // earlier one's tail. A scope removes both by construction: nothing
+        // else can write into this bucket.
+        let claim = self
+            .deps
+            .approval_requests
+            .claim(ApprovalScope::Run(self.run_id.clone()));
+        let outcome = claim
+            .scoped(
+                self.pool
+                    .run_background(&self.company, agent_ref, &message, &self.deps),
+            )
             .await;
         // Drained on BOTH arms, deliberately. A turn that errored may still have
         // had a tool call gated before it failed, and that request is just as
-        // real — leaving it on the queue hands it to the next chat cycle's
-        // `clear()`, which is the exact disappearance this issue is about.
-        self.park_gated_calls(from).await;
+        // real — dropping the claim without parking would discard it, which is
+        // the exact disappearance this issue is about.
+        //
+        // Inside the scope, so the drain reads this run's bucket rather than
+        // whatever `Unscoped` happens to hold.
+        claim.scoped(self.park_gated_calls()).await;
         let outcome = outcome
             .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
