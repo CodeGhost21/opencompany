@@ -260,6 +260,10 @@ async fn run_workflow_inner(
     // durable effect around the engine — the started/finished/node journal
     // writes, the delivery dispatch, and gate parking. Read once here.
     let dry_run = ctx.dry_run;
+    // Issue #661 (L2): a failed per-run-workspace mkdir aborts the run here,
+    // BEFORE the WorkflowRunStarted journal append below — so a workspace the
+    // effects cannot be rooted at leaves no orphaned started row, and the caller
+    // sees the real cause instead of a later, further-removed effect failure.
     let capabilities = super::caps::build_capabilities(
         pool,
         deps,
@@ -269,7 +273,7 @@ async fn run_workflow_inner(
         run_request,
         dry_run,
     )
-    .await;
+    .await?;
 
     // The opening bracket, appended BEFORE the engine call so a run killed
     // mid-flight leaves a start with no finish — which is precisely the shape

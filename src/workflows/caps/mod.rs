@@ -112,6 +112,14 @@ type EffectSlots = (
 /// policy and search backend are not built at all for a dry run — nothing needs
 /// them. Because every effect is stubbed, a future node kind cannot reach a real
 /// effect through a dry bundle: the engine only calls what is on the bundle.
+///
+/// # Errors
+///
+/// Live mode (issue #661) creates the per-run workspace directory the
+/// `tool_call` / `http_request` slots are rooted at; if that mkdir fails this
+/// returns [`OpenCompanyError::Harness`](crate::error::OpenCompanyError::Harness)
+/// rather than proceeding with effects pointed at a directory that does not
+/// exist. A dry run builds no workspace and is infallible.
 pub async fn build_capabilities(
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
@@ -120,7 +128,7 @@ pub async fn build_capabilities(
     run_id: &str,
     run_request: Option<String>,
     dry_run: bool,
-) -> Capabilities {
+) -> crate::error::Result<Capabilities> {
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
     // when one is set, the manifest's otherwise. Reading `manifest.policy` here
@@ -171,14 +179,20 @@ pub async fn build_capabilities(
         )
     } else {
         let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
-        if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
-            tracing::warn!(
-                company = %company,
-                workspace = %workflow_ws.display(),
-                %err,
-                "workflow: could not create the per-run workspace"
-            );
-        }
+        // L2 (issue #661): a workspace the `tool_call` / `http_request` slots
+        // cannot create is not something to warn past and keep going — the run
+        // would proceed with those effects rooted at a directory that does not
+        // exist, failing later and further from the cause. Abort here so the
+        // caller sees the real reason. The failure precedes the WorkflowRunStarted
+        // journal append, so a failed mkdir leaves no orphaned started row.
+        tokio::fs::create_dir_all(&workflow_ws)
+            .await
+            .map_err(|err| {
+                crate::error::OpenCompanyError::Harness(format!(
+                    "workflow run could not create its workspace directory {}: {err}",
+                    workflow_ws.display()
+                ))
+            })?;
 
         // ONE exec-security policy shared by the tool_call toolbelt and the
         // http_request client, sandboxed to the workflow workspace with the
@@ -242,7 +256,7 @@ pub async fn build_capabilities(
         (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
 
-    Capabilities {
+    Ok(Capabilities {
         llm: Arc::new(UnwiredLlm),
         tools,
         http,
@@ -260,7 +274,7 @@ pub async fn build_capabilities(
         // no company manifest can currently produce one (`NodeKind` has no
         // `memory` variant on our side).
         memory: None,
-    }
+    })
 }
 
 /// Builds a traversal-safe workspace path unique to one workflow execution.
@@ -813,7 +827,8 @@ mod tests {
             None,
             false,
         )
-        .await;
+        .await
+        .expect("build_capabilities");
 
         assert!(
             caps.memory.is_none(),
@@ -852,7 +867,8 @@ mod tests {
             None,
             true, // dry
         )
-        .await;
+        .await
+        .expect("build_capabilities");
 
         // http: the stub echoes without sending, carrying the marker.
         let http_out = caps
@@ -886,5 +902,87 @@ mod tests {
             None,
             "dry state must be the inert NoopState, never durable"
         );
+    }
+
+    // ── Issue #661 (L2): a workspace mkdir failure aborts the live build ──
+
+    /// T5 — live mode with an impossible `workspace_root` (a path rooted under a
+    /// regular file) fails the build with a `Harness` error naming the path and
+    /// the underlying I/O cause, instead of warning past it and handing back a
+    /// bundle whose effects are rooted at a directory that does not exist.
+    #[tokio::test]
+    async fn build_capabilities_live_errors_when_workspace_cannot_be_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A regular file where a directory would need to be: `create_dir_all`
+        // under it fails with ENOTDIR.
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"x").expect("write file");
+
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace_root = not_a_dir.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        // `Capabilities` is not `Debug`, so match rather than `expect_err`.
+        let err = match build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            "wf",
+            "run:1",
+            None,
+            false, // live: the workspace mkdir runs
+        )
+        .await
+        {
+            Ok(_) => panic!("an uncreatable workspace must fail the build"),
+            Err(err) => err,
+        };
+
+        let crate::error::OpenCompanyError::Harness(msg) = &err else {
+            panic!("expected a Harness error, got {err:?}");
+        };
+        assert!(
+            msg.contains("could not create its workspace directory"),
+            "message should name the failure: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-dir"),
+            "message should name the offending path: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("not a directory"),
+            "message should carry the underlying I/O cause: {msg}"
+        );
+    }
+
+    /// T6 — the same impossible root is harmless for a dry run: it builds no
+    /// workspace, so the bundle assembles fine.
+    #[tokio::test]
+    async fn build_capabilities_dry_ignores_an_impossible_workspace_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"x").expect("write file");
+
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace_root = not_a_dir;
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            "wf",
+            "run:1",
+            None,
+            true, // dry: no workspace mkdir at all
+        )
+        .await
+        .expect("a dry build never touches the workspace");
     }
 }
