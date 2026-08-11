@@ -10,7 +10,14 @@
 //! echoed — the read shape carries only a `keyConfigured` bool.
 //!
 //! A runtime switch takes effect on the agents' **next turn** with no restart:
-//! the per-tenant provider re-resolves this config every turn.
+//! the per-tenant provider re-resolves this config every turn, and (issue #585)
+//! a `DeferredBrain` re-decides every cycle whether the company has cognition at
+//! all — so this holds even for a tenant that booted with no credential of any
+//! kind, which is the deployment where the company's own key is the only one.
+//!
+//! Setting the key on the `managed` provider is the ordinary case, not a BYOK
+//! edge: it keeps the platform endpoint and swaps only the credential, so the
+//! company pays for its own agents on the TinyHumans brain.
 
 use std::collections::BTreeMap;
 
@@ -395,6 +402,68 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["status"]["provider"], "managed");
         assert_eq!(resp["status"]["source"], "managed");
+
+        std::fs::remove_dir_all(&home).ok();
+    }
+
+    /// Issue #585: the company's key on the *managed* brain — set, rotate, and
+    /// clear — is the whole point of the screen, and the route must never echo
+    /// any of the three tokens back.
+    #[tokio::test]
+    async fn managed_key_can_be_set_rotated_and_cleared() {
+        const ROTATED: &str = "sk-rotated-inference-token-ABC";
+        let home = home();
+        let state = state_with_company(&home).await;
+
+        // Set: the company pays for its own agents on the platform endpoint.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["provider"], "managed");
+        assert_eq!(resp["status"]["slug"], "managed");
+        assert_eq!(resp["status"]["source"], "runtime");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        // Setting only a key must not move the tenant off the managed endpoint.
+        assert_eq!(
+            resp["status"]["baseUrl"],
+            crate::company::inference::MANAGED_BASE_URL
+        );
+        assert!(!raw.contains(TOKEN), "PUT leaked the token: {raw}");
+
+        // Rotate: a second key replaces the first, still write-only.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": ROTATED })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        assert!(!raw.contains(TOKEN), "PUT leaked the old token: {raw}");
+        assert!(!raw.contains(ROTATED), "PUT leaked the new token: {raw}");
+
+        // Clear: an explicit empty key removes it (the console's "Remove key").
+        let (status, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["status"]["keyConfigured"], false);
+
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["keyConfigured"], false);
+        for token in [TOKEN, ROTATED] {
+            assert!(!raw.contains(token), "GET leaked a token: {raw}");
+        }
 
         std::fs::remove_dir_all(&home).ok();
     }

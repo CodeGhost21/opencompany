@@ -55,7 +55,7 @@ layer set it, and what is missing for each optional capability.
 | `OPENCOMPANY_DATA_DIR` | `~/.opencompany` | Bundle root for fs stores |
 | `OPENCOMPANY_BRAIN_MODE` | `hosted` | `hosted` \| `sidecar` (overrides `[brain].mode`) |
 | `OPENCOMPANY_OPENHUMAN_URL` | — | Attach to a running `openhuman-core serve` instead of launching |
-| `OPENCOMPANY_INFERENCE_KEY` | `TINYHUMANS_API_KEY` | Harness-brain credential (`openhuman` feature). Per-tenant override of the platform key |
+| `OPENCOMPANY_INFERENCE_KEY` | `TINYHUMANS_API_KEY` | Harness-brain credential (`openhuman` feature). Deploy-time default only — a company key set through the console (`PUT …/inference`) outranks both names |
 | `OPENCOMPANY_INFERENCE_URL` | `https://api.tinyhumans.ai/openai/v1` | Harness-brain OpenAI-compatible endpoint (`openhuman` feature) |
 | `OPENCOMPANY_INFERENCE_MODEL` | `chat-v1` | Roster-wide default model/tier for the harness brain (`openhuman` feature) |
 | `TINYPLACE_API_URL` | `https://api.tiny.place` | tiny.place base (staging/local override) |

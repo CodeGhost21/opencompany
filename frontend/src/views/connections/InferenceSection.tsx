@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { BrainCircuit, Check, Loader2, RotateCcw, Save, Zap } from "lucide-react";
+import { BrainCircuit, Check, Loader2, RotateCcw, Save, Trash2, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -81,7 +81,7 @@ export function InferenceSection({
 }) {
   const [load, setLoad] = useState<Load>("loading");
   const [status, setStatus] = useState<InferenceStatus | null>(null);
-  const [busy, setBusy] = useState<"save" | "reset" | "test" | null>(null);
+  const [busy, setBusy] = useState<"save" | "reset" | "test" | "removeKey" | null>(null);
   const [test, setTest] = useState<TestState>({ kind: "idle" });
 
   // Switch form.
@@ -120,9 +120,12 @@ export function InferenceSection({
     if (busy) return;
     setBusy("save");
     try {
-      // "Managed" means "use the platform default" — that's a revert, not a
-      // runtime override with an empty credential.
-      if (provider === "managed") {
+      // "Managed" with no company key — neither typed now nor already stored —
+      // means "use the platform default", which is a revert rather than a
+      // runtime override. With a key it is a real override: the company pays for
+      // its own agents on the managed brain (issue #585), so the override has to
+      // be written or the key would be stored and then ignored.
+      if (provider === "managed" && !key.trim() && !status?.keyConfigured) {
         await revertInference(client, company);
       } else {
         const cleanModels = Object.fromEntries(
@@ -143,6 +146,36 @@ export function InferenceSection({
       await refresh();
     } catch (err) {
       toast.error(err instanceof ApiError ? err.message : "Couldn't update inference.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  /** Clears the stored company key without changing the effective provider. */
+  async function removeKey() {
+    if (busy) return;
+    setBusy("removeKey");
+    const effective = (status?.provider as InferenceProvider) ?? provider;
+    try {
+      await setInference(client, company, {
+        provider: effective,
+        // Only echo the resolved base URL back for the providers that require
+        // one. `managed` and `openrouter` resolve theirs from the environment or
+        // a well-known default, and persisting the *displayed* value would pin
+        // the company to it — silently overriding `OPENCOMPANY_INFERENCE_URL`.
+        baseUrl:
+          effective === "ollama" || effective === "openai_compatible"
+            ? status?.baseUrl || undefined
+            : undefined,
+        models: status && Object.keys(status.models).length ? status.models : undefined,
+        key: "",
+      });
+      toast.success("Removed the company key. Agents fall back on their next turn.");
+      setKey("");
+      setTest({ kind: "idle" });
+      await refresh();
+    } catch (err) {
+      toast.error(err instanceof ApiError ? err.message : "Couldn't remove the key.");
     } finally {
       setBusy(null);
     }
@@ -198,9 +231,10 @@ export function InferenceSection({
         </h3>
       </div>
       <p className="text-sm text-muted-foreground">
-        Choose which model provider your agents think with. Bring your own key for OpenRouter, a
-        custom OpenAI-compatible endpoint, or a local Ollama server — the key is stored securely and
-        never shown again. A switch takes effect on the next turn, no restart.
+        Choose which model provider your agents think with, and set the key they spend against —
+        the managed TinyHumans brain, OpenRouter, a custom OpenAI-compatible endpoint, or a local
+        Ollama server. The key is stored securely and never shown again. A switch takes effect on
+        the next turn, no restart.
       </p>
 
       {load === "loading" ? (
@@ -297,38 +331,51 @@ export function InferenceSection({
               </div>
 
               {provider !== "managed" && (
-                <>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    {TIERS.map((tier) => (
-                      <div key={tier} className="space-y-1">
-                        <Label htmlFor={`inference-model-${tier}`} className="text-xs">
-                          {tier}
-                        </Label>
-                        <Input
-                          id={`inference-model-${tier}`}
-                          value={models[tier] ?? ""}
-                          placeholder="provider model id"
-                          onChange={(e) => setModel(tier, e.target.value)}
-                        />
-                      </div>
-                    ))}
-                  </div>
-                  {provider !== "ollama" && (
-                    <div className="space-y-1">
-                      <Label htmlFor="inference-key" className="text-xs">
-                        API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
+                <div className="grid gap-2 sm:grid-cols-2">
+                  {TIERS.map((tier) => (
+                    <div key={tier} className="space-y-1">
+                      <Label htmlFor={`inference-model-${tier}`} className="text-xs">
+                        {tier}
                       </Label>
                       <Input
-                        id="inference-key"
-                        type="password"
-                        value={key}
-                        placeholder="write-only"
-                        autoComplete="off"
-                        onChange={(e) => setKey(e.target.value)}
+                        id={`inference-model-${tier}`}
+                        value={models[tier] ?? ""}
+                        placeholder="provider model id"
+                        onChange={(e) => setModel(tier, e.target.value)}
                       />
                     </div>
-                  )}
-                </>
+                  ))}
+                </div>
+              )}
+
+              {/*
+                The key field is offered for `managed` too (issue #585): the
+                company's TinyHumans key is the admin's to set, and hiding the
+                input here was the whole reason it could only arrive as a
+                deploy-time environment variable. Ollama is the one provider that
+                takes no bearer.
+              */}
+              {provider !== "ollama" && (
+                <div className="space-y-1">
+                  <Label htmlFor="inference-key" className="text-xs">
+                    API key {status?.keyConfigured ? "(leave blank to keep)" : ""}
+                  </Label>
+                  <Input
+                    id="inference-key"
+                    type="password"
+                    value={key}
+                    placeholder="write-only"
+                    autoComplete="off"
+                    onChange={(e) => setKey(e.target.value)}
+                  />
+                  <p className="text-xs text-muted-foreground">
+                    This key is the company's wallet. Everyone you invite to this company spends
+                    against it — inference, embeddings, tools and capabilities all bill to this one
+                    account, and spend cannot be attributed back to individual members. Removing
+                    someone from the roster stops their future access; it does not separate what
+                    they already spent.
+                  </p>
+                </div>
               )}
 
               <div className="flex items-center gap-2">
@@ -340,6 +387,21 @@ export function InferenceSection({
                   {busy === "reset" ? <Loader2 className="size-4 animate-spin" /> : <RotateCcw className="size-4" />}
                   Reset to managed
                 </Button>
+                {status?.keyConfigured && (
+                  <Button
+                    variant="ghost"
+                    className="text-destructive"
+                    disabled={busy !== null}
+                    onClick={() => void removeKey()}
+                  >
+                    {busy === "removeKey" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Trash2 className="size-4" />
+                    )}
+                    Remove key
+                  </Button>
+                )}
               </div>
             </div>
           </CardContent>
