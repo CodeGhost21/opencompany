@@ -107,9 +107,24 @@ impl Reach {
 /// operator-owned state is [`PerCall`](Self::PerCall) however innocuous its
 /// name; a read scoped to one connected account is
 /// [`Grantable`](Self::Grantable) however alarming the tool carrying it sounds.
+///
+/// # This now decides two different things (issue #560)
+///
+/// Since the `auto` tier, [`Consequence::parks_under_auto`] reads this field to
+/// mean "may run **unattended for everyone** while the company sits in `auto`"
+/// — a wider grant than the per-teammate, until-a-deadline one the name
+/// describes. Loosening a tool to [`Grantable`](Self::Grantable) for a
+/// delegation reason therefore also stops it parking under `auto`, for every
+/// agent, with no operator in the loop. That is sound because this field is
+/// decided by what a tool can *reach* rather than by what it is called — but it
+/// is two decisions in one edit, and the second one is easy to make by
+/// accident. `the_auto_tier_line_is_pinned_tool_by_tool` in this module's tests
+/// walks the whole table and fails loudly if a tool crosses that line.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
-    /// An operator may grant this to a teammate until a deadline.
+    /// An operator may grant this to a teammate until a deadline — **and**,
+    /// since issue #560, may run unattended under the `auto` tier. See the note
+    /// on [`Standing`] before loosening a tool to this.
     Grantable,
     /// Every call is its own decision.
     PerCall,
@@ -627,6 +642,95 @@ mod tests {
 
     fn c(tool: &str) -> Consequence {
         consequence_of(tool, &json!({}))
+    }
+
+    /// The `auto` line, named tool by tool and taken from the whole table
+    /// rather than a sample (issue #560).
+    ///
+    /// [`Consequence::parks_under_auto`] is easy to check as a predicate; what
+    /// an operator actually feels is *which tools* stopped asking. And since
+    /// #560, [`Standing::Grantable`] decides two things at once — may be
+    /// delegated to one teammate, **and** runs unattended for everyone under
+    /// `auto` — so an edit loosening one tool for a delegation reason moves it
+    /// across this line as a side effect.
+    ///
+    /// This walks [`declared_tools`], so a tool joining or leaving the
+    /// unattended set fails here and has to be named deliberately. The
+    /// predicate test alone would not notice.
+    #[test]
+    fn the_auto_tier_line_is_pinned_tool_by_tool() {
+        // The whole of what `auto` changes: parks for an operator under
+        // `supervised`, runs unattended under `auto`. Every entry is the
+        // agent's own sandbox or this company's own memory — nothing here
+        // leaves the building or spends money.
+        const MOVED_BY_AUTO: &[&str] = &[
+            "apply_patch",
+            "csv_export",
+            "edit",
+            "file_write",
+            "memory_store",
+        ];
+
+        let mut moved: Vec<&str> = declared_tools()
+            .filter(|tool| {
+                let verdict = c(tool);
+                verdict.reach.parks_under_supervision() && !verdict.parks_under_auto()
+            })
+            .collect();
+        moved.sort_unstable();
+        assert_eq!(
+            moved, MOVED_BY_AUTO,
+            "a tool crossed the `auto` line. If that is intended, say so here — \
+             `Standing::Grantable` now also means 'runs unattended for every agent \
+             while the company sits in auto', which is wider than the standing \
+             grant the field is named for"
+        );
+
+        // The other direction, spelled out: the tools an operator would be
+        // most alarmed to find running unattended still park.
+        for tool in [
+            "shell",
+            "http_request",
+            "git_operations",
+            "workspace_write",
+            "publish_artifact",
+            "media_generate_image",
+            "media_generate_video",
+            "mcp_call_tool",
+            "run_workflow",
+            "some_tool_nobody_declared",
+        ] {
+            assert!(
+                c(tool).parks_under_auto(),
+                "`{tool}` leaves the company, spends money, or cannot be seen into — \
+                 it must still park under auto"
+            );
+        }
+
+        // And the boundary `auto` deliberately does not draw: a billed read is
+        // not a park. `web_search` runs under `supervised` because openhuman
+        // resolves a `RequireApproval` inline — a parked search never happens —
+        // and `auto` must not be stricter than the tier it replaces. The daily
+        // cap is what holds spend.
+        assert!(!c("web_search").parks_under_auto());
+        assert!(c("web_search").reach.costs_money());
+    }
+
+    /// The argument-classified half of the same line: a Composio read runs
+    /// unattended under `auto`, a send does not — and the cautious fallback
+    /// keeps an unclassified action on the parking side.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn the_auto_line_reads_composio_arguments_not_the_tool_name() {
+        let auto = |slug: &str| {
+            consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": slug })).parks_under_auto()
+        };
+        assert!(!auto("GITHUB_LIST_PULL_REQUESTS"), "a catalogue read runs");
+        assert!(auto("GMAIL_SEND_EMAIL"), "a send still parks");
+        assert!(
+            auto("GITHUB_INVENT_A_NEW_VERB"),
+            "an action nobody has classified is a send, in this tier too"
+        );
     }
 
     #[test]
