@@ -332,6 +332,20 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
 const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
   shell: ["command", "cwd", "timeout"],
   glob: ["pattern", "path"],
+  // The #701 labels lean on this block harder than the two above do. "Download a
+  // file from the internet" is only half a question until the operator can see
+  // *which* address, and both network payloads carry headers and a body that
+  // will happily push the url off the first line. Same for the git operation,
+  // which is the entire difference between reading a log and committing.
+  //
+  // Key names are the tools' own, not guesses: `curl` takes `url`/`dest_path`
+  // and no method (it streams a download to disk), `http_request` takes
+  // `url`/`method`, and `git_operations` takes `operation` — an enum, not a
+  // command line. Nothing is hidden here; this promotes, and every unlisted
+  // argument still follows.
+  curl: ["url", "dest_path"],
+  http_request: ["url", "method"],
+  git_operations: ["operation"],
 };
 
 function renderValue(value: unknown): string {
