@@ -427,6 +427,19 @@ impl<'a> DelegationRunner<'a> {
         // is what carries "one message, one card" through the publish drain too:
         // the caller files a published deliverable onto `spawned_task` rather
         // than minting a second card beside this one (issue #463).
+        //
+        // Adoption is NOT a settle, and one path notices (issue #678). When the
+        // orchestrator answers "create a workflow named X" by authoring the
+        // graph in-turn with the inline `create_workflow` tool, this card is
+        // adopted — the bubble links to it — but nothing moves it out of To-do:
+        // `CreateWorkflowTool` stages onto the `WorkflowRefQueue`, which is
+        // drained only by the dispatched-card path in `HarnessBrain::run_task`,
+        // and the publish drain settles from `pending_publishes`, which
+        // `create_workflow` never populates. The operator does get the workflow;
+        // the card is what lags. Fixing it needs a `workflow_refs` handle here
+        // AND a notion of task output without a run row (`TaskOutput.run_id` is
+        // required and a chat turn has no run) — both #183's territory, so it is
+        // tracked rather than bolted on.
         let handler_card = match carded_by_handler {
             true => self.chat_handler_card(message).await?,
             false => None,

@@ -45,6 +45,16 @@
 //! paths call, so the issue-#463 title contract with
 //! `DelegationRunner::chat_handler_card` — which has to derive byte-for-byte
 //! the same title the handler wrote — is untouched.
+//!
+//! # What this deliberately is not
+//!
+//! Not the LLM classifier issue #267 sketches. OpenHuman's `trigger_triage`
+//! precedent classifies *external* triggers and pays a fast model to do it;
+//! OpenCompany has one `ChatModel` per company and no fast tier, so a
+//! pre-turn classifier would add a full-price serial round-trip to every
+//! message. It is tracked in **issue #678** along with fast-model routing, a
+//! first-class `automate` class, and gating the hosted path once #176 gives it
+//! a delegation stack to gate.
 
 /// Bare greeting / acknowledgement messages that must never open a card, matched
 /// against the whole message (punctuation stripped). Kept short and exact so a
