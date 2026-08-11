@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { signInWithHubToken, verifyCode } from "@/api/auth";
@@ -95,7 +95,51 @@ function clearHubResultFromUrl(): void {
   window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
 }
 
+/**
+ * The styleguide answers before anything else does.
+ *
+ * It reads no company and holds no client — it renders the stylesheet and
+ * nothing else — so putting it behind the sign-in gate would only mean that
+ * reviewing the design system required credentials for a running host. This
+ * way `#/styleguide` works against any build, including a static one.
+ *
+ * Checked before `resolveConfig()` so a console with no reachable host still
+ * serves it.
+ */
+function isStyleguideRoute(): boolean {
+  return window.location.hash.replace(/^#\/?/, "").split("?")[0] === "styleguide";
+}
+
 export function App() {
+  /**
+   * Tracked rather than read once, so `#/styleguide` typed into the address
+   * bar of a *running* console switches to it. Without the listener the shell
+   * below would keep the screen, and its own router — which does not know
+   * this route — would canonicalize the unknown hash straight back to
+   * `#/overview`, making the styleguide reachable only by a full reload.
+   */
+  const [styleguide, setStyleguide] = useState(isStyleguideRoute);
+  useEffect(() => {
+    const onHash = () => setStyleguide(isStyleguideRoute());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  if (styleguide) {
+    return (
+      <Suspense fallback={null}>
+        <StandaloneStyleguide />
+      </Suspense>
+    );
+  }
+  return <Console />;
+}
+
+const StandaloneStyleguide = lazy(() =>
+  import("@/views/StyleguideView").then((m) => ({ default: m.StyleguideView })),
+);
+
+function Console() {
   const config = useMemo(() => resolveConfig(), []);
   /**
    * The bootstrap connection.
