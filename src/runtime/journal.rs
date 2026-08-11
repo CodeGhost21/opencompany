@@ -28,7 +28,7 @@ use crate::error::OpenCompanyError;
 use crate::ports::types::{Actor, ApprovalId, Effect, EventSeq};
 use crate::runtime::grants::{GrantId, GrantedCall, StandingGrant};
 pub use crate::runtime::types::TaskLink;
-use crate::store::fs::{PathLocks, append_line};
+use crate::store::fs::{PathLocks, append_line, append_line_durable};
 
 /// Journal append locks, keyed by path, shared by every [`RuntimeJournal`] in
 /// the process (issue #386).
@@ -290,6 +290,91 @@ enum JournalRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
+}
+
+/// The failure a journal record is written to outlast (issue #392).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum Durability {
+    /// In the kernel's page cache when [`RuntimeJournal::append`] returns. A
+    /// killed process cannot lose the record; a host crash or power loss can.
+    Process,
+    /// On stable storage when [`RuntimeJournal::append`] returns, at the cost of
+    /// one flush per append.
+    Host,
+}
+
+impl JournalRecord {
+    /// Which failure this record must survive.
+    ///
+    /// Host durability is bought for exactly the records whose loss would make
+    /// the runtime **repeat an external action**, and for nothing else. The
+    /// frequency asymmetry is the whole argument, and it runs the helpful way:
+    /// the dangerous records are rare and the frequent records are harmless.
+    /// [`EffectExecuted`](Self::EffectExecuted) is written at human-approval
+    /// scale, immediately in front of a network call that costs 100ms-2s, so a
+    /// flush ahead of it is invisible; [`CycleStarted`](Self::CycleStarted) is
+    /// written on the front edge of *every* cycle, before the per-company serial
+    /// lock, and losing it costs an observability bracket. A blanket flush would
+    /// tax the hottest cosmetic record in the journal to protect the rarest
+    /// dangerous one.
+    ///
+    /// The match is **wildcard-free on purpose, and must stay that way**: a new
+    /// record kind is a compile error until its author has decided which failure
+    /// it must survive. That decision — not the two flushes — is what #392
+    /// delivers. Same reasoning as [`TaskLink`] being an enum rather than a bare
+    /// `Option`: the type refuses to let a decision be skipped by default.
+    fn durability(&self) -> Durability {
+        match self {
+            // Written *before* the side effect runs (`execute_effect_once`), so
+            // losing it makes the next boot re-fire the effect mechanically —
+            // the single duplication this journal exists to prevent.
+            Self::EffectExecuted { .. } => Durability::Host,
+            // Losing it silently un-revokes: the grant replays live on the next
+            // boot and keeps admitting calls until its own deadline, undoing an
+            // operator's withdrawal of authority. An operator action, so rare
+            // enough that the flush costs nothing measurable.
+            Self::StandingGrantRevoked { .. } => Durability::Host,
+
+            // Written *after* the tool already ran, batched at cycle end as an
+            // explicitly best-effort write whose failure is only logged
+            // (`CompanyCycle::run`). The design already accepts a turn-length
+            // loss window, so flushing inside a wider accepted window is
+            // theatre. A lost record re-arms a spent grant, which re-asks the
+            // operator.
+            Self::GrantConsumed { .. } => Durability::Process,
+            // Losing a park loses the *question*: the approval vanishes and the
+            // agent parks it again on its next attempt. Nothing external fired.
+            Self::ApprovalParked { .. } => Durability::Process,
+            // Bookkeeping after the decision. A ghost approval that is approved
+            // a second time cannot duplicate the effect, because the effect's
+            // own commit is host-durable and `is_executed` skips it.
+            Self::ApprovalResolved { .. } => Durability::Process,
+            // Recomputed: the parked record carries the deadline, so replay
+            // re-expires it.
+            Self::ApprovalExpired { .. } => Durability::Process,
+            // Audit-only. The queue removal rides on the paired
+            // `ApprovalResolved`, and the original effect stays recoverable from
+            // the earlier `ApprovalParked`.
+            Self::ApprovalAmended { .. } => Durability::Process,
+            // Written *before* the grant goes live, so losing it forgets a YES:
+            // the agent is blocked again and the operator is re-asked. The safe
+            // direction — the cost of the loss is an extra question, never an
+            // extra call.
+            Self::ApprovalGranted { .. } => Durability::Process,
+            // The same direction as `ApprovalGranted`, one scope wider.
+            Self::StandingGrantMinted { .. } => Durability::Process,
+            // Deadline arithmetic rather than state: `replayed_standing_grants`
+            // takes `now_millis` and re-expires anything past its deadline on
+            // the next boot regardless of whether the record survived.
+            Self::GrantExpired { .. } => Durability::Process,
+            Self::StandingGrantExpired { .. } => Durability::Process,
+            // Observability brackets, and the highest-volume records here.
+            // Losing either half reads as an interrupted cycle — which, after a
+            // host crash, it was.
+            Self::CycleStarted { .. } => Durability::Process,
+            Self::CycleFinished { .. } => Durability::Process,
+        }
+    }
 }
 
 /// A parked approval awaiting resolution.
@@ -1561,17 +1646,40 @@ impl RuntimeJournal {
     }
 
     /// Appends one record, whole, and does not return until the write syscall
-    /// has completed.
+    /// has completed — and, for the record kinds that need it, until the bytes
+    /// are on stable storage.
     ///
-    /// **The guarantee is process-crash durability, not host-crash durability.**
-    /// There is no `sync_data`/`sync_all` here, so the bytes are in the kernel's
-    /// page cache rather than on stable storage when this returns: killing the
-    /// process cannot lose them, but a host crash or power loss between the
-    /// append and the flush still can. The at-most-once contract therefore holds
-    /// against a process dying — the case this codebase actually handles, and
-    /// the one the boot reaper and the interrupted-run sweep are built around —
-    /// and not against losing the machine. Whether an `fsync` per append is
-    /// worth its cost on this path is a separate decision (see #392).
+    /// **Durability is per record kind, by decision (issue #392).** Every record
+    /// declares which failure it must outlast through
+    /// [`JournalRecord::durability`], and this is the single choke point that
+    /// honours it, exactly as it is the single choke point for
+    /// [`JOURNAL_WRITE_LOCKS`]:
+    ///
+    /// * The two [`Durability::Host`] kinds — `EffectExecuted` and
+    ///   `StandingGrantRevoked` — go through
+    ///   [`append_line_durable`](crate::store::fs::append_line_durable) and are
+    ///   flushed to stable storage before this returns. So the at-most-once
+    ///   contract holds against **losing the machine** for precisely the records
+    ///   whose loss would repeat an external action, and a failed flush fails
+    ///   the append — which aborts `execute_effect_once` before `perform_effect`
+    ///   and so cannot produce the duplicate it is guarding against.
+    /// * The other eleven are page-cache durable: killing the process cannot
+    ///   lose them, a host crash can. That is the decision, not a gap left open.
+    ///   Losing any of them makes the runtime **re-ask** — an approval is parked
+    ///   again, an operator is prompted again, a cycle bracket reads as
+    ///   interrupted — and never re-fire. Flushing them would tax the journal's
+    ///   highest-volume records to protect against a re-asked question.
+    ///
+    /// **This is bounded by the volume underneath.** The journal is constructed
+    /// unconditionally on the filesystem path, outside the storage ports, so a
+    /// hosted tenant whose `/data` is ephemeral scratch (the documented
+    /// arrangement under `OPENCOMPANY_STORAGE=mongodb` — see
+    /// `docs/spec/runtime/storage.md`) does not keep its journal across a
+    /// container replacement, let alone a host crash, and gains nothing from
+    /// this flush. Where the data directory is a real volume — the reference ECS
+    /// deployment mounts EFS at `/data`, whose NFS client page cache is exactly
+    /// what `sync_data` forces through — it buys real durability. Moving the
+    /// journal behind the ports is issue #726 and is not attempted here.
     ///
     /// Delegates to [`append_line`](crate::store::fs::append_line), which emits
     /// the record **and** its newline in a single blocking `write_all` under
@@ -1595,13 +1703,17 @@ impl RuntimeJournal {
     /// and the feedback store's copy of it; the journal was the last twin.
     async fn append(&self, record: &JournalRecord) -> Result<()> {
         let line = serde_json::to_string(record)?;
+        let durability = record.durability();
         let _guard = self.write_lock.lock().await;
         if let Some(parent) = self.path.parent() {
             tokio::fs::create_dir_all(parent)
                 .await
                 .map_err(|e| self.io_err_at(parent, e))?;
         }
-        append_line(&self.path, &line).await
+        match durability {
+            Durability::Host => append_line_durable(&self.path, &line).await,
+            Durability::Process => append_line(&self.path, &line).await,
+        }
     }
 
     fn io_err(&self, source: std::io::Error) -> OpenCompanyError {
@@ -3190,5 +3302,184 @@ mod test {
                 serde_json::to_string(&record).unwrap()
             );
         }
+    }
+
+    /// One value of every [`JournalRecord`] variant (issue #392).
+    ///
+    /// Hand-built, so it carries its own completeness check below — the tag
+    /// count. The *classification* needs no such guard: `durability`'s match is
+    /// wildcard-free, so a new variant cannot compile until somebody decides
+    /// which failure it must survive.
+    fn every_record_kind() -> Vec<JournalRecord> {
+        vec![
+            JournalRecord::EffectExecuted {
+                key: "k".into(),
+                effect: Some(executed(1)),
+            },
+            JournalRecord::ApprovalParked {
+                id: ApprovalId::new("a"),
+                effect: effect(),
+                at_millis: 1,
+                task: Some(TaskLink::Unlinked),
+                thread: None,
+                parent: None,
+                cycle: None,
+            },
+            JournalRecord::ApprovalResolved {
+                id: ApprovalId::new("a"),
+            },
+            JournalRecord::ApprovalExpired {
+                id: ApprovalId::new("a"),
+                at_millis: 2,
+            },
+            JournalRecord::ApprovalAmended {
+                id: ApprovalId::new("a"),
+                amended_effect: effect(),
+                at_millis: 3,
+            },
+            JournalRecord::ApprovalGranted {
+                grant: grant("a", 4),
+            },
+            JournalRecord::GrantConsumed {
+                id: ApprovalId::new("a"),
+                effect: None,
+            },
+            JournalRecord::GrantExpired {
+                id: ApprovalId::new("a"),
+                at_millis: 5,
+            },
+            JournalRecord::StandingGrantMinted {
+                grant: standing("s", "composio_execute", 9),
+            },
+            JournalRecord::StandingGrantRevoked {
+                id: GrantId::new("s"),
+                by: revoker(),
+                at_millis: 6,
+            },
+            JournalRecord::StandingGrantExpired {
+                id: GrantId::new("s"),
+                at_millis: 7,
+            },
+            JournalRecord::CycleStarted {
+                cycle_id: "c".into(),
+                at_millis: 8,
+                trigger: "test".into(),
+            },
+            JournalRecord::CycleFinished {
+                cycle_id: "c".into(),
+                at_millis: 9,
+                error: None,
+            },
+        ]
+    }
+
+    /// The operator who takes a standing grant back.
+    fn revoker() -> Actor {
+        Actor {
+            kind: crate::ports::types::ActorKind::User,
+            id: "user-42".into(),
+        }
+    }
+
+    /// A record's `record` tag — the same name the serialized line carries, so a
+    /// failure names the variant rather than an index.
+    fn record_tag(record: &JournalRecord) -> String {
+        serde_json::to_value(record).unwrap()["record"]
+            .as_str()
+            .expect("every record is tagged")
+            .to_string()
+    }
+
+    /// **Issue #392**: the host-durable set is a policy, and this pins it.
+    ///
+    /// The wildcard-free match in [`JournalRecord::durability`] already makes
+    /// *completeness* a compile error — a new variant will not build until it is
+    /// classified. What no compiler can catch is an existing kind being moved
+    /// across the line: flipping `EffectExecuted` to `Process` compiles, passes
+    /// every other test in this file, and silently gives up the one guarantee
+    /// the journal exists for. This is the test that notices.
+    #[test]
+    fn host_durable_kinds_are_exactly_effect_executed_and_standing_grant_revoked() {
+        let all = every_record_kind();
+        let tags: HashSet<String> = all.iter().map(record_tag).collect();
+        assert_eq!(
+            tags.len(),
+            13,
+            "every JournalRecord variant must appear once in every_record_kind"
+        );
+
+        let mut host: Vec<String> = all
+            .iter()
+            .filter(|record| record.durability() == Durability::Host)
+            .map(record_tag)
+            .collect();
+        host.sort();
+        assert_eq!(
+            host,
+            vec![
+                "EffectExecuted".to_string(),
+                "StandingGrantRevoked".to_string()
+            ],
+            "the host-durable set is these two kinds and nothing else; \
+             widening it taxes the hot path, narrowing it lets an effect duplicate"
+        );
+    }
+
+    /// **Issue #392**: a host-durable record's append really does take the
+    /// flushing path, and a process-durable one really does not.
+    ///
+    /// What this proves and what it does not. It proves the **policy** (which
+    /// kinds route where) and the **plumbing** (the flush was requested and its
+    /// syscall returned `Ok` — the append would have failed otherwise), plus
+    /// that the record is readable back afterwards. It does **not** prove the
+    /// bytes reached stable storage, and no portable unit test can: a synced and
+    /// an unsynced line are byte-identical on disk, and `SIGKILL` does not drop
+    /// the page cache, so no process-level test can simulate host loss. Proving
+    /// that needs a crash-consistency harness — dm-log-writes, or a VM whose
+    /// unsynced page cache is dropped — which this repo does not have. The OS
+    /// contract carries the rest.
+    #[tokio::test]
+    async fn host_records_route_through_the_durable_append() {
+        use crate::store::fs::append_probe;
+
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        let journal = RuntimeJournal::new(&path);
+
+        journal.record_cycle_started("c-1", "test").await.unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 0),
+            "CycleStarted is process-durable and must not flush"
+        );
+
+        journal.record_executed("k-1", executed(1)).await.unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 1),
+            "EffectExecuted must flush before its side effect runs"
+        );
+
+        journal
+            .record_standing_revoked(&GrantId::new("s-1"), revoker(), 6)
+            .await
+            .unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 2),
+            "StandingGrantRevoked must flush"
+        );
+
+        journal.record_cycle_finished("c-1", None).await.unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (2, 2),
+            "CycleFinished is process-durable and must not flush"
+        );
+
+        // The durable path must leave a journal that still replays.
+        let reloaded = RuntimeJournal::new(&path);
+        reloaded.load().await.unwrap();
+        assert!(reloaded.is_executed("k-1"), "the flushed commit replays");
     }
 }

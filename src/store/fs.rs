@@ -116,13 +116,59 @@ pub(crate) fn path_lock(path: &Path) -> Arc<TokioMutex<()>> {
 /// Tokio's async `File` buffers internally and can return before the kernel
 /// write completes, which makes concurrent-appends tests unreliable; this
 /// version always waits for the write syscall to finish before returning.
+///
+/// **Process-crash durable, not host-crash durable**: the bytes are in the
+/// kernel's page cache when this returns, so killing the process cannot lose
+/// them but losing the machine can. A caller that must have a record on stable
+/// storage before it proceeds uses [`append_line_durable`] instead. Which
+/// records those are is decided per record kind by the runtime journal (issue
+/// #392) — not here, and deliberately not for every append: this function is
+/// the hot path for the event log and the ledger, whose own durability is a
+/// separate decision that #392 does not make.
 pub(crate) async fn append_line(path: &Path, line: &str) -> Result<()> {
+    append_line_inner(path, line, false).await
+}
+
+/// Appends one line exactly as [`append_line`] does, and does not return until
+/// the bytes are on **stable storage** (issue #392).
+///
+/// The write itself is unchanged — one `write_all` under `O_APPEND`, so the
+/// atomicity argument in [`append_line`] carries over untouched — and is
+/// followed by `File::sync_data`. When the file did **not** exist before the
+/// open, the parent directory is opened and `sync_all`ed as well: on a create it
+/// is the directory entry that names the new file, and that entry is a separate
+/// write which a host crash can lose on its own, leaving a flushed file nothing
+/// can find. One `try_exists` pays for that, and it is confined to this function
+/// so the plain path never stats.
+///
+/// **A failed flush fails the append.** For the caller this exists for — the
+/// journal's `EffectExecuted` commit, written immediately before the side effect
+/// runs — that is the safe direction: no record means `execute_effect_once`
+/// aborts before `perform_effect`, so nothing external fires and nothing can
+/// duplicate. It is also the only correct handling of an `fsync` error on Linux,
+/// where a failed flush may already have dropped the dirty pages and a *retry*
+/// would cheerfully report success over lost data.
+pub(crate) async fn append_line_durable(path: &Path, line: &str) -> Result<()> {
+    append_line_inner(path, line, true).await
+}
+
+/// The one append implementation, with the flush as a parameter.
+///
+/// Shared rather than duplicated so the two entry points can never drift on the
+/// part that matters to both of them: the single whole-record `write_all` under
+/// `O_APPEND`.
+async fn append_line_inner(path: &Path, line: &str, sync: bool) -> Result<()> {
     let owned_path = path.to_path_buf();
     let mut record = String::with_capacity(line.len() + 1);
     record.push_str(line);
     record.push('\n');
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
+        // Whether this append is the one that creates the file, which is the
+        // only append whose directory entry needs flushing. Asked before the
+        // open, and only on the durable path. An error answers "assume new",
+        // which costs one needless directory flush and never skips a needed one.
+        let creating = sync && !owned_path.try_exists().unwrap_or(false);
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -130,10 +176,91 @@ pub(crate) async fn append_line(path: &Path, line: &str) -> Result<()> {
             .map_err(|e| io_err(&owned_path, e))?;
         file.write_all(record.as_bytes())
             .map_err(|e| io_err(&owned_path, e))?;
+        if sync {
+            file.sync_data().map_err(|e| io_err(&owned_path, e))?;
+            if creating {
+                sync_parent_dir(&owned_path)?;
+            }
+        }
+        #[cfg(test)]
+        append_probe::record(&owned_path, sync);
         Ok::<_, OpenCompanyError>(())
     })
     .await
     .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+}
+
+/// Flushes the directory entry naming `path`, so a newly created file is still
+/// *findable* after a host crash.
+///
+/// `sync_data` on the file covers the file's own data and the metadata needed to
+/// read it back. It does not cover the parent directory's block, which is where
+/// a create records the new name — flush only the file and a crash can leave the
+/// data durable under a name that was never written down.
+///
+/// POSIX-only by construction: Windows has no directory handle to flush (the
+/// nearest equivalent flushes a whole volume), and `File::open` on a directory
+/// fails there outright, so a non-unix build must not turn that into a failed
+/// append. The deployed target is Linux containers and the development target is
+/// macOS; both are covered.
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) -> Result<()> {
+    let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) else {
+        return Ok(());
+    };
+    std::fs::File::open(parent)
+        .and_then(|dir| dir.sync_all())
+        .map_err(|e| io_err(parent, e))
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) -> Result<()> {
+    Ok(())
+}
+
+/// A test-only tally of how each append to a path was performed (issue #392).
+///
+/// The seam a per-kind durability policy needs proved is "this record asked for
+/// the flush", and no inspection of the file can answer it: a synced line and an
+/// unsynced line are byte-identical on disk. Counting the request where it is
+/// made is the honest check. What it proves is the plumbing, not the platter —
+/// see the journal's `host_records_route_through_the_durable_append` for the
+/// full statement of what a unit test can and cannot establish here.
+#[cfg(test)]
+pub(crate) mod append_probe {
+    use std::collections::HashMap;
+    use std::path::{Path, PathBuf};
+    use std::sync::{LazyLock, Mutex};
+
+    /// `(plain, durable)` append counts, keyed like [`super::path_lock`] on the
+    /// absolutised path so a test and the code under test always meet.
+    static COUNTS: LazyLock<Mutex<HashMap<PathBuf, (usize, usize)>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+
+    fn key(path: &Path) -> PathBuf {
+        std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+    }
+
+    pub(crate) fn record(path: &Path, synced: bool) {
+        let mut counts = COUNTS.lock().expect("append-probe poisoned");
+        let entry = counts.entry(key(path)).or_insert((0, 0));
+        if synced {
+            entry.1 += 1;
+        } else {
+            entry.0 += 1;
+        }
+    }
+
+    /// The `(plain, durable)` appends observed for `path`. Tests use their own
+    /// temp paths, so no two of them share a tally.
+    pub(crate) fn counts(path: &Path) -> (usize, usize) {
+        COUNTS
+            .lock()
+            .expect("append-probe poisoned")
+            .get(&key(path))
+            .copied()
+            .unwrap_or((0, 0))
+    }
 }
 
 /// Reads a file to a string, returning an empty string if it does not exist.
@@ -1100,6 +1227,67 @@ mod test {
         let mut seen: Vec<u64> = rows.iter().map(|r| r["i"].as_u64().unwrap()).collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..N).collect::<Vec<_>>(), "all records intact");
+    }
+
+    /// **Issue #392**: the durable append must behave exactly like the plain one
+    /// from the file's point of view — same bytes, same one-record-per-line
+    /// framing, appending rather than truncating — and must report the flush it
+    /// performed.
+    ///
+    /// It cannot assert the bytes are on the platter; nothing in a unit test
+    /// can, because a synced and an unsynced line are identical on disk. It
+    /// asserts the two things that *are* observable: the flush was requested and
+    /// its syscall returned `Ok` (the append would have failed otherwise), and
+    /// the content is intact.
+    #[tokio::test]
+    async fn durable_append_writes_the_same_bytes_and_reports_the_flush() {
+        let root_dir = tmp_root();
+        // A nested directory so the create path — and with it the parent
+        // directory flush — is exercised on a directory this test owns.
+        let root = root_dir.path().join("nested");
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let path = root.join("durable.jsonl");
+
+        // The first append creates the file; the second finds it already there.
+        for i in 0..2u64 {
+            let line = serde_json::to_string(&serde_json::json!({ "i": i })).unwrap();
+            append_line_durable(&path, &line).await.unwrap();
+        }
+        // A plain append to the same file must still take the unsynced path.
+        append_line(
+            &path,
+            &serde_json::to_string(&serde_json::json!({ "i": 2 })).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 2),
+            "two durable appends and one plain one, each on its own path"
+        );
+
+        let rows: Vec<serde_json::Value> = read_jsonl(&path).await.expect("no corrupt lines");
+        let seen: Vec<u64> = rows.iter().map(|r| r["i"].as_u64().unwrap()).collect();
+        assert_eq!(
+            seen,
+            vec![0, 1, 2],
+            "durable appends append, never truncate"
+        );
+    }
+
+    /// A durable append into a directory that does not exist must surface the
+    /// error rather than half-succeed. This is the direction the journal's
+    /// at-most-once guarantee depends on: a failed commit stops the effect.
+    #[tokio::test]
+    async fn durable_append_reports_an_unwritable_path() {
+        let root_dir = tmp_root();
+        let path = root_dir.path().join("absent-dir").join("durable.jsonl");
+        let err = append_line_durable(&path, "{}").await.unwrap_err();
+        assert!(
+            matches!(err, OpenCompanyError::StoreIo { .. }),
+            "an unwritable durable append must report a store IO error, got {err:?}"
+        );
     }
 
     // The fs backend runs the identical port-conformance suite the sqlite
