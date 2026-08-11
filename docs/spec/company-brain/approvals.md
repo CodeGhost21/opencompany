@@ -355,7 +355,10 @@ A tool call is decided in this order:
    and it re-checks the live arguments, so a grant minted on a Composio read
    cannot admit a Composio send.
 4. `[policy].always_approve` → park.
-5. mode dispatch (`readonly` / `supervised` / `auto` / `full`).
+5. the per-agent daily cap, then `auto_approve_under_usd`.
+6. mode dispatch (`readonly` / `supervised` / `auto` / `full`).
+7. **per-call judgement** (issue #338) → park. Consulted *only* where step 6
+   allowed the call, and its only answers are "stop" and "say nothing".
 
 The grant sits **above** `always_approve` on purpose. A tool on that list still
 parks the first time, which is what the list is for; but once the operator has
@@ -367,6 +370,18 @@ narrow.
 Note this is the *tool* gate (`ApprovalPolicy`), which is a different path from
 the *effect* gate (`ManifestApprovalGate::evaluate`) the taxonomy above
 describes. A harness tool call parks directly and never reaches `evaluate`.
+
+### Per-call judgement (issue #338)
+
+Steps 1–6 are all decided before the run starts, by an operator writing a
+manifest; nothing in them looks at what the run is about to do. Step 7 closes
+that gap: `src/policy/judgement.rs` asks, per candidate call, whether it
+warrants a human on its own merits, and it can **only ever add a stop**.
+
+It is documented in full — the placement argument, the three rules, the
+no-learning boundary against #563, why it is not a model call, fail-closed, and
+the deliberate `publish_artifact` exclusion — in
+[per-call-judgement.md](per-call-judgement.md).
 
 ## Approvals inside a workflow run (issue #395)
 

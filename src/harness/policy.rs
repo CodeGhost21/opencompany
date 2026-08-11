@@ -68,6 +68,20 @@
 //! See [`ApprovalPolicy::daily_budget_verdict`] for why the arm sits exactly
 //! where it does, why an at-cap call **parks** rather than being denied, and
 //! what the cap does not see.
+//!
+//! ## Per-call judgement (issue #338)
+//!
+//! Everything above is decided before the run starts, by an operator writing a
+//! manifest; nothing in it looks at what the run is about to do. The last arm
+//! of [`check`](ToolPolicy::check) asks that question — see
+//! [`crate::policy::judgement`], where the verdict itself lives as a pure,
+//! separately tested function.
+//!
+//! It is **last**, and consulted only where the mode already said allow. That
+//! placement is the whole safety argument: it can turn an allow into a stop and
+//! can do nothing else, so every arm above keeps its authority unchanged. The
+//! practical effect is confined to `full` — `supervised` already parks a
+//! consequence and `readonly` already denies one.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1234,7 +1248,7 @@ impl ToolPolicy for ApprovalPolicy {
         // tier including `full`.
         let consequence = crate::policy::consequence_of(tool, &request.arguments);
         let reach = consequence.reach;
-        match self.mode {
+        let by_mode = match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
             // `auto` sits between the two (issue #560): the agent's own sandbox
             // writes and its outward reads run unattended, and anything that
@@ -1277,7 +1291,46 @@ impl ToolPolicy for ApprovalPolicy {
                     ToolPolicyDecision::Allow
                 }
             }
+        };
+
+        // 5. Per-call judgement (issue #338): the last word, and only ever a
+        //    stricter one.
+        //
+        // LAST, and gated on the mode having already said Allow, because that
+        // placement *is* the safety argument. Static configuration stays
+        // authoritative everywhere it speaks: the reserved `never_do` slot, the
+        // `readonly` brake, a redeemed grant, `always_approve`, the daily cap
+        // and `auto_approve_under_usd` have all had their say above and every
+        // one of them returned before reaching here. This can turn an Allow
+        // into a stop; it can never turn a deny into an allow, skip
+        // `always_approve`, or spend a grant.
+        //
+        // `supervised` and `readonly` are untouched by construction: a
+        // `Consequence` call already parked above under one and was already
+        // denied under the other, so every call this would stop has already
+        // been stopped. That is deliberate — a tier an operator has already
+        // reasoned about does not shift under them.
+        //
+        // Which leaves `full` and `auto`. `full`'s contract is "act without
+        // asking, EXCEPT the few things on the always-ask list", and this is
+        // what makes that exception mean something without requiring an
+        // operator to have anticipated each one by name. `auto` (issue #560)
+        // already parks what leaves the company or spends, so this adds only
+        // the unbounded ones its line does not draw — `shell` and its family,
+        // which run arbitrary code in a sandbox whose permissions are not
+        // visible from here. Same rule in both tiers, applied wherever the mode
+        // said allow; no tier gets a carve-out of its own.
+        if matches!(by_mode, ToolPolicyDecision::Allow)
+            && let Some(stop) = crate::policy::judge(tool, &request.arguments).stop_reason()
+        {
+            return self.require_approval(
+                tool,
+                &request.arguments,
+                format!("'{tool}' {}", stop.describe()),
+            );
         }
+
+        by_mode
     }
 }
 
@@ -1447,8 +1500,15 @@ mod tests {
     #[tokio::test]
     async fn full_allows_but_always_approve_still_parks() {
         let p = policy("full", &["payment"], None);
+        // `file_write`, not `write_file`. This asserted the undeclared
+        // `write_file`, which the per-call judgement arm (issue #338) now stops
+        // fail-closed — nobody has declared what it does. The point being made
+        // here is that `full` allows a tool absent from `always_approve`, so it
+        // wants a tool `full` genuinely allows: `file_write` is declared, and is
+        // one of the low-consequence scratch writes #444 found safe enough to
+        // grant standing.
         assert_eq!(
-            p.check(&request("write_file", serde_json::json!({}))).await,
+            p.check(&request("file_write", serde_json::json!({}))).await,
             ToolPolicyDecision::Allow
         );
         assert!(matches!(
@@ -1926,12 +1986,18 @@ mod tests {
             );
         }
 
-        // Under `full` there is no per-call gate at all — which is precisely
-        // why `workspace_write` and `workspace_delete` each carry a required
-        // `expected_updated_at` compare-and-swap token of their own, why
-        // `workspace_create` refuses a path that already resolves rather than
-        // overwriting it, and why `workspace_delete` refuses a folder that
-        // still holds anything.
+        // Under `full` these still run. There IS a per-call gate now (issue
+        // #338), but writing the company's own note tree is not one of the acts
+        // it stops: it is internal, and the gate is scoped to what leaves the
+        // company or cannot be bounded. These tools keep their own safeguards:
+        // writes and deletes require an `expected_updated_at` compare-and-swap
+        // token, creates refuse paths that already resolve, and deletes refuse
+        // folders that still hold anything.
+        //
+        // This is the assertion that caught the first version of that gate,
+        // which stopped both: publishing runs through them, and thirteen
+        // `publish_turn_test` cases failed with "the model was never handed a
+        // publish receipt".
         let full = policy("full", &[], None);
         for tool in [
             "workspace_write",
@@ -3274,12 +3340,15 @@ mod tests {
             .with_agent("analyst")
             .with_spend(meter.clone() as Arc<dyn UsageMeter>, CompanyId::new("acme"));
 
+        // `web_search`, not `pay_invoice`. Both are priced calls — `web_search`
+        // is declared `EffectGroup::Spend`, which is what `is_priced_call`
+        // reads — so this still exercises the cap arm. `pay_invoice` would now
+        // also be stopped by the per-call judgement arm (issue #338), and a
+        // test about the *meter* should not be able to fail for a reason that
+        // has nothing to do with the meter.
         assert_eq!(
             uncapped
-                .check(&request(
-                    "pay_invoice",
-                    serde_json::json!({ "amount_usd": 400.0 })
-                ))
+                .check(&request("web_search", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow
         );
@@ -3305,12 +3374,12 @@ mod tests {
             .with_requests(ApprovalRequestQueue::default())
             .with_agent("analyst");
 
+        // `web_search` for the same reason as `an_uncapped_agent_never_queries_
+        // the_meter`: a priced call the per-call judgement arm is silent on, so
+        // this keeps testing the cap and only the cap.
         assert_eq!(
             no_meter
-                .check(&request(
-                    "pay_invoice",
-                    serde_json::json!({ "amount_usd": 400.0 })
-                ))
+                .check(&request("web_search", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow,
             "an unenforceable cap must not park what it can never release"
@@ -4057,6 +4126,185 @@ mod tests {
             assert!(classify_group(tool, &args).is_unclassified(), "{tool}");
             assert!(!grantable(tool, &args), "{tool}");
             assert!(is_external_effect(tool, &args), "{tool}");
+        }
+    }
+
+    // ---- Per-call judgement (issue #338) ----------------------------------
+    //
+    // The unit tests for the verdict itself live in `crate::policy::judgement`,
+    // which is pure and compiles in the default build. What is tested HERE is
+    // the only thing that needs the harness: **where the arm sits in the
+    // chain**. Every test below is an assertion that the arm did not move
+    // something above it.
+
+    fn decision_name(d: &ToolPolicyDecision) -> &'static str {
+        match d {
+            ToolPolicyDecision::Allow => "allow",
+            ToolPolicyDecision::RequireApproval { .. } => "park",
+            ToolPolicyDecision::Deny { .. } => "deny",
+        }
+    }
+
+    /// The behaviour change, stated as #338's acceptance states it: a call that
+    /// sends, publishes or pays stops **regardless of mode** — and `full` is
+    /// the mode where that was not already true.
+    #[tokio::test]
+    async fn full_autonomy_stops_for_an_irreversible_call() {
+        let p = policy("full", &[], None);
+        for tool in ["send_email", "publish_post", "pay_invoice"] {
+            let d = p.check(&request(tool, serde_json::json!({}))).await;
+            assert_eq!(decision_name(&d), "park", "`{tool}` must stop under full");
+        }
+    }
+
+    /// The other half: `full` still means full for everything that does not
+    /// warrant a human. A gate that stopped reads would simply be `supervised`
+    /// with extra steps.
+    #[tokio::test]
+    async fn full_autonomy_still_allows_reads_and_drafts() {
+        let p = policy("full", &[], None);
+        for tool in ["file_read", "grep", "list", "memory_recall", "web_search"] {
+            let d = p.check(&request(tool, serde_json::json!({}))).await;
+            assert_eq!(decision_name(&d), "allow", "`{tool}` must still run");
+        }
+    }
+
+    /// `readonly` DENIES an irreversible call; it does not park it.
+    ///
+    /// The failure this guards is subtle and would look like an improvement: if
+    /// the judgement arm ran before the mode, a send on a read-only desk would
+    /// come back as "ask the operator" instead of "no". That converts the
+    /// emergency stop into a prompt, which is the one thing the brake exists to
+    /// not be.
+    #[tokio::test]
+    async fn the_readonly_brake_still_denies_rather_than_parking() {
+        let p = policy("readonly", &[], None);
+        let d = p.check(&request("send_email", serde_json::json!({}))).await;
+        assert_eq!(decision_name(&d), "deny");
+    }
+
+    /// `supervised` is untouched: the call already parked, and it still parks
+    /// with the reason `supervised` gives rather than the judgement one.
+    ///
+    /// Reason text is asserted because it is the operator-visible half — a tier
+    /// silently re-labelling its stops would be a change nobody asked for.
+    #[tokio::test]
+    async fn supervised_keeps_its_own_reason() {
+        let p = policy("supervised", &[], None);
+        let d = p.check(&request("send_email", serde_json::json!({}))).await;
+        match d {
+            ToolPolicyDecision::RequireApproval { reason } => {
+                assert!(
+                    reason.contains("supervised"),
+                    "expected the supervised reason, got: {reason}"
+                );
+            }
+            other => panic!("expected a park, got {}", decision_name(&other)),
+        }
+    }
+
+    /// A pre-granted call still runs under `full` — "unless explicitly
+    /// pre-granted", in the acceptance's words.
+    ///
+    /// This is the arm's placement doing the work: the grant check returns
+    /// `Allow` long before the judgement arm is reached, so the operator's
+    /// approval is not re-litigated by a classifier.
+    #[tokio::test]
+    async fn a_pre_granted_irreversible_call_still_runs() {
+        let (p, grants) = granting_policy("full", &[], "finance");
+        let args = serde_json::json!({ "to": "customer@example.com" });
+        grants.grant(granted("finance", "send_email", args.clone()));
+        let d = p.check(&request("send_email", args.clone())).await;
+        assert_eq!(
+            decision_name(&d),
+            "allow",
+            "the grant must still be honoured"
+        );
+
+        // ...and it was consumed, so the next identical call stops again
+        // (#243 semantics, and #183 decision 3: a run may stop more than once).
+        let again = p.check(&request("send_email", args)).await;
+        assert_eq!(decision_name(&again), "park");
+    }
+
+    /// `always_approve` keeps its own reason under `full`.
+    ///
+    /// Both arms would park this call, so the decision alone cannot tell them
+    /// apart — the reason can, and the operator's card shows the reason. If the
+    /// judgement arm had been placed above `always_approve`, the operator would
+    /// stop being told that this stop is one they themselves configured.
+    #[tokio::test]
+    async fn always_approve_keeps_its_own_reason_under_full() {
+        let p = policy("full", &["send_email"], None);
+        let d = p.check(&request("send_email", serde_json::json!({}))).await;
+        match d {
+            ToolPolicyDecision::RequireApproval { reason } => {
+                assert!(
+                    reason.contains("always-approve"),
+                    "expected the always-approve reason, got: {reason}"
+                );
+            }
+            other => panic!("expected a park, got {}", decision_name(&other)),
+        }
+    }
+
+    /// `auto_approve_under_usd` is static configuration about spend, and it
+    /// still speaks first.
+    ///
+    /// Worth stating as a test rather than leaving implicit: an operator who
+    /// wrote "anything under $5 is fine" said something specific about money,
+    /// and this arm does not get to overrule it. The daily cap above still
+    /// does.
+    #[tokio::test]
+    async fn a_sub_threshold_spend_is_still_auto_approved() {
+        let p = policy("full", &[], Some(5.0));
+        let d = p
+            .check(&request(
+                "pay_invoice",
+                serde_json::json!({ "amount_usd": 1.0 }),
+            ))
+            .await;
+        assert_eq!(decision_name(&d), "allow");
+    }
+
+    /// Fail closed: a tool nobody declared stops under `full` rather than
+    /// running because nothing recognised it.
+    #[tokio::test]
+    async fn an_undeclared_tool_stops_under_full() {
+        let p = policy("full", &[], None);
+        let d = p
+            .check(&request("frobnicate_the_widget", serde_json::json!({})))
+            .await;
+        assert_eq!(decision_name(&d), "park");
+    }
+
+    /// Every stop reaches the operator. A `RequireApproval` that skipped
+    /// `require_approval` would refuse the tool without ever queueing anything
+    /// to park — the bug issue #172 closed — so the new arm is checked to go
+    /// through the same door as every other.
+    #[tokio::test]
+    async fn a_judgement_stop_is_queued_for_the_operator() {
+        let queue = ApprovalRequestQueue::default();
+        let p = policy("full", &[], None).with_requests(queue.clone());
+        let d = p.check(&request("send_email", serde_json::json!({}))).await;
+        assert_eq!(decision_name(&d), "park");
+        // `queued()`, deliberately, and neither `drain` nor `take_from`. Both of
+        // those are being reshaped by PRs in flight — #625 changes `drain`'s
+        // return type to `DrainedRequests`, and #439 removes `take_from`
+        // entirely — and neither would conflict with this branch *textually*,
+        // so both lanes would be green and whoever merged second would break
+        // the tree. `queued()` is untouched by both and answers the question
+        // this test is actually asking.
+        assert_eq!(queue.queued(), 1, "the stop must be queued to park");
+        // The reason reaching the operator is the same string the decision
+        // carries — `require_approval` clones it onto the queued request — so
+        // asserting it here needs no queue read at all.
+        match d {
+            ToolPolicyDecision::RequireApproval { reason } => assert!(
+                !reason.is_empty(),
+                "the operator needs a reason on the card"
+            ),
+            other => panic!("expected a park, got {}", decision_name(&other)),
         }
     }
 }
