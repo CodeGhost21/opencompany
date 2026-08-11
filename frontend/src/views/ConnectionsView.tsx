@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Check, Info, Loader2, Plug, ShieldCheck } from "lucide-react";
+import { Info, ShieldCheck } from "lucide-react";
 import { toast } from "sonner";
 
 import { me as fetchMe } from "@/api/auth";
@@ -8,28 +8,20 @@ import {
   getComposioStatus,
   listComposioConnections,
   startComposioAuthorize,
+  type ComposioStatus,
 } from "@/api/composio";
 import type { ConnectionState } from "@/api/types";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import { Card, CardContent } from "@/components/ui/card";
-import { Skeleton } from "@/components/ui/skeleton";
-import {
-  CONNECTION_CATEGORY_ORDER,
-  CONNECTION_PROVIDERS,
-  connectionStateFor,
-  connectRoute,
-  type ComposioReach,
-  type ConnectionProvider,
-  type ConnectRoute,
-} from "@/lib/connections";
-import { cn } from "@/lib/utils";
+import { catalogWarning } from "@/lib/composio-catalog";
+import { type ComposioReach } from "@/lib/connections";
+import { buildGridProviders, type GridProvider } from "@/lib/provider-grid";
 import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
+import { ProvidersSection } from "@/views/connections/ProvidersSection";
 import { ChannelsSection } from "./connections/ChannelsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -69,10 +61,17 @@ export function ConnectionsView({ client, company }: Props) {
   // particularly poor greeting, since the failure arrives only after they have
   // pasted a live credential into a form that could never submit it.
   const [canManage, setCanManage] = useState(false);
-  // What Composio offers here, or `null` while unknown / not reachable. This is
-  // the hosted connect route for every tile (issue #599), so the grid cannot
-  // decide what a Connect does without it.
-  const [reach, setReach] = useState<ComposioReach | null>(null);
+  // The host's Composio answer, or `null` while unknown / not reachable.
+  //
+  // The whole status, not just the routing facts it used to be narrowed to: the
+  // page's one provider grid is built from `effectiveCatalog` (issue #582), and
+  // the catalog's honesty markers (`catalogSource`, `catalogNotice`) travel with
+  // it. Narrowing here and re-fetching the same call elsewhere for the rest is
+  // how the page ended up with two lists.
+  const [status, setStatus] = useState<ComposioStatus | null>(null);
+  // Slugs connected through the by-slug escape hatch this session, so they keep
+  // a tile instead of vanishing after a successful sign-in (issue #397).
+  const [extraToolkits, setExtraToolkits] = useState<string[]>([]);
   // Whether this instance carries a platform-projected identity, as Composio
   // reports it. A second witness for the same host-level fact the connection
   // rows carry — and the only one available when the manifest declares no
@@ -116,28 +115,17 @@ export function ConnectionsView({ client, company }: Props) {
         // connection and never answers would hold the page on skeletons
         // forever. Losing the race is not an error, it is "no Composio route
         // we can confirm", which is what a null `reach` already means.
-        const status = await Promise.race([
+        const probed = await Promise.race([
           getComposioStatus(client, company),
           new Promise<null>((resolve) => window.setTimeout(() => resolve(null), COMPOSIO_PROBE_TIMEOUT_MS)),
         ]);
         if (!live) return;
-        if (!status) {
-          setReach(null);
-          setAttested(false);
-          return;
-        }
-        setReach({
-          inBuild: status.inBuild,
-          granted: status.granted,
-          hasCredential: status.credentialSource !== "none",
-          openMode: status.openMode,
-          effectiveToolkits: status.effectiveToolkits,
-        });
-        setAttested(status.credentialSource === "attested");
+        setStatus(probed);
+        setAttested(probed?.credentialSource === "attested");
       } catch {
         // No Composio surface on this host — not an error for this page.
         if (live) {
-          setReach(null);
+          setStatus(null);
           setAttested(false);
         }
       } finally {
@@ -180,8 +168,8 @@ export function ConnectionsView({ client, company }: Props) {
   }, [client, company]);
 
   /** The self-hosted hatch: navigate the document to the host's authorize URL. */
-  async function connectNative(p: ConnectionProvider) {
-    const { url } = await client.startConnection(p.id, company);
+  async function connectNative(p: GridProvider) {
+    const { url } = await client.startConnection(p.providerId, company);
     // Unlike the Composio sign-in below (which opens a tab and survives), this
     // navigates the whole document away — taking the product tour's
     // in-memory step state with it. Arm a resume marker so the operator comes
@@ -203,12 +191,12 @@ export function ConnectionsView({ client, company }: Props) {
    * finished when the tab opens, and clearing early would offer a second Connect
    * for a sign-in already in flight.
    */
-  async function connectComposio(p: ConnectionProvider, toolkit: string) {
+  async function connectComposio(p: { providerId: string; label: string }, toolkit: string) {
     // A sign-in for this toolkit is already polling (it can have been started
     // from a different tile sharing the slug). Clear the flag we just set rather
     // than leaving this tile spinning on someone else's flow.
     if (pollTimers.current[toolkit] !== undefined) {
-      setBusy((b) => (b === p.id ? null : b));
+      setBusy((b) => (b === p.providerId ? null : b));
       return;
     }
     const { connectUrl } = await startComposioAuthorize(client, company, toolkit);
@@ -226,21 +214,24 @@ export function ConnectionsView({ client, company }: Props) {
     // wrong trade on a tab we hand an OAuth URL to. `ComposioSection.signIn`
     // opens the same URL the same way and likewise does not check.
     window.open(connectUrl, "_blank", "noopener,noreferrer");
-    toast.message(`Complete ${p.name} sign-in in the new tab.`);
+    toast.message(`Complete ${p.label} sign-in in the new tab.`);
     const deadline = Date.now() + 120_000;
     const poll = async () => {
       delete pollTimers.current[toolkit];
       if (Date.now() > deadline) {
-        setBusy((b) => (b === p.id ? null : b));
-        toast.message(`${p.name} sign-in timed out. Try again if it didn't complete.`);
+        setBusy((b) => (b === p.providerId ? null : b));
+        toast.message(`${p.label} sign-in timed out. Try again if it didn't complete.`);
         return;
       }
       try {
         const rows = await listComposioConnections(client, company);
         if (rows.some((r) => r.toolkit.toLowerCase() === toolkit.toLowerCase() && r.connected)) {
-          setBusy((b) => (b === p.id ? null : b));
-          toast.success(`Connected ${p.name}.`);
-          // Re-read the host's reconciled view so the tile flips to Disconnect.
+          setBusy((b) => (b === p.providerId ? null : b));
+          toast.success(`Connected ${p.label}.`);
+          // Re-read the host's reconciled view so the tile flips to connected.
+          // This is the page's only status source now (issue #582), so one
+          // refresh updates everything that speaks about this provider — there
+          // is no second list left to go stale behind it.
           await refresh();
           return;
         }
@@ -252,15 +243,15 @@ export function ConnectionsView({ client, company }: Props) {
     pollTimers.current[toolkit] = window.setTimeout(() => void poll(), 2_000);
   }
 
-  async function connect(p: ConnectionProvider, route: ConnectRoute) {
+  async function connect(p: GridProvider) {
     if (busy) return;
-    setBusy(p.id);
+    setBusy(p.providerId);
     try {
-      if (route.kind === "composio") {
-        await connectComposio(p, route.toolkit);
+      if (p.route.kind === "composio") {
+        await connectComposio(p, p.route.toolkit);
         return;
       }
-      if (route.kind === "native") {
+      if (p.route.kind === "native") {
         await connectNative(p);
         return;
       }
@@ -268,26 +259,53 @@ export function ConnectionsView({ client, company }: Props) {
       // would be a rendering bug rather than an operator action.
       setBusy(null);
     } catch {
-      toast.error(`Couldn't start the ${p.name} connection.`);
+      toast.error(`Couldn't start the ${p.label} connection.`);
       setBusy(null);
     }
   }
 
-  async function disconnect(p: ConnectionProvider) {
-    if (busy) return;
-    setBusy(p.id);
+  /**
+   * Sign in to a toolkit typed into the by-slug hatch.
+   *
+   * It has no tile until the host reports it, so it is added to `extraToolkits`
+   * first — `buildGridProviders` gives it one from local metadata, and the
+   * refresh after a successful poll then fills in the real status.
+   */
+  async function connectSlug(slug: string) {
+    if (busy || !slug) return;
+    setExtraToolkits((t) => (t.includes(slug) ? t : [...t, slug]));
+    setBusy(slug);
     try {
-      await client.disconnectConnection(p.id, company);
-      toast.success(`Disconnected ${p.name}.`);
+      await connectComposio({ providerId: slug, label: slug }, slug);
+    } catch {
+      toast.error(`Couldn't start the ${slug} connection.`);
+      setBusy(null);
+    }
+  }
+
+  /**
+   * Release a connection this host actually holds.
+   *
+   * Only offered for a tile whose `via` includes `native` (see
+   * `GridProvider.canDisconnect`): this route blanks the host's own
+   * `oauth/{provider}` secret, and no host route can release a Composio
+   * connection. Offering it on a Composio-only tile would report success and
+   * leave the tile connected on the next refresh.
+   */
+  async function disconnect(p: GridProvider) {
+    if (busy) return;
+    setBusy(p.providerId);
+    try {
+      await client.disconnectConnection(p.providerId, company);
+      toast.success(`Disconnected ${p.label}.`);
       await refresh();
     } catch {
-      toast.error(`Couldn't disconnect ${p.name}.`);
+      toast.error(`Couldn't disconnect ${p.label}.`);
     } finally {
       setBusy(null);
     }
   }
 
-  const connectedCount = Object.values(states).filter((s) => s.connected).length;
   // `attested` is a property of the *instance*, not of one provider: it means
   // this pod carries a platform-minted identity, so every connection is the
   // platform's to run. One row reporting it is therefore enough to say so once
@@ -302,20 +320,41 @@ export function ConnectionsView({ client, company }: Props) {
     load === "ready" &&
     (Object.values(states).some((s) => s.credentialSource === "attested") || attested);
 
-  // One decision per tile, made once and used for both the button and the click,
-  // so what is rendered and what is called can never disagree.
-  const routes = useMemo(() => {
-    const out = new Map<string, { state?: ConnectionState; route: ConnectRoute }>();
-    for (const provider of CONNECTION_PROVIDERS) {
-      const state = connectionStateFor(provider, states);
-      // A tile the host said nothing about still inherits the instance-level
-      // `attested` fact — it is a property of the pod, not of one provider.
-      const effective =
-        state ?? (platformManaged ? ({ credentialSource: "attested" } as const) : undefined);
-      out.set(provider.id, { state, route: connectRoute(provider, effective, reach) });
-    }
-    return out;
-  }, [states, reach, platformManaged]);
+  // The routing facts, narrowed out of the status the page already holds.
+  const reach: ComposioReach | null = useMemo(
+    () =>
+      status
+        ? {
+            inBuild: status.inBuild,
+            granted: status.granted,
+            hasCredential: status.credentialSource !== "none",
+            openMode: status.openMode,
+            effectiveToolkits: status.effectiveToolkits,
+          }
+        : null,
+    [status],
+  );
+
+  // The page's one provider list. Status, route and metadata resolved together,
+  // once, so nothing on this screen can answer differently from anything else
+  // on it (issue #582).
+  const providers = useMemo(
+    () =>
+      buildGridProviders(
+        status?.effectiveCatalog ?? [],
+        extraToolkits,
+        states,
+        reach,
+        platformManaged,
+      ),
+    [status?.effectiveCatalog, extraToolkits, states, reach, platformManaged],
+  );
+
+  // Counted off the rendered grid, not off the raw host rows. The badge used to
+  // count every row `GET …/connections` returned while the grid below drew only
+  // the eleven tiles the console had metadata for — so the header could read "3
+  // connected" above a grid showing none of them (issue #582).
+  const connectedCount = providers.filter((p) => p.connected).length;
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -390,205 +429,29 @@ export function ConnectionsView({ client, company }: Props) {
           client={client}
           company={company}
           canManage={canManage}
+          onChanged={() => setCredentialGeneration((n) => n + 1)}
         />
 
         <ChannelsSection client={client} company={company} canManage={canManage} />
 
-        {load === "ready" && (
-          <Alert data-testid="connections-catalog-advisory">
-            <Info className="size-4" />
-            <AlertTitle>Agents reach these providers through Composio</AlertTitle>
-            <AlertDescription>
-              Connecting below records the account against this company, but the tool belt your
-              agents actually run on is wired in the Composio section above — that is where a
-              connection becomes something an agent can do. Connect Gmail, GitHub or Slack there
-              first (issue #396).
-            </AlertDescription>
-          </Alert>
-        )}
-
-        {load === "loading" || !reachSettled ? (
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-            {Array.from({ length: 6 }).map((_, i) => (
-              <Skeleton key={i} className="h-28 rounded-xl" />
-            ))}
-          </div>
-        ) : (
-          CONNECTION_CATEGORY_ORDER.map((category) => {
-            const providers = CONNECTION_PROVIDERS.filter((p) => p.category === category);
-            if (providers.length === 0) return null;
-            return (
-              <section key={category} className="space-y-3">
-                <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-                  {category}
-                </h3>
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-                  {providers.map((p) => {
-                    const { state, route } = routes.get(p.id) ?? { route: { kind: "unavailable" as const } };
-                    return (
-                      <ConnectionCard
-                        key={p.id}
-                        provider={p}
-                        state={state}
-                        route={route}
-                        disabled={load === "unavailable" || !canManage}
-                        busy={busy === p.id}
-                        onConnect={() => void connect(p, route)}
-                        onDisconnect={() => void disconnect(p)}
-                      />
-                    );
-                  })}
-                </div>
-              </section>
-            );
-          })
-        )}
+        {/* The page's one provider list (issue #582). It used to be two — this
+            grid and a categorised grid of eleven hardcoded tiles below it — and
+            they disagreed by construction, so a provider could show as connected
+            in one and offer a Connect button in the other on the same screen. */}
+        <ProvidersSection
+          providers={providers}
+          canManage={canManage && load !== "unavailable"}
+          busy={busy}
+          noCredential={status?.credentialSource === "none"}
+          granted={status?.granted !== false}
+          openMode={status?.openMode === true}
+          degraded={status ? catalogWarning(status) : null}
+          loading={load === "loading" || !reachSettled}
+          onConnect={(p) => void connect(p)}
+          onDisconnect={(p) => void disconnect(p)}
+          onConnectSlug={(slug) => void connectSlug(slug)}
+        />
       </div>
-    </div>
-  );
-}
-
-/**
- * One provider tile.
- *
- * The unconnected foot of the card renders whatever {@link connectRoute}
- * decided, so the button an operator sees is the call the click makes:
- *
- * - `native` — this host holds a registered provider application for it (or the
- *   company already stored a token): the self-hosted hatch. The Connect button,
- *   exactly as before.
- * - `composio` — the hosted route. Also a Connect button, but it opens
- *   Composio's own OAuth in a tab rather than navigating this document.
- * - `managed` — a platform identity runs connections for this instance and
- *   there is no Composio route; nothing to set up locally.
- * - `unavailable` — no route can succeed, so the tile says so rather than
- *   offering a button that 400s. This is the state issue #599 reports missing:
- *   every undeclared tile fell through to a Connect that could never work.
- *
- * The connected foot offers **Disconnect only when there is something local to
- * revoke** — i.e. `via` includes `native`. A Composio-only connection has no
- * disconnect route on the host at all (`/composio` exposes status, token,
- * authorize and connections, and nothing else), so a Disconnect button there
- * would call `…/connections/{id}/disconnect`, blank a secret that was never
- * set, report success and change nothing. Naming where the connection lives is
- * the honest answer until a Composio disconnect route exists.
- */
-function ConnectionCard({
-  provider,
-  state,
-  route,
-  disabled,
-  busy,
-  onConnect,
-  onDisconnect,
-}: {
-  provider: ConnectionProvider;
-  state?: ConnectionState;
-  route: ConnectRoute;
-  disabled: boolean;
-  busy: boolean;
-  onConnect: () => void;
-  onDisconnect: () => void;
-}) {
-  const connected = Boolean(state?.connected);
-  const managedByPlatform = route.kind === "managed";
-  const noRoute = route.kind === "unavailable";
-  // Which namespace actually backs this connection. `native` alone means the
-  // credential sits in the host's catalog, which no agent tool reads yet — worth
-  // distinguishing from a Composio connection, which is a live capability.
-  const via = state?.via ?? [];
-  const nativeOnly = connected && via.length > 0 && !via.includes("composio");
-  // Only a native credential can be revoked from here; see the doc above.
-  // An empty `via` is "this host predates the field" (it is optional on the
-  // wire), not "Composio owns it" — withholding Disconnect there would strip
-  // the control from every connection on an older host, so the affordance is
-  // withheld only when the host affirmatively named Composio and nothing else.
-  const canDisconnect = connected && (via.length === 0 || via.includes("native"));
-  const unverified = state?.unverified === true;
-  return (
-    <Card className={cn(connected && "border-primary/30")}>
-      <CardContent className="flex h-full flex-col gap-3 py-4">
-        <div className="flex items-start gap-3">
-          <Monogram provider={provider} />
-          <div className="min-w-0 flex-1">
-            <div className="flex items-center gap-2">
-              <p className="truncate font-medium">{provider.name}</p>
-              {connected && (
-                <span className="inline-flex items-center gap-1 text-xs font-medium text-status-done-text">
-                  <Check className="size-3" /> Connected
-                </span>
-              )}
-            </div>
-            <p className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
-              {connected && state?.account ? state.account : provider.description}
-            </p>
-            {connected && via.length > 0 && (
-              <p className="mt-0.5 text-xs text-muted-foreground" data-testid={`connection-via-${provider.id}`}>
-                via {via.join(" + ")}
-                {nativeOnly && " — stored here; agents use the Composio connection"}
-              </p>
-            )}
-            {!connected && unverified && (
-              <p className="mt-0.5 text-xs text-status-blocked-text">
-                Couldn&apos;t check the Composio connection — state unknown.
-              </p>
-            )}
-          </div>
-        </div>
-        <div className="mt-auto">
-          {canDisconnect ? (
-            <Button variant="outline" size="sm" className="w-full" disabled={busy} onClick={onDisconnect}>
-              {busy ? <Loader2 className="size-4 animate-spin" /> : null}
-              Disconnect
-            </Button>
-          ) : connected ? (
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid={`connection-composio-managed-${provider.id}`}
-            >
-              Connected through Composio — manage it in the Composio section above.
-            </p>
-          ) : managedByPlatform ? (
-            <p
-              className="inline-flex items-center gap-1 text-xs text-status-done-text"
-              data-testid={`connection-managed-${provider.id}`}
-            >
-              <ShieldCheck className="size-3" /> Managed by the platform — nothing to set up here
-            </p>
-          ) : noRoute ? (
-            <p
-              className="text-xs text-muted-foreground"
-              data-testid={`connection-unavailable-${provider.id}`}
-            >
-              Not available on this host.
-            </p>
-          ) : (
-            <Button
-              variant={disabled ? "outline" : "default"}
-              size="sm"
-              className="w-full"
-              disabled={disabled || busy}
-              onClick={onConnect}
-            >
-              {busy ? <Loader2 className="size-4 animate-spin" /> : <Plug className="size-4" />}
-              Connect
-            </Button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
-  );
-}
-
-function Monogram({ provider }: { provider: ConnectionProvider }) {
-  const label = provider.glyph ?? provider.name.charAt(0);
-  return (
-    <div
-      className="flex size-10 shrink-0 items-center justify-center rounded-lg text-sm font-semibold text-white"
-      style={{ backgroundColor: provider.color }}
-      aria-hidden
-    >
-      {label}
     </div>
   );
 }

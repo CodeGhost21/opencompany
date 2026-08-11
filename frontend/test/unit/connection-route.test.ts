@@ -106,9 +106,22 @@ describe("composioCanAuthorize", () => {
   it("is false without a reachable Composio", () => {
     expect(composioCanAuthorize(null, "slack")).toBe(false);
     expect(composioCanAuthorize({ ...OPEN, inBuild: false }, "slack")).toBe(false);
-    expect(composioCanAuthorize({ ...OPEN, granted: false }, "slack")).toBe(false);
     // `credentialSource: "none"` — nothing to authorize against.
     expect(composioCanAuthorize({ ...OPEN, hasCredential: false }, "slack")).toBe(false);
+  });
+
+  // Issue #582. This assertion used to read `false`, and that was half of the
+  // page's self-contradiction: `POST …/composio/authorize` never consulted the
+  // grant (`resolve_tenant` reads the credential and the toolkit allowlist and
+  // nothing else), so the sign-in this predicate refused to offer worked fine
+  // from the provider list that ignored the grant. One surface said "connect
+  // me", the other said "no route", for the same account on the same screen.
+  //
+  // The grant governs whether AGENTS receive Composio tools, which is a caveat
+  // the grid states next to the connected badge — not a reason to withhold a
+  // handshake that completes.
+  it("offers a route without the composio grant, which gates tools and not the handshake", () => {
+    expect(composioCanAuthorize({ ...OPEN, granted: false }, "slack")).toBe(true);
   });
 
   it("allows any toolkit in open mode, where the backend allowlist governs", () => {

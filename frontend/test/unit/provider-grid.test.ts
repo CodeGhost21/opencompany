@@ -1,0 +1,217 @@
+// The Connections page's one provider grid (issue #582).
+//
+// The bug these pin: the page rendered two provider lists from two routes that
+// applied different rules to the same Composio state, so Gmail could show as
+// connected in one and offer an actionable Connect button in the other, on one
+// screen. These tests are about the merge that leaves one list — that a provider
+// appears exactly once, that its connected state has a single source, and that
+// no action is offered which the host cannot carry out.
+
+import { describe, expect, it } from "vitest";
+
+import type { ComposioToolkitEntry } from "@/api/composio";
+import type { ConnectionState } from "@/api/types";
+import { buildGridProviders } from "@/lib/provider-grid";
+import { CONNECTION_PROVIDERS, type ComposioReach } from "@/lib/connections";
+
+/** A host where Composio is live and everything is reachable (open mode). */
+const OPEN: ComposioReach = {
+  inBuild: true,
+  granted: true,
+  hasCredential: true,
+  openMode: true,
+  effectiveToolkits: [],
+};
+
+function entry(slug: string, over: Partial<ComposioToolkitEntry> = {}): ComposioToolkitEntry {
+  return { slug, name: "", description: "", logo: null, categories: [], ...over };
+}
+
+function states(...rows: ConnectionState[]): Record<string, ConnectionState> {
+  return Object.fromEntries(rows.map((r) => [r.provider, r]));
+}
+
+function bySlug(providers: ReturnType<typeof buildGridProviders>, slug: string) {
+  const found = providers.filter((p) => p.slug === slug);
+  expect(found.length, `expected exactly one ${slug} tile, got ${found.length}`).toBe(1);
+  return found[0];
+}
+
+describe("buildGridProviders", () => {
+  it("renders a provider exactly once even when the host reports it twice", () => {
+    // The host emits two rows for one provider whenever an id and its Composio
+    // slug do not normalize alike: a manifest declaring `x` yields a
+    // disconnected `x` row while Composio's connected state arrives as
+    // `twitter`. Two rows must still be one tile — this is acceptance criterion
+    // 1, and the failure it guards is the whole issue.
+    const providers = buildGridProviders(
+      [entry("twitter")],
+      [],
+      states(
+        { provider: "x", connected: false },
+        { provider: "twitter", connected: true, via: ["composio"] },
+      ),
+      OPEN,
+      false,
+    );
+    const tile = bySlug(providers, "twitter");
+    expect(tile.connected).toBe(true);
+    expect(tile.via).toEqual(["composio"]);
+  });
+
+  it("takes connected from the host's reconciled rows, not from a second probe", () => {
+    const providers = buildGridProviders(
+      [entry("gmail"), entry("slack")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"], account: "ops@acme.test" }),
+      OPEN,
+      false,
+    );
+    expect(bySlug(providers, "gmail").connected).toBe(true);
+    expect(bySlug(providers, "gmail").account).toBe("ops@acme.test");
+    // Absent from `/connections` means not connected — the single answer, with
+    // no second list to contradict it.
+    expect(bySlug(providers, "slack").connected).toBe(false);
+  });
+
+  it("offers no connect action for an already-connected provider", () => {
+    // Acceptance criterion 3. A connected tile is not a Connect affordance, so
+    // an operator cannot start a second sign-in for one account — the shape
+    // #396 had to clean up once.
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+    );
+    expect(bySlug(providers, "gmail").connected).toBe(true);
+  });
+
+  it("matches a hyphenated console id to its Composio slug", () => {
+    const providers = buildGridProviders(
+      [entry("googlecalendar")],
+      [],
+      states({ provider: "googlecalendar", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+    );
+    const tile = bySlug(providers, "googlecalendar");
+    expect(tile.connected).toBe(true);
+    // The host id stays distinct from the Composio slug: one is what
+    // `startConnection`/`disconnectConnection` take, the other is what
+    // `composio/authorize` takes, and sending either to the other's route fails.
+    expect(tile.providerId).toBe("google-calendar");
+  });
+
+  it("keeps every local tile when the host offers no Composio catalog", () => {
+    // A self-hoster with Composio switched off gets an empty catalog. Without
+    // the union the page would render nothing at all rather than the tiles they
+    // can genuinely connect natively.
+    const providers = buildGridProviders([], [], {}, null, false);
+    for (const local of CONNECTION_PROVIDERS) {
+      expect(
+        providers.some((p) => p.slug === local.toolkit),
+        `${local.id} lost its tile with no Composio catalog`,
+      ).toBe(true);
+    }
+  });
+
+  it("does not duplicate a local tile the backend catalog also offers", () => {
+    const providers = buildGridProviders([entry("gmail", { name: "Gmail" })], [], {}, OPEN, false);
+    expect(providers.filter((p) => p.slug === "gmail")).toHaveLength(1);
+  });
+
+  it("offers Disconnect only where the host holds something to release", () => {
+    // `DELETE …/connections/{provider}` blanks the host's own `oauth/{provider}`
+    // secret; no host route releases a Composio connection. A Disconnect on a
+    // Composio-only tile would report success and leave it connected on the next
+    // refresh — the same contradiction in a different place.
+    const providers = buildGridProviders(
+      [entry("gmail"), entry("slack")],
+      [],
+      states(
+        { provider: "gmail", connected: true, via: ["composio"] },
+        { provider: "slack", connected: true, via: ["native"] },
+      ),
+      OPEN,
+      false,
+    );
+    expect(bySlug(providers, "gmail").canDisconnect).toBe(false);
+    expect(bySlug(providers, "slack").canDisconnect).toBe(true);
+  });
+
+  it("reports an unread Composio probe as unknown rather than disconnected", () => {
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: false, unverified: true }),
+      OPEN,
+      false,
+    );
+    expect(bySlug(providers, "gmail").unverified).toBe(true);
+  });
+
+  it("does not call a connected provider unverified", () => {
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states(
+        { provider: "gmail", connected: true, via: ["native"] },
+        { provider: "gmail-alias", connected: false, unverified: true },
+      ),
+      OPEN,
+      false,
+    );
+    expect(bySlug(providers, "gmail").unverified).toBe(false);
+  });
+
+  it("routes an undeclared provider through Composio on a platform-managed host", () => {
+    // Issue #599's case, carried over: `GET …/connections` answers only for
+    // declared providers, so a tenant declaring none leaves every tile with no
+    // row of its own. The instance-level `attested` fact still applies.
+    const providers = buildGridProviders([entry("gmail")], [], {}, OPEN, true);
+    expect(bySlug(providers, "gmail").route).toEqual({ kind: "composio", toolkit: "gmail" });
+  });
+
+  it("says a platform-managed tile is managed when Composio cannot reach it", () => {
+    const providers = buildGridProviders([entry("gmail")], [], {}, null, true);
+    expect(bySlug(providers, "gmail").route).toEqual({ kind: "managed" });
+  });
+
+  it("gives a slug from the by-slug hatch a tile of its own", () => {
+    const providers = buildGridProviders([], ["hubspot"], {}, OPEN, false);
+    expect(bySlug(providers, "hubspot").route).toEqual({ kind: "composio", toolkit: "hubspot" });
+  });
+
+  it("orders connected providers first", () => {
+    const providers = buildGridProviders(
+      [entry("zendesk"), entry("gmail"), entry("stripe")],
+      [],
+      states({ provider: "stripe", connected: true, via: ["composio"] }),
+      OPEN,
+      false,
+    );
+    expect(providers[0].slug).toBe("stripe");
+  });
+
+  it("connects a provider whose company does not grant the composio namespace", () => {
+    // The heart of #582 on this side of the wire. The grant governs whether
+    // agents receive Composio tools; it never governed whether a sign-in can
+    // complete. Gating the route on it — while the other list did not — is what
+    // made one page say both things.
+    const providers = buildGridProviders(
+      [entry("gmail")],
+      [],
+      states({ provider: "gmail", connected: true, via: ["composio"] }),
+      { ...OPEN, granted: false },
+      false,
+    );
+    const tile = bySlug(providers, "gmail");
+    expect(tile.connected).toBe(true);
+    expect(bySlug(buildGridProviders([entry("slack")], [], {}, { ...OPEN, granted: false }, false), "slack").route).toEqual({
+      kind: "composio",
+      toolkit: "slack",
+    });
+  });
+});
