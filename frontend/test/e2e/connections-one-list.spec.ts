@@ -32,10 +32,28 @@ import { expect, test } from "@playwright/test";
 
 type Page = import("@playwright/test").Page;
 
+/**
+ * Open the page with the first-run tour out of the way.
+ *
+ * The dismissal is not cosmetic and the wait is not padding: the welcome dialog
+ * is a Radix dialog, so while it is open every other element is `aria-hidden`
+ * and therefore invisible to `getByRole`. It also mounts a beat *after* the
+ * navigation resolves — so an `isVisible()` check taken immediately races it and
+ * usually wins, leaving the dialog to open over the assertions that follow.
+ * Every spec here starts from the same shared storage state, which was captured
+ * before any tour was skipped, so this happens once per test rather than once
+ * per run.
+ */
 async function openConnections(page: Page): Promise<void> {
   await page.goto("/#/settings/connections");
   const skip = page.getByRole("button", { name: "Skip for now" });
-  if (await skip.isVisible().catch(() => false)) await skip.click();
+  await skip
+    .waitFor({ state: "visible", timeout: 10_000 })
+    .then(() => skip.click())
+    .catch(() => {
+      /* already dismissed in this context — nothing to close */
+    });
+  await expect(skip).toBeHidden({ timeout: 10_000 });
   await expect(page.getByRole("heading", { name: "Providers" })).toBeVisible({ timeout: 30_000 });
 }
 
