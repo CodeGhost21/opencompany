@@ -455,9 +455,22 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
         // dead-ended the turn — per page, per list. A first-time park is not a
         // cheap price for a read, it is the whole cost.
         //
-        // `Standing::Grantable` stays. It stops mattering for `supervised` now
-        // that nothing parks there, but it still governs `readonly` and any
-        // tier added later.
+        // `Standing::Grantable` stays — but not for the reason the issue gives.
+        // It does **not** govern `readonly`: that brake denies off
+        // `Reach::denied_under_readonly` before any grant is consulted
+        // (`harness::policy::check`, "readonly outranks a grant"), and it never
+        // reads `Standing` at all. Under `supervised` nothing parks here now,
+        // so the admission path this used to feed is unreachable for a
+        // catalogue read in every tier that exists today.
+        //
+        // What it still governs is the **mint** side: a standing grant may only
+        // be minted for a grantable call
+        // (`Effect::may_be_granted_standing`, and the re-check in
+        // `standing_grant_allows`), and a Composio *send* arriving under this
+        // same tool name must never be mintable. It is also the field any
+        // unattended tier has to read to tell a read it may run from a send it
+        // may not — the `auto` tier proposed in #560 derives exactly that line.
+        // Removing it would make both of those decisions unrepresentable.
         Consequence {
             group: EffectGroup::Other,
             reach: Reach::ExternalRead,
