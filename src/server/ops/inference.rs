@@ -13,10 +13,16 @@
 //! the per-tenant provider re-resolves this config every turn — *once the
 //! company is already on the harness cognition path*. Which brain a company runs
 //! is chosen once, at build time, so a company that resolved **no** inference
-//! source at boot is on the offline echo brain and stays there until the process
-//! restarts, no matter what is saved here. That one transition is reported as
+//! source at boot is on the offline echo brain until its runtime is rebuilt in
+//! place (issue #290) or the process restarts. That transition is reported as
 //! [`InferenceStatusDto::restart_required`] rather than papered over with a
 //! "next turn" promise the runtime cannot keep (issue #266).
+//!
+//! Setting the key on the `managed` provider is an ordinary case, not a BYOK
+//! edge (issue #585): it keeps the platform endpoint and swaps only the
+//! credential, so the company pays for its own agents on the TinyHumans brain.
+//! `resolve_endpoint` has always preferred a stored key over the env default
+//! here; what was missing was anywhere for an admin to type one.
 
 use std::collections::BTreeMap;
 
@@ -939,6 +945,67 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["status"]["provider"], "managed");
         assert_eq!(resp["status"]["source"], "managed");
+    }
+
+    /// Issue #585: the company's key on the *managed* brain — set, rotate, and
+    /// clear — is the whole point of the screen, and the route must never echo
+    /// any of the three tokens back.
+    #[tokio::test]
+    async fn managed_key_can_be_set_rotated_and_cleared() {
+        const ROTATED: &str = "sk-rotated-inference-token-ABC";
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        // Set: the company pays for its own agents on the platform endpoint.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["provider"], "managed");
+        assert_eq!(resp["status"]["slug"], "managed");
+        assert_eq!(resp["status"]["source"], "runtime");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        // Setting only a key must not move the tenant off the managed endpoint.
+        assert_eq!(
+            resp["status"]["baseUrl"],
+            crate::company::inference::MANAGED_BASE_URL
+        );
+        assert!(!raw.contains(TOKEN), "PUT leaked the token: {raw}");
+
+        // Rotate: a second key replaces the first, still write-only.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": ROTATED })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        assert!(!raw.contains(TOKEN), "PUT leaked the old token: {raw}");
+        assert!(!raw.contains(ROTATED), "PUT leaked the new token: {raw}");
+
+        // Clear: an explicit empty key removes it (the console's "Remove key").
+        let (status, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "managed", "key": "" })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(resp["status"]["keyConfigured"], false);
+
+        let (_, dto, raw) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["keyConfigured"], false);
+        for token in [TOKEN, ROTATED] {
+            assert!(!raw.contains(token), "GET leaked a token: {raw}");
+        }
     }
 
     #[tokio::test]
