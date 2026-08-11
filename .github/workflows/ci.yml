@@ -61,6 +61,49 @@ permissions:
 # release into a reviewable PR that moves the SHA and its version comment
 # together, which is the point of pinning in the first place.
 jobs:
+  # The header above states an invariant. This job is what makes it one.
+  #
+  # A comment is a guard only for people who read it, and the evidence that
+  # this one is not enough arrived before the sweep even merged: the `Desktop`
+  # job below was written against the pre-sweep file and landed with three
+  # unpinned references while this branch was open. The next such job will be
+  # written the same way. A grep is the cheapest thing that says no.
+  #
+  # Deliberately dumb and deliberately not a third-party action — a pinning
+  # gate that itself resolves an action at run time would be circular. It reads
+  # every `uses:` line in every workflow and requires a 40-hex SHA. It cannot
+  # tell a good SHA from a bad one; the version comment beside it is for
+  # humans, and Dependabot is what keeps it honest.
+  actions-pinned:
+    name: Actions pinned
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Every `uses:` names a commit SHA
+        run: |
+          set -euo pipefail
+          # Match the `uses:` value only, ignoring prose that mentions "uses:"
+          # inside a comment. Anchored to the step form: optional list dash,
+          # the key, then the reference.
+          unpinned=$(grep -rnE '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/ \
+            | grep -vE 'uses:[[:space:]]*[^@]+@[0-9a-f]{40}([[:space:]]|$|#)' || true)
+          if [ -n "$unpinned" ]; then
+            echo "::error title=Unpinned action::A \`uses:\` reference names a tag or branch rather than a 40-hex commit SHA. A tag is a pointer its owner can move, so the job would run whatever it names at run time. Resolve it with: gh api repos/<owner>/<action>/commits/<tag> --jq .sha — then record the precise version in a trailing comment." >&2
+            echo "$unpinned" >&2
+            exit 1
+          fi
+          count=$(grep -rhcE '^[[:space:]]*-?[[:space:]]*uses:' .github/workflows/ | paste -sd+ - | bc)
+          # Zero would pass the check above while asserting nothing — the
+          # failure mode issue #555 exists to remember.
+          if [ "$count" -eq 0 ]; then
+            echo "::error title=Pin check matched nothing::The grep selected zero \`uses:\` lines, so this job is green while checking nothing. The pattern or the workflow layout changed." >&2
+            exit 1
+          fi
+          echo "$count \`uses:\` references, all pinned to a commit SHA."
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
