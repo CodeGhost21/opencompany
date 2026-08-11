@@ -5649,9 +5649,12 @@ async fn an_admin_is_refused_by_none_of_them() {
 /// the datum `human_edit_diff` exists to answer — and overwriting only the node
 /// would leave the history claiming the agent's draft shipped unchanged.
 ///
-/// The ordering is asserted too: the version must be there when the node write
-/// is refused, since chain-ahead-of-node is the survivable direction and
-/// node-ahead-of-chain is the silent one.
+/// The ordering is asserted too, by refusing the node write: an artifact
+/// stamped with a node id the tree does not have makes the chain append
+/// succeed and the node write fail, and the version must still be there
+/// afterwards. Chain-ahead-of-node is the survivable direction and
+/// node-ahead-of-chain is the silent one, so a failed save must land on the
+/// first.
 #[tokio::test]
 async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
     use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
@@ -5726,6 +5729,54 @@ async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
     assert_eq!(
         node.updated_by,
         crate::ports::workspace::WorkspaceOrigin::Operator
+    );
+
+    // -- and now the ordering, with the node write refused ------------------
+    //
+    // A deliverable whose node the operator deleted still carries that node's
+    // id on its latest version, so the reverse lookup matches and the append
+    // runs — then the write fails, because the node is gone. That is the
+    // failure this route's ordering was chosen for, and it is reachable
+    // without a mock: the refusal comes from the real store.
+    let mut orphaned = ArtifactRecord::new(
+        "art-2",
+        "t-1",
+        "Retired spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("retired.md");
+    orphaned.stamp_workspace_node("node-the-operator-deleted");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &orphaned)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-the-operator-deleted",
+        Some(json!({"content": "an edit the tree cannot take"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "the node write must fail — there is no such node"
+    );
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        2,
+        "the version must survive the refused node write: chain-ahead-of-node is \
+         the direction that heals, and this is the ordering that guarantees it"
+    );
+    assert_eq!(
+        artifact["versions"][1]["body"],
+        "an edit the tree cannot take"
     );
 }
 
