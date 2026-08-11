@@ -3760,6 +3760,117 @@ mod test {
         }
     }
 
+    /// Issue #618: membership gets you the approval, role gets you its
+    /// contents.
+    ///
+    /// **The two-account part is the point.** The harness signs every request
+    /// in as an admin, so a redaction verified only as an admin passes
+    /// identically against no redaction at all — the test would prove nothing
+    /// while looking like coverage. This seeds a second, Member-role account
+    /// and drives the same route with both.
+    #[tokio::test]
+    async fn a_member_sees_the_approval_but_not_its_payload_or_amount() {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let effect = crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(2400.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "board@example.test", "memo": "Q3 retainer" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        runtime
+            .journal
+            .record_parked(
+                &crate::ports::types::ApprovalId::new("appr-618"),
+                &effect,
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        async fn approvals_as(app: &axum::Router, cookie: String) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/company/approvals")
+                        .header("cookie", cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        // The admin decides the sign-off, so the admin sees what it will do.
+        let as_admin = approvals_as(&app, crate::server::test_support::fixed_cookie("acme")).await;
+        let admin_row = &as_admin.as_array().unwrap()[0];
+        assert_eq!(admin_row["amount_usd"].as_f64(), Some(2400.0));
+        assert_eq!(admin_row["payload"]["to"], "board@example.test");
+        assert!(
+            admin_row.get("contents_hidden").is_none(),
+            "an admin is not told anything was hidden: {admin_row}"
+        );
+
+        let as_member =
+            approvals_as(&app, crate::server::test_support::member_cookie("acme")).await;
+        let member_row = &as_member.as_array().unwrap()[0];
+
+        // Still visible: everything that makes stalled work legible. This half
+        // is what #468 depends on — a member must keep seeing that work is
+        // waiting and what kind of call it is.
+        assert_eq!(member_row["id"], "appr-618");
+        assert_eq!(member_row["kind"], "payment.send");
+        assert_eq!(member_row["agent"], "ceo");
+        assert_eq!(member_row["at_millis"].as_u64(), Some(1_000));
+
+        // Withheld: the recipient and the money.
+        assert!(
+            member_row.get("payload").is_none(),
+            "the recipient must not reach a member: {member_row}"
+        );
+        // `null`, not absent: unlike `payload`, `amount_usd` carries no
+        // `skip_serializing_if`, so it stays on the wire as an explicit null.
+        // Both read as "no value" to the console (`a.amount_usd != null`
+        // covers either), and changing the wire shape as a side effect of a
+        // redaction would be a worse trade than asserting the shape that is
+        // actually there.
+        assert!(
+            member_row["amount_usd"].is_null(),
+            "nor the amount: {member_row}"
+        );
+        assert_eq!(
+            member_row["contents_hidden"], true,
+            "and the console must be able to say so rather than render an empty card: {member_row}"
+        );
+
+        // Belt and braces: the recipient string must appear nowhere in the
+        // member's response, however the shape changes later.
+        let raw = serde_json::to_string(&as_member).unwrap();
+        assert!(
+            !raw.contains("board@example.test") && !raw.contains("Q3 retainer"),
+            "payload content leaked to a member: {raw}"
+        );
+    }
+
     /// The dotted kind the stalled brain parks once its follow-up turn gets
     /// past the barrier. Parking journals durably (`record_parked`), so its
     /// presence in `pending_approvals()` is proof the continuation reached the

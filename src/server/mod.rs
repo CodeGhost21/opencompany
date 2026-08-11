@@ -1,6 +1,5 @@
 #[cfg(feature = "tinyplace")]
 pub mod a2a;
-pub(crate) mod approval_visibility;
 /// The Agent Client Protocol surface (the `acp` feature).
 ///
 /// The module's own docs reason about "a build without the feature"; this is
@@ -9,6 +8,7 @@ pub(crate) mod approval_visibility;
 /// console shell.
 #[cfg(feature = "acp")]
 pub mod acp;
+pub(crate) mod approval_visibility;
 pub mod chat_history;
 pub mod cors;
 mod error;

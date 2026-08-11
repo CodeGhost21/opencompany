@@ -134,7 +134,10 @@ mod tests {
     #[test]
     fn a_member_gets_the_approval_without_its_contents() {
         let out = for_principal(&principal(UserRole::Member), vec![summary()]);
-        assert!(out[0].payload.is_none(), "the recipient must not reach a member");
+        assert!(
+            out[0].payload.is_none(),
+            "the recipient must not reach a member"
+        );
         assert!(out[0].amount_usd.is_none(), "nor the amount");
         assert!(
             out[0].contents_hidden,

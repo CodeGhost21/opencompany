@@ -72,12 +72,13 @@ impl CompanyGql {
     /// the whole boundary reachable through one GraphQL field.
     async fn approvals(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<ApprovalGql>> {
         let auth = ctx.data::<GqlAuth>()?;
-        Ok(
-            crate::server::approval_visibility::for_principal(auth, self.runtime.pending_approvals())
-                .into_iter()
-                .map(ApprovalGql::from)
-                .collect(),
+        Ok(crate::server::approval_visibility::for_principal(
+            auth,
+            self.runtime.pending_approvals(),
         )
+        .into_iter()
+        .map(ApprovalGql::from)
+        .collect())
     }
 
     /// The company roster: manifest teammates plus operator-added overlays.
