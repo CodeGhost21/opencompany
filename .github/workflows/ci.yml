@@ -189,6 +189,142 @@ jobs:
           # Consumed minutes later by one job in the same run and never again.
           retention-days: 1
 
+  # Issue #555. The MongoDB backend's conformance suite, which until now RAN
+  # NOWHERE — the same defect as the SQLite step above, in the backend that
+  # carries the hosted product.
+  #
+  # `src/store/mongodb.rs` calls the same `src/store/conformance.rs` assertions
+  # the SQLite step rescued: 20 tests over the task / workspace / fact / skill /
+  # inbox / usage / run / user / session ports, plus isolation, append-only and
+  # monotonic-seq. None had ever executed. `cargo test` omits `--features
+  # mongodb`, `rust-gated` pins `openhuman,tinycortex`, and `Check
+  # (--all-features)` compiles the module without running it — three lanes touch
+  # the file, no lane ran it. `StorageKind::Mongodb` is what hosted tenants run,
+  # so the one storage backend under the deployed product was the one with no
+  # coverage, and `conformance.rs` is the only thing pinning the three backends
+  # to answer identically.
+  #
+  # It had already drifted. The first green run of this job was not green: the
+  # port contract reads a limit of zero as an empty page, `find().limit(0)` is
+  # MongoDB's *no limit* sentinel, and `list_runs` returned the whole collection
+  # where the fs and sqlite backends return nothing. See `FindLimit` in
+  # `src/store/mongodb.rs` — a live inversion sitting behind a green pipeline,
+  # which is the argument for this job stated better than the rest of this
+  # comment states it.
+  #
+  # A JOB, not a step — a DEPARTURE from the SQLite step's reasoning, so:
+  #
+  # `services:` is declared per JOB. Actions has no per-step service container,
+  # so "make it a step on `rust`" is not on the table; the container would have
+  # to attach to the whole job. That costs more than it looks. The runner pulls
+  # `mongo:7` and waits for its health check BEFORE the job's first step, so
+  # fmt, clippy, the default test run, the SQLite step and the binary build all
+  # start later — and `console-e2e` has `needs: rust` for that binary, which
+  # puts the wait on the run's CRITICAL PATH to serve a suite none of those
+  # steps touch. `rust` also has no `Swatinem/rust-cache`, so a second feature
+  # set built there recompiles cold on every run, in front of everything.
+  #
+  # A separate job pays a runner, a checkout and a toolchain install, exactly as
+  # the SQLite comment says — but pays them IN PARALLEL, where they are compute
+  # rather than wall clock, and amortises the compile in its own cache keyed to
+  # this feature set. The SQLite step's arithmetic held because its suite's cost
+  # was ALL setup and it needed no server; a service container is setup that
+  # cannot be shared no matter where it is declared. `rust-gated` is the in-repo
+  # precedent for the same trade: a separate job so the fast default lane keeps
+  # its turnaround and its `Rust` check name for branch protection.
+  #
+  # Scoped to `--lib store::mongodb` for the SQLite step's reason exactly: this
+  # lane runs the backend's own suite, and rerunning the ~1800 default tests
+  # under a feature that does not change them would buy no coverage.
+  #
+  # On EVERY PR, not behind a `paths:` filter on `src/store/**`. The failure
+  # guarded here is a port change that breaks one backend's implementation, and
+  # the author of such a change need never open `src/store/mongodb.rs` — a path
+  # filter would skip this lane on exactly the diff that most needs it.
+  rust-mongodb:
+    name: Rust (mongodb)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      mongodb:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        # The health check is the handshake, not decoration: steps begin as soon
+        # as the container is STARTED, and `mongod` accepts TCP before it will
+        # answer a command. Without this the first test races startup, and the
+        # driver's own server-selection retry would turn that into a 30s stall
+        # ending in a timeout rather than a legible failure.
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ping:1})'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # Same reason as the `rust` job: `tinyhumans-sdk` is an unconditional path
+      # dependency of the vendored openhuman crate (issue #499), so Cargo reads
+      # its manifest during resolution even where the feature selection excludes
+      # `openhuman`. A missing checkout fails THIS build too, not just a gated
+      # one. `submodules: true` is not recursive, hence the explicit init.
+      - name: Init vendored openhuman crate submodules
+        run: |
+          git -C vendor/openhuman submodule update --init --depth 1 \
+            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
+            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+          git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
+            vendor/tinyagents
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # TWO different silent-success modes are guarded below, and neither guard
+      # catches the other's failure. Both are needed.
+      #
+      # `OPENCOMPANY_TEST_MONGODB_REQUIRED=1` turns "no server" from a skip into
+      # a panic (see `required()` in `src/store/mongodb.rs`). The suite's local
+      # default is to skip when `OPENCOMPANY_TEST_MONGODB_URI` is unset, which
+      # rightly keeps a laptop's `cargo test` offline — and which, left in place
+      # here, lets this job report `20 passed` in 0.00s having connected to
+      # nothing. That is measured, not hypothetical: it is what the suite does
+      # on this runner today, and reproducing it inside the lane built to end it
+      # would just move the bug one layer down.
+      #
+      # The count assertion catches the mode `REQUIRED` cannot. If the
+      # `store::mongodb` filter stops matching — module renamed, moved, or
+      # feature-gated away — cargo selects zero tests, prints `0 passed; 0
+      # failed` and exits 0, and `required()` never runs because `store()` is
+      # never called. Only a NUMBER separates "everything passed" from "nothing
+      # ran"; issue #481 established the same assertion for integration targets.
+      #
+      # `scripts/ci/assert-integration-targets-run.sh` is NOT reused: it walks
+      # the `[[test]]` targets `cargo metadata` reports — the files under
+      # `tests/` — and this suite is a `--lib` unit module it does not select.
+      # Same defect class, different target kind, so the count is read straight
+      # off cargo's summary line instead.
+      - name: Test the MongoDB backend
+        env:
+          OPENCOMPANY_TEST_MONGODB_URI: mongodb://localhost:27017
+          OPENCOMPANY_TEST_MONGODB_REQUIRED: "1"
+        run: |
+          set -euo pipefail
+          cargo test --locked --features mongodb --lib store::mongodb \
+            | tee "${RUNNER_TEMP}/mongodb-suite.log"
+          passed=$(sed -n 's/^test result: ok\. \([0-9][0-9]*\) passed.*/\1/p' \
+            "${RUNNER_TEMP}/mongodb-suite.log" | head -n 1)
+          if [ -z "${passed}" ] || [ "${passed}" -eq 0 ]; then
+            echo "::error title=MongoDB suite ran nothing::cargo reported no passing tests for --lib store::mongodb, so this job is green while asserting nothing about the backend hosted tenants run. The filter selects no tests — see issue #555." >&2
+            exit 1
+          fi
+          echo "MongoDB backend suite: ${passed} tests passed."
+
   # Issue #202. The `Rust` job above builds DEFAULT FEATURES ONLY, so every line
   # behind `openhuman` (`src/harness/**`, `src/workflows/**`, `src/runtime/`
   # `delegation*`, and the `live_company_turn` example) and every line behind
