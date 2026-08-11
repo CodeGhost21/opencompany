@@ -190,39 +190,68 @@ pub fn is_delegation_tool(tool: &str) -> bool {
 /// whichever tool was chosen. What the brief has to do now is stop the model
 /// *double-tracking* (a `spawn_task` beside every hand-off), which is why it
 /// tells it what `spawn_task` is still for.
+///
+/// # Answering leads, and the tool list stopped being the shape (issue #267)
+///
+/// The discrimination rule was already here — *"act on the board only when it
+/// genuinely helps — otherwise answer directly and concisely"* — as the closing
+/// clause of a brief that spent its length enumerating seven action tools and
+/// how to use each. **The structure read as an invitation to act with a caveat
+/// attached, and behaviour followed the structure rather than the caveat.** Six
+/// cards sat unworked in `backlog` on a live company, and four of them were
+/// asks to *create a workflow* that the orchestrator could have authored in the
+/// turn it was asked.
+///
+/// So the default moved to the front and the enumeration was trimmed to fit
+/// underneath it. Two things changed in substance rather than order:
+///
+/// * *A question about state is never a card* is now stated, not implied.
+/// * `create_workflow` is framed as **something to do this turn**, not a
+///   capability to mention. That is what un-deadens the four workflow cards'
+///   class: Layer A still opens the `Track` card for "create a workflow named
+///   X" — it *is* an instruction — but the orchestrator now completes it
+///   instead of leaving it to rot.
+///
+/// This is guidance, and the two deterministic layers in
+/// [`triage_message`](crate::company::task_intent::triage_message) and
+/// `DelegationRunner::handle_operator_message` are what make the outcome not
+/// depend on it.
+///
+/// # Budget
+///
+/// Persona-appended, so it sits OUTSIDE the issue-#417
+/// [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES)
+/// insight-document budget and cannot crowd out the Desks section
+/// `delegate_to_desk` depends on. Kept no longer than it already was regardless
+/// — see `the_brief_leads_with_answering_and_did_not_grow`.
 pub fn orchestrator_brief() -> String {
     " You are also this company's orchestrator: the single point of contact for the operator. \
-Answer from whole-company context. Two decisions come up constantly and they are INDEPENDENT — do \
-not collapse them into one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, \
-hand it to that desk with `delegate_to_desk` rather than answering from your own guess; when it is \
-yours to answer, answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you \
-must not pick a tool in order to influence it. Anything substantial handed to a desk is opened as a \
-board card automatically, and so is anything substantial an operator asks a desk or teammate \
-directly — the hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for \
-the same work, and never prefer one over the other to get something tracked. Reach for `spawn_task` \
-only for work that belongs on the board but must NOT start in this turn: something for later, for \
-somebody else, or waiting on a person. Use `query_company` to ground answers in the \
-company's durable facts, recent activity, saved workflows, team roster, and desks — it is the \
-source of truth for what workflows exist, who is on the team, and which desks can take work, so \
-consult it before answering \"what workflows/teammates do we have?\" or before delegating, rather \
-than guessing or naming a skill \
-— `delegate_to_desk` to hand a turn to a desk's lead \
-member, naming the desk by an id `query_company` lists under Desks (a desk is not a person: \
-handing work to a teammate's name is not a delegation), \
-`spawn_task` to open a card for work that should wait rather than start now, `run_workflow` to execute one of the \
-company's saved workflows by id (for example to advance or finish a task that is waiting on a \
-workflow run) — you can run workflows yourself; never claim the run_workflow tool is unavailable — \
-`create_workflow` to author and save a brand-new workflow graph (a trigger plus agent / tool / \
-condition / output steps) when a repeatable process is worth capturing — it's enabled immediately \
-and runnable with run_workflow — and `add_agent` to bring on a new teammate (a name, role, and \
-optional mandate) when the company genuinely needs one — it becomes a real, addressable member of \
-the team starting next turn. \
-You also own the board's lifecycle: `assign_task` to set or change who owns an existing card (this \
-records ownership only — moving the card to In Progress is what starts the work), and \
-`review_task` to record your verdict on a card awaiting review, either `approve` when the work is \
-accepted or `revise` to send it back to To-do for another pass. \
-Delegate, run or create a workflow, add a teammate, or act on the board only when it genuinely \
-helps — otherwise answer directly and concisely."
+MOST MESSAGES ARE QUESTIONS OR QUICK READS. Answer them from whole-company context and touch \
+nothing else. A question about state — what is on the board, what workflows exist, who is on the \
+team, what happened — is NEVER a card. Use `query_company`: it is the source of truth for the \
+company's durable facts, recent activity, saved workflows, team roster and desks, so consult it \
+before answering rather than guessing, then answer directly and concisely. A board write is the \
+exception and needs a reason. \
+When there IS work, two decisions come up and they are INDEPENDENT — do not collapse them into \
+one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, hand it to that desk \
+with `delegate_to_desk`, naming the desk by an id `query_company` lists under Desks (a desk is not \
+a person: handing work to a teammate's name is not a delegation); when it is yours to answer, \
+answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
+tool in order to influence it. Anything substantial handed to a desk is opened as a board card \
+automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
+hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
+and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
+that belongs on the board but must NOT start in this turn: something for later, for somebody else, \
+or waiting on a person. \
+WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
+capture a repeatable process (\"create a workflow that…\"), author it NOW with `create_workflow` — \
+a trigger plus agent / tool / condition / output steps — and say it is ready; it is enabled \
+immediately and runnable. `run_workflow` executes a saved workflow by id, including to advance a \
+task waiting on a run; you can run workflows yourself, so never claim that tool is unavailable. \
+`add_agent` brings on a new teammate when the company genuinely needs one. \
+You also own the board's lifecycle: `assign_task` sets who owns an existing card (ownership only — \
+moving it to In Progress is what starts the work), and `review_task` records `approve` or `revise` \
+on a card awaiting review."
         .to_string()
 }
 
@@ -2947,6 +2976,59 @@ mod tests {
             tools: Vec::new(),
             budget_usd_daily: None,
         }
+    }
+
+    /// Issue #267: the brief's **shape** is the thing under test, because the
+    /// shape is what the model followed. Answering has to lead, the
+    /// never-a-card rule has to be stated rather than implied, authoring a
+    /// workflow has to read as something done in this turn, and the whole thing
+    /// has to be no longer than the version it replaced — a "rebalance" that
+    /// grew the brief would just be more prose competing with the lead.
+    #[test]
+    fn the_brief_leads_with_answering_and_did_not_grow() {
+        let brief = orchestrator_brief();
+
+        // The default leads. Measured by position, not by presence: the old
+        // brief contained the same rule as its closing clause and behaviour
+        // followed the enumeration instead.
+        let answer_first = brief
+            .find("MOST MESSAGES ARE QUESTIONS OR QUICK READS")
+            .expect("the answering default is stated");
+        for later in [
+            "delegate_to_desk",
+            "spawn_task",
+            "create_workflow",
+            "add_agent",
+            "assign_task",
+            "review_task",
+        ] {
+            let at = brief.find(later).unwrap_or_else(|| panic!("names {later}"));
+            assert!(
+                answer_first < at,
+                "`{later}` is introduced before the answering default"
+            );
+        }
+
+        assert!(
+            brief.contains("is NEVER a card"),
+            "the never-a-card rule must be stated, not implied: {brief}"
+        );
+        // The #442 two-decisions block survives the restructure.
+        assert!(brief.contains("they are INDEPENDENT"), "{brief}");
+        assert!(brief.contains("the hand-off IS the card"), "{brief}");
+        // A "create a workflow" ask is authored now, not parked.
+        assert!(
+            brief.contains("author it NOW with `create_workflow`"),
+            "the automate path must read as this-turn work: {brief}"
+        );
+
+        // The length of the brief this replaced. A ceiling, not a target.
+        const PREVIOUS_LEN: usize = 2784;
+        assert!(
+            brief.len() <= PREVIOUS_LEN,
+            "the brief grew to {} (was {PREVIOUS_LEN})",
+            brief.len()
+        );
     }
 
     /// Issue #276: both directions of the arming summary, including the name
