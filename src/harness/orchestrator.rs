@@ -2423,6 +2423,28 @@ mod tests {
         );
     }
 
+    /// **Issue #327.** A workspace write summarizes structurally — the change
+    /// word and the node id, nothing else.
+    ///
+    /// The node's *name* is the exclusion with teeth. It is operator-authored
+    /// free text that routinely carries the substance of the note ("Q3 layoffs
+    /// shortlist"), and this string is a non-sensitive one-liner for the
+    /// insight surface, which is precisely where free text does not belong.
+    /// Same reasoning as the recipient exclusion two tests up; the arm was
+    /// written this way, and this is what pins it.
+    #[test]
+    fn a_workspace_write_summarizes_to_the_change_and_node_without_the_notes_name() {
+        let summary = summarize_event(&CompanyEvent::WorkspaceChanged {
+            node_id: "n-42".to_string(),
+            change: "updated".to_string(),
+        });
+
+        // Exact, not `contains`: the whole claim is that nothing *else* is in
+        // here. A future arm that looked the node up to add its name would keep
+        // passing every `contains` assertion and fail this one.
+        assert_eq!(summary, "workspace updated: n-42");
+    }
+
     #[test]
     fn orchestrator_id_prefers_the_tagged_agent() {
         let roster = vec![
