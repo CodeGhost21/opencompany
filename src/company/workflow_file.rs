@@ -20,11 +20,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{OpenCompanyError, Result};
 
-/// The node kinds a workflow graph may use, mirroring the tinyflows model. The
-/// first six are the original OpenCompany set; the trailing six (P2) complete
-/// the tinyflows node catalog: data-shape nodes (`switch` / `merge` /
-/// `split_out` / `transform` / `output_parser`) and `sub_workflow` composition.
-/// Each string is tinyflows' snake_case wire kind verbatim.
+/// The node kinds a workflow graph may use — the OpenCompany authoring
+/// contract. The first six are the original set; the trailing six (P2) add the
+/// data-shape nodes (`switch` / `merge` / `split_out` / `transform` /
+/// `output_parser`) and `sub_workflow` composition. Each string is tinyflows'
+/// snake_case wire kind verbatim, but this set is deliberately *narrower* than
+/// tinyflows' full engine catalog (`tinyflows`'s `NODE_KINDS`): the engine-only
+/// kinds are refused at parse. The accepted-vs-rejected contract, and why each
+/// engine-only kind is left out, is documented in
+/// `docs/spec/runtime/workflow-vocabulary.md`.
 pub const WORKFLOW_NODE_KINDS: &[&str] = &[
     "trigger",
     "agent",
