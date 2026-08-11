@@ -497,11 +497,14 @@ async fn test_config(company: ScopedCompany) -> Response {
         Ok(m) => m,
         Err(err) => return err.into_response(),
     };
-    let decl =
-        match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
-            Ok(d) => d,
-            Err(err) => return ApiError(err).into_response(),
-        };
+    let secrets = runtime.secrets().as_ref();
+    // Gate on *tenant* config, with no platform default: the button probes what
+    // the company configured, so "nothing configured" stays a 409 instead of
+    // quietly probing the platform brain on the operator's behalf.
+    let decl = match resolve_effective(runtime.id(), &manifest, None, secrets).await {
+        Ok(d) => d,
+        Err(err) => return ApiError(err).into_response(),
+    };
     match decl {
         None => (
             StatusCode::CONFLICT,
@@ -512,23 +515,45 @@ async fn test_config(company: ScopedCompany) -> Response {
             })),
         )
             .into_response(),
-        Some(decl) => match crate::harness::provider::probe(&decl).await {
-            Ok(()) => Json(serde_json::json!({
-                "ok": true,
-                "provider": decl.provider,
-                "note": "Reached the provider and got a reply.",
-            }))
-            .into_response(),
-            Err(err) => (
-                StatusCode::BAD_GATEWAY,
-                Json(serde_json::json!({
-                    "ok": false,
-                    "error": format!("Inference probe failed: {err}"),
-                    "code": "probe_failed",
-                })),
-            )
+        Some(tenant) => {
+            // Probe with the platform default in place. A `managed` config
+            // inherits both the platform endpoint and its credential, so
+            // resolving without it aimed the probe at the built-in production
+            // URL carrying no bearer at all — a staging tenant whose routing is
+            // perfectly fine would be told its provider is unreachable, on the
+            // same card that was already misreporting the URL (issue #597).
+            let decl = match platform_default(&crate::app::config::ProcessEnv) {
+                None => tenant,
+                Some(platform) => {
+                    match resolve_effective(runtime.id(), &manifest, Some(&platform), secrets).await
+                    {
+                        // Adding the platform default can only add a source,
+                        // never remove the one that just resolved — fall back to
+                        // it rather than inventing an error path for a case that
+                        // cannot happen.
+                        Ok(d) => d.unwrap_or(tenant),
+                        Err(err) => return ApiError(err).into_response(),
+                    }
+                }
+            };
+            match crate::harness::provider::probe(&decl).await {
+                Ok(()) => Json(serde_json::json!({
+                    "ok": true,
+                    "provider": decl.provider,
+                    "note": "Reached the provider and got a reply.",
+                }))
                 .into_response(),
-        },
+                Err(err) => (
+                    StatusCode::BAD_GATEWAY,
+                    Json(serde_json::json!({
+                        "ok": false,
+                        "error": format!("Inference probe failed: {err}"),
+                        "code": "probe_failed",
+                    })),
+                )
+                    .into_response(),
+            }
+        }
     }
 }
 
@@ -758,6 +783,22 @@ mod tests {
             .unwrap();
         assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
         assert_eq!(dto.source, "manifest");
+    }
+
+    /// The probe's gate stays keyed on *tenant* config. Pointing a deployment at
+    /// a platform endpoint gives the probe somewhere real to aim, but it must not
+    /// turn "nothing configured" into a live probe of the platform brain — that
+    /// 409 is the honest answer to "test my provider" from a company that has
+    /// not named one.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn probing_an_unconfigured_company_stays_not_configured() {
+        let home_dir = home();
+        let state = state_with_company(home_dir.path()).await;
+
+        let (status, body, _) = send(&state, "POST", "/api/v1/company/inference/test", None).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["code"], "not_configured");
     }
 
     #[cfg(feature = "openhuman")]
