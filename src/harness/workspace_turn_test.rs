@@ -186,6 +186,9 @@ fn folder(id: &str, name: &str) -> WorkspaceNode {
         updated_at_millis: crate::ports::now_millis(),
         created_by: WorkspaceOrigin::Operator,
         updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
     }
 }
 
@@ -198,6 +201,9 @@ fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
         updated_at_millis: crate::ports::now_millis(),
         created_by: WorkspaceOrigin::Operator,
         updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
     }
 }
 

@@ -2048,6 +2048,9 @@ async fn seed_workspace(
             // nor an agent, and the console says exactly that (issue #326).
             created_by: WorkspaceOrigin::Seed,
             updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);

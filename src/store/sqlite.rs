@@ -330,6 +330,11 @@ impl SqliteStore {
             "stored_ms",
             "INTEGER NOT NULL DEFAULT 0",
         )?;
+        // Issue #553: a workspace node may hold bytes. Nullable and with no
+        // default, so every existing prose note keeps `blob IS NULL` — which is
+        // exactly the "this node is not binary" test the reads use, and needs no
+        // backfill.
+        add_column_if_missing(&conn, "workspace_nodes", "blob", "BLOB")?;
         Ok(Self {
             conn: Arc::new(StdMutex::new(conn)),
             senders: Arc::new(StdMutex::new(HashMap::new())),
@@ -2205,7 +2210,19 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
             .optional()
             .map_err(sql_err)?;
         match row {
-            Some((node_json, content)) => Ok(Some((serde_json::from_str(&node_json)?, content))),
+            Some((node_json, content)) => {
+                let node: crate::ports::workspace::WorkspaceNode =
+                    serde_json::from_str(&node_json)?;
+                // A binary node reads as an empty body, like a folder — the port
+                // contract that keeps every prose-shaped caller correct without
+                // teaching it that bytes exist.
+                let content = if node.is_binary() {
+                    String::new()
+                } else {
+                    content
+                };
+                Ok(Some((node, content)))
+            }
             None => Ok(None),
         }
     }
@@ -2236,6 +2253,11 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         if node.kind != NodeKind::File {
             return Err(OpenCompanyError::InvalidRequest(
                 "cannot write content to a folder".to_string(),
+            ));
+        }
+        if let Some(mime) = &node.mime {
+            return Err(OpenCompanyError::InvalidRequest(
+                crate::ports::workspace::binary_write_refusal(&node.name, mime),
             ));
         }
         node.updated_at_millis = now_millis();
@@ -2300,6 +2322,137 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         )
         .map_err(sql_err)?;
         Ok(())
+    }
+
+    /// One `INSERT` carrying the node and its payload together.
+    ///
+    /// **sqlite cannot orphan a blob**, and that is a property of this statement
+    /// rather than of care taken around it: the bytes live in the same row as
+    /// the node, so there is no ordering between two writes to get wrong and no
+    /// crash window to sweep afterwards. The other two backends have to work for
+    /// what this gets for free.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &crate::ports::workspace::WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<()> {
+        use crate::ports::workspace::NodeKind;
+        let node = crate::ports::workspace::stamped_binary(node, bytes)?;
+        let conn = self.conn();
+        let nodes = self.workspace_nodes(&conn, company)?;
+        if nodes.contains_key(&node.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "workspace node {} already exists",
+                node.id
+            )));
+        }
+        if let Some(parent) = &node.parent_id {
+            match nodes.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        conn.execute(
+            "INSERT INTO workspace_nodes (company_id, id, node_json, content, updated_ms, blob) \
+             VALUES (?1, ?2, ?3, '', ?4, ?5)",
+            params![
+                company.as_ref(),
+                node.id,
+                serde_json::to_string(&node)?,
+                node.updated_at_millis as i64,
+                bytes
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
+        let conn = self.conn();
+        let node_json: Option<String> = conn
+            .query_row(
+                "SELECT node_json FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(node_json) = node_json else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {id}"
+            )));
+        };
+        let mut node: crate::ports::workspace::WorkspaceNode = serde_json::from_str(&node_json)?;
+        crate::ports::workspace::rebind_binary(&mut node, bytes, mime, author)?;
+        conn.execute(
+            "UPDATE workspace_nodes SET node_json = ?1, blob = ?2, updated_ms = ?3 \
+             WHERE company_id = ?4 AND id = ?5",
+            params![
+                serde_json::to_string(&node)?,
+                bytes,
+                node.updated_at_millis as i64,
+                company.as_ref(),
+                id
+            ],
+        )
+        .map_err(sql_err)?;
+        Ok(node)
+    }
+
+    /// Buffers the row's blob once, under the connection mutex, and yields it as
+    /// a single chunk.
+    ///
+    /// The one backend that cannot genuinely stream: the payload is a `BLOB` in
+    /// a row behind a `StdMutex<Connection>`, and holding that lock across an
+    /// `await` while a client drains a slow download would stall every other
+    /// query in the process. So the bytes are resident for the length of the
+    /// read, bounded by the per-file cap the quota decorator enforces — stated
+    /// here rather than left to be discovered by whoever raises that cap.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        let conn = self.conn();
+        let row: Option<(String, Option<Vec<u8>>)> = conn
+            .query_row(
+                "SELECT node_json, blob FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<Vec<u8>>>(1)?)),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        drop(conn);
+        let Some((node_json, Some(blob))) = row else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode = serde_json::from_str(&node_json)?;
+        if !node.is_binary() {
+            return Ok(None);
+        }
+        Ok(Some((node, crate::ports::workspace::one_chunk(blob))))
     }
 
     async fn rename_move(

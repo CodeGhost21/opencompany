@@ -2076,6 +2076,9 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         updated_by: WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
         },
+        mime: None,
+        size: None,
+        sha256: None,
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());

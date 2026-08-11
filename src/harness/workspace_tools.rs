@@ -1501,6 +1501,9 @@ impl Tool for WorkspaceCreateTool {
             updated_at_millis: crate::ports::now_millis(),
             created_by: origin.clone(),
             updated_by: origin,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         match self
             .workspace
@@ -1602,6 +1605,9 @@ mod tests {
             updated_at_millis: 1_000,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         }
     }
 
@@ -1614,6 +1620,9 @@ mod tests {
             updated_at_millis: 2_000,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         }
     }
 
@@ -3138,6 +3147,9 @@ mod tests {
             updated_by: WorkspaceOrigin::Agent {
                 id: "maya".to_string(),
             },
+            mime: None,
+            size: None,
+            sha256: None,
         };
         store
             .create(&id, &node, Some("maya's draft"))
@@ -3211,6 +3223,9 @@ mod tests {
             updated_at_millis: 2_000,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         store.create(&id, &node, Some("a note")).await.unwrap();
 

@@ -280,6 +280,9 @@ pub(crate) async fn create_folder(
         updated_at_millis: crate::ports::now_millis(),
         created_by: origin.clone(),
         updated_by: origin,
+        mime: None,
+        size: None,
+        sha256: None,
     };
     store.create(company, &node, None).await?;
     Ok(node.id)
@@ -413,6 +416,9 @@ mod tests {
                 updated_at_millis: 1,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             None,
         )
@@ -452,6 +458,9 @@ mod tests {
                 updated_at_millis: 1,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("# not a folder"),
         )
@@ -488,6 +497,9 @@ mod tests {
                     updated_at_millis: 1,
                     created_by: WorkspaceOrigin::Operator,
                     updated_by: WorkspaceOrigin::Operator,
+                    mime: None,
+                    size: None,
+                    sha256: None,
                 },
                 None,
             )
@@ -617,6 +629,9 @@ mod tests {
                 updated_at_millis: 1,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             None,
         )
@@ -669,6 +684,9 @@ mod tests {
                 updated_at_millis: 1,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("# notes about the ceo"),
         )

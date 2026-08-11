@@ -3314,6 +3314,9 @@ members = ["engineer"]
                 updated_at_millis: now_millis(),
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("an operator's note, in the way"),
         )

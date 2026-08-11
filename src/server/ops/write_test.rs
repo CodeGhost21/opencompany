@@ -6154,6 +6154,9 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
             updated_at_millis: 1,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         },
         Some("the agent's draft"),
     )

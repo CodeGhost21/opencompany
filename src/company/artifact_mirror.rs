@@ -203,6 +203,9 @@ pub async fn materialize(
                 updated_at_millis: now_millis(),
                 created_by: origin(target.agent_id),
                 updated_by: origin(target.agent_id),
+                mime: None,
+                size: None,
+                sha256: None,
             };
             workspace.create(company, &node, Some(target.body)).await?;
             Ok(node.id)
@@ -396,6 +399,9 @@ async fn resolve_folder(
                 updated_at_millis: now_millis(),
                 created_by: origin(agent_id),
                 updated_by: origin(agent_id),
+                mime: None,
+                size: None,
+                sha256: None,
             });
             Ok(id)
         }

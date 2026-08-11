@@ -243,6 +243,9 @@ async fn create_node(
         // These routes are the console's, and the console is the operator.
         created_by: WorkspaceOrigin::Operator,
         updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
     };
     company
         .runtime
