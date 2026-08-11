@@ -790,19 +790,26 @@ async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_
     let (_pool, deps, _record, _store) = harness(base, "\"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"workspace\"").await;
 
-    let queued_before = deps.approval_requests.queued();
     pool.run(&record.id, "ceo", "tidy the standards", &deps, None)
         .await
         .expect("the turn runs");
-    let parked = deps.approval_requests.take_from(queued_before);
+    // Issue #439: no boundary index — this turn ran outside any claim, so its
+    // requests are in the `Unscoped` bucket and `drain` reads exactly them.
+    let parked = deps
+        .approval_requests
+        .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
     assert_eq!(
-        parked.len(),
+        parked.requests.len(),
         1,
         "the read must not park and the write must: {:?}",
-        parked.iter().map(|r| r.tool.clone()).collect::<Vec<_>>()
+        parked
+            .requests
+            .iter()
+            .map(|r| r.tool.clone())
+            .collect::<Vec<_>>()
     );
-    assert_eq!(parked[0].tool, "workspace_write");
+    assert_eq!(parked.requests[0].tool, "workspace_write");
     // Not vacuous: the read that did not park was really made, and really
     // returned — so "one parked request" is one write, not one read the belt
     // silently withheld.
@@ -811,7 +818,7 @@ async fn a_supervised_turn_reads_the_workspace_freely_and_parks_a_write_with_no_
         "both the read and the (blocked) write must have fed a result back"
     );
     assert!(
-        !parked[0].effect.may_be_granted_standing(),
+        !parked.requests[0].effect.may_be_granted_standing(),
         "a card for overwriting operator-owned guidance must not offer a standing scope"
     );
 }
@@ -837,16 +844,19 @@ async fn a_parked_write_to_the_agents_own_workspace_does_offer_a_standing_scope(
         harness(base, "\"files\", \"workspace\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"files\", \"workspace\"").await;
 
-    let queued_before = deps.approval_requests.queued();
     pool.run(&record.id, "ceo", "jot a note", &deps, None)
         .await
         .expect("the turn runs");
-    let parked = deps.approval_requests.take_from(queued_before);
+    // Issue #439: no boundary index — this turn ran outside any claim, so its
+    // requests are in the `Unscoped` bucket and `drain` reads exactly them.
+    let parked = deps
+        .approval_requests
+        .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
-    assert_eq!(parked.len(), 1, "the sandboxed write parks");
-    assert_eq!(parked[0].tool, "file_write");
+    assert_eq!(parked.requests.len(), 1, "the sandboxed write parks");
+    assert_eq!(parked.requests[0].tool, "file_write");
     assert!(
-        parked[0].effect.may_be_granted_standing(),
+        parked.requests[0].effect.may_be_granted_standing(),
         "a write confined to the agent's own sandbox is exactly what a standing \
          grant is for; refusing it would leave the feature with nothing to apply to"
     );
@@ -878,16 +888,23 @@ async fn a_supervised_turn_reads_its_own_workspace_without_asking() {
     let (_pool, deps, _record, _store) = harness(base, "\"files\"", dir.path()).await;
     let (pool, record) = supervised(&deps, "\"files\"").await;
 
-    let queued_before = deps.approval_requests.queued();
     pool.run(&record.id, "ceo", "what do we have?", &deps, None)
         .await
         .expect("the turn runs");
-    let parked = deps.approval_requests.take_from(queued_before);
+    // Issue #439: no boundary index — this turn ran outside any claim, so its
+    // requests are in the `Unscoped` bucket and `drain` reads exactly them.
+    let parked = deps
+        .approval_requests
+        .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN);
 
     assert!(
-        parked.is_empty(),
+        parked.requests.is_empty(),
         "reading the agent's own workspace must not interrupt an operator: {:?}",
-        parked.iter().map(|r| r.tool.clone()).collect::<Vec<_>>()
+        parked
+            .requests
+            .iter()
+            .map(|r| r.tool.clone())
+            .collect::<Vec<_>>()
     );
     // Not vacuous: both reads were genuinely offered to the model and both
     // came back with a result, so the calls reached the gate and returned.

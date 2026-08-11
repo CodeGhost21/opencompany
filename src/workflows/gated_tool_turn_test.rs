@@ -324,10 +324,15 @@ async fn a_gated_tool_call_inside_a_workflow_node_parks_for_approval() {
 }
 
 /// The regression this issue is actually about. Parking is only half the fix:
-/// the shared queue is cleared at the top of **every** chat cycle, and before
-/// #395 a workflow's request sat on it waiting to be wiped by the next
-/// conversation. A card in the journal is independent of that queue, and this
-/// asserts it.
+/// the in-memory queue is emptied around **every** chat cycle, and before #395
+/// a workflow's request sat on it waiting to be wiped by the next conversation.
+/// A card in the journal is independent of that queue, and this asserts it.
+///
+/// Still worth pinning after issue #439, on narrower grounds. A workflow run's
+/// entries now live in their own scope, so a chat cycle can no longer reach
+/// them at all — but the property under test was never really about who could
+/// reach the queue. It is that the journal is the durable record and the queue
+/// is not, which is what makes the card survive *any* queue lifecycle.
 #[tokio::test]
 async fn the_parked_request_survives_a_later_chat_cycle() {
     let dir = tempfile::tempdir().unwrap();
@@ -337,7 +342,9 @@ async fn the_parked_request_survives_a_later_chat_cycle() {
         "precondition: the request parked"
     );
 
-    // Exactly what `HarnessBrain::run_cycle` does at the top of every cycle.
+    // Stands in for the cycle's own queue lifecycle — `clear()` outside a claim
+    // empties the unscoped bucket, and #439's `Cycle` claim clears on entry and
+    // on drop. Either way the journal must not care.
     deps.approval_requests.clear();
 
     assert!(
