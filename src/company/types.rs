@@ -601,7 +601,11 @@ fn default_tool_provider() -> String {
 }
 
 /// `[policy]` — the default `ApprovalGate` configuration.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+///
+/// `PartialEq` is load-bearing rather than incidental: `runtime::builder`
+/// compares the previous boot's seed `[policy]` with this one's to decide
+/// whether a console override survives the rebuild (issue #562).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Policy {
     /// `readonly` | `supervised` (default) | `auto` | `full`.
     ///
