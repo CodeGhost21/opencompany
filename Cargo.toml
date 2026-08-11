@@ -422,3 +422,8 @@ whisper-rs-sys = { git = "https://github.com/tinyhumansai/whisper-rs-sys.git", b
 
 [dev-dependencies]
 tempfile = "3"
+# `test-util` only — for `#[tokio::test(start_paused = true)]`, which the git
+# deadline test needs to fire a timeout deterministically instead of racing a
+# real child process. Dev-only: under resolver v2 this feature is not unified
+# into normal builds, so the shipped binary is unchanged.
+tokio = { version = "1", features = ["test-util"] }

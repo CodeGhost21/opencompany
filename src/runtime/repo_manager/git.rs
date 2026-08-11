@@ -512,20 +512,40 @@ mod test {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_git_that_overruns_its_deadline_is_stopped_and_reported() {
-        // A zero deadline fires on the first poll, so this is deterministic
-        // rather than a race against process spawn. What it proves is the
-        // shape of the timeout arm — the error an operator sees, and that the
-        // child is dropped (and so reaped, by `kill_on_drop`) rather than
-        // leaked. It does not, and cannot cheaply, prove the kill against a
-        // remote that really hangs; that is what the deadline exists for.
+        // Virtual time, not a zero deadline racing a real process.
+        //
+        // `tokio::time::timeout` polls its inner future first and only consults
+        // the deadline when that future returns `Pending`. `git version` can
+        // finish and have its output buffered before the first `Pending`, so a
+        // `Duration::ZERO` deadline returns `Ok` — which is exactly what
+        // happened on Linux CI while passing locally. The old comment here
+        // claimed determinism the code did not have.
+        //
+        // Under `start_paused` the clock is virtual and auto-advances whenever
+        // the runtime has nothing ready, which is precisely the state it is in
+        // while waiting on a real child's I/O. The deadline therefore fires on
+        // the first idle rather than on a stopwatch, and no wall-clock second
+        // is actually spent.
+        //
+        // What this proves is the shape of the timeout arm — the error an
+        // operator sees, and that the child is dropped (and so reaped, by
+        // `kill_on_drop`) rather than leaked. It does not, and cannot cheaply,
+        // prove the kill against a remote that really hangs; that is what the
+        // deadline exists for.
         let base = std::env::temp_dir().join(format!("oc-gittimeout-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
-        let err = run_bounded(&base, &["version"], None, None, std::time::Duration::ZERO)
-            .await
-            .unwrap_err()
-            .to_string();
+        let err = run_bounded(
+            &base,
+            &["version"],
+            None,
+            None,
+            std::time::Duration::from_secs(300),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("did not finish"), "{err}");
         assert!(err.contains("was stopped"), "{err}");
         std::fs::remove_dir_all(&base).ok();
