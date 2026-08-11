@@ -4863,12 +4863,15 @@ async fn a_parked_approval_appears_on_its_own_task() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["id"], "appr-mine");
     assert_eq!(approvals[0]["status"], "pending");
-    assert_eq!(approvals[0]["kind"], "filing.submit");
     assert_eq!(approvals[0]["atMillis"].as_u64().unwrap(), parked_at);
-    assert!(
-        approvals[0].get("resolvedAtMillis").is_none(),
-        "a pending approval has not resolved",
-    );
+    // #468 shrank this projection to what the card's one waiting line reads.
+    // `kind`, `resolvedAtMillis` and `waitedMillis` left with the Approvals tab.
+    for gone in ["kind", "resolvedAtMillis", "waitedMillis"] {
+        assert!(
+            approvals[0].get(gone).is_none(),
+            "`{gone}` was dropped with the Approvals tab (#468)",
+        );
+    }
     // The timeline is untouched — a parked approval still has no event.
     assert!(
         body["timeline"]
@@ -5042,13 +5045,23 @@ async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     let row = &approvals[0];
     assert_eq!(row["status"], "denied");
-    // The row is anchored at the *park*, so the tab reads in the order things
+    // The row is anchored at the *park*, so approvals read in the order things
     // were asked rather than the order they were answered.
     assert_eq!(row["atMillis"].as_u64().unwrap(), parked_at);
-    let resolved_at = row["resolvedAtMillis"].as_u64().unwrap();
+    // The park→resolve span moved off this row with the Approvals tab (#468).
+    // It is unchanged, and still asserted here — on the `approval` timeline
+    // entry, which is where it now lives. Dropping the assertion along with the
+    // field would have quietly retired the arithmetic's only coverage.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
     assert!(resolved_at > parked_at);
     assert_eq!(
-        row["waitedMillis"].as_u64().unwrap(),
+        entry["waitedMillis"].as_u64().unwrap(),
         resolved_at - parked_at,
     );
     // Nothing is parked any more, so the card is not still waiting.
@@ -5302,9 +5315,17 @@ async fn a_pre_333_approval_falls_back_to_the_run_window() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["id"], "appr-legacy");
     assert_eq!(approvals[0]["status"], "approved");
-    let resolved_at = approvals[0]["resolvedAtMillis"].as_u64().unwrap();
+    // As above (#468): the span lives on the timeline entry now, and the legacy
+    // clamping behaviour is asserted there rather than dropped.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
     assert_eq!(
-        approvals[0]["waitedMillis"].as_u64().unwrap(),
+        entry["waitedMillis"].as_u64().unwrap(),
         resolved_at.saturating_sub(dispatched_at + 5),
         "the resolved legacy row keeps the original park-to-resolve wait",
     );

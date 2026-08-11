@@ -59,7 +59,6 @@ import {
   type SteerAction,
   type Task,
   type TaskApproval,
-  type TaskApprovalStatus,
   type TaskDetail,
   type TaskPlan,
   type TimelineEntry,
@@ -81,6 +80,7 @@ import {
 } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import { hasFocus, type TaskFocus } from "@/lib/task-output";
+import { pendingApprovalWait } from "@/lib/task-approvals";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -492,6 +492,8 @@ export function TaskDetailView({
 
             <LineageRail lineage={detail.lineage} onNavigate={onNavigate} />
 
+            <AwaitingApprovalRow approvals={detail.approvals} now={now} />
+
             <Tabs value={tab} onValueChange={(next) => setTab(String(next))}>
               <TabsList>
                 <TabsTrigger value="timeline">Timeline</TabsTrigger>
@@ -526,7 +528,6 @@ export function TaskDetailView({
                     })()}
                   </TabsTrigger>
                 )}
-                <TabsTrigger value="approvals">Approvals</TabsTrigger>
                 <TabsTrigger value="artifacts">Artifacts</TabsTrigger>
                 <TabsTrigger value="discussion">Discussion</TabsTrigger>
               </TabsList>
@@ -554,10 +555,6 @@ export function TaskDetailView({
                   <TaskPlanBrief plan={detail.task.plan} />
                 </TabsContent>
               )}
-
-              <TabsContent value="approvals" className="mt-4">
-                <ApprovalsTab approvals={detail.approvals} now={now} />
-              </TabsContent>
 
               <TabsContent value="artifacts" className="mt-4">
                 <ArtifactsTab
@@ -1787,94 +1784,53 @@ function RunDrawer({
   );
 }
 
-/** What each status reads as on a row, and how it is coloured (#333). */
-const APPROVAL_STATUS: Record<TaskApprovalStatus, { label: string; className: string }> = {
-  pending: {
-    label: "Waiting on you",
-    className: "text-amber-700 dark:text-amber-400",
-  },
-  approved: { label: "Approved", className: "text-emerald-600 dark:text-emerald-400" },
-  denied: { label: "Declined", className: "text-muted-foreground" },
-  expired: { label: "Expired (auto-declined)", className: "text-muted-foreground" },
-};
-
 /**
- * The Approvals tab (#333): this task's own sign-offs, oldest first — ordered
- * by when each was *asked for*, not when it was answered, so a still-parked row
- * sits in the run where it arose rather than being pinned to the bottom.
+ * The card's one line about approvals (#468).
  *
- * It reads `detail.approvals`, not the timeline. Filtering the timeline for
- * `kind === "approval"` could only ever find *resolutions*, and only ones that
- * fell inside the run window, so the tab was empty for every task that had an
- * approval actually waiting on a human.
+ * This replaces an Approvals tab that listed every sign-off this task ever
+ * asked for. The tab was removed because it could not do the one thing an
+ * operator wanted from it — decide. Approvals are resolved in exactly one
+ * place, and a second surface beside that one was a maintenance cost that only
+ * ever ended in a link.
+ *
+ * What could not be removed with it is the *signal*. A card stalled behind a
+ * sign-off has to say so, or the screen that exists to answer "why is this
+ * stuck" silently stops answering it — trading a bad surface for a worse
+ * silence. So: one row, only when something is actually pending, saying what is
+ * being waited on and for how long, and linking to where it gets decided.
+ *
+ * Deliberately says nothing about *decided* approvals. Those are resolutions,
+ * they are already on the timeline as `approval` entries with their own waited
+ * span, and repeating them here would rebuild the tab one row at a time.
+ *
+ * Renders nothing when nothing is pending — an always-present "no approvals"
+ * line is the clutter the tab was removed for.
  */
-function ApprovalsTab({ approvals, now }: { approvals: TaskApproval[]; now: number }) {
+function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; now: number }) {
+  const pending = pendingApprovalWait(approvals, now);
+  if (!pending) return null;
+  const { waited } = pending;
+
   return (
-    <div className="space-y-3">
-      <p className="text-xs text-muted-foreground">
-        Sign-offs this task asked for, still waiting or already decided. Each wait is measured from
-        the moment the effect actually parked.
-      </p>
-      {approvals.length === 0 ? (
-        <EmptyState
-          title="No approvals for this task"
-          body="Anything this task parks for your sign-off will appear here."
-        />
-      ) : (
-        <ol className="space-y-1.5">
-          {approvals.map((a) => {
-            const status = APPROVAL_STATUS[a.status] ?? APPROVAL_STATUS.pending;
-            const pending = a.status === "pending";
-            // A pending row has no resolution to measure against, so its wait
-            // runs to the polled clock instead.
-            const waited = pending ? Math.max(0, now - a.atMillis) : a.waitedMillis;
-            return (
-              <li
-                key={a.id}
-                className="flex items-center gap-2 rounded-lg border bg-card px-3 py-2 text-xs"
-              >
-                {pending ? (
-                  <Hourglass className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-                ) : (
-                  <ShieldCheck className="size-3.5 shrink-0 text-muted-foreground" />
-                )}
-                <span className="min-w-0 flex-1 truncate font-medium">{a.kind}</span>
-                {/*
-                 * A pending row is the one thing on this tab the operator can
-                 * act on, and the tab itself cannot approve or deny — so the
-                 * status doubles as the way out, to the Approvals page where
-                 * the decision lives. Decided rows have nothing to go to.
-                 */}
-                {pending ? (
-                  <a
-                    href="#/approvals"
-                    className={cn(
-                      "shrink-0 text-[11px] underline-offset-2 hover:underline",
-                      status.className,
-                    )}
-                    aria-label={`${status.label} — review ${a.kind} on the Approvals page`}
-                    title="Review this on the Approvals page"
-                  >
-                    {status.label}
-                  </a>
-                ) : (
-                  <span className={cn("shrink-0 text-[11px]", status.className)}>
-                    {status.label}
-                  </span>
-                )}
-                {waited !== undefined && (
-                  <span className="shrink-0 text-[11px] tabular-nums text-amber-700 dark:text-amber-400">
-                    {pending ? "waiting" : "waited"} {formatDuration(waited)}
-                  </span>
-                )}
-                <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
-                  {timeOf(a.atMillis)}
-                </span>
-              </li>
-            );
-          })}
-        </ol>
-      )}
+    <div className="flex items-center gap-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs dark:border-amber-400/30 dark:bg-amber-950/30">
+      <Hourglass className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+      <span className="min-w-0 flex-1 text-amber-800 dark:text-amber-300">
+        {pending.count === 1
+          ? "Waiting on an approval"
+          : `Waiting on ${pending.count} approvals`}{" "}
+        <span className="tabular-nums">for {formatDuration(waited)}</span>
+      </span>
+      <a
+        href="#/approvals"
+        className="shrink-0 font-medium text-amber-800 underline-offset-2 hover:underline dark:text-amber-300"
+        aria-label={
+          pending.count === 1
+            ? "Review this task's pending approval on the Approvals page"
+            : `Review this task's ${pending.count} pending approvals on the Approvals page`
+        }
+      >
+        Review
+      </a>
     </div>
   );
 }
