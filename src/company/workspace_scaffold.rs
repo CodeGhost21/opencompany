@@ -357,6 +357,54 @@ mod tests {
         (dir, ops)
     }
 
+    /// Seeds root folders that share `name` by writing the workspace index
+    /// directly.
+    ///
+    /// The filesystem store refuses to *create* two siblings under one name,
+    /// because on that backend they would resolve to one path (issue #666).
+    /// The trees below are the ones that check what the scaffold does when it
+    /// nevertheless *finds* an ambiguous root — an index written before that
+    /// refusal existed, or one an id-keyed backend can still represent legally.
+    /// So the state is written rather than requested: going through `create`
+    /// would only re-assert the store's refusal and never reach the scaffold.
+    async fn seed_duplicate_roots(
+        dir: &std::path::Path,
+        company: &CompanyId,
+        name: &str,
+        ids: &[&str],
+    ) {
+        let index: std::collections::HashMap<String, WorkspaceNode> = ids
+            .iter()
+            .map(|id| {
+                (
+                    (*id).to_string(),
+                    WorkspaceNode {
+                        id: (*id).to_string(),
+                        name: name.to_string(),
+                        kind: NodeKind::Folder,
+                        parent_id: None,
+                        updated_at_millis: 1,
+                        created_by: WorkspaceOrigin::Operator,
+                        updated_by: WorkspaceOrigin::Operator,
+                        mime: None,
+                        size: None,
+                        sha256: None,
+                    },
+                )
+            })
+            .collect();
+        let bundle = crate::store::Bundle::new(dir.to_path_buf(), company);
+        tokio::fs::create_dir_all(bundle.workspace_dir())
+            .await
+            .expect("workspace dir");
+        tokio::fs::write(
+            bundle.workspace_index_json(),
+            serde_json::to_vec(&index).expect("index json"),
+        )
+        .await
+        .expect("seed index");
+    }
+
     /// A node's rendered `parent/child` path, for readable assertions.
     fn path_of(nodes: &[WorkspaceNode], node: &WorkspaceNode) -> String {
         match &node.parent_id {
@@ -529,28 +577,9 @@ mod tests {
     /// shape: adding a third would make it worse, so nothing is created.
     #[tokio::test]
     async fn several_nodes_sharing_a_root_name_are_left_alone() {
-        let (_dir, ws) = store().await;
+        let (dir, ws) = store().await;
         let company = CompanyId::new("acme");
-        for id in ["dup-a", "dup-b"] {
-            ws.create(
-                &company,
-                &WorkspaceNode {
-                    id: id.to_string(),
-                    name: AGENTS_ROOT.to_string(),
-                    kind: NodeKind::Folder,
-                    parent_id: None,
-                    updated_at_millis: 1,
-                    created_by: WorkspaceOrigin::Operator,
-                    updated_by: WorkspaceOrigin::Operator,
-                    mime: None,
-                    size: None,
-                    sha256: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        }
+        seed_duplicate_roots(dir.path(), &company, AGENTS_ROOT, &["dup-a", "dup-b"]).await;
 
         ensure_workspace_scaffold(ws.as_ref(), &company)
             .await
@@ -867,28 +896,9 @@ mod tests {
     /// root it *does* manage still provisions beside them.
     #[tokio::test]
     async fn duplicate_desks_nodes_do_not_disturb_the_scaffold() {
-        let (_dir, ws) = store().await;
+        let (dir, ws) = store().await;
         let company = CompanyId::new("acme");
-        for id in ["dup-a", "dup-b"] {
-            ws.create(
-                &company,
-                &WorkspaceNode {
-                    id: id.to_string(),
-                    name: DESKS_ROOT.to_string(),
-                    kind: NodeKind::Folder,
-                    parent_id: None,
-                    updated_at_millis: 1,
-                    created_by: WorkspaceOrigin::Operator,
-                    updated_by: WorkspaceOrigin::Operator,
-                    mime: None,
-                    size: None,
-                    sha256: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
-        }
+        seed_duplicate_roots(dir.path(), &company, DESKS_ROOT, &["dup-a", "dup-b"]).await;
 
         ensure_workspace_scaffold(ws.as_ref(), &company)
             .await
