@@ -47,6 +47,18 @@ mod workflow_file;
 // REST route is in the default build, and one shared scan is what keeps the two
 // read surfaces from drifting.
 pub(crate) mod workspace_links;
+// How a node's logical path is rendered from its ancestor chain, and how a
+// caller-supplied one is validated. Shared by the agent tools' `PathIndex` and
+// by `workspace_search`, so a node search offers is always a node
+// `workspace_read` can open. Always compiled: search reaches the default-build
+// REST and GraphQL surfaces, the tools do not.
+pub(crate) mod workspace_paths;
+// Issue #607: text search over the shared tree, behind the agent
+// `workspace_search` tool, the REST `GET …/workspace/search` route and the
+// GraphQL `Company.workspaceSearch` resolver. Always compiled and openhuman-free
+// for the same reason `workspace_links` is: two of its three callers are in the
+// default build, and one shared scan is what stops them answering differently.
+pub mod workspace_search;
 // The workspace's `Agents/` + `Desks/` system roots, and the folders minted
 // beneath them on first use (issue #551). Always compiled and openhuman-free:
 // the scaffold is called from the runtime builder at boot, which is in the

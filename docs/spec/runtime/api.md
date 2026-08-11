@@ -123,6 +123,7 @@ POST   …/memory                             add a memory fact
 DELETE …/memory/{factId}                     delete a memory fact
 GET    …/workspace                          the whole tree (metadata; no bodies)
 GET    …/workspace/file/{nodeId}             one file: content + inbound backlinks
+GET    …/workspace/search?q=…                which notes mention a phrase (#607)
 POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
@@ -168,6 +169,23 @@ only — bodies are fetched per file, so a navigation read does not grow with th
 size of the workspace. Reading a folder id as a file is a `404`, never an empty
 note.
 
+`GET …/workspace/search?q=…` (#607) answers which notes mention a phrase, so
+discovery costs one call rather than a listing plus one read per candidate.
+Matching is a plain **case-insensitive substring** over node names and text
+bodies — no tokenising, no stemming, no ranking — which is the only definition
+that answers identically on all three storage backends, and it is defined once
+in `company::workspace_search`, shared with the GraphQL `Company.workspaceSearch`
+resolver and the agent `workspace_search` tool. Optional `prefix` scopes to a
+subtree; optional `limit` pages the answer (default 20, hard cap 50). A hit
+carries the node, its logical `path`, whether the `name` or the `content`
+matched, and — for a content match — a short `excerpt`. `total` reports every
+match, so a capped page says it is one. An empty `q` is a `400`, not "match
+everything": that is the tree read above, and answering it here would turn a
+cleared search box into a full-tree fetch. `limit=0` is a `400` for the same
+reason — it is never read as "no limit". A **binary** node matches on its name
+only: a text read of a payload is empty by the port's definition, and its bytes
+are never scanned or excerpted.
+
 Both workspace `GET`s — and the `POST` / `PATCH` node bodies — carry
 `createdBy` and `updatedBy` (#326), each `{"kind":"seed"|"operator"|"agent",
 "id"?}` with `id` present exactly when `kind` is `agent`. `createdBy` is fixed
@@ -177,8 +195,8 @@ and the last writer only when the two differ. Both fields are always serialized,
 and a node predating the field reads back as `operator`. The `PUT` write route
 stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
 which is fixed at agent-build time and never taken from tool arguments. Agents
-reach the same tree through `workspace_list` / `workspace_read` /
-`workspace_create` / `workspace_write`, and a created note has its default home
+reach the same tree through `workspace_list` / `workspace_search` /
+`workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
 in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
 brief steers toward, not a boundary the routes enforce. Boot scaffolds the
 `Agents/` and `Desks/` roots empty; an individual `Agents/<agent-id>/` is minted

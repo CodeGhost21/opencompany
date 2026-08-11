@@ -10,6 +10,7 @@
 //! GET    …/workspace                  the whole tree (metadata; no bodies)
 //! GET    …/workspace/file/{nodeId}    one file: content + inbound backlinks
 //! GET    …/workspace/blob/{nodeId}    one binary node's payload, streamed
+//! GET    …/workspace/search?q=…       which notes mention a phrase
 //! POST   …/workspace                  create a folder/file (JSON body)
 //! POST   …/workspace/upload           upload a file of any kind (multipart)
 //! PUT    …/workspace/file/{nodeId}    overwrite file content
@@ -48,8 +49,10 @@
 //! prose-shaped read of a payload is `""`, which as an HTTP response would
 //! render as a blank editor over a file that is not blank.
 
+use std::num::NonZeroUsize;
+
 use axum::body::Body;
-use axum::extract::{DefaultBodyLimit, Multipart, Path};
+use axum::extract::{DefaultBodyLimit, Multipart, Path, Query};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
 use axum::routing::{get, patch, post, put};
@@ -59,6 +62,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_links::file_with_backlinks;
+use crate::company::workspace_search::{
+    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace,
+};
 use crate::error::OpenCompanyError;
 use crate::ports::artifacts::ArtifactAuthor;
 use crate::ports::generate_id;
@@ -74,6 +80,10 @@ pub fn router() -> Router<AppState> {
             "/workspace/file/{node_id}",
             put(write_file).get(read_file),
         ))
+        // A static sibling of `/workspace/{node_id}` below, which is exactly
+        // what `/workspace/upload` already is — axum's router prefers a literal
+        // segment over a parameter, so `search` is never captured as a node id.
+        .merge(scoped("/workspace/search", get(search)))
         .merge(scoped("/workspace/blob/{node_id}", get(read_blob)))
         .merge(
             scoped("/workspace/upload", post(upload))
@@ -171,6 +181,52 @@ struct WorkspaceFileBody {
     updated_by: WorkspaceOrigin,
     /// Other files whose content links to this one via `[[name]]`.
     backlinks: Vec<FsNode>,
+}
+
+/// One search hit as the console renders it (issue #607).
+///
+/// Carries the whole node — so the console can badge origin and mark a binary
+/// exactly as it does in the tree — plus the two things only a search knows:
+/// where the node sits (`path`, which the tree view derives from `parentId` but
+/// a flat hit list cannot) and why it matched.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchHitBody {
+    #[serde(flatten)]
+    node: FsNode,
+    /// The node's logical path, e.g. `Standards/Engineering.md`.
+    path: String,
+    /// `name` or `content`.
+    matched: &'static str,
+    /// Text around the first body match. Absent for a name match, a folder, and
+    /// a binary node — a payload is never excerpted.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    excerpt: Option<String>,
+}
+
+/// The search response: the page, and how many matched in total.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SearchResults {
+    hits: Vec<SearchHitBody>,
+    /// Matches before the limit was applied — so the console can say "20 of 137"
+    /// rather than implying it is showing everything.
+    total: usize,
+}
+
+/// The search query string.
+#[derive(Debug, Deserialize)]
+struct SearchQuery {
+    /// The text to look for. Required; an empty one is a 400.
+    #[serde(default)]
+    q: Option<String>,
+    /// Optional subtree scope, by logical path.
+    #[serde(default)]
+    prefix: Option<String>,
+    /// Optional page size. Absent means the default; `0` is a 400 rather than a
+    /// silent "everything".
+    #[serde(default)]
+    limit: Option<usize>,
 }
 
 /// The create-node body.
@@ -287,6 +343,62 @@ async fn read_file(
         backlinks: backlinks
             .into_iter()
             .map(|node| FsNode::from_node(node, None))
+            .collect(),
+    }))
+}
+
+/// `GET …/workspace/search?q=…` — which notes mention a phrase (issue #607).
+///
+/// A thin call into
+/// [`search_workspace`](crate::company::workspace_search::search_workspace),
+/// the same helper behind the GraphQL `workspaceSearch` resolver and the agent
+/// `workspace_search` tool. That is the point rather than a convenience: three
+/// surfaces answering "which notes mention X" with three scans would drift, and
+/// the drift would be invisible from whichever one the reader was not looking
+/// at — the same argument that put the backlink scan in
+/// [`workspace_links`](crate::company::workspace_links).
+///
+/// `q` is required and an empty one is a 400: an empty query is not "everything"
+/// (that is the tree read on this same prefix), and answering it as such would
+/// turn a cleared search box into a full-tree fetch on every keystroke.
+async fn search(
+    company: ScopedCompany,
+    Query(query): Query<SearchQuery>,
+) -> Result<Json<SearchResults>, ApiError> {
+    let q = query.q.unwrap_or_default();
+    // Stated, never silently unlimited. `limit=0` is a caller meaning something
+    // specific, and both available guesses — "the default" and "no limit" — are
+    // wrong.
+    let limit = match query.limit {
+        None => NonZeroUsize::new(DEFAULT_SEARCH_LIMIT).expect("the default limit is non-zero"),
+        Some(n) => NonZeroUsize::new(n).ok_or_else(|| {
+            ApiError(OpenCompanyError::InvalidRequest(format!(
+                "`limit` is 0, which would return no matches; omit it for the default of \
+                 {DEFAULT_SEARCH_LIMIT}, or pass a value between 1 and {MAX_SEARCH_RESULTS}"
+            )))
+        })?,
+    };
+
+    let outcome = search_workspace(
+        company.runtime.workspace().as_ref(),
+        company.id(),
+        &q,
+        query.prefix.as_deref(),
+        limit,
+    )
+    .await?;
+
+    Ok(Json(SearchResults {
+        total: outcome.total,
+        hits: outcome
+            .hits
+            .into_iter()
+            .map(|hit| SearchHitBody {
+                node: FsNode::from_node(hit.node, None),
+                path: hit.path,
+                matched: hit.matched.as_str(),
+                excerpt: hit.excerpt,
+            })
             .collect(),
     }))
 }

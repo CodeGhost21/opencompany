@@ -133,6 +133,11 @@ type Company {
 	"""
 	workspaceFile(id: ID!): WorkspaceFile
 	"""
+	Which workspace notes mention `query`, matched case-insensitively as a
+	substring of note names and note bodies (issue #607).
+	"""
+	workspaceSearch(query: String!, prefix: String, limit: Int): WorkspaceSearchResults!
+	"""
 	The company-brain memory facts.
 	"""
 	memory(query: String, kind: MemoryKind, first: Int! = 50, offset: Int! = 0): MemoryFactPage!
@@ -1102,6 +1107,49 @@ type WorkspaceOrigin {
 	The agent's roster id — set only when `kind` is `agent`.
 	"""
 	agentId: String
+}
+
+"""
+One workspace search hit (issue #607).
+
+The node is nested rather than flattened: `FsNode` is already the projection
+every other workspace read hands back, and re-declaring its seven fields here
+would be a second copy to keep in step. What search adds is the two things
+only a search knows — where the node sits, and why it came back.
+"""
+type WorkspaceSearchHit {
+	"""
+	The matching node.
+	"""
+	node: FsNode!
+	"""
+	Its logical path, e.g. `Standards/Engineering.md`.
+	"""
+	path: String!
+	"""
+	`name` or `content`.
+	"""
+	matched: String!
+	"""
+	Text around the first body match; null for a name match, a folder and a
+	binary node.
+	"""
+	excerpt: String
+}
+
+"""
+A page of workspace search hits, plus how many matched in total.
+"""
+type WorkspaceSearchResults {
+	"""
+	The hits: name matches first, then content matches, freshest first
+	within each group.
+	"""
+	hits: [WorkspaceSearchHit!]!
+	"""
+	Matches before the limit was applied.
+	"""
+	total: Int!
 }
 
 """
