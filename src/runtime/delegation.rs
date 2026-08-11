@@ -570,6 +570,25 @@ impl<'a> DelegationRunner<'a> {
             // the turn that wanted it happened to be a relay, which is invisible
             // from the operator's side. Board writes are executed; hand-offs are
             // still dropped, so the bound stays exactly one extra turn.
+            //
+            // On a question turn the relay's board writes are held back too, and
+            // that is deliberate rather than an oversight of the paragraph above
+            // (issue #267 review). `_claim` is still live here — the relay runs
+            // inside the same `claim_answering` scope as the turn that asked —
+            // so `push_within_cap` refuses a relay `spawn_task` with
+            // `NoDrainReason::Triage`, in the relay's own turn, and the model is
+            // told this message was a question rather than that its context
+            // cannot do board work. #442's reasoning does not survive the
+            // narrowing: it says the relay is better placed to decide something
+            // should be *tracked*, and #267 says a message the operator posed as
+            // a question mints no card by any door. The relay is a door, and
+            // seeing the answer first does not change who asked — replying to
+            // "is the build ok?" with a card nobody asked for is the exact
+            // behaviour #267 exists to stop. A relay that genuinely must
+            // commission work has the same recourse the first turn has: say so,
+            // and let the operator ask for it. Pinned by
+            // `the_relay_turns_card_is_held_back_on_a_question_turn` and its
+            // non-question sibling.
             let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Drop).await?;
             if let Some(id) = drained.spawned_task {
                 spawned_task.get_or_insert(id);
@@ -3085,15 +3104,87 @@ members = ["engineer"]
     /// the desk answered, which is exactly when the orchestrator is best placed
     /// to decide something should be followed up — and that decision used to be
     /// dropped by design.
+    ///
+    /// Driven through [`Turn::tooling`] on purpose (issue #267, review round 2):
+    /// the relay's `spawn_task` goes through the real
+    /// [`DelegationQueue::push_within_cap`] boundary, so this pins that the
+    /// board write is *accepted* there rather than only that a delegation pushed
+    /// onto the queue behind the boundary's back gets executed. The fixture
+    /// message is deliberately not a question — the sibling below is the other
+    /// half.
     #[tokio::test]
     async fn the_relay_turn_can_no_longer_lose_a_card() {
+        let instruction = "the pricing repo needs a map";
+        assert!(
+            !crate::company::task_intent::triage_message(instruction).is_answer(),
+            "the fixture must NOT be a question, or #267 holds the relay's card back \
+             and this proves nothing about #442"
+        );
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(
             &fx,
             vec![
-                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::tooling("asking", vec![handoff("what's the status of the build?")]),
                 Turn::reply("it's red — someone should fix the flaky test"),
-                Turn::queueing(
+                Turn::tooling(
+                    "it's red; I've opened a card",
+                    vec![Delegation::SpawnTask {
+                        title: "Fix the flaky test".to_string(),
+                        note: None,
+                        assignee: None,
+                    }],
+                ),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", instruction, None)
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued, orchestrator::Staged::Queued],
+            "the relay turn's board write is accepted at the tool boundary, not \
+             merely executed once past it"
+        );
+        let cards = fx.cards().await;
+        assert!(
+            cards.iter().any(|c| c.title == "Fix the flaky test"),
+            "the relay's card survives: {cards:?}"
+        );
+    }
+
+    /// …and the other half: on a **question** the relay's board write is held
+    /// back too, refused at the boundary with the triage named as the cause.
+    ///
+    /// This is the #442 × #267 interaction, and it is deliberate rather than an
+    /// oversight. #442 restored the relay's board writes because a card the
+    /// relay opens is not a re-delegation — it is the orchestrator deciding,
+    /// having now seen what came back, that something should be tracked. #267
+    /// says a message the operator posed as a question mints no card by *any*
+    /// door, and the relay turn is a door: it runs under the same live
+    /// `claim_answering` as the turn that asked, so the narrowing reaches it.
+    /// Answering "is the build ok?" with a card nobody asked for is exactly the
+    /// behaviour #267 exists to stop, and the relay seeing the answer first does
+    /// not change who asked.
+    ///
+    /// The refusal is [`orchestrator::NoDrainReason::Triage`], not `Unwired` —
+    /// the claim is live throughout, so the relay is told *this message* is a
+    /// question rather than that its context can never do board work.
+    #[tokio::test]
+    async fn the_relay_turns_card_is_held_back_on_a_question_turn() {
+        let question = "is the build ok?";
+        assert!(
+            crate::company::task_intent::triage_message(question).is_answer(),
+            "fixture must triage as a question, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("asking", vec![handoff("what's the status of the build?")]),
+                Turn::reply("it's red — someone should fix the flaky test"),
+                Turn::tooling(
                     "it's red; I've opened a card",
                     vec![Delegation::SpawnTask {
                         title: "Fix the flaky test".to_string(),
@@ -3105,28 +3196,49 @@ members = ["engineer"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", "is the build ok?", None)
+            .handle_operator_message("chief", question, None)
             .await
             .expect("operator message handled");
 
-        let cards = fx.cards().await;
-        assert_eq!(cards.len(), 1, "the relay's card survives: {cards:?}");
-        assert_eq!(cards[0].title, "Fix the flaky test");
-        assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+        assert_eq!(
+            turns.claim_at_turn(2),
+            orchestrator::DrainClaim::Answering,
+            "the answering claim is still live for the relay turn"
+        );
+        assert_eq!(
+            turns.staged(),
+            vec![
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Triage),
+            ],
+            "the hand-off answers and stages; the relay's card is refused, and the \
+             refusal names the triage rather than blaming an unwired context"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "a question minted a card through the relay"
+        );
+        assert!(turn.spawned_task.is_none());
     }
 
     /// …while the rule the discard existed for still holds: a relay may relay,
     /// never re-delegate. A hand-off queued by the relay turn is dropped, so
     /// there is no second desk turn and no loop.
+    ///
+    /// Through the real boundary too: the relay's hand-off *stages* — it
+    /// answers, so even the narrowed claim admits it — and is dropped at the
+    /// drain by [`HandOffs::Drop`]. Which is the point: the loop is stopped by
+    /// the drain's own rule and not incidentally by #267's gate, so the bound
+    /// survives on a non-question message as well.
     #[tokio::test]
     async fn the_relay_turn_still_cannot_re_delegate() {
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(
             &fx,
             vec![
-                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::tooling("asking", vec![handoff("what's the status of the build?")]),
                 Turn::reply("green"),
-                Turn::queueing("relaying", vec![handoff("now write the release notes")]),
+                Turn::tooling("relaying", vec![handoff("now write the release notes")]),
             ],
         );
         fx.runner(&turns)
@@ -3134,6 +3246,12 @@ members = ["engineer"]
             .await
             .expect("operator message handled");
 
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued, orchestrator::Staged::Queued],
+            "the relay's hand-off is not refused at the boundary — it is dropped at \
+             the drain, which is what bounds the turn count"
+        );
         // Three turns total — orchestrator, desk, relay. A fourth would be the
         // re-delegation the drain exists to prevent.
         let calls = turns.calls();
