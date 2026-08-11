@@ -41,6 +41,8 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
+use crate::company::composio::CatalogEntry;
+
 /// The last-resort provider list, used only when the real catalog cannot be
 /// fetched — and always accompanied by [`CatalogSource::Fallback`] plus a
 /// notice, so it is never mistaken for the backend's answer.
@@ -114,10 +116,13 @@ pub(crate) enum CatalogSource {
 }
 
 /// The toolkits open mode offers, and how honest the answer is.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub(crate) struct OpenModeToolkits {
-    /// The slugs to offer as provider rows.
-    pub toolkits: Vec<String>,
+    /// The providers to offer, with whatever display metadata the backend
+    /// published for each (issue #600). A manifest or fallback list carries
+    /// slugs only; a fetched catalog carries names, logos, descriptions and
+    /// categories too.
+    pub toolkits: Vec<CatalogEntry>,
     /// Where they came from.
     pub source: CatalogSource,
     /// Plain-language reason the list is a fallback, for the console to show the
@@ -128,7 +133,7 @@ pub(crate) struct OpenModeToolkits {
 
 impl OpenModeToolkits {
     /// The good case: the backend answered.
-    pub(crate) fn from_backend(toolkits: Vec<String>) -> Self {
+    pub(crate) fn from_backend(toolkits: Vec<CatalogEntry>) -> Self {
         Self {
             toolkits,
             source: CatalogSource::Backend,
@@ -138,9 +143,17 @@ impl OpenModeToolkits {
 
     /// The honest degradation: the built-in list, marked as such, with the
     /// reason attached.
+    ///
+    /// Slug-only entries, and unavoidably so: a fallback exists precisely
+    /// because the metadata could not be fetched. The console renders these
+    /// with its own typography, which is why that fallback survives #600 rather
+    /// than being deleted in favour of the backend's names.
     pub(crate) fn degraded(reason: &str) -> Self {
         Self {
-            toolkits: FALLBACK_TOOLKITS.iter().map(|s| (*s).to_string()).collect(),
+            toolkits: FALLBACK_TOOLKITS
+                .iter()
+                .map(|s| CatalogEntry::from_slug(*s))
+                .collect(),
             source: CatalogSource::Fallback,
             notice: Some(format!(
                 "Composio's provider catalog could not be fetched ({}), so this is a built-in \
@@ -152,11 +165,20 @@ impl OpenModeToolkits {
     }
 
     /// Turn a cached-or-fresh fetch outcome into the rendered answer.
-    pub(crate) fn from_outcome(outcome: Result<Vec<String>, String>) -> Self {
+    pub(crate) fn from_outcome(outcome: Result<Vec<CatalogEntry>, String>) -> Self {
         match outcome {
             Ok(toolkits) => Self::from_backend(toolkits),
             Err(reason) => Self::degraded(&reason),
         }
+    }
+
+    /// Just the slugs, in render order — the wire field the console has always
+    /// had and every existing consumer still reads.
+    ///
+    /// Kept as a derived view rather than a second stored list so the two can
+    /// never disagree about which providers are on offer.
+    pub(crate) fn slugs(&self) -> Vec<String> {
+        self.toolkits.iter().map(|t| t.slug.clone()).collect()
     }
 }
 
@@ -181,7 +203,7 @@ fn bound_reason(reason: &str) -> String {
 /// One cached fetch outcome and when it was recorded.
 struct CacheEntry {
     at: Instant,
-    outcome: Result<Vec<String>, String>,
+    outcome: Result<Vec<CatalogEntry>, String>,
 }
 
 impl CacheEntry {
@@ -212,14 +234,18 @@ impl CatalogCache {
     /// The cached outcome for `key`, if one was recorded within its TTL of
     /// `now`. An expired entry reads as a miss and is left for the next
     /// [`Self::store`] to overwrite.
-    pub(crate) fn lookup(&self, key: &str, now: Instant) -> Option<Result<Vec<String>, String>> {
+    pub(crate) fn lookup(
+        &self,
+        key: &str,
+        now: Instant,
+    ) -> Option<Result<Vec<CatalogEntry>, String>> {
         let entries = self.entries.lock().ok()?;
         let entry = entries.get(key)?;
         (now.saturating_duration_since(entry.at) < entry.ttl()).then(|| entry.outcome.clone())
     }
 
     /// Record an outcome as observed at `at`.
-    pub(crate) fn store(&self, key: &str, outcome: Result<Vec<String>, String>, at: Instant) {
+    pub(crate) fn store(&self, key: &str, outcome: Result<Vec<CatalogEntry>, String>, at: Instant) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.insert(key.to_string(), CacheEntry { at, outcome });
         }
@@ -255,8 +281,10 @@ pub(crate) fn cache_key(company: &crate::ports::types::CompanyId, backend_url: &
 mod tests {
     use super::*;
 
-    fn slugs(list: &[&str]) -> Vec<String> {
-        list.iter().map(|s| (*s).to_string()).collect()
+    /// Slug-only catalog entries — what a manifest list, a fallback list, or a
+    /// backend predating the dynamic catalog yields.
+    fn slugs(list: &[&str]) -> Vec<CatalogEntry> {
+        list.iter().map(|s| CatalogEntry::from_slug(*s)).collect()
     }
 
     /// A fetched catalog is served as the backend's answer, with nothing
