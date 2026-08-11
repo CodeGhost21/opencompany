@@ -137,6 +137,31 @@ impl CronExpr {
         None
     }
 
+    /// The most recent epoch **minute** strictly before `before_minute` that
+    /// satisfies this schedule, scanning back at most `limit` minutes; `None`
+    /// when no match falls inside that window.
+    ///
+    /// The bounded reverse mirror of [`next_after`](Self::next_after), working in
+    /// epoch minutes (`unix_millis / 60_000`) rather than [`CivilTime`] because
+    /// its one caller — the restart catch-up (issue #241) — compares against the
+    /// `latest_fire` anchor, which is a minute. The `limit` bound is what keeps a
+    /// long downtime from walking the schedule back years: the catch-up passes a
+    /// one-week window, so at most `limit` minutes are probed and the scan is
+    /// `O(limit)`, never unbounded. Purely arithmetic — no wall clock.
+    pub fn prev_match_before(&self, before_minute: u64, limit: u64) -> Option<u64> {
+        let mut minute = before_minute;
+        for _ in 0..limit {
+            if minute == 0 {
+                break; // epoch floor: nothing before minute 0
+            }
+            minute -= 1;
+            if self.matches(&CivilTime::from_unix_millis(minute * MINUTE_MS)) {
+                return Some(minute);
+            }
+        }
+        None
+    }
+
     /// A plain-English gloss of this schedule, or `None` when the shape is
     /// gnarlier than a one-liner can honestly state.
     ///
@@ -581,6 +606,47 @@ mod test {
         let next = weekly.next_after(&at(2026, 7, 10, 9, 0)).unwrap();
         assert_eq!((next.year, next.month, next.day), (2026, 7, 13));
         assert_eq!((next.hour, next.minute), (9, 0));
+    }
+
+    /// The epoch minute of a UTC civil minute, the unit `prev_match_before`
+    /// speaks in.
+    fn minute_of(year: i64, month: u32, day: u32, hour: u32, minute: u32) -> u64 {
+        ((days_from_civil(year, month, day) as u64) * DAY_MS
+            + (hour as u64) * 3_600_000
+            + (minute as u64) * MINUTE_MS)
+            / MINUTE_MS
+    }
+
+    #[test]
+    fn prev_match_before_finds_the_preceding_tick() {
+        let expr = CronExpr::parse("*/15 * * * *").unwrap();
+        // Strictly before :07 the previous quarter-hour is :00.
+        let from = minute_of(2026, 7, 10, 9, 7);
+        assert_eq!(
+            expr.prev_match_before(from, 60),
+            Some(minute_of(2026, 7, 10, 9, 0))
+        );
+        // Strictly before an exact match (:15) returns the one before it (:00),
+        // never :15 itself — the scan is exclusive of `before_minute`.
+        let on_match = minute_of(2026, 7, 10, 9, 15);
+        assert_eq!(
+            expr.prev_match_before(on_match, 60),
+            Some(minute_of(2026, 7, 10, 9, 0))
+        );
+    }
+
+    #[test]
+    fn prev_match_before_respects_the_window_bound() {
+        // Weekly Monday 09:00. From the following Wednesday the previous fire is
+        // ~2 days back (2880 minutes).
+        let weekly = CronExpr::parse("0 9 * * MON").unwrap();
+        let wednesday = minute_of(2026, 7, 15, 9, 0);
+        let monday = minute_of(2026, 7, 13, 9, 0);
+        // A window that reaches the Monday finds it…
+        assert_eq!(weekly.prev_match_before(wednesday, 10_080), Some(monday));
+        // …but a window too short to reach it finds nothing rather than walking
+        // further back.
+        assert_eq!(weekly.prev_match_before(wednesday, 60), None);
     }
 
     #[test]
