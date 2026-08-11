@@ -146,9 +146,20 @@ function Swatch({
     <button
       type="button"
       onClick={() => {
-        void navigator.clipboard?.writeText(varName);
-        setCopied(true);
-        window.setTimeout(() => setCopied(false), 1200);
+        // The tick reports the copy, so it must wait for the copy. Clipboard
+        // access is absent on an insecure origin and rejects when the document
+        // is not focused or permission is denied — and an optional-chained call
+        // that never ran still fell through to `setCopied(true)`, which is a
+        // page about honest signals telling one small lie.
+        navigator.clipboard
+          ?.writeText(varName)
+          .then(() => {
+            setCopied(true);
+            window.setTimeout(() => setCopied(false), 1200);
+          })
+          .catch(() => {
+            /* nothing was copied, so nothing is reported */
+          });
       }}
       className="group/swatch rounded-lg border border-border p-1 text-left transition-colors hover:bg-accent focus-visible:ring-3 focus-visible:ring-ring/50 focus-visible:outline-none"
       title={`Copy ${varName}`}
