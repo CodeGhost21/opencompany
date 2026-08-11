@@ -485,6 +485,37 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Identity,
         Reach::Consequence,
     ),
+    // ---- Bound repositories -------------------------------------------------
+    // Issue #245's agent half. The classification is re-derived rather than
+    // borrowed from the nearest-looking neighbour, because both names read like
+    // reads and neither is one in the sense this table means.
+    //
+    // `Consequence`, not `Nothing`, for two reasons that hold independently:
+    //
+    //  1. **Both pull third-party-authored content into the agent's context.**
+    //     A repository's source and a pull request's diff are written by people
+    //     outside this company, and the agent is about to reason over them. That
+    //     is the same shape as `web_fetch` — which is `Consequence` for exactly
+    //     this reason — not the shape of reading the company's own notes.
+    //  2. **Both reach the forge host-side under the operator's credential.**
+    //     `repo_checkout` refreshes the mirror over the network before it
+    //     clones; `repo_pr` is a GitHub API call. An agent deciding when a
+    //     company's credential is used is a decision an operator would want to
+    //     have seen.
+    //
+    // `repo_checkout` additionally materializes thousands of files into a
+    // sandbox the same agent may hold `shell` over, which is why it is denied
+    // under `readonly` — a tier whose contract is that nothing changes cannot
+    // admit a tool whose whole purpose is to write a tree.
+    //
+    // `PerCall` for both, and this is the part a future edit is most likely to
+    // want to loosen: a standing grant here would be a week of unattended
+    // "check out anything bound, whenever you like", which is precisely the
+    // permission the `Standing` field refuses to describe. `EffectGroup::Other`
+    // because there is no consequence word for it — the label and the
+    // permission are separate answers (issue #444).
+    d("repo_checkout", EffectGroup::Other, Reach::Consequence),
+    d("repo_pr", EffectGroup::Other, Reach::Consequence),
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -912,6 +943,11 @@ mod tests {
             "media_generate_video",
             "mcp_call_tool",
             "run_workflow",
+            // Issue #245: both reach a forge under the company's credential and
+            // pull third-party-authored content into the agent's context, and
+            // one of them writes a tree.
+            "repo_checkout",
+            "repo_pr",
             "some_tool_nobody_declared",
         ] {
             assert!(
@@ -987,6 +1023,8 @@ mod tests {
             "run_workflow",
             "mcp_call_tool",
             "mcp_registry_tool_call",
+            "repo_checkout",
+            "repo_pr",
         ] {
             assert_eq!(
                 c(tool).standing,
