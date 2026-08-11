@@ -613,6 +613,149 @@ impl RunStore for FsOps {
 }
 
 // ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+//
+// Function-local imports keep this a pure append to a file edited concurrently
+// on other branches (#274, #596).
+
+/// The filesystem-safe directory component for `schedule_id`: its lowercase-hex
+/// SHA-256. Hashing means an id the store did not mint (a `workflow-<id>` whose
+/// `<id>` a console author chose) can never become a path component — the rule
+/// [`Bundle::runs_jsonl`] documents for run ids.
+fn hashed_schedule_component(schedule_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(schedule_id.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        // Infallible: writing to a String never fails.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+#[async_trait]
+impl crate::ports::schedule_fires::ScheduleFireStore for FsOps {
+    async fn claim_fire(
+        &self,
+        company: &CompanyId,
+        schedule_id: &str,
+        minute: u64,
+    ) -> Result<bool> {
+        let dir = self
+            .bundle(company)
+            .schedule_fires_dir()
+            .join(hashed_schedule_component(schedule_id));
+        let marker = dir.join(minute.to_string());
+        // `create_new` is `O_EXCL`: the OS refuses to open the file if it
+        // already exists, so the *first* caller to reach an unclaimed minute is
+        // the only one whose open succeeds. That is the whole claim — no lock,
+        // no read-then-write window. Single-node only: `O_EXCL` is not
+        // trustworthy on NFS, which is why the hosted path runs mongodb.
+        let claimed_at = now_millis();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Err(io_err(&dir, e));
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+            {
+                Ok(mut file) => {
+                    // The claimed-at stamp is debug only, never part of the key;
+                    // a write failure here does not un-claim the instant, so it
+                    // is deliberately not propagated as a lost claim.
+                    let _ = file.write_all(claimed_at.to_string().as_bytes());
+                    Ok(true)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(io_err(&marker, e)),
+            }
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
+
+    async fn latest_fire(&self, company: &CompanyId, schedule_id: &str) -> Result<Option<u64>> {
+        let dir = self
+            .bundle(company)
+            .schedule_fires_dir()
+            .join(hashed_schedule_component(schedule_id));
+        tokio::task::spawn_blocking(move || {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // No directory means the schedule has never fired — the fresh
+                // install case, which is "no anchor", not an error.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(io_err(&dir, e)),
+            };
+            let mut max: Option<u64> = None;
+            for entry in entries {
+                let entry = entry.map_err(|e| io_err(&dir, e))?;
+                // A marker filename that does not parse as a minute is not one of
+                // ours; skip it rather than failing the read.
+                if let Some(minute) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u64>().ok())
+                {
+                    max = Some(max.map_or(minute, |m| m.max(minute)));
+                }
+            }
+            Ok(max)
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
+
+    async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize> {
+        let root = self.bundle(company).schedule_fires_dir();
+        tokio::task::spawn_blocking(move || {
+            let schedules = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(io_err(&root, e)),
+            };
+            let mut removed = 0usize;
+            for schedule in schedules {
+                let schedule_dir = schedule.map_err(|e| io_err(&root, e))?.path();
+                let markers = match std::fs::read_dir(&schedule_dir) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(io_err(&schedule_dir, e)),
+                };
+                for marker in markers {
+                    let marker = marker.map_err(|e| io_err(&schedule_dir, e))?;
+                    let Some(minute) = marker
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<u64>().ok())
+                    else {
+                        continue;
+                    };
+                    if minute < cutoff_minute {
+                        let path = marker.path();
+                        match std::fs::remove_file(&path) {
+                            Ok(()) => removed += 1,
+                            // A racing prune already removed it — not our removal
+                            // to count, but not an error either.
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(io_err(&path, e)),
+                        }
+                    }
+                }
+            }
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UsageMeter
 // ---------------------------------------------------------------------------
 
@@ -1145,6 +1288,40 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_run_reaper(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_schedule_fire_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_schedule_fire_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    /// A fresh `FsOps` over the same root sees a prior instance's claims (issue
+    /// #241): the durable record is on disk, so the anchor survives the process
+    /// restart that motivated the whole port. Proves the fs backend's marker
+    /// files are read back, not just written.
+    #[tokio::test]
+    async fn schedule_fire_claim_survives_a_new_fsops_over_the_same_root() {
+        use crate::ports::schedule_fires::ScheduleFireStore;
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let company = crate::ports::types::CompanyId::new("acme");
+
+        let first = FsOps::new(&root);
+        assert!(first.claim_fire(&company, "workflow-x", 42).await.unwrap());
+
+        // A brand-new store over the same root — the shape a restart produces.
+        let second = FsOps::new(&root);
+        assert!(
+            !second.claim_fire(&company, "workflow-x", 42).await.unwrap(),
+            "a restart must see the earlier claim and lose the repeat"
+        );
+        assert_eq!(
+            second.latest_fire(&company, "workflow-x").await.unwrap(),
+            Some(42),
+            "the anchor is durable across a new instance"
+        );
     }
 
     #[tokio::test]

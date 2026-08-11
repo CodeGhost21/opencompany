@@ -324,6 +324,19 @@ impl Bundle {
         self.dir.join("run-steps.jsonl")
     }
 
+    /// The per-company schedule-fire claim subdirectory
+    /// (`schedule_fires/<hashed-schedule-id>/<minute>`, one empty-ish marker
+    /// file per claimed instant; #241).
+    ///
+    /// A directory of `O_EXCL` marker files rather than a JSONL log: the claim's
+    /// whole value is that `create_new` is atomic, so the *existence* of the
+    /// file is the claim. The schedule-id component is hashed before it becomes a
+    /// path so an id the store did not mint can never address the filesystem —
+    /// the same rule [`runs_jsonl`](Self::runs_jsonl) states for run ids.
+    pub fn schedule_fires_dir(&self) -> PathBuf {
+        self.dir.join("schedule_fires")
+    }
+
     /// Path to the human user directory (`users.json`, the full set as a JSON
     /// array).
     pub fn users_json(&self) -> PathBuf {
