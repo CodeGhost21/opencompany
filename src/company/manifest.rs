@@ -243,20 +243,6 @@ impl CompanyManifest {
             problems.push(one_of("`[policy].mode`", POLICY_MODES, &self.policy.mode));
         }
 
-        // `always_approve` wins over every tier including `full`, so an entry
-        // that can never match is not a harmless dead string — it is a control
-        // the operator believes is protecting them (issue #684). Fail closed:
-        // a name this build cannot produce stops the company loading, rather
-        // than silently gating nothing.
-        for entry in crate::policy::always_approve::unresolved(&self.policy.always_approve) {
-            problems.push(format!(
-                "`[policy].always_approve` lists `{entry}`, which is neither a tool this company \
-                 can run nor an effect kind its brain can emit — it would never park anything. \
-                 Write a tool name (for example `publish_artifact` or `web_search`) or a dotted \
-                 effect kind naming a real consequence (for example `payment.send`)."
-            ));
-        }
-
         if let Some(under) = self.policy.auto_approve_under_usd
             && under < 0.0
         {
@@ -477,29 +463,6 @@ mod tests {
             manifest.policy.always_approve.is_empty(),
             "the default always-approve list is empty on purpose — see \
              DEFAULT_ALWAYS_APPROVE"
-        );
-    }
-
-    /// The fence an operator writes is honoured, and one they cannot have meant
-    /// is refused rather than silently ignored (issue #684).
-    #[test]
-    fn an_always_approve_entry_that_could_never_fire_is_a_validation_error() {
-        let good = parse(
-            "[company]\nname = \"Solo\"\n\n[policy]\nalways_approve = [\"publish_artifact\", \"payment.send\"]\n",
-        );
-        assert!(good.validate().is_empty(), "{:?}", good.validate());
-
-        // A mistyped *tool name* — the error this check reliably catches, and
-        // the common one, since a tool name has to be spelled exactly. A
-        // mistyped effect *kind* usually still resolves; see
-        // `the_effect_kind_half_of_the_check_is_a_low_floor`.
-        let typo = parse(
-            "[company]\nname = \"Solo\"\n\n[policy]\nalways_approve = [\"pubish_artifact\"]\n",
-        );
-        let problems = typo.validate();
-        assert!(
-            problems.iter().any(|p| p.contains("pubish_artifact")),
-            "a fence that can never fire must be loud, got {problems:?}"
         );
     }
 
@@ -928,36 +891,21 @@ mod tests {
                 skill.id
             );
         }
-        // A supervised policy with a defined always-approve fence — and every
-        // entry in it names something this build can actually gate. Asserting
+        // A supervised policy with a defined always-approve fence. Asserting
         // only `!is_empty()` is what let the template ship three entries that
-        // matched nothing (issue #684): a list's length says nothing about
-        // whether it fires.
+        // matched nothing on its harness path (issue #684): a list's length
+        // says nothing about whether it fires.
         assert_eq!(manifest.policy.mode, "supervised");
         assert!(!manifest.policy.always_approve.is_empty());
-        for entry in &manifest.policy.always_approve {
-            assert!(
-                crate::policy::always_approve::resolves(entry),
-                "the template's fence lists `{entry}`, which would never park anything"
-            );
-        }
-        // `resolves` alone is too weak to guard this template, and saying so
-        // costs nothing: the three entries it used to ship (`payment.send` /
-        // `filing.submit` / `external.publish`) all resolve as effect kinds, so
-        // the loop above would have passed on the broken version unchanged.
-        //
-        // What was actually wrong is that none of them named a tool, and the
-        // template's brain is the openhuman harness — so the fence it
-        // advertised could only ever have fired for a hosted brain the template
-        // does not use. A shipped template must demonstrate a gate that works
-        // on its own path.
+        // What was actually wrong is that none of the old entries named a tool,
+        // and the template runs the openhuman harness. A shipped template must
+        // demonstrate a gate that works on its own path, not merely a plausible
+        // effect-kind string.
         assert!(
-            manifest
-                .policy
-                .always_approve
-                .iter()
-                .any(|entry| crate::policy::consequence::declared_tools()
-                    .any(|tool| tool == entry)),
+            crate::policy::always_approve::matches(
+                &manifest.policy.always_approve,
+                "publish_artifact"
+            ),
             "the template's fence names no declared tool, so nothing in it can \
              park a harness tool call — the shape of issue #684"
         );

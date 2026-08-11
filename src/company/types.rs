@@ -87,10 +87,10 @@ pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web"
 ///   the default configuration; they only ever mattered under `auto` and
 ///   `full`, tiers an operator opts into for unattended operation.
 ///
-/// An operator who wants a specific gate still writes one, and now a name that
-/// could never fire is a manifest validation error instead of a silent
-/// no-match. See [`crate::policy::always_approve`] for what can and cannot be
-/// validated, and why.
+/// An operator who wants a specific gate still writes one. Operator-authored
+/// effect kinds remain open-ended because a hosted brain may emit a kind this
+/// repository has never seen; see [`crate::policy::always_approve`] for why a
+/// registry-based validator would reject working custom fences.
 pub const DEFAULT_ALWAYS_APPROVE: &[&str] = &[];
 
 /// Priorities a company may assign to a prioritized `[[connection]]`.
@@ -651,8 +651,8 @@ pub struct Policy {
     /// so `["publish_artifact"]` and `["payment.send"]` are the same syntax at
     /// different segment counts. Matched by
     /// [`always_approve::matches`](crate::policy::always_approve::matches) on
-    /// both approval paths; an entry that could never match is a validation
-    /// error rather than a silent no-match (issue #684).
+    /// both approval paths (issue #684). Native effect kinds are open-ended, so
+    /// configured entries are not restricted to this build's declared tools.
     ///
     /// Defaults to [`DEFAULT_ALWAYS_APPROVE`], which is empty — see there for
     /// why.

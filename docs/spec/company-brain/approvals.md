@@ -347,24 +347,25 @@ a leading dotted segment (`payment` gates `payment.send`, never
 `payroll.export`). They previously held two matchers with two rules, so one
 operator list meant different things depending on which brain was running.
 
-An entry must **resolve**: name a declared tool, or carry a consequence word so
-that a brain emitting it produces a gateable group. One that does neither stops
-the company loading, because a fence that can never fire is worse than no fence
-— it reads as protection. That check is exact for tool names (a closed set) and
-heuristic for effect kinds (open by specification: the Medulla wire types
-`kind` as a free string, so the brain names its own effects and there is no set
-to check against).
+Operator-authored entries are intentionally not restricted to the declared tool
+table. Native effect kinds are open by specification: the Medulla wire carries
+`kind` as a free string, and a hosted brain may emit one this repository has
+never seen. The gate checks `always_approve` before its `EffectGroup` fallback,
+so even an otherwise-unclassified custom kind can be exactly the one the
+operator meant to stop. Treating the classifier as a registry would turn a
+working fence into a load error.
 
-That limit is why **the default is empty**. A default the runtime cannot prove
-will ever fire must not ship as though it were protection: the shipped default
-used to be `payment.send` / `filing.submit` / `external.publish`, none of which
-named a tool, so every company running it believed payments and publishing were
-gated on the harness path and none were. Two of the three name capabilities the
-product does not have; the real name behind the third is `publish_artifact`,
-which must not be defaulted because `full` publishing unattended is the ruling
-on issue #658. Under the default `supervised` mode the checkpoint taxonomy
-parks every `Spend` / `Sign` / `Publish` effect anyway, so the empty default
-costs no protection that was ever real.
+The **default is empty** because shipped defaults can and should meet a stricter
+standard than open operator input. The old default was `payment.send` /
+`filing.submit` / `external.publish`; none named a tool, so every company using
+the harness path believed payments and publishing were gated and none were. Two
+of the three name capabilities the product does not have; the real name behind
+the third is `publish_artifact`, which must not be defaulted because `full`
+publishing unattended is the ruling on issue #658. Under the default
+`supervised` mode the checkpoint taxonomy parks every `Spend` / `Sign` /
+`Publish` effect anyway, so the empty default costs no protection that was ever
+real. A drift test requires every future default entry to name its intended,
+declared tool target explicitly.
 
 ### Precedence at the tool gate
 

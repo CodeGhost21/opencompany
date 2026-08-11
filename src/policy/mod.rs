@@ -5,10 +5,9 @@
 //! against a company's declared policy and holds the in-memory approval queue.
 //!
 //! The [`always_approve`] module holds the one matcher both approval paths read
-//! for `[policy].always_approve`, plus the resolver the manifest validator uses
-//! to reject an entry that could never fire (issue #684). It is always
-//! compiled, because the native-effect gate below reads it in the default build
-//! while the harness tool policy reads it only under the `openhuman` feature.
+//! for `[policy].always_approve` (issue #684). It is always compiled, because
+//! the native-effect gate below reads it in the default build while the harness
+//! tool policy reads it only under the `openhuman` feature.
 //!
 //! The [`consequence`] module declares, once, what every tool can reach — the
 //! single source both approval questions read ("may this run unattended?" and
