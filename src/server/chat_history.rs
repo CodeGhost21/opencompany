@@ -23,16 +23,58 @@ use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 /// across the two ids depending on which one happened to write it (issue #65).
 pub const MAIN_THREAD_ID: &str = "main";
 
+/// Does this stored chat id mean the General desk?
+///
+/// **Four spellings, one desk.** The console addresses its default thread as
+/// `"main"`, the chat route stores an unaddressed message as `None`, older
+/// events carry `""`, and the desk's own id/name is `"General"`. [`owns`] has
+/// admitted all four since issue #65, which is what stops a transcript from
+/// splitting across whichever id happened to write each message.
+///
+/// Exposed because that equivalence is **not** local to history rendering.
+/// `CompanyRuntime::resolvable_parent` compares a remembered thread root's chat
+/// id against the channel being answered into, and comparing the raw strings
+/// there made a root stored as `None` fail to match the `"General"` it is
+/// rendered under — so a threaded approval rooted in an unaddressed message
+/// silently resumed in the channel, which is the exact symptom issue #435 set
+/// out to remove. Two places deciding "same conversation?" by different rules
+/// is the drift; one function is the fix. See [`same_conversation`].
+pub fn is_general_chat(chat: Option<&str>) -> bool {
+    match chat {
+        None => true,
+        Some(chat) => {
+            chat.is_empty()
+                || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)
+                || chat.eq_ignore_ascii_case(GENERAL_DESK)
+        }
+    }
+}
+
+/// Do two stored chat ids name the same conversation (issue #435)?
+///
+/// Every spelling of the General desk is one conversation — see
+/// [`is_general_chat`] — and everything else compares verbatim, because a desk
+/// id is an opaque identifier and two desks differing only in case are two
+/// desks. Deliberately **not** a general-purpose case-insensitive compare: the
+/// folding is a fact about one desk's history, not a licence to loosen the
+/// others.
+pub fn same_conversation(a: Option<&str>, b: Option<&str>) -> bool {
+    if is_general_chat(a) || is_general_chat(b) {
+        return is_general_chat(a) && is_general_chat(b);
+    }
+    a == b
+}
+
 /// Whether a stored event belongs to the desk identified by `desk_id` /
 /// `desk_name`.
 ///
 /// Both `AgentReply`s and `OperatorMessage`s match on the desk id or name
-/// verbatim, plus — only for the General/operator desk — the console's `"main"`
-/// thread id and an empty chat id, so no historical message is orphaned by the
-/// id it happened to be journaled under (issue #65). An operator message routes
-/// by its stored `chat` id symmetrically with an agent reply's `chat_id`; only
-/// a legacy operator message with no stored chat id (empty/`None`) falls back
-/// to belonging to the General desk.
+/// verbatim, plus — only for the General/operator desk — every spelling
+/// [`is_general_chat`] admits, so no historical message is orphaned by the id it
+/// happened to be journaled under (issue #65). An operator message routes by its
+/// stored `chat` id symmetrically with an agent reply's `chat_id`; only a legacy
+/// operator message with no stored chat id (empty/`None`) falls back to
+/// belonging to the General desk.
 pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
     let is_general_desk =
         desk_id.eq_ignore_ascii_case(GENERAL_DESK) || desk_name.eq_ignore_ascii_case(GENERAL_DESK);
@@ -40,15 +82,12 @@ pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
         CompanyEvent::AgentReply { chat_id, .. } => {
             chat_id == desk_id
                 || chat_id == desk_name
-                || (is_general_desk
-                    && (chat_id.is_empty() || chat_id.eq_ignore_ascii_case(MAIN_THREAD_ID)))
+                || (is_general_desk && is_general_chat(Some(chat_id)))
         }
         CompanyEvent::OperatorMessage { chat, .. } => {
-            let chat = chat.as_deref().unwrap_or_default();
-            chat == desk_id
-                || chat == desk_name
-                || (is_general_desk
-                    && (chat.is_empty() || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)))
+            chat.as_deref() == Some(desk_id)
+                || chat.as_deref() == Some(desk_name)
+                || (is_general_desk && is_general_chat(chat.as_deref()))
         }
         _ => false,
     }

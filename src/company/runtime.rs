@@ -1296,9 +1296,20 @@ impl CompanyRuntime {
             CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.clone()),
             // Only a chat message can root a thread; anything else at that
             // sequence means the recorded parent was never a valid root.
-            _ => None,
+            _ => return None,
         };
-        (channel.as_deref() == Some(chat_id)).then_some(parent)
+        // Compared through the same rule the console renders by
+        // ([`same_conversation`](crate::server::chat_history::same_conversation)),
+        // never as raw strings. The General desk has four spellings — `None`
+        // from an unaddressed chat post, `""` from older events, the console's
+        // `"main"`, and `"General"` itself — and a raw compare rejects the pair
+        // it is *most* likely to be handed: an unaddressed message is journaled
+        // with `chat: None` and rendered under General, so a reply to it arrives
+        // here as `None` vs `"General"`. That mismatch dropped the parent and
+        // resumed in the channel — issue #435's own symptom, surviving inside
+        // its fix.
+        crate::server::chat_history::same_conversation(channel.as_deref(), Some(chat_id))
+            .then_some(parent)
     }
 
     async fn publish_continuation(&self, approval_id: &ApprovalId, report: &mut CycleReport) {
@@ -2312,11 +2323,9 @@ mod tests {
     /// rather than rendering it flat, so a stale root would make the
     /// continuation invisible — strictly worse than the bug being fixed, since
     /// today's answer at least reaches the channel.
-    #[tokio::test]
-    async fn an_unresolvable_thread_root_degrades_to_the_channel() {
-        use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq};
-        use crate::runtime::RuntimeBuilder;
-
+    /// A runtime with a live event log, for the thread-root tests. Returns the
+    /// tempdir too: dropping it deletes the log the runtime is reading.
+    async fn runtime_with_events() -> (crate::company::runtime::CompanyRuntime, tempfile::TempDir) {
         let home_dir = tempfile::Builder::new()
             .prefix("opencompany-parent-")
             .tempdir()
@@ -2335,10 +2344,18 @@ mod tests {
             "#,
         )
         .expect("manifest");
-        let rt = RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
+        let rt = crate::runtime::RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest)
             .build()
             .await
             .expect("runtime");
+        (rt, home_dir)
+    }
+
+    #[tokio::test]
+    async fn an_unresolvable_thread_root_degrades_to_the_channel() {
+        use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq};
+
+        let (rt, _home_dir) = runtime_with_events().await;
 
         // A real root in `desk-finance`, and a second message elsewhere.
         let root = rt
@@ -2482,6 +2499,81 @@ mod tests {
             rt.resolvable_parent(Some(not_a_message), "desk-finance")
                 .await,
             None,
+        );
+    }
+
+    /// The General desk answers to four spellings, and a thread rooted in any
+    /// of them keeps its parent (issue #435).
+    ///
+    /// This is the case the fix was *most* likely to be handed and originally
+    /// dropped: the chat route journals an unaddressed message as
+    /// `chat: None` while the console renders it under `General` and replies to
+    /// it there, so the comparison arrived as `None` vs `"General"`. A raw
+    /// string compare rejected it, the parent was discarded, and the
+    /// continuation resumed in the channel — #435's own symptom surviving
+    /// inside #435's fix, on the default path rather than an exotic one.
+    #[tokio::test]
+    async fn a_root_in_any_spelling_of_the_general_desk_still_resolves() {
+        use crate::ports::types::CompanyEvent;
+
+        let (rt, _home_dir) = runtime_with_events().await;
+
+        // Three roots, one desk: the unaddressed post, the console's own
+        // thread id, and the desk named outright.
+        let mut roots = Vec::new();
+        for chat in [None, Some("main"), Some("General")] {
+            roots.push(
+                rt.events
+                    .append(
+                        &rt.id,
+                        CompanyEvent::OperatorMessage {
+                            text: "ship it".into(),
+                            by: None,
+                            chat: chat.map(str::to_string),
+                            parent: None,
+                        },
+                    )
+                    .await
+                    .expect("append"),
+            );
+        }
+
+        // Every root resolves against every spelling of the channel it is
+        // answered into — including the pair that used to fail.
+        for root in &roots {
+            for channel in ["General", "main", "general"] {
+                assert_eq!(
+                    rt.resolvable_parent(Some(*root), channel).await,
+                    Some(*root),
+                    "root {root} must resolve when answered into `{channel}`",
+                );
+            }
+        }
+
+        // …and the folding stops there. A real desk is still compared
+        // verbatim, so this widening cannot pull an unrelated thread in.
+        let elsewhere = rt
+            .events
+            .append(
+                &rt.id,
+                CompanyEvent::OperatorMessage {
+                    text: "unrelated".into(),
+                    by: None,
+                    chat: Some("desk-ops".into()),
+                    parent: None,
+                },
+            )
+            .await
+            .expect("append");
+        assert_eq!(
+            rt.resolvable_parent(Some(elsewhere), "General").await,
+            None,
+            "a named desk is not the General desk",
+        );
+        assert_eq!(
+            rt.resolvable_parent(Some(roots[0]), "desk-ops").await,
+            None,
+            "and the General desk is not a named one",
         );
     }
 }
