@@ -16,10 +16,14 @@
 //!
 //! * Shell + code tools share one [`SecurityPolicy`] built by [`exec_security`],
 //!   pinned to the agent's workspace with `workspace_only`, high-risk commands
-//!   blocked, tool-install denied, and an autonomy level mapped 1:1 from the
-//!   company's [`PolicyMode`]. This is the *strict* policy — opencompany's own
+//!   blocked, tool-install denied, and an autonomy level mapped from the
+//!   company's [`PolicyMode`] by [`autonomy_for`] — no longer 1:1 since `auto`
+//!   (issue #560) has no upstream counterpart and borrows `Supervised`. This is
+//!   the *strict* policy — opencompany's own
 //!   [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) tool policy stays
-//!   the real fail-closed approval gate on top of it.
+//!   the real fail-closed approval gate on top of it, **except** on the workflow
+//!   `tool_call` path, where no such gate is installed and this policy is the
+//!   whole tier. See [`autonomy_for`].
 //! * Shell command audit is keyed on the agent's own workspace dir
 //!   ([`workspace_audit`]) so audit trails never cross tenants.
 //! * Web tools reuse OpenHuman's upstream SSRF guard (`url_guard`): every
@@ -153,11 +157,16 @@ pub fn namespace_of(tool_name: &str) -> Option<&'static str> {
 /// Extends the same `workspace_only` shape [`file_tools`](crate::harness::build)
 /// uses with the exec-relevant knobs:
 ///
-/// * `autonomy` is mapped **1:1** from the company [`PolicyMode`]
-///   (readonly/supervised/full → [`AutonomyLevel`] ReadOnly/Supervised/Full).
+/// * `autonomy` is mapped from the company [`PolicyMode`] — see
+///   [`autonomy_for`], which is **not** 1:1 since `auto` (issue #560) has no
+///   upstream counterpart, and which is a real security boundary on the
+///   workflow `tool_call` path rather than a mapping detail.
 /// * `block_high_risk_commands` is always on — destructive shell commands are
 ///   refused before they spawn.
-/// * `require_approval_for_medium_risk` mirrors Supervised mode.
+/// * `require_approval_for_medium_risk` covers Supervised **and** Auto, for the
+///   reason argued on [`autonomy_for`]: the flag is inert unless `autonomy` is
+///   `Supervised`, so leaving `auto` out of it would silently undo the very
+///   mapping chosen to keep `auto` from loosening shell execution.
 /// * `allow_tool_install` and `auto_approve_all` are always off — an embedded
 ///   company agent never installs OS packages nor blanket-approves itself.
 ///
@@ -173,18 +182,57 @@ pub fn exec_security(workspace: &Path, mode: PolicyMode) -> SecurityPolicy {
         action_dir: dir,
         workspace_only: true,
         block_high_risk_commands: true,
-        require_approval_for_medium_risk: mode == PolicyMode::Supervised,
+        require_approval_for_medium_risk: matches!(mode, PolicyMode::Supervised | PolicyMode::Auto),
         allow_tool_install: false,
         auto_approve_all: false,
         ..SecurityPolicy::default()
     }
 }
 
-/// The OpenHuman [`AutonomyLevel`] a company [`PolicyMode`] maps to (1:1).
+/// The OpenHuman [`AutonomyLevel`] a company [`PolicyMode`] maps to.
+///
+/// Three of the four map by name. `auto` (issue #560) has no upstream
+/// counterpart — OpenHuman's `AutonomyLevel` is `ReadOnly` / `Supervised` /
+/// `Full` — so it must borrow one, and **the borrowed level is a security
+/// decision, not a naming one.**
+///
+/// # Why `Supervised` and not `Full`
+///
+/// `auto` is more permissive than `supervised` at opencompany's own
+/// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy), which is where
+/// the tier is supposed to be expressed. Reaching for the matching *feel* here
+/// and mapping it to `Full` would loosen a different gate in the opposite
+/// direction, because this policy is not always sitting underneath that one:
+///
+/// * A workflow `tool_call` node runs through
+///   [`WorkflowToolInvoker`](crate::workflows::caps), which gates on the
+///   `[tools].allow` grant list and **this policy** — no `ApprovalPolicy` is
+///   installed on that path. (Workflow *agent* nodes go through the roster and
+///   do have one.) So for those nodes this is the whole tier.
+/// * Upstream, `AutonomyLevel::Full` stops asking about medium-risk shell
+///   commands: the approval arm in `command_checks` fires only when `autonomy
+///   == Supervised`. Mapping `auto` to `Full` would therefore let medium-risk
+///   commands run unapproved in workflow nodes on an `auto` company — while the
+///   tier's stated contract is that `shell` parks. The inverse of what the
+///   operator selected.
+///
+/// Mapping to `Supervised` costs nothing in the other direction. Every tool
+/// this policy governs — `shell`, the code runners, the web tools — is
+/// `Standing::PerCall` and therefore parks under `auto` at the authoritative
+/// layer anyway, so the stricter advisory tier underneath is never the thing
+/// the operator notices. `auto` buys its autonomy in tools this policy does not
+/// govern.
+///
+/// This is also why `require_approval_for_medium_risk` in [`exec_security`]
+/// lists `Auto` explicitly instead of leaving `mode == PolicyMode::Supervised`
+/// to answer it. That expression was exhaustive by accident and would have
+/// quietly returned `false` for the new variant — pairing `Supervised` autonomy
+/// with the medium-risk gate switched off, which is the loosening this mapping
+/// was chosen to prevent, arriving through the back door.
 fn autonomy_for(mode: PolicyMode) -> AutonomyLevel {
     match mode {
         PolicyMode::Readonly => AutonomyLevel::ReadOnly,
-        PolicyMode::Supervised => AutonomyLevel::Supervised,
+        PolicyMode::Supervised | PolicyMode::Auto => AutonomyLevel::Supervised,
         PolicyMode::Full => AutonomyLevel::Full,
     }
 }
@@ -679,7 +727,6 @@ mod tests {
             "supervised must approve medium-risk"
         );
 
-        // Autonomy tracks the mode 1:1; medium-risk approval is Supervised-only.
         let readonly = exec_security(ws, PolicyMode::Readonly);
         assert_eq!(readonly.autonomy, AutonomyLevel::ReadOnly);
         assert!(!readonly.require_approval_for_medium_risk);
@@ -687,6 +734,120 @@ mod tests {
         let full = exec_security(ws, PolicyMode::Full);
         assert_eq!(full.autonomy, AutonomyLevel::Full);
         assert!(!full.require_approval_for_medium_risk);
+    }
+
+    /// `auto` must not loosen shell execution (issue #560).
+    ///
+    /// This is the test for the decision argued on [`autonomy_for`], and it
+    /// guards a hole with no other guard: a workflow `tool_call` node has **no**
+    /// `ApprovalPolicy` above it, so this policy is the entire tier there.
+    /// `auto` is more permissive than `supervised` at the approval gate, and the
+    /// tempting mapping — matching that feel with `AutonomyLevel::Full` — would
+    /// silently drop the medium-risk shell gate for every workflow node on an
+    /// `auto` company, because upstream's approval arm fires only when
+    /// `autonomy == Supervised`.
+    ///
+    /// The second assertion is the subtler half. With autonomy mapped to
+    /// `Supervised`, `require_approval_for_medium_risk` becomes load-bearing —
+    /// and it was written as `mode == PolicyMode::Supervised`, an expression
+    /// that was exhaustive by accident and answers `false` for a variant added
+    /// beside it. Getting the mapping right and leaving that expression alone
+    /// would have reopened the same hole from the other side.
+    #[test]
+    fn auto_borrows_supervised_exec_security_rather_than_full() {
+        let ws = Path::new("/tmp/oc-toolbelt-policy-auto");
+        let auto = exec_security(ws, PolicyMode::Auto);
+
+        assert_eq!(
+            auto.autonomy,
+            AutonomyLevel::Supervised,
+            "auto must not inherit Full's exec autonomy — a workflow tool_call node has no \
+             approval gate above this policy"
+        );
+        assert!(
+            auto.require_approval_for_medium_risk,
+            "the medium-risk gate is inert unless autonomy is Supervised, so auto must opt in \
+             explicitly or the mapping above buys nothing"
+        );
+
+        // The rest of the hardening is tier-independent and stays so.
+        assert!(auto.block_high_risk_commands);
+        assert!(!auto.allow_tool_install);
+        assert!(!auto.auto_approve_all);
+        assert!(auto.workspace_only);
+    }
+
+    /// The mapping above, proven where it actually bites: at openhuman's own
+    /// command gate, on the class that separates the two candidate mappings.
+    ///
+    /// `auto_borrows_supervised_exec_security_rather_than_full` pins the two
+    /// fields; this pins what they *do*.
+    ///
+    /// # Which class actually distinguishes the mappings
+    ///
+    /// Worth stating, because the intuitive example is the wrong one. At
+    /// `gate_decision`, `Destructive` prompts under `Supervised` **and** under
+    /// `Full` — so `rm -rf /` cannot tell the two mappings apart, and a test
+    /// written around it would pass whichever mapping `autonomy_for` chose.
+    /// (`block_high_risk_commands` is a separate, unconditional refusal on the
+    /// `validate_command` path; it is not what `gate_decision` reports.)
+    ///
+    /// The one class `Full` actually loosens is `Write`: `Supervised` prompts,
+    /// `Full` allows. That makes `Write` the whole of the difference here, and
+    /// it is the ordinary case rather than an exotic one — an unrecognised
+    /// command is classified `Write` by fail-closed default. So mapping `auto`
+    /// to `Full` would have let routine state-changing shell commands run
+    /// unprompted in workflow `tool_call` nodes, which is exactly the tier
+    /// inversion `autonomy_for` argues against.
+    ///
+    /// Asserted on `CommandClass` directly rather than through
+    /// `classify_command`, so this pins the tier decision and not the
+    /// classifier's string heuristics.
+    #[test]
+    fn auto_gates_write_class_commands_exactly_as_supervised_does() {
+        use oh::security::{CommandClass, GateDecision};
+        let ws = Path::new("/tmp/oc-toolbelt-policy-auto-cmd");
+
+        let auto = exec_security(ws, PolicyMode::Auto);
+        let supervised = exec_security(ws, PolicyMode::Supervised);
+        let full = exec_security(ws, PolicyMode::Full);
+
+        // The load-bearing assertion: the class the two mappings disagree about.
+        assert_eq!(
+            auto.gate_decision(CommandClass::Write),
+            GateDecision::Prompt,
+            "a write-class command must still ask on an auto desk — mapping auto to Full would \
+             let it run unprompted in a workflow tool_call node, which has no approval gate above \
+             this policy"
+        );
+        assert_eq!(
+            full.gate_decision(CommandClass::Write),
+            GateDecision::Allow,
+            "guard for the assertion above: if Full ever stops allowing Write, this test no \
+             longer distinguishes the two mappings and must be rewritten"
+        );
+
+        // Everything else `auto` decides, it decides identically to `supervised`.
+        for class in [
+            CommandClass::Read,
+            CommandClass::Write,
+            CommandClass::Network,
+            CommandClass::Install,
+            CommandClass::Destructive,
+        ] {
+            assert_eq!(
+                auto.gate_decision(class),
+                supervised.gate_decision(class),
+                "auto must gate {class:?} exactly as supervised does"
+            );
+        }
+
+        // And it is not readonly either — an auto desk can still act.
+        let readonly = exec_security(ws, PolicyMode::Readonly);
+        assert_eq!(
+            readonly.gate_decision(CommandClass::Write),
+            GateDecision::Block
+        );
     }
 
     #[tokio::test]

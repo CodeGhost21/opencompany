@@ -100,13 +100,26 @@ pub const POLICY_NAME: &str = "opencompany-approval";
 /// same way delegation is.
 pub const MAX_APPROVAL_REQUESTS_PER_TURN: usize = 8;
 
-/// The three approval tiers, mirroring OpenHuman's security tiers 1:1.
+/// The four approval tiers, in increasing order of autonomy.
+///
+/// Three of them mirror OpenHuman's own security tiers by name;
+/// [`Auto`](Self::Auto) (issue #560) does not, and is the reason this enum is no
+/// longer 1:1 with anything upstream. See
+/// [`autonomy_for`](crate::harness::toolbelt) for what that costs at the
+/// boundary and how it is paid.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PolicyMode {
     /// Read-only: mutating / external-effect tools are denied outright.
     Readonly,
     /// Supervised: external-effect tools require operator approval.
     Supervised,
+    /// Auto: the agent's own sandbox writes and outward reads run unattended;
+    /// anything that leaves the company or spends money still parks.
+    ///
+    /// The tier line itself is
+    /// [`Consequence::parks_under_auto`](crate::policy::Consequence::parks_under_auto),
+    /// which reads the existing declaration table rather than adding a list.
+    Auto,
     /// Full autonomy: tools run without approval (except `always_approve`).
     Full,
 }
@@ -114,20 +127,20 @@ pub enum PolicyMode {
 impl PolicyMode {
     /// Parses a manifest `[policy].mode` string; unknown values fall back to the
     /// safe `Supervised` default.
+    ///
+    /// The fallback is the *second* line of defence, not the first:
+    /// [`Manifest::validate`](crate::company::Manifest) rejects a mode outside
+    /// [`POLICY_MODES`](crate::company::POLICY_MODES) before a company ever
+    /// loads. This arm catches the paths that reach a `Policy` without going
+    /// through validation, and a new tier has to be added in **both** places —
+    /// parsing `"auto"` here while the validator still refuses it would make the
+    /// tier unreachable from a manifest, which is the only way anyone sets it.
     pub fn parse(mode: &str) -> Self {
         match mode.trim().to_ascii_lowercase().as_str() {
             "readonly" => Self::Readonly,
+            "auto" => Self::Auto,
             "full" => Self::Full,
             _ => Self::Supervised,
-        }
-    }
-
-    /// The openhuman security-tier word this mode maps to (1:1).
-    pub fn security_tier(self) -> &'static str {
-        match self {
-            Self::Readonly => "readonly",
-            Self::Supervised => "supervised",
-            Self::Full => "full",
         }
     }
 }
@@ -870,9 +883,30 @@ impl ToolPolicy for ApprovalPolicy {
         // operator who does want a per-call gate has
         // `[policy].always_approve = ["web_search"]`, which wins over every
         // tier including `full`.
-        let reach = crate::policy::consequence_of(tool, &request.arguments).reach;
+        let consequence = crate::policy::consequence_of(tool, &request.arguments);
+        let reach = consequence.reach;
         match self.mode {
             PolicyMode::Full => ToolPolicyDecision::Allow,
+            // `auto` sits between the two (issue #560): the agent's own sandbox
+            // writes and its outward reads run unattended, and anything that
+            // leaves the company or spends on submit still parks. The line is
+            // drawn by `parks_under_auto`, which reads the same declaration
+            // table this arm's neighbours read — see there for why it reuses
+            // `Standing` rather than introducing a second list, and for the two
+            // boundaries it deliberately does not draw.
+            PolicyMode::Auto => {
+                if consequence.parks_under_auto() {
+                    self.require_approval(
+                        tool,
+                        &request.arguments,
+                        format!(
+                            "'{tool}' leaves the company or spends money, and this desk runs auto"
+                        ),
+                    )
+                } else {
+                    ToolPolicyDecision::Allow
+                }
+            }
             PolicyMode::Supervised => {
                 if reach.parks_under_supervision() {
                     self.require_approval(
@@ -973,15 +1007,47 @@ mod tests {
             .is_grantable()
     }
 
+    /// Every mode the manifest validator accepts parses to its own variant, and
+    /// nothing else does.
+    ///
+    /// This replaces `mode_maps_one_to_one_to_security_tiers`, which asserted
+    /// the same thing through `PolicyMode::security_tier()` — a `&'static str`
+    /// getter whose only caller in the tree was that test. It was deleted with
+    /// issue #560 rather than given a fourth arm: its entire premise was a 1:1
+    /// correspondence with OpenHuman's security-tier words, and `auto` has no
+    /// such word. The two available arms were both wrong — `"auto"` names a tier
+    /// upstream does not have, and `"supervised"` breaks the 1:1 the function
+    /// documented. Keeping a dead accessor alive by making it lie is worse than
+    /// the deletion.
+    ///
+    /// Pinning against `POLICY_MODES` rather than a literal list is the point:
+    /// the validator refuses any mode outside it, so a tier added to only one of
+    /// the two is either unreachable from a manifest or accepted and silently
+    /// downgraded to `Supervised` by the fallback. This fails in both
+    /// directions.
     #[test]
-    fn mode_maps_one_to_one_to_security_tiers() {
-        assert_eq!(PolicyMode::parse("readonly").security_tier(), "readonly");
+    fn every_policy_mode_parses_to_its_own_variant() {
+        use crate::company::POLICY_MODES;
+
+        let mut seen = Vec::new();
+        for mode in POLICY_MODES {
+            let parsed = PolicyMode::parse(mode);
+            assert!(
+                !seen.contains(&parsed),
+                "`{mode}` parsed to {parsed:?}, which another mode already claims — \
+                 a manifest-selectable tier is being silently downgraded"
+            );
+            seen.push(parsed);
+        }
         assert_eq!(
-            PolicyMode::parse("supervised").security_tier(),
-            "supervised"
+            seen.len(),
+            4,
+            "expected four selectable tiers, found {}: {seen:?}",
+            seen.len()
         );
-        assert_eq!(PolicyMode::parse("full").security_tier(), "full");
-        // Unknown falls back to supervised.
+        assert_eq!(PolicyMode::parse("auto"), PolicyMode::Auto);
+
+        // Unknown falls back to supervised — the safe default, unchanged.
         assert_eq!(PolicyMode::parse("bogus"), PolicyMode::Supervised);
     }
 
@@ -994,6 +1060,129 @@ mod tests {
         );
         assert!(matches!(
             p.check(&request("payment.send", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+    }
+
+    /// Issue #560's contract, stated as the operator reads it: the agent works
+    /// without interrupting me, and stops before anything that leaves the
+    /// building or spends money.
+    ///
+    /// Both halves are asserted in one test on purpose. A tier is a *line*, and
+    /// a test that only checked the permissive half would pass just as happily
+    /// against `full` — which is precisely the mistake `auto` exists to avoid.
+    #[tokio::test]
+    async fn auto_runs_sandbox_writes_and_outward_reads_but_parks_anything_that_leaves() {
+        let p = policy("auto", &[], None);
+
+        // Runs unattended: the agent's own scratch space, this company's own
+        // memory, catalogue reads, and a read scoped to one connected account.
+        for (tool, args) in [
+            ("file_write", serde_json::json!({})),
+            ("edit", serde_json::json!({})),
+            ("apply_patch", serde_json::json!({})),
+            ("csv_export", serde_json::json!({})),
+            ("memory_store", serde_json::json!({})),
+            ("file_read", serde_json::json!({})),
+            ("mcp_list_tools", serde_json::json!({})),
+            ("composio_list_tools", serde_json::json!({})),
+            (
+                "composio_execute",
+                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" }),
+            ),
+        ] {
+            assert_eq!(
+                p.check(&request(tool, args)).await,
+                ToolPolicyDecision::Allow,
+                "{tool} should run unattended under auto — the tier is unusable if it interrupts \
+                 the agent's own work"
+            );
+        }
+
+        // Still parks: arbitrary code, arbitrary addresses, a configured remote,
+        // operator-authored guidance, third-party effects, real money on submit,
+        // and a workflow whose contents this layer cannot see.
+        for (tool, args) in [
+            ("shell", serde_json::json!({})),
+            ("http_request", serde_json::json!({})),
+            ("curl", serde_json::json!({})),
+            ("web_fetch", serde_json::json!({})),
+            ("git_operations", serde_json::json!({})),
+            ("workspace_write", serde_json::json!({})),
+            ("workspace_create", serde_json::json!({})),
+            ("publish_artifact", serde_json::json!({})),
+            ("media_generate_image", serde_json::json!({})),
+            ("media_generate_video", serde_json::json!({})),
+            ("mcp_call_tool", serde_json::json!({})),
+            ("mcp_registry_tool_call", serde_json::json!({})),
+            ("run_workflow", serde_json::json!({})),
+            ("composio_authorize", serde_json::json!({})),
+            (
+                "composio_execute",
+                serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+            ),
+            // An action the provider catalogue does not name is a send, so the
+            // cautious verdict survives into the new tier rather than being
+            // re-decided by it.
+            (
+                "composio_execute",
+                serde_json::json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" }),
+            ),
+            // A tool nobody has declared must not run unattended by omission.
+            ("some_tool_nobody_declared", serde_json::json!({})),
+        ] {
+            assert!(
+                matches!(
+                    p.check(&request(tool, args)).await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} leaves the company or spends money and must still park under auto"
+            );
+        }
+    }
+
+    /// `always_approve` wins over `auto` exactly as it wins over `full`, and the
+    /// two tiers below `auto` are untouched by its arrival.
+    ///
+    /// The `readonly`/`supervised` half is not ceremony: `auto` was added by
+    /// widening a `match` on the mode and by adding a predicate next to the two
+    /// the other arms read, so the way this change fails is by moving a
+    /// neighbouring line, not by getting its own arm wrong.
+    #[tokio::test]
+    async fn auto_yields_to_always_approve_and_leaves_the_lower_tiers_alone() {
+        let auto = policy("auto", &["file_write"], None);
+        assert!(
+            matches!(
+                auto.check(&request("file_write", serde_json::json!({})))
+                    .await,
+                ToolPolicyDecision::RequireApproval { .. }
+            ),
+            "a tool on the always-approve list must park even though auto would otherwise run it"
+        );
+
+        // `readonly` still denies a sandbox write outright rather than parking
+        // it, and still allows a pure read.
+        let readonly = policy("readonly", &[], None);
+        assert!(matches!(
+            readonly
+                .check(&request("file_write", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert_eq!(
+            readonly
+                .check(&request("file_read", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+
+        // `supervised` still parks the sandbox write `auto` now runs — the one
+        // difference between the tiers, asserted as a difference.
+        let supervised = policy("supervised", &[], None);
+        assert!(matches!(
+            supervised
+                .check(&request("file_write", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));

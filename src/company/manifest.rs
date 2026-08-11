@@ -504,13 +504,41 @@ mod tests {
         );
     }
 
+    /// Every tier the enum can represent is reachable from a manifest
+    /// (issue #560).
+    ///
+    /// This is the test for the trap that adding `auto` set: the validator
+    /// keeps its own list of modes (`POLICY_MODES`), and it runs *before*
+    /// `PolicyMode::parse` ever sees the string. A tier added to the enum and
+    /// the parser but not to that list is rejected at load with "must be one of
+    /// …", so the feature is unreachable from the only place anybody sets it —
+    /// while every test in `harness::policy` still passes, because they all
+    /// construct a `Policy` directly and never cross this boundary.
+    ///
+    /// Asserted for all four modes rather than just the new one, so the next
+    /// tier is caught the same way instead of relying on someone remembering.
+    #[test]
+    fn every_policy_mode_the_runtime_knows_is_accepted_by_the_validator() {
+        for mode in crate::company::POLICY_MODES {
+            let manifest = parse(&format!(
+                "[company]\nname = \"X\"\n[policy]\nmode = \"{mode}\"\n"
+            ));
+            assert!(
+                manifest.validate().is_empty(),
+                "`[policy].mode = \"{mode}\"` is a mode the runtime knows but the manifest \
+                 validator rejects — the tier is unreachable from a company.toml: {:?}",
+                manifest.validate()
+            );
+        }
+    }
+
     #[test]
     fn rejects_bad_policy_mode_in_prosumer_language() {
         let manifest = parse("[company]\nname = \"X\"\n[policy]\nmode = \"supervized\"\n");
         let problems = manifest.validate();
         assert_eq!(problems.len(), 1);
         assert!(problems[0].contains("`[policy].mode`"));
-        assert!(problems[0].contains("readonly, supervised, full"));
+        assert!(problems[0].contains("readonly, supervised, auto, full"));
         assert!(problems[0].contains("supervized"));
     }
 

@@ -133,6 +133,70 @@ pub struct Consequence {
     pub standing: Standing,
 }
 
+impl Consequence {
+    /// Does this park for an operator under `auto` (issue #560)?
+    ///
+    /// `auto` is the tier between `supervised` — which parks every write and
+    /// every outward read, so companies drown — and `full`, which parks nothing
+    /// but the `always_approve` list. Its contract, in the operator's words:
+    /// **the agent works without interrupting me, and stops before anything
+    /// that leaves the building or spends money.**
+    ///
+    /// # Why this reads two fields instead of adding a third
+    ///
+    /// The split `auto` needs is already declared. [`Standing::Grantable`]
+    /// marks exactly the calls whose consequence stays inside this company —
+    /// the agent's own scratch writes (`file_write`, `edit`, `apply_patch`,
+    /// `csv_export`, `memory_store`) and a read scoped to one connected account.
+    /// Everything that can execute arbitrary code, reach an arbitrary address,
+    /// overwrite operator-authored guidance, spend on generation, or perform an
+    /// effect this layer cannot see is [`Standing::PerCall`] — deliberately, and
+    /// argued tool by tool in [`DECLARED`]. So the tier is a *reader* of that
+    /// work, not a second table to be kept in step with it. A fresh list would
+    /// be the exact hand-maintained carve-out this module was written to delete,
+    /// and it would drift the same silent way.
+    ///
+    /// # What the operator is consenting to
+    ///
+    /// [`Standing`] answers "may an operator hand this to one teammate until a
+    /// deadline?", and this reuses it to mean "may it run unattended for
+    /// everyone while the company sits in `auto`?" — which is a genuinely wider
+    /// grant than a standing grant, not the same one. It is sound because
+    /// [`Standing`] is decided by what a tool can *reach* rather than by how
+    /// alarming its name is, and because the widening is exactly the choice the
+    /// operator makes when they select the tier. It is recorded here so a future
+    /// edit that loosens `Grantable` knows it is loosening two things.
+    ///
+    /// # Two boundaries this does not draw
+    ///
+    /// [`Reach::Money`] does **not** park. `web_search` is billed but changes
+    /// nothing, and it already runs unattended under `supervised` for a reason
+    /// that binds harder here: openhuman resolves a `RequireApproval` inline and
+    /// never re-dispatches, so a parked search is a search that never happens
+    /// and an agent with no search invents citations. `auto` must not be
+    /// stricter than the tier it replaces. The per-agent daily cap is the
+    /// boundary that actually holds spend, and it sits above the tier dispatch.
+    /// Generation that spends on *submit* — `media_generate_image`,
+    /// `media_generate_video` — is [`Reach::Consequence`] and `PerCall`, so it
+    /// parks.
+    ///
+    /// `always_approve` is not consulted here either: it is checked above the
+    /// tier dispatch in
+    /// [`ApprovalPolicy::check`](crate::harness::policy::ApprovalPolicy) and
+    /// wins over every tier, `full` included.
+    ///
+    /// # Stable across issue #559
+    ///
+    /// A Composio read is `Grantable` today while still carrying
+    /// [`Reach::Consequence`]; #559 reclassifies its *reach* without touching
+    /// its standing. This predicate returns `false` — runs unattended — in both
+    /// worlds, because the `Grantable` half already decides it. The two changes
+    /// can land in either order and neither can silently invert the other.
+    pub fn parks_under_auto(self) -> bool {
+        self.reach.parks_under_supervision() && !self.standing.is_grantable()
+    }
+}
+
 /// One tool's declaration.
 struct Declared {
     tool: &'static str,
