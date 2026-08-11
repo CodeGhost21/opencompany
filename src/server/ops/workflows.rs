@@ -126,6 +126,14 @@ pub fn router() -> Router<AppState> {
             "/workflows/runs/{rid}/cancel",
             post(cancel_workflow_run),
         ))
+        // Issue #596: read one past run's per-node output for the run inspector.
+        // Same static-before-dynamic family as the cancel route above and, like
+        // it, four segments deep so it cannot collide with the two/three-segment
+        // dynamic routes — but registered here to keep the ordering uniform.
+        // Deliberately a lazy per-run fetch, NOT folded into `list_runs`: that
+        // fold is already expensive, and an inspector only ever opens one run at
+        // a time (the make.com pattern).
+        .merge(scoped("/workflows/runs/{rid}/output", get(get_run_output)))
         // Issue #259: read, replace, remove — all on the same id. `PUT` is a
         // full replace rather than a `PATCH` merge because a workflow *is* its
         // graph: a partial node/edge merge has no well-defined meaning (which
@@ -1354,6 +1362,45 @@ async fn cancel_workflow_run(
     Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
         "workflow run {rid}"
     ))))
+}
+
+/// `GET …/workflows/runs/{rid}/output` (both scope forms) — the durable per-node
+/// output snapshot of one past (or live-and-settled) run (issue #596).
+///
+/// This is the data the run inspector renders: `{ runId, workflowId, atMillis,
+/// nodes, truncated }`, where `nodes` is the engine's `{ "<node id>": { "items":
+/// [ … ] } }` map, bounded for storage. The console opens one node in a past run
+/// and shows what it produced — the make.com per-node output view.
+///
+/// # 404 means "no output snapshot", and that covers three honest cases
+///
+/// A `404` here is not an error the console should surface loudly: it means this
+/// run has no stored output, which is true for **every run that predates this
+/// feature**, for a **dry run** (writes nothing durable), and for a
+/// **hard-aborted** run (dropped mid-flight, no outcome to persist). The console
+/// renders an explicit empty state ("this run predates output capture / produced
+/// none") rather than a failure. An unknown run id lands here too, and means the
+/// same thing to the operator: there is nothing to show.
+///
+/// Deliberately a lazy per-run fetch rather than a field folded into
+/// [`list_runs`]: that fold is already expensive, and the inspector only ever
+/// needs the one run an operator clicked into.
+async fn get_run_output(
+    company: ScopedCompany,
+    Path(RunPath { rid }): Path<RunPath>,
+) -> Result<Json<crate::ports::WorkflowRunOutputRecord>, ApiError> {
+    match company
+        .runtime
+        .workflow_run_outputs()
+        .get_run_output(company.id(), &rid)
+        .await
+        .map_err(ApiError)?
+    {
+        Some(record) => Ok(Json(record)),
+        None => Err(ApiError(OpenCompanyError::NotFound(format!(
+            "no output captured for workflow run {rid}"
+        )))),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2874,6 +2921,64 @@ mod tests {
             );
             // A run that finished carries no `error` key at all.
             assert!(rows[0].get("error").is_none(), "{body}");
+        }
+
+        /// Issue #596: the run-output route serves a stored snapshot (200) and
+        /// 404s a run with none. Runs in the DEFAULT lane, which also proves the
+        /// route + store are present with the openhuman-gated *writer* compiled
+        /// out — the default build reads back exactly what was written and 404s
+        /// otherwise.
+        #[tokio::test]
+        async fn run_output_route_serves_a_snapshot_and_404s_an_unknown_run() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, id) = hosted_state(&home).await;
+
+            let runtime = state.registry().get(&id).expect("registered");
+            let record = crate::ports::WorkflowRunOutputRecord {
+                run_id: "run-xyz".to_string(),
+                workflow_id: "greeter".to_string(),
+                at_millis: 123,
+                nodes: serde_json::json!({
+                    "writer": { "items": [{ "json": { "text": "the draft" } }] }
+                }),
+                truncated: false,
+            };
+            runtime
+                .workflow_run_outputs()
+                .put_run_output(&id, &record)
+                .await
+                .expect("store write");
+
+            // 200 with the record for a stored run.
+            let response = router(state.clone())
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/run-xyz/output",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body["runId"], "run-xyz", "{body}");
+            assert_eq!(body["workflowId"], "greeter");
+            assert_eq!(body["truncated"], false);
+            assert_eq!(
+                body["nodes"]["writer"]["items"][0]["json"]["text"], "the draft",
+                "the durable per-node output must round-trip through the route: {body}"
+            );
+
+            // 404 for a run with no captured output.
+            let missing = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/runs/nope/output",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(missing.status(), StatusCode::NOT_FOUND);
         }
 
         /// A run that died outright reads back with its reason. This is the

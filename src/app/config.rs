@@ -209,6 +209,20 @@ pub struct ConfigFile {
     pub github_token: Option<String>,
     /// The `[workspace]` section: data-dir layout lifecycle knobs.
     pub workspace: WorkspaceSection,
+    /// `[[default_mcp_server]]` entries — MCP servers the packaged install
+    /// registers and enables for every company, with no user setup (issue #527).
+    ///
+    /// This is the config location the issue asks for: changing what ships is an
+    /// edit here, never a code change and never a per-company `company.toml`
+    /// edit. Entries are normalized by
+    /// [`normalize_default_servers`](crate::company::mcp::normalize_default_servers),
+    /// which drops any that cannot ship and explains why.
+    ///
+    /// **An empty or absent list is authoritative** — it means "ship no
+    /// defaults", never "fall back to a built-in set". There is deliberately no
+    /// compiled-in list to fall back to.
+    #[serde(rename = "default_mcp_server")]
+    pub default_mcp_servers: Vec<crate::company::McpServer>,
 }
 
 /// The `[workspace]` section of `config.toml`: lifecycle of the canonical
@@ -347,6 +361,10 @@ pub struct RuntimeConfig {
     pub tinyhumans_token_file: Option<PathBuf>,
     /// Resolved `[workspace]` data-dir layout configuration.
     pub workspace: WorkspaceConfig,
+    /// Install-wide default MCP servers, already normalized (issue #527).
+    /// Empty when the install configures none, which is the common case and
+    /// leaves MCP resolution byte-identical to the manifest/runtime pair.
+    pub default_mcp_servers: Vec<crate::company::McpServer>,
 }
 
 impl RuntimeConfig {
@@ -516,6 +534,27 @@ pub fn resolve(
         .map(|c| c.workspace.resolve())
         .unwrap_or_default();
 
+    // Install-wide MCP defaults (issue #527). Normalized here, once, at the
+    // config boundary rather than at each read: a rejected entry is an operator
+    // mistake in a packaged file, and it should be named at boot — where
+    // somebody is looking — instead of silently thinning the list on every
+    // company's first agent turn.
+    //
+    // A rejection is a warning, not a boot failure. These servers are additive
+    // convenience; refusing to start an install because one shipped default has
+    // a bad URL would turn a cosmetic packaging error into an outage.
+    let default_mcp_servers = match config_toml {
+        Some(c) if !c.default_mcp_servers.is_empty() => {
+            let (kept, problems) =
+                crate::company::mcp::normalize_default_servers(&c.default_mcp_servers);
+            for problem in &problems {
+                tracing::warn!(target: "opencompany::config", "{problem}");
+            }
+            kept
+        }
+        _ => Vec::new(),
+    };
+
     let config = RuntimeConfig {
         bind,
         data_dir: PathBuf::from(data_dir),
@@ -528,6 +567,7 @@ pub fn resolve(
         tinyhumans_credential,
         tinyhumans_token_file,
         workspace,
+        default_mcp_servers,
     };
     Ok((config, prov))
 }
@@ -745,6 +785,73 @@ mod test {
         // An absent `[workspace]` section resolves to the default (clear on boot).
         let (cfg, _) = resolve(&env, None, &default_manifest()).unwrap();
         assert!(cfg.workspace.clear_tmp_on_startup);
+    }
+
+    #[test]
+    fn default_mcp_servers_resolve_from_config_toml_and_are_normalized() {
+        // Issue #527: the config layer is the whole "no code change" claim, so
+        // it is asserted rather than trusted — a list that silently failed to
+        // resolve looks identical to one nobody configured.
+        fn entry(name: &str, endpoint: &str) -> crate::company::McpServer {
+            crate::company::McpServer {
+                name: name.to_string(),
+                endpoint: endpoint.to_string(),
+                ..Default::default()
+            }
+        }
+        let env = MapEnv::default();
+
+        // A clean entry reaches RuntimeConfig.
+        let file = ConfigFile {
+            default_mcp_servers: vec![entry("deepwiki", "https://deepwiki.example/mcp")],
+            ..ConfigFile::default()
+        };
+        let (cfg, _) = resolve(&env, Some(&file), &default_manifest()).unwrap();
+        assert_eq!(cfg.default_mcp_servers.len(), 1);
+        assert_eq!(cfg.default_mcp_servers[0].name, "deepwiki");
+
+        // An unshippable entry is dropped here, at the boundary, rather than
+        // thinning the list on every company's first agent turn — and it does
+        // not take the good one with it, nor fail the boot.
+        let file = ConfigFile {
+            default_mcp_servers: vec![
+                entry("leaky", "https://api.example/mcp?apiKey=leaked"),
+                entry("clean", "https://clean.example/mcp"),
+            ],
+            ..ConfigFile::default()
+        };
+        let (cfg, _) = resolve(&env, Some(&file), &default_manifest()).unwrap();
+        let names: Vec<&str> = cfg
+            .default_mcp_servers
+            .iter()
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, vec!["clean"]);
+
+        // Absent section => no defaults, and emphatically not a built-in list.
+        let (cfg, _) = resolve(&env, None, &default_manifest()).unwrap();
+        assert!(cfg.default_mcp_servers.is_empty());
+    }
+
+    #[test]
+    fn default_mcp_servers_parse_from_the_toml_array_of_tables() {
+        // Pins the wire name operators actually type. A rename would compile
+        // fine and silently stop reading their config.
+        let file: ConfigFile = toml::from_str(
+            r#"
+            [[default_mcp_server]]
+            name = "deepwiki"
+            endpoint = "https://mcp.deepwiki.com/mcp"
+            description = "Docs for public repos."
+            "#,
+        )
+        .expect("parses");
+        assert_eq!(file.default_mcp_servers.len(), 1);
+        assert_eq!(file.default_mcp_servers[0].name, "deepwiki");
+        assert_eq!(
+            file.default_mcp_servers[0].endpoint,
+            "https://mcp.deepwiki.com/mcp"
+        );
     }
 
     #[test]

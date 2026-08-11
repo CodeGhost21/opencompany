@@ -6,7 +6,13 @@
 import { useEffect, useState } from "react";
 import { Loader2, Trash2 } from "lucide-react";
 
-import { deleteTask, patchTask, type PatchTask, type Task } from "@/api/tasks";
+import {
+  deleteTask,
+  patchTask,
+  type PatchTask,
+  type Task,
+  type TaskDeliverable,
+} from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
 import {
   AlertDialog,
@@ -38,11 +44,31 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
+import { computeTaskPatch } from "@/lib/task-edit";
 import { TASK_COLUMNS } from "@/lib/tasks-sample";
 import { toast } from "sonner";
 import { AssigneeSelect } from "./AssigneeSelect";
 
 const PRIORITIES = ["low", "medium", "high"] as const;
+
+/** The once-vs-workflow options, in review order (issue #580). */
+const DELIVERABLES: { value: TaskDeliverable; label: string }[] = [
+  { value: "once", label: "Do it once" },
+  { value: "workflow", label: "Build me the workflow" },
+];
+
+/**
+ * The columns where the deliverable can still be flipped (issue #580).
+ *
+ * Once a card leaves To-do/Planning the choice is settled: the builder pass
+ * fires on the drag into In Progress, so changing once-vs-workflow afterwards
+ * cannot rebuild what already ran. The control is disabled there rather than
+ * hidden — an honest "locked" reads better than a field that silently vanishes —
+ * but this is a **UI-honesty** guard, not enforcement: the host is the authority
+ * on whether a late patch is accepted, and the untouched-field diff below means
+ * a save that does not touch the deliverable never sends it anyway.
+ */
+const DELIVERABLE_EDITABLE = new Set(["todo", "planning"]);
 
 /**
  * Edit a card (or delete it). Open when `task` is non-null; `onClose` fires on
@@ -76,40 +102,21 @@ export function TaskEditDialog({
         column: task.column,
         priority: task.priority,
         assignee: task.assignee,
+        // Absent means `"once"` on the wire, so the control is seeded with the
+        // normalized value and a card with no stored deliverable edits as the
+        // one-off it is (issue #580).
+        deliverable: task.deliverable ?? "once",
       });
     }
   }, [task]);
 
   if (!task) return null;
 
-  /**
-   * The fields the operator actually changed, and only those.
-   *
-   * A `PatchTask` is applied field-by-field on the host, and every field it
-   * *receives* is re-validated — `assignee` included, which re-runs
-   * `assignee::resolve` against the current roster. Sending the whole seeded
-   * draft therefore made a card uneditable the moment its stored assignee left
-   * the roster (a teammate removed, a desk deleted): renaming the title
-   * resubmitted the stale assignee, which came back `Unknown`, and the save
-   * failed with a `400` about a field the operator never touched. Diffing means
-   * an untouched field is never re-validated, so the only assignee the host is
-   * ever asked to resolve is one just picked from the roster.
-   */
-  function changedFields(current: Task): PatchTask {
-    const patch: PatchTask = {};
-    if ((draft.title ?? "") !== current.title) patch.title = draft.title ?? "";
-    if ((draft.note ?? "") !== (current.note ?? "")) patch.note = draft.note ?? "";
-    if (draft.column !== undefined && draft.column !== current.column) patch.column = draft.column;
-    if (draft.priority !== undefined && draft.priority !== current.priority) {
-      patch.priority = draft.priority;
-    }
-    if ((draft.assignee ?? "") !== current.assignee) patch.assignee = draft.assignee ?? "";
-    return patch;
-  }
-
   async function save() {
     if (!task) return;
-    const patch = changedFields(task);
+    // Only the fields the operator actually touched (issue #263's roster-safety
+    // diff, extended with #580's deliverable). See `computeTaskPatch`.
+    const patch = computeTaskPatch(draft, task);
     if (Object.keys(patch).length === 0) {
       // Nothing to write. Saying so beats a round-trip that reports "Saved."
       // for an edit that never happened.
@@ -241,6 +248,34 @@ export function TaskEditDialog({
                 onChange={(next) => setDraft((d) => ({ ...d, assignee: next }))}
               />
             </div>
+          </div>
+
+          <div className="grid gap-1.5">
+            <Label htmlFor="task-deliverable">Deliverable</Label>
+            <Select
+              value={draft.deliverable ?? task.deliverable ?? "once"}
+              onValueChange={(v) =>
+                setDraft((d) => ({ ...d, deliverable: (v as TaskDeliverable) ?? undefined }))
+              }
+              disabled={!DELIVERABLE_EDITABLE.has(task.column)}
+            >
+              <SelectTrigger id="task-deliverable" data-testid="edit-deliverable">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {DELIVERABLES.map((d) => (
+                  <SelectItem key={d.value} value={d.value}>
+                    {d.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {!DELIVERABLE_EDITABLE.has(task.column) && (
+              <p className="text-[11px] text-muted-foreground">
+                Locked once work starts — the workflow is built when a card enters In progress, so
+                this can only be changed while it&apos;s still in To-do or Planning.
+              </p>
+            )}
           </div>
         </div>
 

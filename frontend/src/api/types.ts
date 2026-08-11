@@ -519,6 +519,32 @@ export interface TeamMemberDto {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * This teammate's tool grants (issue #601) — the **same** three lists, from
+   * the same host-side constructor, that `GET .../team/{agentId}` serves.
+   *
+   * On the list because the overview graph draws a ring of each teammate's
+   * tools and is built from the roster read: without this it would have to
+   * fetch every agent's detail on page load, and it invented a tool shelf
+   * instead. Read `effective` and nothing else when the question is "what does
+   * this agent hold" — see {@link AgentToolsDto} for why `requested` alone
+   * inverts the answer.
+   *
+   * **Optional on the type, not on the wire.** A host predating #601 sends no
+   * such field; `undefined` means "this host cannot say", which is a different
+   * statement from an empty `effective` ("holds nothing") and must not be
+   * collapsed into it.
+   */
+  tools?: AgentToolsDto;
+  /**
+   * The desks this teammate sits on (issue #601), same shape as the detail
+   * read. Desks are the company's real grouping, so these are what the
+   * overview graph draws its department pillars from.
+   *
+   * **Optional on the type, not on the wire**, same rule as `tools`: absent
+   * means the host does not answer, empty means "on no desk".
+   */
+  desks?: AgentDeskDto[];
 }
 
 /**
@@ -767,9 +793,10 @@ export interface McpServer {
 }
 
 /**
- * A mutating MCP response: the resulting server, a rebuild reminder, the live
- * probe result (absent on a non-`openhuman` host), and any non-blocking
- * endpoint advisory.
+ * A mutating MCP response: the resulting server, the host's pickup note (since
+ * issue #566 that is next-turn pickup with no restart, not a rebuild reminder),
+ * the live probe result (absent on a non-`openhuman` host), and any
+ * non-blocking endpoint advisory.
  */
 export interface McpMutationResponse {
   server: McpServer;
@@ -877,6 +904,15 @@ export interface CapabilityStatusDto {
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
+  /**
+   * Whether the agent-side MCP bridge is compiled into this build (issue #567).
+   * Not a grant question like the flags above: the `/mcp/servers` management
+   * routes ship in every build, so without this an operator can add a server,
+   * store a token and watch it probe healthy on a deployment that hands agents
+   * no MCP tool at all. `undefined` is **unknown** (an older host that does not
+   * send the field) and must never be rendered as "absent".
+   */
+  mcpInBuild?: boolean;
 }
 
 /** One day's token totals in the usage series (`GET .../usage`). */

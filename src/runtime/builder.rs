@@ -48,6 +48,8 @@ use crate::ports::{
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
@@ -202,6 +204,8 @@ pub struct RuntimeBuilder {
     home: PathBuf,
     id: CompanyId,
     manifest: CompanyManifest,
+    /// Install-wide default MCP servers (issue #527), from resolved config.
+    default_mcp_servers: Vec<crate::company::McpServer>,
     brain: Option<Arc<dyn Brain>>,
     brain_mode: Option<BrainMode>,
     credential: Option<SecretValue>,
@@ -233,6 +237,7 @@ pub struct RuntimeBuilder {
     runs: Option<Arc<dyn RunStore>>,
     workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
+    run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -298,6 +303,7 @@ impl RuntimeBuilder {
             home: home.into(),
             id,
             manifest,
+            default_mcp_servers: Vec::new(),
             brain: None,
             brain_mode: None,
             credential: None,
@@ -326,6 +332,7 @@ impl RuntimeBuilder {
             runs: None,
             workflow_revisions: None,
             schedule_fires: None,
+            run_output_store: None,
             usage: None,
             skills: None,
             users: None,
@@ -360,6 +367,15 @@ impl RuntimeBuilder {
     ///
     /// An explicit brain wins over hosted-brain selection: setting this bypasses
     /// [`with_brain_mode`](Self::with_brain_mode) entirely.
+    /// Sets the install-wide default MCP servers (issue #527) — the normalized
+    /// `[[default_mcp_server]]` list from the instance `config.toml`. They merge
+    /// underneath this company's manifest servers, so a company that declares a
+    /// server of the same name keeps its own.
+    pub fn with_default_mcp_servers(mut self, servers: Vec<crate::company::McpServer>) -> Self {
+        self.default_mcp_servers = servers;
+        self
+    }
+
     pub fn with_brain(mut self, brain: Arc<dyn Brain>) -> Self {
         self.brain = Some(brain);
         self
@@ -435,6 +451,7 @@ impl RuntimeBuilder {
         self.runs = Some(handles.runs.clone());
         self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.schedule_fires = Some(handles.schedule_fires.clone());
+        self.run_output_store = Some(handles.run_outputs.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -526,6 +543,15 @@ impl RuntimeBuilder {
     /// Swaps the scheduler fire-claim store (default: fs-backed).
     pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
         self.schedule_fires = Some(schedule_fires);
+        self
+    }
+
+    /// Swaps the per-node run-output store (default: fs-backed; #596).
+    pub fn with_run_output_store(
+        mut self,
+        run_output_store: Arc<dyn WorkflowRunOutputStore>,
+    ) -> Self {
+        self.run_output_store = Some(run_output_store);
         self
     }
 
@@ -863,6 +889,10 @@ impl RuntimeBuilder {
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
                 workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
+                workflow_run_outputs: self
+                    .run_output_store
+                    .clone()
+                    .unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
@@ -1494,6 +1524,7 @@ impl RuntimeBuilder {
                             // to no MCP servers rather than bricking boot.
                             let mcp_servers = crate::company::mcp::resolve_effective(
                                 &id,
+                                &self.default_mcp_servers,
                                 &self.manifest.mcp_servers,
                                 secrets.as_ref(),
                             )
@@ -1544,6 +1575,9 @@ impl RuntimeBuilder {
                                 None
                             };
                             let deps = HarnessDeps {
+                                // Carried so live re-resolution merges the same
+                                // three layers boot did (issue #527).
+                                default_mcp_servers: self.default_mcp_servers.clone(),
                                 // A per-tenant provider that re-resolves the
                                 // effective inference config on every turn, so a
                                 // console BYOK switch takes effect next turn with
@@ -1603,6 +1637,13 @@ impl RuntimeBuilder {
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
                                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(
                                 ),
+                                // Issue #596: the DURABLE, console-facing run
+                                // output store — distinct from `run_outputs`
+                                // above (the in-process agent cache). The runner
+                                // persists each settled run's bounded node output
+                                // here so a past run is readable from the console.
+                                // `None` degrades to no-persist, like `events`.
+                                run_output_store: self.run_output_store.clone(),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.
@@ -1905,6 +1946,9 @@ impl RuntimeBuilder {
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        // Install-wide MCP defaults (issue #527) — set before anything resolves
+        // the effective server set, so the first resolution already sees them.
+        runtime.set_default_mcp_servers(self.default_mcp_servers.clone());
 
         // Issue #290: adopt the outgoing runtime's serialising mutexes. Two
         // runtimes for one company each holding their own `serial` would let two

@@ -1751,8 +1751,12 @@ enum RunOutputStored {
 /// tested no-output invariant), and the tenant workspace is for files on disk,
 /// not a run's in-memory items. Durability is not the requirement either — the
 /// consumer is the *same process* that produced the run, and the durable human
-/// record already exists (the console run drawer renders the full output from
-/// the POST run route, and run history covers the rest). So this is a plain
+/// record already exists: the console run drawer renders a live run's output
+/// from the POST run route, run history covers the settled trail, and since #596
+/// a **durable per-node snapshot** ([`WorkflowRunOutputStore`](crate::ports::run_output::WorkflowRunOutputStore))
+/// lets the console reopen any *past* run and read what each node produced. That
+/// store reads the same `output["nodes"]` capture this cache does but persists it
+/// on a sibling surface, so the two never share storage. So this is a plain
 /// in-memory cache, bounded two ways ([`RUN_OUTPUT_CACHE_RUNS`] runs and
 /// [`RUN_OUTPUT_CACHE_MAX_BYTES`] total), evicting oldest-first.
 ///

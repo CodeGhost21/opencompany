@@ -27,6 +27,10 @@ use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::now_millis;
+use crate::ports::run_output::{
+    MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore,
+    sort_newest_first as sort_run_outputs_newest_first,
+};
 use crate::ports::runs::{
     NewRun, RunFilter, RunRecord, RunStatus, RunStepRecord, RunStore, sort_newest_first,
 };
@@ -598,6 +602,58 @@ fn prune_workflow_revisions(all: &mut Vec<WorkflowRevisionRecord>, workflow_id: 
         .map(|r| r.id)
         .collect();
     all.retain(|r| r.workflow_id != workflow_id || keep.contains(&r.id));
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl WorkflowRunOutputStore for FsOps {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.run_outputs_jsonl();
+        // The per-path lock makes read-dedup-prune-write atomic against a
+        // concurrent settle — process-local, the documented fs-backend
+        // assumption everywhere in this file.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut all = read_jsonl::<WorkflowRunOutputRecord>(&path).await?;
+        // Last-write-wins per run_id: drop any prior snapshot for this run before
+        // appending the new one, so a re-run's output overwrites rather than
+        // stacks (and still counts once toward the cap).
+        all.retain(|r| r.run_id != record.run_id);
+        all.push(record.clone());
+        prune_run_outputs(&mut all);
+        rewrite_jsonl(&path, &all).await
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<WorkflowRunOutputRecord>> {
+        let all = read_jsonl::<WorkflowRunOutputRecord>(&self.bundle(company).run_outputs_jsonl())
+            .await?;
+        // Last-write-wins on read too: if two lines share a run_id (a crash
+        // between append and prune), the later one is the truth.
+        Ok(all.into_iter().rev().find(|r| r.run_id == run_id))
+    }
+}
+
+/// Trims `all` to the newest [`MAX_RUN_OUTPUTS_PER_COMPANY`] run snapshots,
+/// dropping the oldest. Kept as a free function so the cap lives in one place.
+fn prune_run_outputs(all: &mut Vec<WorkflowRunOutputRecord>) {
+    if all.len() <= MAX_RUN_OUTPUTS_PER_COMPANY {
+        return;
+    }
+    sort_run_outputs_newest_first(all);
+    all.truncate(MAX_RUN_OUTPUTS_PER_COMPANY);
 }
 
 // ---------------------------------------------------------------------------
@@ -1511,6 +1567,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_workflow_revision_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_run_output_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workflow_run_output_store(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]

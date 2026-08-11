@@ -141,6 +141,12 @@ pub const PAYLOAD_INPUT: &str = "input";
 pub const PAYLOAD_DELIVERED: &str = "delivered";
 /// The payload key holding the plain-prose statement of what approving costs.
 pub const PAYLOAD_NOTE: &str = "note";
+/// The payload key holding the verbatim output of the gate's upstream nodes —
+/// the content awaiting sign-off (issue #596). A map `{ "<upstream node id>":
+/// <bounded node output> }`. Deliberately **not** part of the gate's dedupe
+/// identity (see [`is_same_gate`]): two runs whose only difference is the content
+/// their upstream nodes produced are still one decision on the same gate.
+pub const PAYLOAD_CONTENT: &str = "content";
 /// The payload key holding the toolbelt slug a policy-gated `tool_call` node
 /// would run (issue #460). Absent on an authored `requires_approval` gate,
 /// which stops the run without any particular call behind it.
@@ -314,6 +320,62 @@ pub fn gate_effect(
         // console tie the card back to the run history the operator was
         // watching.
         run_id: Some(run_id.to_string()),
+    }
+}
+
+/// The verbatim output of a gate's **upstream** nodes — the content an operator
+/// is being asked to sign off before it publishes (issue #596).
+///
+/// At park time the paused run's `outcome.output["nodes"]` already holds every
+/// completed upstream node's output (the gate node itself has not run — that is
+/// what "requires approval" means), so the pre-publish content is available with
+/// **zero engine change**: this reads it straight off the settled output.
+///
+/// For the given `gate_node`, it walks `edges` for every `from → gate_node` edge
+/// and collects that upstream node's output, [`bound`](crate::ports::bound_node_output)
+/// so a runaway node cannot bloat the card. The result is a map keyed by upstream
+/// node id; a gate with no upstream output (an unreachable graph, or output the
+/// run never produced) yields an empty map, which the console renders as "no
+/// content to preview".
+pub fn upstream_content(
+    output: &Value,
+    edges: &[crate::company::WorkflowEdgeDef],
+    gate_node: &str,
+) -> Value {
+    let nodes = output.get("nodes");
+    let mut content = Map::new();
+    for edge in edges {
+        if edge.to != gate_node {
+            continue;
+        }
+        // One entry per distinct upstream node, even if two edges connect them.
+        if content.contains_key(&edge.from) {
+            continue;
+        }
+        if let Some(node_output) = nodes.and_then(|n| n.get(&edge.from)) {
+            let (bounded, _truncated) = crate::ports::bound_node_output(node_output);
+            content.insert(edge.from.clone(), bounded);
+        }
+    }
+    Value::Object(content)
+}
+
+/// Attaches the gate's upstream content (issue #596) to an already-built park
+/// effect under [`PAYLOAD_CONTENT`].
+///
+/// A self-contained addition on top of [`gate_effect`] rather than a change to
+/// it: the effect's dedupe identity ([`is_same_gate`]) ignores this key, so
+/// enriching a card with content never splits one decision into two. A no-op on
+/// a non-object payload (which `gate_effect` never produces).
+pub fn attach_upstream_content(
+    effect: &mut Effect,
+    output: &Value,
+    edges: &[crate::company::WorkflowEdgeDef],
+    gate_node: &str,
+) {
+    let content = upstream_content(output, edges, gate_node);
+    if let Value::Object(map) = &mut effect.payload {
+        map.insert(PAYLOAD_CONTENT.to_string(), content);
     }
 }
 
@@ -851,6 +913,90 @@ mod tests {
             "the ledger is not part of the decision:\n{:?}\n{:?}",
             paused.payload,
             re_reached.payload
+        );
+    }
+
+    // --- issue #596: the pre-publish content preview -------------------------
+
+    fn edge(from: &str, to: &str) -> crate::company::WorkflowEdgeDef {
+        crate::company::WorkflowEdgeDef {
+            from: from.to_string(),
+            to: to.to_string(),
+            label: None,
+        }
+    }
+
+    /// The parked gate carries the verbatim output of the nodes feeding it — the
+    /// content awaiting sign-off — keyed by upstream node id.
+    #[test]
+    fn a_parked_gate_carries_its_upstream_content() {
+        let output = serde_json::json!({
+            "nodes": {
+                "writer": { "items": [{ "text": "the draft tweet" }] },
+                "unrelated": { "items": ["not upstream of the gate"] },
+            }
+        });
+        let edges = [edge("start", "writer"), edge("writer", "publish")];
+
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
+        attach_upstream_content(&mut effect, &output, &edges, "publish");
+
+        let content = &effect.payload[PAYLOAD_CONTENT];
+        assert_eq!(
+            content["writer"]["items"][0]["text"], "the draft tweet",
+            "the gate's upstream node output must ride the card: {content}"
+        );
+        assert!(
+            content.get("unrelated").is_none(),
+            "a node that does not feed the gate must not be previewed: {content}"
+        );
+    }
+
+    /// A gate whose upstream produced nothing (or a graph with no such edge) gets
+    /// an empty preview rather than a missing key — the console renders "no
+    /// content".
+    #[test]
+    fn a_gate_with_no_upstream_output_gets_an_empty_preview() {
+        let output = serde_json::json!({ "nodes": {} });
+        let edges = [edge("writer", "publish")];
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
+        attach_upstream_content(&mut effect, &output, &edges, "publish");
+        assert_eq!(effect.payload[PAYLOAD_CONTENT], serde_json::json!({}));
+    }
+
+    /// The content preview is NOT part of the gate's decision identity: two parks
+    /// that differ only in the upstream content their nodes produced are still one
+    /// decision on one gate, and must dedupe to a single card. Without this a
+    /// workflow whose upstream text changes each run would stack a fresh card
+    /// every time — the rubber-stamp failure #395 closed, re-opened by #596.
+    #[test]
+    fn two_parks_differing_only_in_content_still_dedupe() {
+        let edges = [edge("writer", "publish")];
+        let input = serde_json::json!({ "request": "x" });
+
+        let mut a = gate_effect("wf", "publish", &input, "run-1", &[], None);
+        attach_upstream_content(
+            &mut a,
+            &serde_json::json!({ "nodes": { "writer": { "items": ["draft one"] } } }),
+            &edges,
+            "publish",
+        );
+
+        let mut b = gate_effect("wf", "publish", &input, "run-2", &[], None);
+        attach_upstream_content(
+            &mut b,
+            &serde_json::json!({ "nodes": { "writer": { "items": ["a totally different draft"] } } }),
+            &edges,
+            "publish",
+        );
+
+        assert_ne!(
+            a.payload[PAYLOAD_CONTENT], b.payload[PAYLOAD_CONTENT],
+            "the two cards really do carry different content"
+        );
+        assert!(
+            is_same_gate(&a, &b),
+            "…but they are one decision on one gate and must dedupe to a single card"
         );
     }
 
