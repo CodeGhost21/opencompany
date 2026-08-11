@@ -263,7 +263,8 @@ prompt = "Weekly review and operator digest"
     the `Standards/` / `Playbooks/` / `Product/` documents seeded from
     `companies/<name>/workspace/**`, plus whatever the operator and the agents
     have written since. It is **split**, unlike every other namespace: *reads*
-    (`workspace_list`, `workspace_read`) follow the ordinary rule, so a
+    (`workspace_list`, `workspace_search`, `workspace_read`) follow the
+    ordinary rule, so a
     catch-all `*` confers them; *mutations* (`workspace_write`,
     `workspace_create`) need an **explicit** `workspace` or `workspace.write`
     entry in `[tools].allow`, because they change a tree every other agent then
@@ -271,7 +272,13 @@ prompt = "Weekly review and operator digest"
     genuinely read-only grant. Create and write ride the one flag on purpose:
     overwriting an existing standard is strictly more destructive than adding a
     note beside it, so a grant permitting the first has already permitted the
-    second. `workspace_write` overwrites one **existing** note and requires an
+    second. `workspace_search` (issue #607) is a read and rides the read side of
+    that split — **not** the metered `search` namespace, despite the name.
+    `search` is the paid external-credential grant that carries `web_search`;
+    reading the company's own notes must not require a billed credential, and
+    search reads exactly what `workspace_read` already grants, so it costs the
+    operator no additional decision. `workspace_write` overwrites one
+    **existing** note and requires an
     `expected_updated_at` revision token taken from a prior read, so a note
     edited in the console since the agent read it is refused rather than
     clobbered. `workspace_create` adds one folder or note at a path that is

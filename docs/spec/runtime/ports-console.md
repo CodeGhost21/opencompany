@@ -187,8 +187,18 @@ strands only a blob nothing references; `MongoStore::from_database` sweeps those
 at boot. Tenancy in the shared bucket is a filter on `metadata.company_id` **and**
 `metadata.node_id` for every read, delete and sweep.
 
-**Search (for #607).** No workspace search exists yet; when one is built, a
-binary node is **matchable by name and never content-scanned**. Its bytes are
+**Search (#607).** Workspace search is a **company-layer helper**
+(`company::workspace_search`) over the port's existing `tree` + `read`, not a
+port method. A trait method would need five implementations *and* one agreed
+definition of matching across three engines, and SQLite's FTS5 tokeniser,
+MongoDB's `$text` stemming and a hand-rolled filesystem scan cannot be made to
+agree without either forbidding the native indexes or accepting that the same
+query answers differently per deployment. The helper is correct on all three
+backends by construction; the cost it accepts is O(N) reads per query, the same
+shape `workspace_links` already pays on every file open, and it is the named
+place to add an index later.
+
+A binary node is **matched by name and never content-scanned**. Its bytes are
 not text, so scanning them would produce mojibake matches, waste I/O
 proportional to the payload, and — on a streaming backend — pull a whole video
 through memory to find nothing.
@@ -197,10 +207,17 @@ The port already makes the safe behaviour the default rather than a rule to
 remember: a text `read` of a binary node returns an **empty body** on all three
 backends, so a content scan built over `read`/`tree` finds nothing for one
 automatically. It does not need to know binaries exist, and it cannot
-accidentally index them. A scan that wants to *say* something about a payload
-should use `mime`/`size`/`sha256` off the node, which the tree read already
-carries — the same fields `workspace_list` renders. `read_bytes` is for serving
-a download and should not appear in a search path at all.
+accidentally index them. The helper states the rule anyway rather than
+inheriting the silence, because "found nothing" and "not searchable this way"
+are different answers and only one of them is true. A scan that wants to *say*
+something about a payload uses `mime`/`size`/`sha256` off the node, which the
+tree read already carries — the same fields `workspace_list` renders.
+`read_bytes` is for serving a download and appears nowhere in a search path.
+
+Paths in a hit come from `company::workspace_paths`, the same ancestor-chain
+rules the agent tools' `PathIndex` uses, so a node search offers is always a
+node `workspace_read` can open — an unaddressable node (dangling ancestor,
+illegal name segment) is excluded from hits and from `total` alike.
 
 `assert_workspace_binary_store` pins all of it across all three backends,
 including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:

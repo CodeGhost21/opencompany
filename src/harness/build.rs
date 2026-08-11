@@ -28,9 +28,14 @@
 //!   before the request and exactly one priced `SearchCall` usage sample is
 //!   recorded after it completes.
 //! * **Company workspace** (issue #237, [`workspace_tools`](crate::harness::workspace_tools)):
-//!   `workspace_list` / `workspace_read` over the operator's shared note tree,
-//!   granted under the ordinary namespace rule (`*` confers them) and hit live
-//!   per call so there is no snapshot to go stale. `workspace_write` is added
+//!   `workspace_list` / `workspace_search` / `workspace_read` over the
+//!   operator's shared note tree, granted under the ordinary namespace rule
+//!   (`*` confers all three) and hit live per call so there is no snapshot to
+//!   go stale. `workspace_search` (issue #607) rides this READ grant and not
+//!   the metered `search` one: it reads exactly what `workspace_read` already
+//!   grants, so requiring a billed backend credential for it would price the
+//!   cheap discovery path above the list-then-read crawl it replaces.
+//!   `workspace_write` is added
 //!   only under an **explicit** `workspace` / `workspace.write` grant — a bare
 //!   `*` does not confer it — and is guarded by a required compare-and-swap
 //!   revision token. Unlike the file tools these are scoped by the store, not
