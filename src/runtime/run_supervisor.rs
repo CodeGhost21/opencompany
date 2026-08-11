@@ -44,6 +44,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
+use crate::Result;
+use crate::company::DEFAULT_MAX_IN_FLIGHT_RUNS;
+use crate::error::OpenCompanyError;
 use crate::ports::{RunCancel, WorkflowRunContext};
 
 /// One registered run: its stop signal, plus the graph it belongs to for the log
@@ -60,31 +63,91 @@ struct Slot {
 /// before it got here. Cheap to [`Clone`] (a shared handle): the same map is
 /// seen by the HTTP run route that registers runs, the cancel route that fires
 /// them, the cron scheduler, and the orchestrator's `run_workflow` tool.
-#[derive(Clone, Default)]
+///
+/// # The concurrency cap lives here (issue #401)
+///
+/// Every entry point that starts a run — the manual run route, the cron
+/// scheduler, an approved gate's continuation, and the orchestrator's
+/// `run_workflow` tool — reaches a run through [`begin`](Self::begin), so this
+/// map is the one choke point where a per-company ceiling can be enforced
+/// without trusting each caller to remember it. `begin` is fallible for exactly
+/// that reason: the check and the insert happen under the same lock, so the
+/// count can never be raced past the limit, and the compiler forces every
+/// present and future caller to handle a refusal rather than silently
+/// overshoot. A run over the ceiling is refused, never queued.
+#[derive(Clone)]
 pub struct RunSupervisor {
     inner: Arc<Mutex<HashMap<String, Slot>>>,
+    /// The most runs that may be registered at once. Enforced by
+    /// [`begin`](Self::begin) under the map lock.
+    limit: usize,
+}
+
+impl Default for RunSupervisor {
+    /// A supervisor with the default ceiling
+    /// ([`DEFAULT_MAX_IN_FLIGHT_RUNS`]). The builder overrides it per company
+    /// from the manifest via [`with_limit`](Self::with_limit); this default is
+    /// what the default build's runtime (which can start no run at all) keeps.
+    fn default() -> Self {
+        Self::with_limit(DEFAULT_MAX_IN_FLIGHT_RUNS)
+    }
 }
 
 impl RunSupervisor {
-    /// An empty supervisor.
+    /// An empty supervisor with the default concurrency ceiling.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Mints a run context and registers its stop signal.
+    /// An empty supervisor that admits at most `limit` concurrent runs
+    /// (issue #401).
+    ///
+    /// The builder constructs one per company from
+    /// `manifest.workflows.max_in_flight_runs`, which validation has already
+    /// held at `>= 1`.
+    pub fn with_limit(limit: usize) -> Self {
+        Self {
+            inner: Arc::new(Mutex::new(HashMap::new())),
+            limit,
+        }
+    }
+
+    /// This supervisor's concurrency ceiling. For diagnostics and tests.
+    pub fn limit(&self) -> usize {
+        self.limit
+    }
+
+    /// Mints a run context and registers its stop signal, or refuses when the
+    /// company is already at its concurrency ceiling (issue #401).
     ///
     /// `workflow_id` is the graph about to run and `scheduled` says whether a
     /// cron started it — both ride the context exactly as they did before, so
-    /// this is a drop-in for [`WorkflowRunContext::new`] that additionally makes
-    /// the run reachable.
+    /// on the success path this is a drop-in for [`WorkflowRunContext::new`]
+    /// that additionally makes the run reachable.
+    ///
+    /// The ceiling check and the registration happen under **one** hold of the
+    /// map lock, so two callers racing at the boundary cannot both see room and
+    /// both insert — the count is authoritative, not a separate counter that
+    /// could drift from the map [`RunGuard`] drops entries from. On refusal no
+    /// context is minted: there is deliberately no run id to hand back, because
+    /// nothing started.
     ///
     /// The returned [`RunGuard`] MUST be held for the duration of the run.
     /// Dropping it deregisters the entry, which is what keeps a settled run from
-    /// lingering as a cancellable one — and because it is a `Drop`, that holds
-    /// on the error and panic paths too.
-    pub fn begin(&self, workflow_id: &str, scheduled: bool) -> (WorkflowRunContext, RunGuard) {
+    /// lingering as a cancellable one *and* frees the slot it held against the
+    /// ceiling — and because it is a `Drop`, that holds on the error and panic
+    /// paths too.
+    pub fn begin(
+        &self,
+        workflow_id: &str,
+        scheduled: bool,
+    ) -> Result<(WorkflowRunContext, RunGuard)> {
+        let mut map = self.inner.lock().expect("run supervisor poisoned");
+        if map.len() >= self.limit {
+            return Err(OpenCompanyError::WorkflowRunLimit { limit: self.limit });
+        }
         let ctx = WorkflowRunContext::new(scheduled);
-        self.inner.lock().expect("run supervisor poisoned").insert(
+        map.insert(
             ctx.run_id.clone(),
             Slot {
                 workflow_id: workflow_id.to_string(),
@@ -95,7 +158,7 @@ impl RunSupervisor {
             supervisor: self.clone(),
             run_id: ctx.run_id.clone(),
         };
-        (ctx, guard)
+        Ok((ctx, guard))
     }
 
     /// Fires a registered run's stop signal.
@@ -191,7 +254,9 @@ mod test {
         let supervisor = RunSupervisor::new();
         assert!(supervisor.is_empty());
 
-        let (ctx, guard) = supervisor.begin("digest", false);
+        let (ctx, guard) = supervisor
+            .begin("digest", false)
+            .expect("the first run is under any cap");
         assert_eq!(supervisor.len(), 1);
         assert_eq!(guard.run_id(), ctx.run_id);
         assert!(!ctx.cancel.is_cancelled());
@@ -220,7 +285,9 @@ mod test {
         let supervisor = RunSupervisor::new();
         assert!(!supervisor.cancel("never-existed"));
 
-        let (ctx, guard) = supervisor.begin("digest", false);
+        let (ctx, guard) = supervisor
+            .begin("digest", false)
+            .expect("under the default cap");
         drop(guard);
         assert!(
             !supervisor.cancel(&ctx.run_id),
@@ -237,7 +304,7 @@ mod test {
         let supervisor = RunSupervisor::new();
         let outer = supervisor.clone();
         let result = std::panic::catch_unwind(move || {
-            let (_ctx, _guard) = outer.begin("digest", false);
+            let (_ctx, _guard) = outer.begin("digest", false).expect("under the default cap");
             assert_eq!(outer.len(), 1);
             panic!("the run blew up");
         });
@@ -255,8 +322,12 @@ mod test {
     #[test]
     fn concurrent_runs_of_one_workflow_cancel_independently() {
         let supervisor = RunSupervisor::new();
-        let (first, _first_guard) = supervisor.begin("digest", false);
-        let (second, _second_guard) = supervisor.begin("digest", true);
+        let (first, _first_guard) = supervisor
+            .begin("digest", false)
+            .expect("under the default cap");
+        let (second, _second_guard) = supervisor
+            .begin("digest", true)
+            .expect("under the default cap");
         assert_eq!(supervisor.len(), 2);
         assert_ne!(first.run_id, second.run_id);
 
@@ -275,7 +346,9 @@ mod test {
     #[tokio::test]
     async fn a_cancel_before_the_await_is_still_seen() {
         let supervisor = RunSupervisor::new();
-        let (ctx, _guard) = supervisor.begin("digest", false);
+        let (ctx, _guard) = supervisor
+            .begin("digest", false)
+            .expect("under the default cap");
         supervisor.cancel(&ctx.run_id);
 
         tokio::time::timeout(std::time::Duration::from_secs(1), ctx.cancel.cancelled())
@@ -287,7 +360,9 @@ mod test {
     #[tokio::test]
     async fn a_cancel_after_the_await_wakes_it() {
         let supervisor = RunSupervisor::new();
-        let (ctx, _guard) = supervisor.begin("digest", false);
+        let (ctx, _guard) = supervisor
+            .begin("digest", false)
+            .expect("under the default cap");
         let waiter = tokio::spawn({
             let cancel = ctx.cancel.clone();
             async move { cancel.cancelled().await }
@@ -300,5 +375,81 @@ mod test {
             .await
             .expect("the waiter woke")
             .expect("the waiter did not panic");
+    }
+
+    /// Issue #401: the ceiling admits exactly `limit` runs and refuses the next,
+    /// naming the limit it enforced. Held guards stand in for in-flight runs, so
+    /// the property is proven without a single spawned task or wall-clock wait.
+    #[test]
+    fn the_cap_admits_up_to_the_limit_then_refuses() {
+        let supervisor = RunSupervisor::with_limit(2);
+        assert_eq!(supervisor.limit(), 2);
+
+        let (_first, _g1) = supervisor
+            .begin("digest", false)
+            .expect("first run is under the cap of 2");
+        let (_second, _g2) = supervisor
+            .begin("digest", false)
+            .expect("second run reaches the cap of 2");
+        assert_eq!(supervisor.len(), 2);
+
+        match supervisor.begin("digest", false) {
+            Err(OpenCompanyError::WorkflowRunLimit { limit }) => assert_eq!(limit, 2),
+            Ok(_) => panic!("a third run must be refused, not admitted, at the cap of 2"),
+            Err(other) => panic!("expected a run-limit refusal, got {other:?}"),
+        }
+        assert_eq!(
+            supervisor.len(),
+            2,
+            "a refused run registers nothing — the map is untouched"
+        );
+    }
+
+    /// Issue #401: dropping a guard frees the slot it held, so a run refused at
+    /// the ceiling succeeds once an in-flight run settles. This is the RAII
+    /// release the whole design leans on — no second ledger to keep in step.
+    #[test]
+    fn dropping_a_guard_frees_a_slot_for_a_refused_run() {
+        let supervisor = RunSupervisor::with_limit(1);
+        let (_first, guard) = supervisor
+            .begin("digest", false)
+            .expect("first run fills the cap of 1");
+
+        assert!(
+            matches!(
+                supervisor.begin("digest", false),
+                Err(OpenCompanyError::WorkflowRunLimit { limit: 1 })
+            ),
+            "the second run is refused while the first holds the only slot"
+        );
+
+        drop(guard);
+        let (_second, _g2) = supervisor
+            .begin("digest", false)
+            .expect("the freed slot admits a new run");
+        assert_eq!(supervisor.len(), 1);
+    }
+
+    /// Issue #401: a **panicking** run frees its capped slot on the unwind, not
+    /// just on a clean return. Extends the existing panic test to prove the
+    /// ceiling recovers — a run that blew up must not permanently retire a slot.
+    #[test]
+    fn a_panicking_run_frees_its_capped_slot() {
+        let supervisor = RunSupervisor::with_limit(1);
+        let outer = supervisor.clone();
+        let result = std::panic::catch_unwind(move || {
+            let (_ctx, _guard) = outer.begin("digest", false).expect("fills the cap of 1");
+            assert_eq!(outer.len(), 1);
+            panic!("the run blew up while holding the only slot");
+        });
+        assert!(result.is_err(), "the panic really happened");
+        assert_eq!(
+            supervisor.len(),
+            0,
+            "the guard unwound and freed the slot it held against the cap"
+        );
+        supervisor
+            .begin("digest", false)
+            .expect("the recovered slot admits a fresh run");
     }
 }
