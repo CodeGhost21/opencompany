@@ -249,10 +249,20 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
 /// filed under a different kind because it belongs to the company rather than
 /// to a teammate. Excluding it would leave a company able to plan indefinitely
 /// after crossing the tier ceiling that is supposed to have stopped it.
+///
+/// [`SampleKind::SetupCall`] is counted for the same reason, and the exposure is
+/// smaller: a company runs setup once. It is included so the ceiling covers
+/// every completion billed to the tenant, rather than only the ones that happen
+/// to belong to a teammate.
 pub fn tokens_in(samples: &[UsageSample]) -> u64 {
     samples
         .iter()
-        .filter(|s| matches!(s.kind, SampleKind::Inference | SampleKind::PlanningCall))
+        .filter(|s| {
+            matches!(
+                s.kind,
+                SampleKind::Inference | SampleKind::PlanningCall | SampleKind::SetupCall
+            )
+        })
         .map(|s| s.input_tokens.saturating_add(s.output_tokens))
         .fold(0u64, |acc, t| acc.saturating_add(t))
 }
