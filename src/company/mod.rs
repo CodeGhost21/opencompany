@@ -89,6 +89,7 @@ pub use workflow_file::{
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.

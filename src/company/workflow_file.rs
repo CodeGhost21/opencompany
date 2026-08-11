@@ -660,6 +660,16 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
             condition_nodes.insert(node.id.as_str());
         }
 
+        // Per-kind required config (issue #661): a broken seed / hand-authored
+        // file that omits a `condition` `field`, an `http_request` `method`/`url`,
+        // a `switch` discriminant, or a `tool_call` `slug` must fail LOUD here
+        // rather than translate into a graph whose runtime behaviour is silently
+        // wrong. Same helper the console-draft path runs, so the two surfaces
+        // reject the same shapes identically.
+        if let Some(kind) = kind {
+            problems.extend(required_config_problems(kind, &label, node.config.as_ref()));
+        }
+
         // `schedule` says *when* the workflow starts, so it is trigger-only —
         // anywhere else it would sit inert and mislead (the same footgun the
         // stray-`agent` check above prevents). On a trigger it must be a real
@@ -904,6 +914,34 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                 ));
             }
         }
+
+        // A `condition` node's branches steer the run onto the engine's `true`
+        // or `false` port, keyed off the edge label (issue #661). An unlabeled
+        // or oddly-labeled branch would silently funnel through `condition_port`
+        // onto the `true` port — a mislabeled branch that quietly runs the wrong
+        // way — so require every condition branch to read `yes` or `no`. The
+        // sole exception is the `error` recovery edge of a condition that is also
+        // `on_error = "route"`, already validated by the routing-edge rule above.
+        if condition_nodes.contains(edge.from.as_str()) {
+            let is_route_error =
+                edge.label.as_deref() == Some("error") && route_nodes.contains(edge.from.as_str());
+            let is_yes_no = edge
+                .label
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .is_some_and(|l| matches!(l.as_str(), "yes" | "no"));
+            if !is_route_error && !is_yes_no {
+                let shown = edge
+                    .label
+                    .as_deref()
+                    .map(|l| format!("`{l}`"))
+                    .unwrap_or_else(|| "no label".to_string());
+                problems.push(format!(
+                    "{label} leaves condition node `{}` with {shown} — a condition's branches must be labeled `yes` or `no`.",
+                    edge.from
+                ));
+            }
+        }
     }
 
     // Every routing node must actually have somewhere to route its error to.
@@ -1077,6 +1115,69 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
         }
     }
 
+    problems
+}
+
+/// The per-kind required-`config` problems for one node, in prosumer language.
+///
+/// Shared by the on-disk [`validate`] pass and the console/builder draft path
+/// ([`validate_draft_against_record`](crate::company::workflow_create)) so the
+/// same missing config is rejected identically on BOTH author-time surfaces
+/// (issue #661): a `condition` with no `field`, an `http_request` missing
+/// `method`/`url`, a `switch` with no discriminant, or a `tool_call` with no
+/// `slug`. Each of those still *translates* into a runnable graph, but the
+/// node's behaviour is silently wrong — a field-less condition tests the whole
+/// item, a slug-less `tool_call` used to fall back to the node id (masking which
+/// tool would run) — so surfacing it at load/author time is the point.
+pub(crate) fn required_config_problems(
+    kind: WorkflowNodeKind,
+    label: &str,
+    config: Option<&toml::Value>,
+) -> Vec<String> {
+    let table = config.and_then(toml::Value::as_table);
+    // A config key set to a non-empty, non-whitespace string.
+    let non_empty = |key: &str| -> bool {
+        table
+            .and_then(|t| t.get(key))
+            .and_then(toml::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let mut problems = Vec::new();
+    match kind {
+        WorkflowNodeKind::Condition if !non_empty("field") => {
+            problems.push(format!(
+                "{label} is a condition node but sets no `config.field` — give it the boolean \
+                 expression the branch tests (e.g. `field = \"=item.approved\"`)."
+            ));
+        }
+        WorkflowNodeKind::HttpRequest => {
+            if !non_empty("method") {
+                problems.push(format!(
+                    "{label} is an http_request node but sets no `config.method` — name the HTTP \
+                     method (e.g. `method = \"GET\"`)."
+                ));
+            }
+            if !non_empty("url") {
+                problems.push(format!(
+                    "{label} is an http_request node but sets no `config.url` — give the request \
+                     URL (e.g. `url = \"https://…\"`)."
+                ));
+            }
+        }
+        WorkflowNodeKind::Switch if !non_empty("field") && !non_empty("expression") => {
+            problems.push(format!(
+                "{label} is a switch node but names no discriminant — set `config.field` or \
+                 `config.expression` to the value that selects the branch."
+            ));
+        }
+        WorkflowNodeKind::ToolCall if !non_empty("slug") => {
+            problems.push(format!(
+                "{label} is a tool_call but sets no `config.slug` — set `config.slug` to the \
+                 tool to run."
+            ));
+        }
+        _ => {}
+    }
     problems
 }
 
@@ -1368,6 +1469,8 @@ mod tests {
             name = "Export"
             on_error = "continue"
             requires_approval = true
+            [node.config]
+            slug = "csv_export"
             [node.retry]
             max_attempts = 3
             backoff_ms = 100
@@ -1543,6 +1646,8 @@ mod tests {
             kind = "tool_call"
             name = "Call"
             on_error = "route"
+            [node.config]
+            slug = "csv_export"
             [[node]]
             id = "recover"
             kind = "output"
@@ -1575,6 +1680,8 @@ mod tests {
             id = "sw"
             kind = "switch"
             name = "Switch"
+            [node.config]
+            field = "=item.kind"
             [[node]]
             id = "mg"
             kind = "merge"
@@ -1747,6 +1854,8 @@ mod tests {
             id = "sw"
             kind = "switch"
             name = "Switch"
+            [node.config]
+            field = "=item.kind"
             [[node]]
             id = "err_case"
             kind = "output"
@@ -1771,6 +1880,205 @@ mod tests {
             parse_workflow(src).is_ok(),
             "an error-labeled switch case must be valid without on_error = route"
         );
+    }
+
+    // --- Per-kind required config (issue #661) ------------------------------
+
+    /// A `condition` node with no `config.field` is rejected — without it the
+    /// engine tests the whole item and the branch is silently meaningless.
+    #[test]
+    fn condition_without_field_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [[node]]
+            id = "yes_out"
+            kind = "output"
+            name = "Yes"
+            [[node]]
+            id = "no_out"
+            kind = "output"
+            name = "No"
+            [[edge]]
+            from = "start"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "yes_out"
+            label = "yes"
+            [[edge]]
+            from = "gate"
+            to = "no_out"
+            label = "no"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("config.field"), "{err}");
+    }
+
+    /// A `condition` branch labeled anything but `yes`/`no` is rejected — an
+    /// off-vocabulary label silently maps onto the `true` port.
+    #[test]
+    fn condition_branch_with_non_yes_no_label_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [node.config]
+            field = "=item.ok"
+            [[node]]
+            id = "a"
+            kind = "output"
+            name = "A"
+            [[node]]
+            id = "b"
+            kind = "output"
+            name = "B"
+            [[edge]]
+            from = "start"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "a"
+            label = "pass"
+            [[edge]]
+            from = "gate"
+            to = "b"
+            label = "no"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("labeled `yes` or `no`"), "{err}");
+    }
+
+    /// A well-formed `condition` — a `field` plus `yes`/`no` branches — parses.
+    #[test]
+    fn condition_with_field_and_yes_no_labels_is_valid() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [node.config]
+            field = "=item.approved"
+            [[node]]
+            id = "a"
+            kind = "output"
+            name = "A"
+            [[node]]
+            id = "b"
+            kind = "output"
+            name = "B"
+            [[edge]]
+            from = "start"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "a"
+            label = "yes"
+            [[edge]]
+            from = "gate"
+            to = "b"
+            label = "no"
+        "#;
+        assert!(parse_workflow(src).is_ok());
+    }
+
+    /// An `http_request` node missing `config.method` / `config.url` is rejected.
+    #[test]
+    fn http_request_without_method_or_url_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "fetch"
+            kind = "http_request"
+            name = "Fetch"
+            [[edge]]
+            from = "start"
+            to = "fetch"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("config.method"), "{message}");
+        assert!(message.contains("config.url"), "{message}");
+    }
+
+    /// A `switch` node with neither `field` nor `expression` is rejected.
+    #[test]
+    fn switch_without_discriminant_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "sw"
+            kind = "switch"
+            name = "Switch"
+            [[node]]
+            id = "case_a"
+            kind = "output"
+            name = "A"
+            [[edge]]
+            from = "start"
+            to = "sw"
+            [[edge]]
+            from = "sw"
+            to = "case_a"
+            label = "a"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("discriminant"), "{err}");
+    }
+
+    /// On-disk parity (issue #661): a `tool_call` with no `slug` fails at load,
+    /// the same as the console-draft path — so `translate` never has to fall
+    /// back to the node id as a placeholder slug.
+    #[test]
+    fn tool_call_without_slug_is_rejected_on_disk() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Call"
+            [[edge]]
+            from = "start"
+            to = "call"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("config.slug"), "{err}");
     }
 
     // --- G15: inescapable cycles + reachability (issue #540) ----------------
@@ -1816,7 +2124,7 @@ mod tests {
     }
 
     /// A miniature of the shipped `game_build_pipeline` shape: a `condition`
-    /// guards the loop, with a `pass` branch that leaves it and a `fail` branch
+    /// guards the loop, with a `yes` branch that leaves it and a `no` branch
     /// that loops back. That is a legal bounded retry — it must parse clean.
     #[test]
     fn condition_guarded_loop_is_valid() {
@@ -1836,6 +2144,8 @@ mod tests {
             id = "gate"
             kind = "condition"
             name = "Good enough?"
+            [node.config]
+            field = "=item.good_enough"
             [[node]]
             id = "done"
             kind = "output"
@@ -1849,11 +2159,11 @@ mod tests {
             [[edge]]
             from = "gate"
             to = "done"
-            label = "pass"
+            label = "yes"
             [[edge]]
             from = "gate"
             to = "work"
-            label = "fail"
+            label = "no"
         "#;
         assert!(
             parse_workflow(src).is_ok(),
@@ -1863,7 +2173,7 @@ mod tests {
 
     /// The shipped guarded-retry preset itself must stay valid — its loop
     /// (`gameplay → assets → balance → qa → gate → gameplay`) is escapable
-    /// because `gate` is a `condition` whose `pass` branch leaves the loop.
+    /// because `gate` is a `condition` whose `yes` branch leaves the loop.
     #[test]
     fn the_shipped_guarded_loop_preset_is_valid() {
         const GAME: &str = include_str!(concat!(

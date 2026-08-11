@@ -153,8 +153,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::company::{
-    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, list_workflows_union,
-    parse_workflow, raw_workflow_from_toml, render_workflow,
+    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, WorkflowNodeKind,
+    list_workflows_union, parse_workflow, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
@@ -648,6 +649,30 @@ fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) ->
                 }
             },
             "tool_call" => validate_tool_call_node(node, record)?,
+            // Per-kind required config (issue #661): reject a `condition` with no
+            // `field`, an `http_request` missing `method`/`url`, or a `switch`
+            // with no discriminant at author time — the same gate the on-disk
+            // `validate` applies, surfaced here as a 400 so the console/builder
+            // draft path never persists a graph whose runtime behaviour is
+            // silently wrong. `tool_call` keeps its richer `validate_tool_call_node`
+            // (slug + namespace/grant); the structural kinds share the helper.
+            "condition" | "http_request" | "switch" => {
+                let kind = match node.kind.as_str() {
+                    "condition" => WorkflowNodeKind::Condition,
+                    "http_request" => WorkflowNodeKind::HttpRequest,
+                    _ => WorkflowNodeKind::Switch,
+                };
+                if let Some(problem) = required_config_problems(
+                    kind,
+                    &format!("node `{}`", node.id),
+                    node.config.as_ref(),
+                )
+                .into_iter()
+                .next()
+                {
+                    return Err(OpenCompanyError::InvalidRequest(problem));
+                }
+            }
             _ => {}
         }
     }
