@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { OpenCompanyClient } from "@/api/client";
 import type {
@@ -7,6 +7,7 @@ import type {
   TransportRequest,
   TransportResponse,
 } from "@/api/transport";
+import { BrowserTransport, ProxyTransport, defaultTransport, isDesktopRuntime } from "@/api/transport";
 import { ApiError } from "@/api/types";
 
 /**
@@ -222,5 +223,36 @@ describe("the transport seam", () => {
 
     t.handlers?.onMessage('{"type":"agent_reply"}');
     expect(seen).toEqual(['{"type":"agent_reply"}']);
+  });
+});
+
+describe("picking a transport", () => {
+  const original = (globalThis as { window?: unknown }).window;
+  afterEach(() => {
+    if (original === undefined) delete (globalThis as { window?: unknown }).window;
+    else (globalThis as { window?: unknown }).window = original;
+  });
+
+  it("stays on the browser transport when only the internals global is present", () => {
+    // The two globals answer different questions. `__TAURI_INTERNALS__` is
+    // injected by the runtime unconditionally; `__TAURI__` exists only under
+    // `app.withGlobalTauri`, and it is the one `ProxyTransport.bridge()` calls.
+    // Probing the former selected a proxy transport whose every request then
+    // threw "the desktop bridge is unavailable" — a desktop that could not
+    // complete a single call.
+    (globalThis as { window?: unknown }).window = { __TAURI_INTERNALS__: {} };
+    expect(isDesktopRuntime()).toBe(false);
+    expect(defaultTransport("conn-1")).toBeInstanceOf(BrowserTransport);
+  });
+
+  it("uses the proxy transport when the bridge it calls is really there", () => {
+    (globalThis as { window?: unknown }).window = {
+      __TAURI_INTERNALS__: {},
+      __TAURI__: { invoke: () => Promise.resolve(), Channel: class {} },
+    };
+    expect(isDesktopRuntime()).toBe(true);
+    expect(defaultTransport("conn-1")).toBeInstanceOf(ProxyTransport);
+    // No connection id: the bootstrap probe, which has no host to address yet.
+    expect(defaultTransport()).toBeInstanceOf(BrowserTransport);
   });
 });

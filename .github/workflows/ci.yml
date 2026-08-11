@@ -416,7 +416,10 @@ jobs:
         with:
           components: clippy
 
-      - uses: Swatinem/rust-cache@v2
+      # Pinned to a commit, not the `v2` tag: a tag can be repointed by whoever
+      # owns the action, and whatever it then resolves to runs inside this
+      # workflow. This is v2.9.2. Bump it deliberately.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       # Steps are ordered to fail fast and cheap: a compile break (the `E0062`
       # class of bug that motivated this job) surfaces before the lint pass
@@ -480,6 +483,18 @@ jobs:
       # found already live in the SQLite backend.
       - name: Test the runner lane
         run: cargo test --locked --features runner --lib runner
+
+      # The ACP surface, for the same reason and with the same shape. Both
+      # modules document themselves in terms of a feature that did not exist
+      # until now, so they compiled into every build and were run by no lane —
+      # and served by no route either, since nothing mounts them yet.
+      # Two invocations, not one: `--lib` selects the target and the bare
+      # argument is the filter, so a second filter would be read as a flag
+      # rather than as another module — and would silently narrow to nothing.
+      - name: Test the ACP surface
+        run: |
+          cargo test --locked --features acp --lib server::acp
+          cargo test --locked --features acp --lib harness::acp_run_turn
 
       - name: Assert every integration target actually runs
         run: scripts/ci/assert-integration-targets-run.sh openhuman,tinycortex
@@ -877,3 +892,82 @@ jobs:
           name: playwright-live-brain-failures
           path: frontend/test-results/
           retention-days: 7
+
+  # The desktop shell.
+  #
+  # A SEPARATE JOB, and separate for the reason `src-tauri/Cargo.toml` explains
+  # at length: the crate is not a workspace member, so no `cargo` invocation in
+  # the jobs above reaches it — not even `Check (--all-features)`, which
+  # resolves only the root graph. Without this lane the desktop's Rust, its
+  # tests and its `Cargo.lock` are built by nothing.
+  #
+  # That is issue #475's pathology exactly, in a tree that fixes the same thing
+  # for the SQLite conformance suite two hundred lines above. A suite everybody
+  # reads as coverage, selected by no lane, reporting zero without failing
+  # anything.
+  desktop:
+    name: Desktop
+    runs-on: ubuntu-latest
+    # The webkit toolchain plus a cold Rust compile of the host as a path
+    # dependency. The cap is a wedged-runner backstop, not a target.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          submodules: true
+
+      # The desktop links the host crate by path, so its optional vendored
+      # manifests must resolve here for the same reason they must in `rust` —
+      # Cargo reads every path dependency's manifest during resolution.
+      - name: Init vendored openhuman crate submodules
+        run: |
+          git -C vendor/openhuman submodule update --init --depth 1 \
+            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
+            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+          git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
+            vendor/tinyagents
+
+      # Tauri's system dependencies. `wry` links webkit2gtk, so this is what
+      # makes the desktop tree buildable at all — and it is precisely why the
+      # crate is kept out of the root workspace, so that checking the SERVER
+      # never needs any of it.
+      - name: Install webkit and GTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev \
+            librsvg2-dev libsoup-3.0-dev
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # `tauri-build` reads `frontendDist` from `tauri.conf.json` at build time,
+      # so the console bundle has to exist before the Rust crate compiles.
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run build
+        working-directory: frontend
+
+      # Pinned to a commit, not the `v2` tag: a tag can be repointed by whoever
+      # owns the action, and whatever it then resolves to runs inside this
+      # workflow. This is v2.9.2. Bump it deliberately.
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          workspaces: src-tauri
+
+      - name: Format
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
+
+      # `--no-deps`, matching the gated lane: the host is a path dependency and
+      # its lints are that crate's business, not this one's.
+      - name: Clippy
+        run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets --no-deps -- -D warnings
+
+      # `--locked`, so a manifest edit whose lock was never regenerated is named
+      # here rather than absorbed — the desktop keeps its own `Cargo.lock`.
+      - name: Test
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked

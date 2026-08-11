@@ -305,10 +305,20 @@ medulla = ["dep:reqwest"]
 # key parsers, is how a signature check comes to differ between two callers.
 identity = ["dep:ed25519-dalek", "dep:bs58", "dep:rand_core"]
 tinyplace = ["identity", "dep:reqwest"]
+# The Agent Client Protocol: the `/acp` endpoint's session/permission surface
+# and the `RunTurn` implementation over an ACP agent.
+#
+# Named as a feature because both modules already document themselves in terms
+# of one — `server::acp` reasons about "a build without the feature" and
+# `routes::RESERVED_PREFIXES` reserves `/acp` so such a build 404s rather than
+# answering an ACP client with the console shell. Until this existed the code
+# compiled into every build, was served by no route and run by no lane.
+acp = ["openhuman"]
 # The runner control lane: machines that dial out and execute this host's work.
 # Dispatch folds an ACP turn into a `TurnOutcome`, which lives behind
-# `openhuman` along with the `RunTurn` seam it satisfies.
-runner = ["identity", "openhuman"]
+# `openhuman` along with the `RunTurn` seam it satisfies, and drives it over the
+# `AcpAgent` port from `acp`.
+runner = ["identity", "acp"]
 # Real HTTP POST webhook delivery + HMAC-SHA256 signing. The `WebhookSink` trait,
 # the offline `RecordingWebhookSink`, and the deterministic default signer
 # compile without this; only `HttpWebhookSink`/`HmacSha256Signer` are gated here.

@@ -39,6 +39,12 @@ MongoDB settings:
 - `OPENCOMPANY_TENANT_ID` — tenant identity for **shared-single-DB** mode
   (default unset). See [Shared single database](#shared-single-database-mode).
 
+## The root itself
+
+How the data root is resolved, why only one process may write it, and what
+`instance-id` is: [`data-root.md`](data-root.md). This file describes the layout
+*inside* the root.
+
 ## Workspace layout (`src/store/layout.rs`)
 
 `OPENCOMPANY_DATA_DIR` (default `$HOME/.opencompany`; `/data` in a hosted tenant
@@ -258,21 +264,9 @@ the variable fails loudly rather than half-placing a store.
 
 #### Running two hosts side by side
 
-Because a bundle store is shared by every process that resolves the same root,
-two `serve` processes on different ports with no isolation write to one another's
-companies — teammates and desks created on one appear on the other. Give each its
-own root:
-
-```sh
-OPENCOMPANY_DATA_DIR=/tmp/oc-a opencompany serve \
-  --company companies/e2e_harness --bind 127.0.0.1:8095 &
-OPENCOMPANY_DATA_DIR=/tmp/oc-b opencompany serve \
-  --company companies/e2e_harness --bind 127.0.0.1:8096 &
-```
-
-`--home /tmp/oc-a` places the bundles the same way and takes precedence, but it
-does **not** move the shared workspace — prefer the variable for side-by-side
-hosts.
+A data root has exactly one writer, enforced by an advisory lock — a second
+`serve` over the same root is refused at boot. Give each host its own root; see
+[`data-root.md`](data-root.md) for the recipe and the rules.
 
 The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle:
 
