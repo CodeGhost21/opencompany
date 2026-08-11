@@ -27,8 +27,10 @@ function usd(n: number, maxFrac = 2): string {
   return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: maxFrac });
 }
 
+/* The brand leads slot 1, and the token already themes itself — see the note
+   in UsageView on why the hex pair this replaced was a liability. */
 const chartConfig = {
-  amount: { label: "Spend", theme: { light: "#2a78d6", dark: "#3987e5" } },
+  amount: { label: "Spend", color: "var(--chart-1)" },
 } satisfies ChartConfig;
 
 interface Props {
@@ -91,7 +93,7 @@ export function FinancesView({ client, company }: Props) {
             label="Net"
             value={`${data.netUsd >= 0 ? "+" : "−"}${usd(Math.abs(data.netUsd), 0)}`}
             hint="Revenue − spend"
-            valueClass={data.netUsd >= 0 ? "text-emerald-600 dark:text-emerald-400" : "text-rose-600 dark:text-rose-400"}
+            valueClass={data.netUsd >= 0 ? "text-status-done-text" : "text-status-failed-text"}
           />
         </div>
 
@@ -106,7 +108,7 @@ export function FinancesView({ client, company }: Props) {
           <CardContent className="space-y-2">
             <div className="h-2.5 w-full overflow-hidden rounded-full bg-muted">
               <div
-                className={cn("h-full rounded-full", budgetPct >= 90 ? "bg-rose-500" : budgetPct >= 70 ? "bg-amber-500" : "bg-emerald-500")}
+                className={cn("h-full rounded-full", budgetPct >= 90 ? "bg-status-failed" : budgetPct >= 70 ? "bg-status-blocked" : "bg-status-done")}
                 style={{ width: `${budgetPct}%` }}
               />
             </div>
@@ -150,7 +152,7 @@ export function FinancesView({ client, company }: Props) {
                       <span
                         className={cn(
                           "flex size-8 shrink-0 items-center justify-center rounded-full",
-                          inflow ? "bg-emerald-500/12 text-emerald-600 dark:text-emerald-400" : "bg-muted text-muted-foreground",
+                          inflow ? "bg-status-done-soft text-status-done-text" : "bg-muted text-muted-foreground",
                         )}
                       >
                         {inflow ? <ArrowDownLeft className="size-4" /> : <ArrowUpRight className="size-4" />}
@@ -161,7 +163,7 @@ export function FinancesView({ client, company }: Props) {
                           {new Date(t.date).toLocaleDateString(undefined, { month: "short", day: "numeric" })} · {t.category}
                         </p>
                       </div>
-                      <span className={cn("shrink-0 text-sm font-medium tabular-nums", inflow ? "text-emerald-600 dark:text-emerald-400" : "text-foreground")}>
+                      <span className={cn("shrink-0 text-sm font-medium tabular-nums", inflow ? "text-status-done-text" : "text-foreground")}>
                         {inflow ? "+" : "−"}
                         {usd(t.amountUsd)}
                       </span>

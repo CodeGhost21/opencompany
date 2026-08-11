@@ -54,14 +54,14 @@ export function ProposalCard({
       data-testid="workflow-proposal"
       data-state={state}
       className={cn(
-        "rounded-lg border bg-background p-2 text-[11px] leading-snug",
+        "rounded-lg border bg-background p-2 text-2xs leading-snug",
         settled && "opacity-60",
       )}
     >
       <div className="flex items-start justify-between gap-2">
         <p className="font-medium text-foreground">{summary}</p>
         {state === "applied" && (
-          <span className="inline-flex shrink-0 items-center gap-1 text-emerald-600 dark:text-emerald-400">
+          <span className="inline-flex shrink-0 items-center gap-1 text-status-done-text">
             <Check className="size-3" /> Applied
           </span>
         )}
@@ -73,14 +73,14 @@ export function ProposalCard({
       {blocked && !settled && (
         <Alert className="mt-2 py-1.5">
           <AlertTriangle className="size-3" />
-          <AlertDescription className="text-[11px] leading-snug">{blocked}</AlertDescription>
+          <AlertDescription className="text-2xs leading-snug">{blocked}</AlertDescription>
         </Alert>
       )}
 
       {error && (
         <Alert variant="destructive" className="mt-2 py-1.5">
           <AlertTriangle className="size-3" />
-          <AlertDescription className="text-[11px] leading-snug">{error}</AlertDescription>
+          <AlertDescription className="text-2xs leading-snug">{error}</AlertDescription>
         </Alert>
       )}
 
@@ -88,7 +88,7 @@ export function ProposalCard({
         <div className="mt-2 flex items-center gap-2">
           <Button
             size="sm"
-            className="h-7 px-2 text-[11px]"
+            className="h-7 px-2 text-2xs"
             disabled={state === "applying" || Boolean(blocked)}
             onClick={onApply}
             data-testid="workflow-proposal-apply"
@@ -103,7 +103,7 @@ export function ProposalCard({
           <Button
             size="sm"
             variant="ghost"
-            className="h-7 px-2 text-[11px]"
+            className="h-7 px-2 text-2xs"
             disabled={state === "applying"}
             onClick={onDismiss}
             data-testid="workflow-proposal-dismiss"

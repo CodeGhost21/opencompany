@@ -49,7 +49,7 @@ const VERDICT: Record<
   satisfied: {
     label: "Ready",
     icon: CheckCircle2,
-    className: "border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
+    className: "border-transparent bg-status-done-soft text-status-done-text",
   },
   missing: {
     label: "Blocking",
@@ -59,7 +59,7 @@ const VERDICT: Record<
   needsApproval: {
     label: "Needs approval",
     icon: ShieldAlert,
-    className: "border-transparent bg-amber-500/10 text-amber-600 dark:text-amber-400",
+    className: "border-transparent bg-status-blocked-soft text-status-blocked-text",
   },
   unknown: {
     label: "Not checked",
@@ -117,7 +117,7 @@ export function TaskPlanBrief({ plan }: { plan: TaskPlan }) {
           <ol className="flex flex-col gap-3">
             {plan.steps.map((step, i) => (
               <li key={i} className="flex gap-3">
-                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-[11px] font-medium tabular-nums text-muted-foreground">
+                <span className="mt-0.5 flex size-5 shrink-0 items-center justify-center rounded-full bg-muted text-2xs font-medium tabular-nums text-muted-foreground">
                   {i + 1}
                 </span>
                 <div className="min-w-0 flex-1">
@@ -158,7 +158,7 @@ export function TaskPlanBrief({ plan }: { plan: TaskPlan }) {
                 key={i}
                 className="flex items-start gap-2 text-sm leading-relaxed text-muted-foreground"
               >
-                <TriangleAlert className="mt-0.5 size-4 shrink-0 text-amber-500" />
+                <TriangleAlert className="mt-0.5 size-4 shrink-0 text-status-blocked-text" />
                 <span>{risk}</span>
               </li>
             ))}
@@ -220,16 +220,16 @@ function Headline({ plan }: { plan: TaskPlan }) {
       className={cn(
         "flex items-start gap-2 rounded-lg border px-3 py-2",
         tone === "blocked" && "border-destructive/30 bg-destructive/5",
-        tone === "caveat" && "border-amber-500/30 bg-amber-500/5",
-        tone === "clear" && "border-emerald-500/30 bg-emerald-500/5",
+        tone === "caveat" && "border-status-blocked/30 bg-status-blocked-soft",
+        tone === "clear" && "border-status-done/30 bg-status-done-soft",
       )}
     >
       <Icon
         className={cn(
           "mt-0.5 size-4 shrink-0",
           tone === "blocked" && "text-destructive",
-          tone === "caveat" && "text-amber-600 dark:text-amber-400",
-          tone === "clear" && "text-emerald-600 dark:text-emerald-400",
+          tone === "caveat" && "text-status-blocked-text",
+          tone === "clear" && "text-status-done-text",
         )}
       />
       <div className="min-w-0 text-sm leading-relaxed">
@@ -252,7 +252,7 @@ function PrerequisiteRow({ prerequisite }: { prerequisite: Prerequisite }) {
     <li className="flex items-start gap-2.5">
       <span
         className={cn(
-          "mt-0.5 flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium",
+          "mt-0.5 flex shrink-0 items-center gap-1 rounded-full border px-2 py-0.5 text-2xs font-medium",
           verdict.className,
         )}
       >
@@ -261,7 +261,7 @@ function PrerequisiteRow({ prerequisite }: { prerequisite: Prerequisite }) {
       </span>
       <div className="min-w-0 flex-1 text-sm leading-relaxed">
         <span className="font-medium">{prerequisite.name}</span>
-        <span className="ml-1.5 text-[11px] uppercase tracking-wide text-muted-foreground">
+        <span className="ml-1.5 text-2xs uppercase tracking-wide text-muted-foreground">
           {prerequisite.kind}
         </span>
         <p className="text-muted-foreground">{prerequisite.note}</p>
@@ -292,7 +292,7 @@ function Estimates({ step }: { step: TaskPlan["steps"][number] }) {
   }
   if (parts.length === 0) return null;
   return (
-    <p className="mt-1 flex items-center gap-1 text-[11px] text-muted-foreground">
+    <p className="mt-1 flex items-center gap-1 text-2xs text-muted-foreground">
       <Clock className="size-3 shrink-0" />
       <span className="tabular-nums">{parts.join(" · ")}</span>
       <span className="opacity-70">estimated</span>
@@ -310,7 +310,7 @@ function Estimates({ step }: { step: TaskPlan["steps"][number] }) {
 function Footnote({ plan }: { plan: TaskPlan }) {
   const unchecked = plan.prerequisites.some((p) => p.status === "unknown");
   return (
-    <p className="flex items-start gap-1.5 border-t pt-3 text-[11px] leading-relaxed text-muted-foreground">
+    <p className="flex items-start gap-1.5 border-t pt-3 text-2xs leading-relaxed text-muted-foreground">
       <HelpCircle className="mt-0.5 size-3 shrink-0" />
       <span>
         Written by the planner from what this company had at the time. Estimates are guesses and
@@ -325,7 +325,7 @@ function Footnote({ plan }: { plan: TaskPlan }) {
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <section className="flex flex-col gap-2">
-      <h4 className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+      <h4 className="text-2xs font-semibold uppercase tracking-wide text-muted-foreground">
         {title}
       </h4>
       {children}
