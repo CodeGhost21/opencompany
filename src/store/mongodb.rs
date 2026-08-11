@@ -2586,7 +2586,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             .map(
                 |document| -> Result<crate::ports::workspace::WorkspaceNode> {
                     let json = get_str(document, "node_json")?;
-                    Ok(serde_json::from_str(json)?)
+                    Ok(serde_json::from_str(&json)?)
                 },
             )
             .transpose()?;
