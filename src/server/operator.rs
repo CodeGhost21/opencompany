@@ -750,21 +750,38 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             }
             o
         }
-        // The dispatch terminal (#185). `output` is the agent's own reply text
-        // — the same string already written into the card's note — never raw
-        // tool output, so it is safe to project.
+        // The dispatch terminal (#185), narrowed and widened by #377.
+        //
+        // **Widened** with `chatId`: the conversation the card was raised from,
+        // which is what lets a console file the settle into the channel the
+        // work came from instead of guessing at one. Omitted rather than null
+        // when the card names none — mirroring `approval_parked` below, so "no
+        // conversation raised this" is a presence check on the console rather
+        // than a null check, and a board-created card is board-only on the wire
+        // too.
+        //
+        // **Narrowed** by dropping `output`. The run's prose already reaches
+        // the operator as the orchestrator's relay bubble (#151); what the
+        // channel was missing is the structural fact that the card *settled*
+        // and *where*, which is `column`. Carrying the prose here as well would
+        // put one run's words into the same channel twice, so it is dropped at
+        // the projection — the one place that can guarantee no later reader
+        // reintroduces the duplicate. Nothing in the console read it. `desk`
+        // stays for wire compatibility.
         CompanyEvent::DeskTaskCompleted {
             task_id,
             desk,
-            output,
             column,
+            origin_chat_id,
             ..
         } => {
             let mut o = envelope("desk_task_completed");
             o["taskId"] = json!(task_id);
             o["desk"] = json!(desk);
-            o["output"] = json!(output);
             o["column"] = json!(column);
+            if let Some(chat_id) = origin_chat_id {
+                o["chatId"] = json!(chat_id);
+            }
             o
         }
         // Issue #379: a request just parked, so a console watching the
@@ -4702,24 +4719,72 @@ mod test {
         assert!(uncorrelated.get("taskId").is_none());
     }
 
-    /// #185: the dispatch terminal projects all four fields. `column` is the one
-    /// that matters most — it is how a console tells a clean finish from a
-    /// cancelled or failed run without parsing `output`.
+    /// #185/#377: the dispatch terminal projects the structural fields, plus
+    /// the conversation the card was raised from. `column` is the one that
+    /// matters most — it is how a console tells a clean finish from a cancelled
+    /// or failed run — and `chatId` is what says which channel it belongs in.
     #[test]
     fn projects_desk_task_completed_with_every_field() {
         let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
             task_id: "t-1".into(),
-            desk: "ceo".into(),
+            desk: "engineer".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
+        assert_eq!(v["taskId"], serde_json::json!("t-1"));
+        assert_eq!(v["desk"], serde_json::json!("engineer"));
+        assert_eq!(v["column"], serde_json::json!("in_review"));
+        assert_eq!(v["chatId"], serde_json::json!("engineering"));
+        // The envelope's own keys still ride along — the console mints the
+        // marker's identity from `seq` (issue #483's mechanism), so losing it
+        // here would silently disable the reload dedupe.
+        assert!(v.get("seq").is_some(), "{v}");
+        assert!(v.get("atMillis").is_some(), "{v}");
+    }
+
+    /// Issue #377: the run's prose is **not** on this frame.
+    ///
+    /// The relay bubble (#151) already carries the agent's words into the same
+    /// channel this marker lands in. Projecting `output` here as well would put
+    /// one run's text into one conversation twice, and dropping it at the
+    /// projection is what stops any later reader from reintroducing that.
+    #[test]
+    fn desk_task_completed_does_not_project_the_runs_prose() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
+            output: "the whole reply, verbatim".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".into()),
+        }))
+        .expect("desk_task_completed is an attention signal");
+        assert!(v.get("output").is_none(), "{v}");
+        assert!(
+            !v.to_string().contains("the whole reply"),
+            "the prose must not reach the wire under any key: {v}"
+        );
+    }
+
+    /// Issue #377: a card nobody raised from a conversation omits `chatId`
+    /// rather than sending null — so "board-created" is a presence check on the
+    /// console, the same shape `approval_parked` uses for a page-only approval.
+    #[test]
+    fn desk_task_completed_omits_the_chat_id_for_a_board_created_card() {
+        let v = super::project_event(&stored(CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "engineer".into(),
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
             origin_chat_id: None,
         }))
         .expect("desk_task_completed is an attention signal");
-        assert_eq!(v["type"], serde_json::json!("desk_task_completed"));
-        assert_eq!(v["taskId"], serde_json::json!("t-1"));
-        assert_eq!(v["desk"], serde_json::json!("ceo"));
-        assert_eq!(v["output"], serde_json::json!("shipped"));
+        assert!(v.get("chatId").is_none(), "{v}");
         assert_eq!(v["column"], serde_json::json!("in_review"));
     }
 
