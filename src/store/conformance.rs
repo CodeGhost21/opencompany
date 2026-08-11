@@ -24,6 +24,9 @@ use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::now_millis;
+use crate::ports::run_output::{
+    MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore,
+};
 use crate::ports::sessions::{SessionKind, SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillSource, SkillState, SkillStateStore};
 use crate::ports::store::CompanyStore;
@@ -1769,6 +1772,113 @@ pub async fn assert_workflow_revision_store(revisions: Arc<dyn WorkflowRevisionS
             .unwrap()
             .len(),
         1
+    );
+}
+
+/// Asserts the [`WorkflowRunOutputStore`] contract (issue #596): roundtrip,
+/// company isolation, overwrite idempotence, and prune-to-newest-N.
+pub async fn assert_workflow_run_output_store(outputs: Arc<dyn WorkflowRunOutputStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    let record = |run_id: &str, workflow_id: &str, at: u64, marker: &str| WorkflowRunOutputRecord {
+        run_id: run_id.to_string(),
+        workflow_id: workflow_id.to_string(),
+        at_millis: at,
+        nodes: serde_json::json!({ "writer": { "items": [marker] } }),
+        truncated: false,
+    };
+
+    // Roundtrip: a stored record reads back byte-identically.
+    let first = record("run-1", "greet", 10, "hello");
+    outputs.put_run_output(&alpha, &first).await.unwrap();
+    let got = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .expect("the stored run output must read back");
+    assert_eq!(got, first, "a run output must round-trip verbatim");
+
+    // A run that was never stored is `None`, not an error — the pre-feature /
+    // dry-run / hard-abort shape the read route turns into a 404.
+    assert!(
+        outputs
+            .get_run_output(&alpha, "never")
+            .await
+            .unwrap()
+            .is_none(),
+        "an unknown run id must read back as None"
+    );
+
+    // Company isolation: beta cannot see alpha's run, even by the same id.
+    outputs
+        .put_run_output(&beta, &record("run-1", "greet", 10, "beta-secret"))
+        .await
+        .unwrap();
+    let beta_got = outputs
+        .get_run_output(&beta, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(beta_got.nodes["writer"]["items"][0], "beta-secret");
+    let alpha_got = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        alpha_got.nodes["writer"]["items"][0], "hello",
+        "one company's run output must never leak into another's"
+    );
+
+    // Overwrite idempotence: re-writing the same run_id replaces, never stacks.
+    let replaced = record("run-1", "greet", 20, "world");
+    outputs.put_run_output(&alpha, &replaced).await.unwrap();
+    let after = outputs
+        .get_run_output(&alpha, "run-1")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after, replaced,
+        "a re-write must overwrite the prior snapshot"
+    );
+
+    // Prune-to-cap: push MAX+5 distinct runs and prove only the newest MAX survive.
+    for i in 0..(MAX_RUN_OUTPUTS_PER_COMPANY as u64 + 5) {
+        outputs
+            .put_run_output(&alpha, &record(&format!("r{i}"), "ring", 1000 + i, "x"))
+            .await
+            .unwrap();
+    }
+    // The newest run is retained…
+    let newest_id = format!("r{}", MAX_RUN_OUTPUTS_PER_COMPANY as u64 + 4);
+    assert!(
+        outputs
+            .get_run_output(&alpha, &newest_id)
+            .await
+            .unwrap()
+            .is_some(),
+        "the newest run must survive the prune"
+    );
+    // …and the oldest of the batch was evicted.
+    assert!(
+        outputs
+            .get_run_output(&alpha, "r0")
+            .await
+            .unwrap()
+            .is_none(),
+        "the oldest run beyond the cap must be pruned"
+    );
+
+    // Beta's single run is untouched by alpha's prune.
+    assert!(
+        outputs
+            .get_run_output(&beta, "run-1")
+            .await
+            .unwrap()
+            .is_some(),
+        "one company's prune must not touch another's records"
     );
 }
 

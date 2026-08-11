@@ -34,6 +34,8 @@ use crate::ports::{
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
 use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -131,6 +133,8 @@ pub struct OpsStores {
     pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
     pub schedule_fires: Arc<dyn ScheduleFireStore>,
+    /// Durable, console-facing per-node run output snapshots (#596).
+    pub workflow_run_outputs: Arc<dyn WorkflowRunOutputStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
@@ -834,6 +838,13 @@ impl CompanyRuntime {
     /// restarts.
     pub fn schedule_fires(&self) -> &Arc<dyn ScheduleFireStore> {
         &self.ops.schedule_fires
+    }
+
+    /// This company's durable per-node run output snapshots (#596): one record
+    /// per settled run, read by the console run inspector to show what each node
+    /// produced on any past run.
+    pub fn workflow_run_outputs(&self) -> &Arc<dyn WorkflowRunOutputStore> {
+        &self.ops.workflow_run_outputs
     }
 
     /// This company's usage meter (written by the cost hook, read by WS5).
