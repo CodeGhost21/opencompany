@@ -30,11 +30,16 @@
 //! stays authoritative everywhere it speaks; this speaks only in the silence
 //! after it.
 //!
-//! A consequence worth stating plainly: **`supervised` and `readonly` are
-//! unchanged**. Under `supervised` a [`Reach::Consequence`] call already parks
-//! and under `readonly` it is already denied, so every call this module would
-//! stop has already been stopped by the mode. The behaviour it changes is
-//! `full`, and only `full`.
+//! The invariant, phrased so it survives the next tier: **this arm only ever
+//! speaks where the mode allowed.** A tier that already parks or denies a call
+//! keeps its own answer, whatever the tier is called and however many there
+//! are. Spelling out which tiers those are dates the moment a tier lands — as
+//! it did when `auto` (issue #560) arrived mid-review.
+//!
+//! As it happens the arm today changes `full` alone: `supervised` parks a
+//! [`Reach::Consequence`] call, `readonly` denies it, and `auto` parks
+//! everything that is not `Grantable`, which covers every rule below.
+//! `the_arm_adds_nothing_under_auto` pins that rather than trusting it.
 //!
 //! # Where the classification lives
 //!
@@ -76,12 +81,19 @@
 //!
 //! # What this deliberately does NOT stop
 //!
-//! #338's acceptance says "send, publish, pay, or delete". This delivers three
-//! of those four: **`publish_artifact` is excluded**, see `DEFERRED` and issue
-//! #658. The short version is that this gate's only escape is a per-call grant,
-//! so stopping publishing would end unattended publishing for every `full`
-//! company with no operator override — a product decision that belongs to the
-//! people who own #244, not to a classifier landing at the end of a build day.
+//! #338's acceptance says "send, publish, pay, or delete". Of those, **send,
+//! pay and delete are gated; publish is not**, and the outward-HTTP family is
+//! held back too. See `DEFERRED`:
+//!
+//! * `publish_artifact` — issue #658. This gate's only escape is a per-call
+//!   grant, so stopping it would end unattended publishing for every `full`
+//!   company with no operator override.
+//! * `http_request`, `curl`, `web_fetch` — issue #674. #614 states the opposite
+//!   premise in a named test; that contradiction has an owner, and it is not
+//!   this module.
+//!
+//! `shell` stays gated, which is what keeps "or delete" real: destruction has
+//! no `EffectGroup` of its own, and `shell` is how a run deletes.
 //!
 //! # Failure is a stop
 //!
@@ -286,9 +298,26 @@ fn is_unbounded(tool: &str, consequence: Consequence) -> bool {
 /// `publish_turn_test` cases green, and shipping it needs a grant minted per
 /// scripted call in a suite that is about publish mechanics, not approvals.
 ///
-/// Issue #658 carries the argument and the options. When it is settled, this
-/// list goes away in one direction or the other.
-const DEFERRED: &[&str] = &["publish_artifact"];
+/// Issues #658 and #674 carry the arguments and the options. When they are
+/// settled, each entry goes away in one direction or the other.
+const DEFERRED: &[&str] = &[
+    // Issue #658 — see the note above.
+    "publish_artifact",
+    // Issue #674. These reach an arbitrary address with the tenant's own
+    // credentials, so `UNBOUNDED` names them and rule 3 would stop them. #614
+    // (merged as #627) states the opposite premise, in a test named
+    // `an_http_request_node_does_not_gate_under_full` — and a named test is a
+    // stated position, not an accident.
+    //
+    // Both are defensible and they cannot both hold. Choosing between them is a
+    // product decision belonging to #614's owner, so it is deferred rather than
+    // taken here: #674 puts the two premises side by side and asks which one it
+    // is. `shell`, `git_operations` and `run_workflow` stay gated — `shell` is
+    // how a run deletes, and #614 does not touch it.
+    "http_request",
+    "curl",
+    "web_fetch",
+];
 
 /// The argument key a declared amount of money arrives under.
 ///
@@ -490,7 +519,10 @@ mod tests {
     /// a standing grant for the same reason.
     #[test]
     fn unbounded_tools_stop() {
-        for tool in UNBOUNDED {
+        // Minus the ones held back — `UNBOUNDED` says what the rule *names*,
+        // `DEFERRED` says what is withheld from it, and this test is about the
+        // rule. The carve-outs have their own tests.
+        for tool in UNBOUNDED.iter().filter(|t| !DEFERRED.contains(t)) {
             assert_eq!(
                 judge_bare(tool),
                 Judgement::Stop(StopReason::UnboundedReach),
@@ -535,6 +567,60 @@ mod tests {
             Judgement::Silent,
             "excluded pending #658; do not 'fix' this without reading it"
         );
+    }
+
+    /// The arm adds nothing under `auto` (issue #560) — pinned as a rule over
+    /// the whole declaration table, not as a snapshot of what it holds today.
+    ///
+    /// `auto` parks `parks_under_supervision() && !is_grantable()`, so the only
+    /// calls it allows that `supervised` would park are the `Grantable` ones.
+    /// Today every `d_grantable` row is `EffectGroup::Other`, none is in
+    /// `UNBOUNDED` and none carries an amount, so no rule fires — but that is a
+    /// property of the table's current contents, and nothing pinned it.
+    ///
+    /// The day somebody adds `d_grantable("send_invoice", EffectGroup::Send,
+    /// Reach::Consequence)`, `auto` would shift silently under operators who
+    /// chose it — exactly the failure the placement argument exists to prevent.
+    /// This walks every declared tool and fails on that day instead.
+    #[test]
+    fn the_arm_adds_nothing_under_auto() {
+        for tool in declared_tools() {
+            let c = consequence_of(tool, &json!({}));
+            if c.parks_under_auto() {
+                continue; // `auto` already stops it; this arm is never reached.
+            }
+            assert_eq!(
+                judge(tool, &json!({})),
+                Judgement::Silent,
+                "`{tool}` runs under `auto` but this arm would stop it — `auto` \
+                 has shifted under operators who chose it"
+            );
+        }
+    }
+
+    /// Every carve-out must be a tool a rule would otherwise have stopped.
+    ///
+    /// The point of the list is to hold back calls this gate *would* gate. An
+    /// entry that no rule fires on is not a deferral, it is a misunderstanding —
+    /// and it would sit there looking like a decision. This fails if the
+    /// declaration table moves under a carve-out, so a deferral cannot quietly
+    /// become a no-op.
+    #[test]
+    fn every_deferred_tool_would_otherwise_be_stopped() {
+        for tool in DEFERRED {
+            let c = consequence_of(tool, &json!({}));
+            let would_stop = (is_irreversible_group(c.group) && c.reach == Reach::Consequence)
+                || is_unbounded(tool, c);
+            assert!(
+                would_stop,
+                "`{tool}` is deferred but no rule would stop it — the entry is inert"
+            );
+            assert_eq!(
+                judge_bare(tool),
+                Judgement::Silent,
+                "`{tool}` is deferred; do not 'fix' this without reading #658 / #674"
+            );
+        }
     }
 
     /// Everything held back must be a declared tool, or the exclusion silently

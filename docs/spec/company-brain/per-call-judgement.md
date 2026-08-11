@@ -20,15 +20,23 @@ stop**. It runs only where step 6 already allowed the call, so:
   already had their say and returned before it is reached;
 - it cannot turn a deny into a park, skip `always_approve`, or spend a grant.
 
-`supervised` and `readonly` are untouched by construction: a `Consequence` call
-already parks under one and is already denied under the other, so every call
-this would stop has already been stopped. That leaves the two autonomous tiers.
+The invariant, phrased so it survives the next tier: **this arm only ever speaks
+where the mode allowed.** A tier that already parks or denies a call keeps its
+own answer, whatever it is called and however many tiers there are — so a tier
+an operator has already reasoned about does not shift under them.
+
+Today that leaves **`full` alone**. `supervised` parks a `Consequence` call,
+`readonly` denies it, and `auto` (#560) parks everything that is not
+`Grantable` — which covers every rule below, so this adds nothing there. That
+last one holds by a property of the declaration table rather than by
+construction: the day a `Grantable` + `Consequence` tool with a named
+consequence class is declared, `auto` would shift silently. The test
+`the_arm_adds_nothing_under_auto` walks the whole table and fails on that day,
+rather than the claim resting on a paragraph.
+
 `full`'s contract is "act without asking, *except the few things on the
 always-ask list*", and this is what makes that exception mean something without
-an operator having to anticipate each one by name. `auto` (#560) already parks
-what leaves the company or spends money, so this adds only the unbounded tools
-its line does not draw — `shell` and its family. The same rule applies in both;
-no tier gets a carve-out of its own.
+an operator having to anticipate each one by name.
 
 ## What stops
 
@@ -62,13 +70,27 @@ broke publishing outright. What keeps it narrow at the other end is
 that only reads, searches, or drafts does not stop" stays true.
 
 **What it deliberately does not stop.** #338's acceptance says "send, publish,
-pay, or delete"; this delivers three of the four. **`publish_artifact` is
-excluded** (`DEFERRED` in `src/policy/judgement.rs`), pending issue #658. It is
-declared `EffectGroup::Publish` + `Reach::Consequence` and so qualifies under
-rule 1, but this gate's only escape is a per-call grant — so stopping it would
-end unattended publishing for every `full` company with no operator override,
-which is a product decision belonging to the owners of #244 rather than a side
-effect of adding a classifier. #658 carries the argument and the options.
+pay, or delete". Of those, **send, pay and delete are gated; publish is not**,
+and the outward-HTTP family is held back as well. Both carve-outs live in
+`DEFERRED` in `src/policy/judgement.rs`:
+
+- **`publish_artifact`** — issue #658. It qualifies under rule 1
+  (`EffectGroup::Publish` + `Reach::Consequence`), but this gate's only escape
+  is a per-call grant, so stopping it would end unattended publishing for every
+  `full` company with no operator override. That is a product decision owned by
+  #244, not a side effect of adding a classifier.
+- **`http_request`, `curl`, `web_fetch`** — issue #674. They qualify under rule
+  3, and #614 (merged as #627) states the opposite premise in a test named
+  `an_http_request_node_does_not_gate_under_full`. A named test is a stated
+  position; choosing between two defensible premises belongs to #614's owner.
+
+**`shell` stays gated**, which is what keeps "or delete" real: destruction has
+no `EffectGroup` of its own, `shell` is how a run deletes, and #614 does not
+touch it. `git_operations` and `run_workflow` stay too.
+
+A test asserts every deferred tool *qualifies* on the declaration and is silent
+anyway, so deleting a carve-out fails loudly rather than silently re-opening
+the question.
 
 **It does not learn.** If an operator approves the same shape of call five
 times, the sixth still stops. The module holds no state across calls at all.

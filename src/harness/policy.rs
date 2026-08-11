@@ -1305,21 +1305,22 @@ impl ToolPolicy for ApprovalPolicy {
         // into a stop; it can never turn a deny into an allow, skip
         // `always_approve`, or spend a grant.
         //
-        // `supervised` and `readonly` are untouched by construction: a
-        // `Consequence` call already parked above under one and was already
-        // denied under the other, so every call this would stop has already
-        // been stopped. That is deliberate — a tier an operator has already
-        // reasoned about does not shift under them.
+        // The invariant, phrased to survive the next tier: this arm only ever
+        // speaks where the mode allowed. A tier that already parks or denies a
+        // call keeps its own answer — deliberately, so a tier an operator has
+        // already reasoned about does not shift under them.
         //
-        // Which leaves `full` and `auto`. `full`'s contract is "act without
-        // asking, EXCEPT the few things on the always-ask list", and this is
-        // what makes that exception mean something without requiring an
-        // operator to have anticipated each one by name. `auto` (issue #560)
-        // already parks what leaves the company or spends, so this adds only
-        // the unbounded ones its line does not draw — `shell` and its family,
-        // which run arbitrary code in a sandbox whose permissions are not
-        // visible from here. Same rule in both tiers, applied wherever the mode
-        // said allow; no tier gets a carve-out of its own.
+        // Today that leaves `full` alone. `supervised` parks a consequence,
+        // `readonly` denies it, and `auto` (issue #560) parks everything that
+        // is not `Grantable` — which covers every rule `judge` applies, so it
+        // adds nothing there. That last one holds by a property of the
+        // declaration table rather than by construction, so it is pinned by
+        // `the_arm_adds_nothing_under_auto` instead of asserted here.
+        //
+        // `full`'s contract is "act without asking, EXCEPT the few things on
+        // the always-ask list", and this is what makes that exception mean
+        // something without requiring an operator to have anticipated each one
+        // by name.
         if matches!(by_mode, ToolPolicyDecision::Allow)
             && let Some(stop) = crate::policy::judge(tool, &request.arguments).stop_reason()
         {
