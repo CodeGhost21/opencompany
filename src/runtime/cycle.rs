@@ -5069,7 +5069,7 @@ mod test {
             None,
         );
         assert_eq!(
-            cycle_thread_id(&[workflow_node_started()], approval_thread),
+            cycle_conversation(&[workflow_node_started()], approval_conversation).thread,
             None,
         );
     }
