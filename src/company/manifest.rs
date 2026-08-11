@@ -504,30 +504,35 @@ mod tests {
         );
     }
 
-    /// Every tier the enum can represent is reachable from a manifest
-    /// (issue #560).
+    /// Each tier is accepted by name from a `company.toml` (issue #560).
     ///
-    /// This is the test for the trap that adding `auto` set: the validator
-    /// keeps its own list of modes (`POLICY_MODES`), and it runs *before*
-    /// `PolicyMode::parse` ever sees the string. A tier added to the enum and
+    /// This is the test for the trap that adding `auto` set. The validator keeps
+    /// its own list of modes (`POLICY_MODES`) and runs *before*
+    /// `PolicyMode::parse` ever sees the string, so a tier added to the enum and
     /// the parser but not to that list is rejected at load with "must be one of
-    /// …", so the feature is unreachable from the only place anybody sets it —
-    /// while every test in `harness::policy` still passes, because they all
-    /// construct a `Policy` directly and never cross this boundary.
+    /// …" — unreachable from the only place anybody sets it, while every test in
+    /// `harness::policy` still passes because they all construct a `Policy`
+    /// directly and never cross this boundary.
     ///
-    /// Asserted for all four modes rather than just the new one, so the next
-    /// tier is caught the same way instead of relying on someone remembering.
+    /// The mode words are **literals** on purpose. Deriving them from
+    /// `POLICY_MODES` — the first version of this test — passes vacuously when a
+    /// mode is missing from that list, because the missing case simply stops
+    /// being generated. Revert-and-check caught it; the literal cannot be
+    /// removed by the edit it is meant to detect.
+    ///
+    /// `harness::policy` holds the matching direction: that `POLICY_MODES` and
+    /// the enum agree, so a tier cannot be added here and nowhere else.
     #[test]
-    fn every_policy_mode_the_runtime_knows_is_accepted_by_the_validator() {
-        for mode in crate::company::POLICY_MODES {
+    fn every_tier_is_accepted_by_name_from_a_company_toml() {
+        for mode in ["readonly", "supervised", "auto", "full"] {
             let manifest = parse(&format!(
                 "[company]\nname = \"X\"\n[policy]\nmode = \"{mode}\"\n"
             ));
+            let problems = manifest.validate();
             assert!(
-                manifest.validate().is_empty(),
-                "`[policy].mode = \"{mode}\"` is a mode the runtime knows but the manifest \
-                 validator rejects — the tier is unreachable from a company.toml: {:?}",
-                manifest.validate()
+                problems.is_empty(),
+                "`[policy].mode = \"{mode}\"` is a tier the runtime knows but the manifest \
+                 validator rejects — unreachable from a company.toml: {problems:?}"
             );
         }
     }

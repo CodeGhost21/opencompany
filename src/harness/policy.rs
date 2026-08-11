@@ -125,6 +125,20 @@ pub enum PolicyMode {
 }
 
 impl PolicyMode {
+    /// Every tier, paired with the manifest word that selects it.
+    ///
+    /// Exists so the two halves of "a tier is reachable" can be checked against
+    /// something that is neither of them. The enum, [`parse`](Self::parse) and
+    /// [`POLICY_MODES`](crate::company::POLICY_MODES) are three lists that must
+    /// agree; a test that walks any one of them to check the others passes
+    /// vacuously when a tier is missing from the list it walked.
+    pub const ALL: [(&'static str, PolicyMode); 4] = [
+        ("readonly", Self::Readonly),
+        ("supervised", Self::Supervised),
+        ("auto", Self::Auto),
+        ("full", Self::Full),
+    ];
+
     /// Parses a manifest `[policy].mode` string; unknown values fall back to the
     /// safe `Supervised` default.
     ///
@@ -1007,8 +1021,8 @@ mod tests {
             .is_grantable()
     }
 
-    /// Every mode the manifest validator accepts parses to its own variant, and
-    /// nothing else does.
+    /// Every tier is reachable from a manifest, parses to its own variant, and
+    /// nothing else parses to any of them.
     ///
     /// This replaces `mode_maps_one_to_one_to_security_tiers`, which asserted
     /// the same thing through `PolicyMode::security_tier()` — a `&'static str`
@@ -1020,32 +1034,52 @@ mod tests {
     /// documented. Keeping a dead accessor alive by making it lie is worse than
     /// the deletion.
     ///
-    /// Pinning against `POLICY_MODES` rather than a literal list is the point:
-    /// the validator refuses any mode outside it, so a tier added to only one of
-    /// the two is either unreachable from a manifest or accepted and silently
-    /// downgraded to `Supervised` by the fallback. This fails in both
-    /// directions.
+    /// # Why it walks [`PolicyMode::ALL`] and not [`POLICY_MODES`]
+    ///
+    /// The first draft of this test walked `POLICY_MODES`, and a revert-and-check
+    /// caught it passing vacuously: deleting `"auto"` from that list does not
+    /// break a test that derives its cases from it — it just stops testing
+    /// `auto`. The same shape hid the trap this whole change turns on, since
+    /// `PolicyMode::parse` is never reached for a word the validator rejects.
+    ///
+    /// So the cases come from a third list, and the two under test are checked
+    /// against it in both directions: `ALL` → `parse`, and `ALL` ↔
+    /// `POLICY_MODES` by membership *and* by length, so a word in one and not
+    /// the other cannot pass. Adding a variant without extending `ALL` is caught
+    /// by the exhaustive `match` below, which the compiler will refuse.
     #[test]
-    fn every_policy_mode_parses_to_its_own_variant() {
+    fn every_tier_is_reachable_from_a_manifest_and_parses_to_itself() {
         use crate::company::POLICY_MODES;
 
-        let mut seen = Vec::new();
-        for mode in POLICY_MODES {
-            let parsed = PolicyMode::parse(mode);
-            assert!(
-                !seen.contains(&parsed),
-                "`{mode}` parsed to {parsed:?}, which another mode already claims — \
-                 a manifest-selectable tier is being silently downgraded"
+        // A new variant makes this match non-exhaustive — the compiler forces
+        // whoever adds it to come here, and the length assertions below then
+        // fail until `ALL` and `POLICY_MODES` are both extended.
+        for (word, mode) in PolicyMode::ALL {
+            let expected = match mode {
+                PolicyMode::Readonly => "readonly",
+                PolicyMode::Supervised => "supervised",
+                PolicyMode::Auto => "auto",
+                PolicyMode::Full => "full",
+            };
+            assert_eq!(word, expected, "ALL pairs `{word}` with the wrong variant");
+
+            assert_eq!(
+                PolicyMode::parse(word),
+                mode,
+                "`{word}` does not parse to {mode:?} — it is silently downgraded"
             );
-            seen.push(parsed);
+            assert!(
+                POLICY_MODES.contains(&word),
+                "`{word}` is a tier the runtime knows but the manifest validator rejects — \
+                 unreachable from a company.toml, and no policy-side test would notice"
+            );
         }
         assert_eq!(
-            seen.len(),
-            4,
-            "expected four selectable tiers, found {}: {seen:?}",
-            seen.len()
+            POLICY_MODES.len(),
+            PolicyMode::ALL.len(),
+            "POLICY_MODES {POLICY_MODES:?} and PolicyMode::ALL disagree about how many tiers \
+             exist"
         );
-        assert_eq!(PolicyMode::parse("auto"), PolicyMode::Auto);
 
         // Unknown falls back to supervised — the safe default, unchanged.
         assert_eq!(PolicyMode::parse("bogus"), PolicyMode::Supervised);
