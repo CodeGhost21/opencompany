@@ -311,6 +311,33 @@ pub struct ComposioConnectionRow {
     pub account: Option<String>,
 }
 
+/// Why a disconnect did not happen.
+///
+/// Two variants because they are two different sentences to an operator, and —
+/// caught by running the route rather than by a test — two different HTTP
+/// statuses. Collapsing both into one error type reported a refused id as
+/// `502 Bad Gateway`: "the provider is down", about a call that was never made,
+/// for an id the guard rejected locally. The caller cannot re-derive the
+/// distinction from an error string, so the type carries it.
+#[derive(Debug)]
+pub enum DisconnectError {
+    /// The id names nothing this company can see, so there is nothing to
+    /// revoke. A client mistake, not an outage.
+    NotFound(String),
+    /// The call reached Composio, and Composio failed or declined it. Already
+    /// scrubbed of the tenant bearer.
+    Upstream(anyhow::Error),
+}
+
+impl std::fmt::Display for DisconnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) => f.write_str(message),
+            Self::Upstream(err) => write!(f, "{err}"),
+        }
+    }
+}
+
 #[cfg(feature = "composio")]
 pub use live::{
     ComposioMetering, authorize_connect_url, composio_tools, delete_connection,
@@ -591,21 +618,35 @@ mod live {
     /// error rather than a silent success: the console's next line tells the
     /// operator the account is gone, and it must not say so on the strength of a
     /// call the backend declined.
-    pub async fn delete_connection(config: &TenantComposio, connection_id: &str) -> Result<()> {
+    pub async fn delete_connection(
+        config: &TenantComposio,
+        connection_id: &str,
+    ) -> std::result::Result<(), DisconnectError> {
         let connection_id = connection_id.trim();
         if connection_id.is_empty() {
-            anyhow::bail!("composio disconnect: connection id must not be empty");
+            return Err(DisconnectError::NotFound(
+                "a connection id is required".to_string(),
+            ));
         }
-        let known = list_connections_detailed(config).await?;
+        let known = list_connections_detailed(config)
+            .await
+            .map_err(DisconnectError::Upstream)?;
         if !known.iter().any(|row| row.id == connection_id) {
-            anyhow::bail!("no such connection for this company");
+            return Err(DisconnectError::NotFound(
+                "no such connection for this company".to_string(),
+            ));
         }
         tracing::debug!(connection_id = %connection_id, "[composio] ops delete_connection");
-        let (client, secrets) = live_call(config).await?;
+        let (client, secrets) = live_call(config).await.map_err(DisconnectError::Upstream)?;
         match client.delete_connection(connection_id).await {
             Ok(resp) if resp.deleted => Ok(()),
-            Ok(_) => anyhow::bail!("Composio declined to delete the connection"),
-            Err(err) => Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+            Ok(_) => Err(DisconnectError::Upstream(anyhow::anyhow!(
+                "Composio declined to delete the connection"
+            ))),
+            Err(err) => Err(DisconnectError::Upstream(anyhow::anyhow!(scrub(
+                &format!("{err}"),
+                &secrets
+            )))),
         }
     }
 
@@ -1919,9 +1960,12 @@ mod ops_helper_tests {
         let err = delete_connection(&config(&url, vec!["gmail".into()]), "c4")
             .await
             .expect_err("a connection outside the grant is not deletable");
+        // The *variant* is the assertion, not the message: it is what decides
+        // the status code the console sees, and asserting only on the string
+        // is what let a refusal ship as a `502`.
         assert!(
-            err.to_string().contains("no such connection"),
-            "unexpected error: {err}"
+            matches!(err, DisconnectError::NotFound(_)),
+            "a refused id must be NotFound, not an upstream failure: {err:?}"
         );
 
         // And an id that exists nowhere at all fails the same way.
@@ -1929,21 +1973,24 @@ mod ops_helper_tests {
             .await
             .expect_err("an unknown id is not deletable");
         assert!(
-            err.to_string().contains("no such connection"),
-            "unexpected error: {err}"
+            matches!(err, DisconnectError::NotFound(_)),
+            "unexpected error: {err:?}"
         );
     }
 
-    /// An empty / whitespace id is refused before the list is even fetched.
+    /// An empty / whitespace id is refused before the list is even fetched —
+    /// and as a client mistake, not as an unreachable backend.
     #[tokio::test]
     async fn disconnect_refuses_a_blank_id_before_any_network_call() {
-        // Unreachable backend — the argument check must fire first.
+        // Unreachable backend — the argument check must fire first. If it did
+        // not, this would surface as `Upstream`, which is what the assertion
+        // below rules out.
         let err = delete_connection(&config("http://127.0.0.1:1", vec!["gmail".into()]), "  ")
             .await
             .expect_err("a blank id is refused");
         assert!(
-            err.to_string().contains("must not be empty"),
-            "unexpected error: {err}"
+            matches!(err, DisconnectError::NotFound(_)),
+            "unexpected error: {err:?}"
         );
     }
 

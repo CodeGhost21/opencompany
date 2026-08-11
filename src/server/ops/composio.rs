@@ -732,14 +732,26 @@ async fn disconnect_impl(
     runtime: &CompanyRuntime,
     connection_id: &str,
 ) -> Result<Json<DisconnectDto>, ApiError> {
+    use crate::harness::composio::DisconnectError;
+
     let config = resolve_tenant(runtime).await?;
     crate::harness::composio::delete_connection(&config, connection_id)
         .await
-        .map_err(|err| {
-            ApiError(crate::error::OpenCompanyError::TinyHumans {
-                code: "composio_disconnect".to_string(),
-                message: err.to_string(),
-            })
+        // An id this company cannot see is a `404`, not a `502`. Both were the
+        // latter until the route was actually run: the console would have told
+        // an operator the provider was unreachable about a call that never left
+        // the host, and a retry — the obvious response to a bad gateway — would
+        // fail identically forever.
+        .map_err(|err| match err {
+            DisconnectError::NotFound(message) => {
+                ApiError(crate::error::OpenCompanyError::NotFound(message))
+            }
+            DisconnectError::Upstream(err) => {
+                ApiError(crate::error::OpenCompanyError::TinyHumans {
+                    code: "composio_disconnect".to_string(),
+                    message: err.to_string(),
+                })
+            }
         })?;
     Ok(Json(DisconnectDto {
         note: "Disconnected at Composio. Agents lose these tools on their next turn.".to_string(),
