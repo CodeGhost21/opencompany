@@ -43,6 +43,27 @@ impl DataLayout {
         self.root.join("companies")
     }
 
+    /// One company's repository mirror cache (`companies/<slug>/repos/`).
+    ///
+    /// **Owned by the repo cache, not by the fs bundle.** It shares the
+    /// `companies/<slug>/` prefix with [`companies_dir`](Self::companies_dir)
+    /// so a company's whole footprint stays in one subtree, but nothing in the
+    /// fs store creates or reads it — and on a mongodb tenant the bundle
+    /// directory has no other reason to exist at all, so the cache must create
+    /// its own parents rather than assume a bundle put them there.
+    ///
+    /// It is deliberately **outside** any agent workspace
+    /// (`harness/<company>/<agent>/workspace`): the mirrors are fetched
+    /// host-side with a credential, and an agent that could write to them could
+    /// rewrite what every later checkout sees.
+    ///
+    /// Nothing extra is needed to keep it inside the soft quota:
+    /// [`usage_bytes`](Self::usage_bytes) already sums every regular file under
+    /// the root, and this hangs off the root like everything else.
+    pub fn company_repos_dir(&self, slug: &str) -> PathBuf {
+        self.companies_dir().join(slug).join("repos")
+    }
+
     /// Instance-shared memory artifacts.
     pub fn memory_dir(&self) -> PathBuf {
         self.root.join("memory")
@@ -169,6 +190,10 @@ mod test {
         assert_eq!(layout.companies_dir(), Path::new("/data/companies"));
         assert_eq!(layout.tmp_dir(), Path::new("/data/tmp"));
         assert_eq!(layout.memory_dir(), Path::new("/data/memory"));
+        assert_eq!(
+            layout.company_repos_dir("acme"),
+            Path::new("/data/companies/acme/repos"),
+        );
     }
 
     #[tokio::test]
@@ -228,6 +253,38 @@ mod test {
         // A missing workspace measures zero, not an error.
         let absent = DataLayout::new(scratch_root("absent"));
         assert_eq!(absent.usage_bytes().await.unwrap(), 0);
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    /// The repo mirror cache joins the boot quota measurement for free — it is
+    /// a subtree of the root, and `usage_bytes` walks the whole root. Asserted
+    /// rather than assumed: a cache that measured zero would let one bad clone
+    /// fill a tenant volume with the quota check reporting all clear.
+    #[tokio::test]
+    async fn usage_bytes_counts_the_repo_cache() {
+        let root = scratch_root("repos-usage");
+        let layout = DataLayout::new(&root);
+        layout.ensure(true).await.unwrap();
+
+        let repos = layout.company_repos_dir("acme");
+        // `companies/<slug>/` does not exist yet on a mongodb tenant, so the
+        // cache creates its own parents. That is the case measured here.
+        tokio::fs::create_dir_all(repos.join("acme-widgets.git/objects"))
+            .await
+            .unwrap();
+        tokio::fs::write(
+            repos.join("acme-widgets.git/objects/pack.bin"),
+            vec![0u8; 4096],
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            layout.usage_bytes().await.unwrap(),
+            4096,
+            "the repo mirror cache must be inside the measured root"
+        );
 
         tokio::fs::remove_dir_all(&root).await.ok();
     }
