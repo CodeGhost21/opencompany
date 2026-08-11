@@ -102,7 +102,7 @@ use std::sync::{Arc, Mutex};
 use serde::{Deserialize, Serialize};
 
 use crate::ports::generate_id;
-use crate::ports::types::{Actor, ApprovalId};
+use crate::ports::types::{Actor, ApprovalId, EventSeq};
 
 /// How long an unredeemed grant stays live: 15 minutes.
 ///
@@ -142,6 +142,27 @@ pub struct GrantedCall {
     /// was never right for a desk channel.
     #[serde(default)]
     pub origin_thread: Option<String>,
+    /// The thread *within* [`origin_thread`](Self::origin_thread) the approval
+    /// was raised in (issue #435) — the root the raising message hangs off,
+    /// copied off the approval's origin alongside the channel.
+    ///
+    /// Rides along on exactly the same terms as `origin_thread`, and for the
+    /// same reason: **not** part of the redemption match. The operator approved
+    /// a call, not a location, and a grant that failed to match because the
+    /// turn came back on a different thread would silently re-park — the
+    /// failure #379 called out, one axis finer. It is routing, and only
+    /// routing.
+    ///
+    /// That is safe by construction rather than by care: [`GrantSet::consume`]
+    /// matches field by field on `agent`, `tool` and `args`, so a field added
+    /// here cannot join the predicate by accident.
+    ///
+    /// `None` when the approval was raised straight in a channel rather than
+    /// inside a thread, and on a grant replayed from a line written before this
+    /// field existed. Both mean the continuation answers in the channel, which
+    /// is the pre-#435 behaviour.
+    #[serde(default)]
+    pub origin_parent: Option<EventSeq>,
 }
 
 /// The hard ceiling on a standing grant's life: 7 days.
@@ -253,6 +274,20 @@ pub struct StandingGrant {
     /// [`agent`](Self::agent), which is right for a DM.
     #[serde(default)]
     pub origin_thread: Option<String>,
+    /// The thread *within* [`origin_thread`](Self::origin_thread) the approval
+    /// was raised in (issue #435), carried on exactly the terms
+    /// [`GrantedCall::origin_parent`] documents.
+    ///
+    /// **Routing only, never part of the match** — the match here is `(agent,
+    /// tool, unexpired)`, and a standing grant deliberately admits any
+    /// arguments; adding a location to it would make a broad permission
+    /// silently narrow.
+    ///
+    /// `None` when the approval was raised straight in a channel, and on a
+    /// grant replayed from a line written before this field existed — both
+    /// answer in the channel, as before.
+    #[serde(default)]
+    pub origin_parent: Option<EventSeq>,
     /// The slice of [`tool`](Self::tool) this grant is confined to, when the
     /// tool's name is not the whole of what it can do (issue #457).
     ///
@@ -577,6 +612,62 @@ mod test {
             args,
             at_millis: 1_000,
             origin_thread: None,
+            origin_parent: None,
+        }
+    }
+
+    /// Issue #435, guarding #379's decision: a grant's origin is **routing, not
+    /// identity**. Neither the channel nor the thread within it may join the
+    /// redemption match.
+    ///
+    /// The failure this prevents is silent and expensive. If location were part
+    /// of the match, a re-dispatched turn that came back anywhere other than
+    /// where it started would simply fail to find its grant and re-park — the
+    /// operator approves, the agent asks again, and nothing anywhere says why.
+    /// `origin_parent` makes that mistake newly reachable by adding a second,
+    /// finer location to get wrong, so it is pinned here rather than left to
+    /// the comment on the field.
+    #[test]
+    fn a_grants_origin_is_routing_and_never_part_of_the_match() {
+        let args = serde_json::json!({ "to": "a@b.test" });
+
+        // Minted inside a thread; redeemed by a turn that knows only the call.
+        // `consume` is not even given a location to compare against — that is
+        // the shape of the guarantee.
+        let set = GrantSet::default();
+        set.grant(GrantedCall {
+            origin_thread: Some("desk-finance".to_string()),
+            origin_parent: Some(EventSeq::new(7)),
+            ..call("a1", "finance", "composio_execute", args.clone())
+        });
+        let redeemed = set
+            .consume("finance", "composio_execute", &args)
+            .expect("a thread-rooted grant is redeemed by the matching call");
+        assert_eq!(
+            redeemed.origin_parent,
+            Some(EventSeq::new(7)),
+            "and the location rides along on the consumed grant, for routing",
+        );
+        assert_eq!(redeemed.origin_thread, Some("desk-finance".to_string()));
+
+        // Two grants differing *only* in origin are the same call as far as
+        // matching is concerned: the first still redeems, so nothing about the
+        // location narrowed it.
+        for origin in [
+            (None, None),
+            (Some("desk-finance".to_string()), None),
+            (Some("agent-cfo".to_string()), Some(EventSeq::new(9))),
+        ] {
+            let set = GrantSet::default();
+            set.grant(GrantedCall {
+                origin_thread: origin.0,
+                origin_parent: origin.1,
+                ..call("a1", "finance", "composio_execute", args.clone())
+            });
+            assert!(
+                set.consume("finance", "composio_execute", &args).is_some(),
+                "the operator approved a call, not a location",
+            );
         }
     }
 
@@ -726,6 +817,7 @@ mod test {
             at_millis: 1_000,
             expires_at_millis,
             origin_thread: None,
+            origin_parent: None,
             scope: None,
         }
     }

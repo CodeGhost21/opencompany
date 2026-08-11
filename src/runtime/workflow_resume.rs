@@ -1092,7 +1092,7 @@ mod decide_tests {
     use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyId, Verdict};
     use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
     use crate::runtime::RuntimeBuilder;
-    use crate::runtime::journal::TaskLink;
+    use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
     /// What the resume actually asked for.
     #[derive(Clone, Debug)]
@@ -1241,7 +1241,7 @@ mode = "full"
                 &effect,
                 crate::ports::now_millis(),
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await

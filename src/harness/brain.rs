@@ -6040,6 +6040,7 @@ members = ["eng1", "eng2"]
                 args: args.clone(),
                 at_millis: now_millis(),
                 origin_thread: None,
+                origin_parent: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 
@@ -6135,6 +6136,7 @@ members = ["eng1", "eng2"]
                 at_millis: now_millis(),
                 expires_at_millis: now_millis() + 60 * 60 * 1000,
                 origin_thread: None,
+                origin_parent: None,
                 scope: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
@@ -6190,6 +6192,7 @@ members = ["eng1", "eng2"]
                 args: serde_json::json!({}),
                 at_millis: now_millis(),
                 origin_thread: None,
+                origin_parent: None,
             });
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 
@@ -6368,6 +6371,7 @@ members = ["eng1", "eng2"]
             args: serde_json::json!({}),
             at_millis: now_millis(),
             origin_thread: None,
+            origin_parent: None,
         }
     }
 

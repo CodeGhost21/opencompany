@@ -2101,6 +2101,7 @@ mod tests {
             args,
             at_millis: 1_000,
             origin_thread: None,
+            origin_parent: None,
         }
     }
 
@@ -2306,6 +2307,7 @@ mod tests {
             args: args.clone(),
             at_millis: 1_000,
             origin_thread: None,
+            origin_parent: None,
         });
 
         queue.clear();
@@ -2958,6 +2960,7 @@ mod tests {
             at_millis: 1_000,
             expires_at_millis,
             origin_thread: None,
+            origin_parent: None,
             scope: None,
         }
     }
