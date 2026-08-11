@@ -49,6 +49,21 @@
 //! the write landed at all, so there the node necessarily moves first. It is
 //! the narrowest window available rather than a different policy.
 //!
+//! # The guarantee is owed to deliverables, not to every note
+//!
+//! "Avoided in the second direction" is a promise about *published* nodes, and
+//! it costs something to keep: the reverse lookup runs on every save, so a
+//! strict reading would make an unreachable artifact store refuse edits to
+//! ordinary notes too — notes with no chain to corrupt, on a save that
+//! otherwise never touches that store. That trades the whole tree's
+//! availability for a guarantee none of it is owed.
+//!
+//! [`mirror_node_edit`] therefore separates *cannot record* from *cannot tell*
+//! (see [`MirrorOutcome`]). Its callers keep failing closed once a node is
+//! known to be a deliverable, and choose for themselves what an unanswerable
+//! store means. The console `PUT` takes the availability side and says so in
+//! its own doc, including what that costs when the store is down.
+//!
 //! # Why this module is in the default build
 //!
 //! [`mirror_node_edit`] has three callers across two layers — the console's
@@ -203,9 +218,25 @@ pub async fn materialize(
 /// and an edit to one that never reached the version history is exactly the
 /// silent corruption the artifact port exists to prevent.
 ///
-/// Returns `None` — and touches nothing — when `node_id` names an ordinary
-/// note. Most of the tree is ordinary notes, so this is the common answer and
-/// deliberately not an error.
+/// Answers [`MirrorOutcome::Ordinary`] — and touches nothing — when `node_id`
+/// names an ordinary note. Most of the tree is ordinary notes, so this is the
+/// common answer and deliberately not an error.
+///
+/// # Two failures, told apart on purpose
+///
+/// The lookup and the append fail for different reasons and are not returned
+/// alike. A failed **append** is an `Err`: the store answered, so this node is
+/// known to be a published deliverable, and the caller must not write the node
+/// behind a version that was never recorded. A failed **lookup** is
+/// [`MirrorOutcome::Undetermined`] inside `Ok`, because it establishes nothing
+/// — the node may be a deliverable or may be one of the ordinary notes that
+/// are nearly the whole tree, and only the caller knows whether its own work
+/// can proceed without that answer.
+///
+/// Collapsing the second into [`MirrorOutcome::Ordinary`] would read as "no
+/// chain here, carry on" on every store fault, which is precisely how the
+/// fail-closed guarantee for deliverables would stop applying without anything
+/// appearing to change.
 ///
 /// # The scan, named rather than hidden
 ///
@@ -224,20 +255,48 @@ pub async fn mirror_node_edit(
     author: ArtifactAuthor,
     author_id: &str,
     note: Option<String>,
-) -> Result<Option<MirroredEdit>> {
-    let Some(mut record) = published_record_for_node(artifacts, company, node_id).await? else {
-        return Ok(None);
+) -> Result<MirrorOutcome> {
+    let mut record = match published_record_for_node(artifacts, company, node_id).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return Ok(MirrorOutcome::Ordinary),
+        Err(err) => return Ok(MirrorOutcome::Undetermined(err)),
     };
     let version = record.push_version(body, author, author_id, now_millis(), note);
     // The appended version lives in the same node as the one before it. Without
     // this the *next* edit's reverse lookup — which reads the latest version —
     // would find nothing and silently stop mirroring.
     record.stamp_workspace_node(node_id);
+    // Fail-closed, and the one place in this function that is: the lookup
+    // succeeded, so this node *is* a deliverable, and a caller that wrote it
+    // anyway would leave the history claiming the agent's draft shipped
+    // unchanged.
     artifacts.upsert(company, &record).await?;
-    Ok(Some(MirroredEdit {
+    Ok(MirrorOutcome::Recorded(MirroredEdit {
         artifact_id: record.id,
         version,
     }))
+}
+
+/// What [`mirror_node_edit`] was able to do — and, when it could not act,
+/// whether the caller may carry on without it.
+///
+/// [`Ordinary`](MirrorOutcome::Ordinary) and
+/// [`Undetermined`](MirrorOutcome::Undetermined) both mean "nothing was
+/// recorded", and that is the whole reason they are separate variants rather
+/// than one absent value: the first is a complete answer from a healthy store
+/// and the second is no answer at all.
+#[derive(Debug)]
+pub enum MirrorOutcome {
+    /// `node_id` is a published deliverable, and this edit is now a version on
+    /// its chain.
+    Recorded(MirroredEdit),
+    /// The store answered, and `node_id` names no artifact — an ordinary note.
+    /// There is no chain here for a node write to get ahead of.
+    Ordinary,
+    /// The store could not be read, so whether `node_id` is published is
+    /// **unknown** rather than "no". Carries the fault so a caller that
+    /// tolerates it can still say why in a log.
+    Undetermined(OpenCompanyError),
 }
 
 /// What [`mirror_node_edit`] appended, for a caller that wants to log or return
@@ -639,7 +698,7 @@ mod test {
         record.stamp_workspace_node("node-1");
         artifacts.upsert(&co, &record).await.unwrap();
 
-        let mirrored = mirror_node_edit(
+        let MirrorOutcome::Recorded(mirrored) = mirror_node_edit(
             artifacts,
             &co,
             "node-1",
@@ -649,8 +708,9 @@ mod test {
             Some("operator edit before approval".to_string()),
         )
         .await
-        .unwrap()
-        .expect("a published node's edit is recorded");
+        .unwrap() else {
+            panic!("a published node's edit is recorded");
+        };
 
         assert_eq!(mirrored.artifact_id, "a-1");
         assert_eq!(mirrored.version, 2);
@@ -701,7 +761,7 @@ mod test {
         .await
         .unwrap();
 
-        assert!(mirrored.is_none());
+        assert!(matches!(mirrored, MirrorOutcome::Ordinary), "{mirrored:?}");
         let stored = artifacts.get(&co, "a-1").await.unwrap().unwrap();
         assert_eq!(
             stored.versions.len(),
@@ -734,21 +794,23 @@ mod test {
         artifacts.upsert(&co, &record).await.unwrap();
 
         assert!(
-            mirror_node_edit(
-                artifacts,
-                &co,
-                "node-old",
-                "edit",
-                ArtifactAuthor::Operator,
-                "operator",
-                None,
-            )
-            .await
-            .unwrap()
-            .is_none(),
+            matches!(
+                mirror_node_edit(
+                    artifacts,
+                    &co,
+                    "node-old",
+                    "edit",
+                    ArtifactAuthor::Operator,
+                    "operator",
+                    None,
+                )
+                .await
+                .unwrap(),
+                MirrorOutcome::Ordinary
+            ),
             "the retired node no longer addresses this artifact"
         );
-        assert!(
+        assert!(matches!(
             mirror_node_edit(
                 artifacts,
                 &co,
@@ -759,8 +821,116 @@ mod test {
                 None,
             )
             .await
-            .unwrap()
-            .is_some()
+            .unwrap(),
+            MirrorOutcome::Recorded(_)
+        ));
+    }
+
+    // -- the two store faults, told apart --------------------------------
+
+    /// An artifact store with one chosen fault, so a test can ask for exactly
+    /// the failure it means: unreadable (`list`) or unwritable (`upsert`).
+    struct FaultyArtifacts {
+        listed: Vec<ArtifactRecord>,
+        list_fails: bool,
+        upsert_fails: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl ArtifactStore for FaultyArtifacts {
+        async fn list(&self, _: &CompanyId, _: Option<&str>) -> Result<Vec<ArtifactRecord>> {
+            if self.list_fails {
+                return Err(OpenCompanyError::Store("the artifact store is down".into()));
+            }
+            Ok(self.listed.clone())
+        }
+        async fn get(&self, _: &CompanyId, _: &str) -> Result<Option<ArtifactRecord>> {
+            Ok(None)
+        }
+        async fn upsert(&self, _: &CompanyId, _: &ArtifactRecord) -> Result<()> {
+            if self.upsert_fails {
+                return Err(OpenCompanyError::Store("the disk is full".into()));
+            }
+            Ok(())
+        }
+        async fn delete(&self, _: &CompanyId, _: &str) -> Result<bool> {
+            Ok(false)
+        }
+    }
+
+    fn published_as(node_id: &str) -> ArtifactRecord {
+        let mut record = ArtifactRecord::new(
+            "a-1",
+            "t-1",
+            "Launch",
+            ArtifactKind::Markdown,
+            "agent draft",
+            "cmo",
+            1,
+        );
+        record.stamp_workspace_node(node_id);
+        record
+    }
+
+    /// A store that cannot be listed establishes **nothing**, and must not be
+    /// reported as the ordinary-note answer.
+    ///
+    /// This is the variant that carries the whole guarantee: `Ordinary` is what
+    /// callers are entitled to write a node behind. If a read fault collapsed
+    /// into it, every published deliverable would silently lose its fail-closed
+    /// protection the moment the store got sick — the one moment it matters.
+    #[tokio::test]
+    async fn an_unreadable_store_is_undetermined_not_ordinary() {
+        let co = CompanyId::new("acme");
+        let artifacts = FaultyArtifacts {
+            listed: Vec::new(),
+            list_fails: true,
+            upsert_fails: false,
+        };
+
+        let outcome = mirror_node_edit(
+            &artifacts,
+            &co,
+            "node-1",
+            "edit",
+            ArtifactAuthor::Operator,
+            "operator",
+            None,
+        )
+        .await
+        .expect("an unreadable store is the caller's decision, not an error");
+
+        assert!(
+            matches!(outcome, MirrorOutcome::Undetermined(_)),
+            "a read fault must stay distinguishable from `Ordinary`: {outcome:?}"
+        );
+    }
+
+    /// Once the store has answered and named this node a deliverable, a version
+    /// that cannot be appended is an error — the caller must not go on to write
+    /// the node, because that is the silent, permanent direction.
+    #[tokio::test]
+    async fn a_refused_append_on_a_published_node_still_fails_closed() {
+        let co = CompanyId::new("acme");
+        let artifacts = FaultyArtifacts {
+            listed: vec![published_as("node-1")],
+            list_fails: false,
+            upsert_fails: true,
+        };
+
+        assert!(
+            mirror_node_edit(
+                &artifacts,
+                &co,
+                "node-1",
+                "edit",
+                ArtifactAuthor::Operator,
+                "operator",
+                None,
+            )
+            .await
+            .is_err(),
+            "a known deliverable whose version cannot be recorded must refuse the save"
         );
     }
 }

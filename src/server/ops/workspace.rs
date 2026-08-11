@@ -44,7 +44,7 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::artifact_mirror::mirror_node_edit;
+use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_links::file_with_backlinks;
 use crate::error::OpenCompanyError;
 use crate::ports::artifacts::ArtifactAuthor;
@@ -274,10 +274,28 @@ async fn create_node(
 /// chooses. See [`artifact_mirror`](crate::company::artifact_mirror).
 ///
 /// An ordinary note — which is nearly all of them — matches no artifact, so the
-/// lookup returns `None` and this behaves exactly as it did before. The lookup
-/// is a scan of the company's artifacts per save; it is bounded by what
+/// lookup answers `Ordinary` and this behaves exactly as it did before. The
+/// lookup is a scan of the company's artifacts per save; it is bounded by what
 /// artifacts are (a task's drafts, not a repository) and is named as the place
 /// to add an index if it ever hurts.
+///
+/// # When the artifact store cannot answer at all
+///
+/// The lookup is the only reason this route reads the artifact store, and it
+/// runs for every note. Propagating its failure would mean an artifact-store
+/// fault rejects the save of a plain note — losing an operator's edit to a
+/// store that note does not depend on, to protect a chain it does not have.
+/// So a lookup that *fails* is warned about and the node write proceeds.
+///
+/// This is a deliberate narrowing of the ordering guarantee, not an exception
+/// to it. Fail-closed still holds wherever it can be applied: once the store
+/// answers and names this node a deliverable, a version that cannot be appended
+/// still refuses the save. What is given up is only the case where the store
+/// cannot be read at all — there, a published deliverable edited during the
+/// outage lands node-ahead-of-chain, the silent direction. The window is an
+/// unreachable artifact store, the alternative is refusing every note in the
+/// company for the same duration, and the divergence heals on the next
+/// successful save of that note.
 async fn write_file(
     company: ScopedCompany,
     Path(NodePath { node_id }): Path<NodePath>,
@@ -287,7 +305,7 @@ async fn write_file(
     // stamps one), so the lookup answers `None` for it and the `write` below
     // still rejects it — an extra read per save to pre-empt an error case would
     // cost every ordinary save to save nothing.
-    mirror_node_edit(
+    if let MirrorOutcome::Undetermined(err) = mirror_node_edit(
         company.runtime.artifacts().as_ref(),
         company.id(),
         &node_id,
@@ -296,7 +314,17 @@ async fn write_file(
         "operator",
         Some(OPERATOR_EDIT_NOTE.to_string()),
     )
-    .await?;
+    .await?
+    {
+        tracing::warn!(
+            company = %company.id(),
+            node = %node_id,
+            error = %err,
+            "[workspace] could not read the artifact store, so whether this note is a \
+             published deliverable is unknown; saving it anyway. If it was published, its \
+             chain is one version behind until the next successful save"
+        );
+    }
 
     let node = company
         .runtime

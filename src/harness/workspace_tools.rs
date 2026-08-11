@@ -160,7 +160,7 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
-use crate::company::artifact_mirror::mirror_node_edit;
+use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactStore};
@@ -1232,8 +1232,14 @@ impl Tool for WorkspaceWriteTool {
                 // Ordinary notes are the overwhelming majority and match no
                 // artifact, so this is a no-op for almost every call. It is not
                 // a publish: no queue, no claim, #445 untouched.
-                if let Some(artifacts) = self.workspace.artifacts.as_ref()
-                    && let Err(err) = mirror_node_edit(
+                if let Some(artifacts) = self.workspace.artifacts.as_ref() {
+                    // A refused append and an unreadable store are told apart
+                    // for callers that still have a decision left to make. This
+                    // one does not: the node is already written, so both mean
+                    // the same thing here — the chain is behind and nothing can
+                    // undo it — and both warn rather than fail a write that
+                    // succeeded.
+                    let unrecorded = match mirror_node_edit(
                         artifacts.as_ref(),
                         &self.workspace.company,
                         &node.id,
@@ -1243,16 +1249,21 @@ impl Tool for WorkspaceWriteTool {
                         None,
                     )
                     .await
-                {
-                    tracing::warn!(
-                        company = %self.workspace.company,
-                        agent = %self.workspace.agent_id,
-                        node = %node.id,
-                        error = %err,
-                        "[workspace] overwrote a published note but could not record the \
-                         revision on its artifact; the chain is one version behind until the \
-                         next write on either surface"
-                    );
+                    {
+                        Ok(MirrorOutcome::Recorded(_) | MirrorOutcome::Ordinary) => None,
+                        Ok(MirrorOutcome::Undetermined(err)) | Err(err) => Some(err),
+                    };
+                    if let Some(err) = unrecorded {
+                        tracing::warn!(
+                            company = %self.workspace.company,
+                            agent = %self.workspace.agent_id,
+                            node = %node.id,
+                            error = %err,
+                            "[workspace] overwrote a note whose artifact chain could not be \
+                             updated; if it was a published deliverable the chain is one \
+                             version behind until the next write on either surface"
+                        );
+                    }
                 }
                 Ok(ToolResult::success(format!(
                     "Overwrote the workspace note `{path}` (id={id}); it is now {bytes} bytes. \
