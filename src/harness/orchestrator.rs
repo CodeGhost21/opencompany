@@ -2648,22 +2648,32 @@ impl Tool for ReadRunOutputTool {
 /// routes return (`id`/`name`/`description?`/`nodes`/`edges`), so a graph the
 /// orchestrator authors is indistinguishable from one authored in the console.
 ///
-/// **This is deliberately a narrower surface than the REST body**, and the node
-/// shape below is where that shows: it accepts only `id`/`kind`/`name`/`summary`
-/// /`agent`, omitting `config`, `onError`, `retry`, `requiresApproval` — and
-/// `schedule` (issue #169). The omission is the policy, not an oversight:
+/// **This is deliberately a narrower surface than the REST body, but the
+/// narrowing is POLICY fields only** — the node shape below omits `schedule`
+/// (issue #169), `onError`, `retry`, and `requiresApproval`, and nothing else.
+/// Those four are unattended-run policy: a field the model cannot set is a field
+/// it cannot get wrong, and each carries real consequence — retry/error policy
+/// changes failure behavior, and a `schedule` makes a workflow run *on its own,
+/// forever*, with no operator in the loop at the moment it fires. So
+/// **agent-authored workflows stay manual-run only**: schedules are
+/// operator-authored, through the console's creator or `POST …/workflows`, where
+/// a human chose the cron. An agent can build the graph; a human decides whether
+/// it runs unattended.
 ///
-/// * A field the model cannot set is a field it cannot get wrong. Each of these
-///   carries real consequence — retry/error policy changes failure behavior, and
-///   a `schedule` makes a workflow run *on its own, forever*, with no operator
-///   in the loop at the moment it fires.
-/// * So **agent-authored workflows are manual-run only**. Schedules are
-///   operator-authored, through the console's creator or `POST …/workflows`,
-///   where a human chose the cron. An agent can build the graph; a human decides
-///   whether it runs unattended.
+/// The FUNCTIONAL fields `config` and `destination` are accepted (issue #661,
+/// H1): four of the six node kinds this tool advertises are inert without them.
+/// A `tool_call` names the tool to run in `config.slug`; an `http_request` puts
+/// its method/url in `config`; a `condition` branches on a `config` expression;
+/// an `output` may route its report via `destination`. Omitting these did not
+/// make the tool safer — it made the tool advertise `tool_call`/`http_request`/
+/// `condition`/`output` while being unable to author a working one (on current
+/// main `validate_draft_against_record` now *rejects* every config-less
+/// `tool_call` as "names no `slug`"). Both fields flow into the same validated
+/// `create_company_workflow` core the REST route and the builder use, so they
+/// inherit that core's validation rather than adding any of their own.
 ///
 /// Whether agents should be able to schedule themselves is an open product
-/// question. If the answer becomes yes, add the field here and to
+/// question. If the answer becomes yes, add the policy field here and to
 /// [`RawWorkflow`] construction below — the model and validation already support
 /// it, so nothing else has to change.
 #[derive(serde::Deserialize)]
@@ -2836,7 +2846,7 @@ impl Tool for CreateWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Use this to capture a repeatable process; then run it with run_workflow."
+        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Per-kind config: a `tool_call` node REQUIRES `config.slug` and can run ONLY a wired shell/code/web/search tool (e.g. `shell`, `apply_patch`, `web_fetch`, `web_search`) — for Composio, GitHub, or media/image/video actions use an `agent` node instead, NOT a `tool_call` (those are agent-turn tool families and are rejected on a `tool_call`). An `http_request` node needs `config.method` and `config.url`. A `condition` node needs a `config.field` boolean expression, with its outgoing edges labeled `yes`/`no`. An `output` node may carry a `destination` ({kind: `owner`/`email`/`channel`, and a `target` for email/channel). Never put a null value inside `config` — it can't be stored. Workflows authored here are manual-run only (no schedule). Use this to capture a repeatable process; then run it with run_workflow."
     }
 
     fn parameters_schema(&self) -> Value {
