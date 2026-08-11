@@ -950,6 +950,23 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["scheduled"] = json!(scheduled);
             o
         }
+        // Issue #382: the live per-node START bracket, the counterpart of the
+        // finish arm below. Without an explicit arm here it would fall to the
+        // `_ => return None` wildcard and be silently dropped, and the canvas
+        // would be back to deriving "currently executing" from graph topology —
+        // the exact guess #382 replaces. Structural by construction: the event
+        // carries only ids, so nothing to scrub.
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id,
+            run_id,
+            node_id,
+        } => {
+            let mut o = envelope("workflow_node_started");
+            o["workflowId"] = json!(workflow_id);
+            o["runId"] = json!(run_id);
+            o["nodeId"] = json!(node_id);
+            o
+        }
         CompanyEvent::WorkflowNodeFinished {
             workflow_id,
             run_id,
@@ -4885,6 +4902,41 @@ mod test {
                 "workflowId",
             ],
             "the node frame carries only structural fields: {node}"
+        );
+    }
+
+    /// Issue #382: the per-node START bracket reaches the console too. Without
+    /// its own arm it would fall to `project_event`'s `_ => return None` wildcard
+    /// and be silently dropped — the exact trap this file has been bitten by
+    /// three times — and the canvas would be back to guessing which node runs.
+    /// It carries the ids and NOTHING else: no status or duration (the node has
+    /// not run) and no input, so the frame is structural by construction.
+    #[test]
+    fn projects_the_per_node_started_bracket() {
+        let node = super::project_event(&stored(CompanyEvent::WorkflowNodeStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            node_id: "ceo".into(),
+        }))
+        .expect("workflow_node_started reaches the console");
+        assert_eq!(node["type"], "workflow_node_started");
+        assert_eq!(node["workflowId"], "digest");
+        assert_eq!(node["runId"], "run-1");
+        assert_eq!(node["nodeId"], "ceo");
+
+        // Structural-only: ids plus the envelope, and no status/duration/payload
+        // slot the finish frame has. Regresses only by widening the event.
+        let mut keys: Vec<&str> = node
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["atMillis", "nodeId", "runId", "seq", "type", "workflowId"],
+            "the started frame carries only structural ids: {node}"
         );
     }
 

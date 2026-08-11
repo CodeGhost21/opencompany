@@ -101,7 +101,7 @@ operator-initiated. Nodes that already completed keep their journal rows, and
 approvals earlier nodes parked stay valid in the queue: they are journal-backed
 and independent of the run, so they can still be approved or denied afterwards.
 No minted grant is revoked. See
-[events.md](events.md#stopping-a-run-issue-383).
+[workflow-events.md](workflow-events.md#stopping-a-run-issue-383).
 
 ## Console write plane (`src/server/ops/`)
 

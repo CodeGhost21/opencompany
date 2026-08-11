@@ -965,6 +965,13 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowRunStarted { workflow_id, .. } => {
             format!("workflow run started: {workflow_id}")
         }
+        // Issue #382: the per-node start bracket. Same summarized, no-payload
+        // rule as its sibling arms — a node id only, never any input.
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id,
+            node_id,
+            ..
+        } => format!("workflow {workflow_id} started node {node_id}"),
         CompanyEvent::WorkflowNodeFinished {
             workflow_id,
             node_id,

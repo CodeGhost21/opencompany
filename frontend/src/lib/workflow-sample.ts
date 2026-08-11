@@ -24,14 +24,14 @@ export interface WorkflowNodeData extends Record<string, unknown> {
 }
 
 /**
- * A node's state within one run (issue #371).
+ * A node's state within one run (issue #371, #382).
  *
- * `running` is **derived**, not reported: the engine's observer has an
- * `on_step_finish` hook and no `on_step_start`, so the console marks the
- * successors of a finished node as running rather than being told. It is
- * therefore a good-faith frontier, not ground truth — after a branch point it
- * briefly marks both arms until one of them finishes. `ok` and `error` are
- * reported by the engine and are exact.
+ * All three are **reported** by the engine now. `running` used to be *derived* —
+ * the observer had only an `on_step_finish` hook, so the console guessed a
+ * frontier by marking a finished node's successors — but issue #382 added
+ * `on_step_start`, so the host emits a `workflow_node_started` frame and the
+ * console lights the node up because it was told to, not because it inferred it.
+ * `ok` and `error` come from the finish frame, exact as before.
  */
 export type NodeRunState = "running" | "ok" | "error";
 
