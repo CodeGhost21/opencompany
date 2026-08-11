@@ -65,11 +65,10 @@ this product does not make.
 --font-mono: "Geist Mono Variable", ui-monospace, "SF Mono", "Menlo", monospace;
 ```
 
-> **Not yet installed.** Only `@fontsource-variable/geist` (sans) is a
-> dependency, so the stack currently falls through to the platform mono — which
-> is legible and correctly tabular, but is not Geist. Installing
-> `@fontsource-variable/geist-mono` and adding one `@import` to `index.css` is
-> the whole fix; the token already names it first.
+Installed and live: `@fontsource-variable/geist-mono` is a dependency and
+`index.css` imports it. Verified in the running console with
+`document.fonts.check('400 12px "Geist Mono Variable"')` rather than by
+eye — a missing face falls back silently, and the fallback is also monospace.
 
 `tabular-nums` is applied automatically to `table` elements and to anything
 carrying `data-numeric`, set once in the base layer rather than per component.

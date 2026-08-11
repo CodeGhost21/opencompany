@@ -153,10 +153,49 @@ Catalogued rather than hidden.
 | Hardcoded hex colours | 26 | **Cleared** — [`color.md`](color.md#hardcoded-colour-debt) |
 | Tailwind palette used for state | 87 | **Cleared** — [`color.md`](color.md#status) |
 | Identity colours colliding with status | 6 maps | **Cleared** — [`color.md`](color.md#identity-tones) |
+| Contrast failures in the running app | 3 | **Cleared** — see [Auditing](#auditing-the-running-app) |
+| Geist Mono not installed | — | **Cleared** — [`typography.md`](typography.md#the-mono-face) |
 | No vector logo asset | — | Open — [`../brand/README.md`](../brand/README.md#6-logo--marks) |
-| Geist Mono not installed | — | Open — [`typography.md`](typography.md#the-mono-face) |
 | Figma tokens transcribed by hand | — | Open — [`figma-plugin/README.md`](../../figma-plugin/README.md#keeping-tokens-in-sync) |
 | Figma library covers 8 of N components | — | Open — [The Figma library](#the-figma-library) |
+
+## Auditing the running app
+
+Two Playwright tools measure contrast against the real console, because
+reading tokens cannot catch what composition does to them. Both need a host
+running (see `frontend/test/e2e/host.sh`) and take `SP=<dir>` to save
+screenshots:
+
+```sh
+cd frontend
+node test/tools/contrast-audit.mjs              # 9 views x 2 themes, at rest
+node test/tools/contrast-audit-interactive.mjs  # dialogs, dropdowns, hover, focus
+```
+
+They found three failures a static reading of the tokens could not:
+
+| Where | Was | Cause |
+| --- | --- | --- |
+| Sidebar Discord row, dark | 3.04:1 | `opacity-60` applied to a mid-tone hue |
+| Sidebar Discord row, light | 4.20:1 | a fill colour used as text |
+| Settings subtitle, light | 4.48:1 | muted text on the brand-tinted accent |
+
+The pattern in all three is **composition**: every token passed on its own,
+and the pairing failed. That is the class of bug this tooling exists for.
+
+### Two ways these tools lied before they worked
+
+Both worth knowing, because both reported a confident pass:
+
+1. **An rgb-only colour regex.** `getComputedStyle` returns `oklch(...)` for
+   every token here, so nearly every element was skipped and backgrounds fell
+   back to white. The audit measured 4 nodes and called it clean.
+2. **`page.goto()` to a hash-only URL is a same-document navigation.** The
+   page never reloaded, `next-themes` never re-read the theme, and the "dark"
+   pass was light mode a second time.
+
+Hence both tools print how many nodes they measured. A vacuous run has to be
+visible as one, or it reads as success.
 
 ### The two checks that keep it cleared
 
