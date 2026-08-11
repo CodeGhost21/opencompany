@@ -11,6 +11,7 @@ import {
   Loader2,
   MoreHorizontal,
   PanelLeft,
+  Download,
   RefreshCw,
   Upload,
 } from "lucide-react";
@@ -23,10 +24,14 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   createNode,
   deleteNode as deleteNodeApi,
+  fetchBlobUrl,
   fetchFile,
   fetchTree,
+  formatBytes,
+  isBinary,
   originLabel,
   renameMoveNode,
+  uploadFile,
   writeFile,
   OPERATOR_ORIGIN,
   type WorkspaceFile,
@@ -715,6 +720,12 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       for (const a of pathOf(nodes, id)) if (a.kind === "folder") next.add(a.id);
       return next;
     });
+    // A payload has no text body to fetch, and the host refuses the text read
+    // for one — asking anyway would put an error in `fileError` for a file that
+    // is perfectly fine (issue #553). `BinaryNodeView` fetches the bytes it
+    // needs itself.
+    const node = nodeById(nodes, id);
+    if (node && isBinary(node)) return;
     await loadFile(id);
   }
 
@@ -841,22 +852,23 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     await createAndOpen(target, `# ${target}\n`);
   }
 
+  /**
+   * Upload files of any kind (issue #553).
+   *
+   * Every file now goes to the host's multipart route, including Markdown.
+   * Reading the bytes here to decide would mean re-implementing the host's
+   * text-versus-binary rule in a second place, where the two could disagree
+   * about the same file; the host reads the bytes and answers with the node it
+   * made, so there is one rule and the console just renders the result.
+   */
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
-    const reads = await Promise.all(
-      Array.from(files).map(async (f) => ({ name: f.name, text: await f.text().catch(() => "") })),
-    );
-    for (const r of reads) {
+    for (const file of Array.from(files)) {
       try {
-        const created = await createNode(client, company, {
-          name: ensureMdExt(r.name),
-          kind: "file",
-          parentId: null,
-          content: r.text,
-        });
+        const created = await uploadFile(client, company, file, null);
         setNodes((all) => [...all, created]);
       } catch (e) {
-        toast.error(`${r.name}: ${message(e, "upload failed")}`);
+        toast.error(`${file.name}: ${message(e, "upload failed")}`);
       }
     }
   }
@@ -896,7 +908,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
           <input
             ref={uploadRef}
             type="file"
-            accept=".md,.markdown,.txt"
+            // Anything. The tree holds bytes now, and the host decides what
+            // each file becomes — an allow-list here would be a second,
+            // narrower rule that silently refuses files the store supports.
+            accept="*/*"
             multiple
             hidden
             onChange={(e) => {
@@ -1018,20 +1033,32 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
               <SaveStatus state={saveState} />
-              <Tabs
-                value={mode}
-                onValueChange={(v) => void changeMode(v as "read" | "edit")}
-                className="ml-auto"
-              >
-                <TabsList>
-                  <TabsTrigger value="read">Reading</TabsTrigger>
-                  <TabsTrigger value="edit">Edit</TabsTrigger>
-                </TabsList>
-              </Tabs>
+              {/* A payload has no prose to read or edit, so the mode switch is
+                  hidden rather than shown-and-broken (issue #553). The host
+                  refuses a text write to one, so an Edit tab here would be a
+                  control whose only outcome is an error toast. */}
+              {!isBinary(openNode) && (
+                <Tabs
+                  value={mode}
+                  onValueChange={(v) => void changeMode(v as "read" | "edit")}
+                  className="ml-auto"
+                >
+                  <TabsList>
+                    <TabsTrigger value="read">Reading</TabsTrigger>
+                    <TabsTrigger value="edit">Edit</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              )}
             </div>
             <div className="flex flex-1 overflow-hidden">
               <div className="flex-1 overflow-y-auto">
-                {fileError ? (
+                {isBinary(openNode) ? (
+                  // Checked before `fileError` and before the skeleton: a
+                  // payload is never fetched through the text route at all, so
+                  // neither of those states is reachable for one and both would
+                  // be wrong answers here.
+                  <BinaryNodeView client={client} company={company} node={openNode} />
+                ) : fileError ? (
                   <div className="p-6">
                     <Alert variant="destructive">
                       <AlertDescription>{fileError}</AlertDescription>
@@ -1268,6 +1295,123 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
 }
 
 /* ---- note markdown with wiki links ---- */
+
+/**
+ * A binary workspace node: rendered if it is an image, described and offered
+ * for download if it is not (issue #553).
+ *
+ * # Why the bytes are fetched rather than linked
+ *
+ * The blob route needs the bearer token the API client holds, and an `<img
+ * src>` cannot carry an `Authorization` header — so a direct link would 401 for
+ * every operator. The bytes come through the authenticated client and become an
+ * object URL the element can point at.
+ *
+ * The URL is revoked on unmount and whenever the node changes. An object URL is
+ * a document-lifetime reference to the blob behind it, so a view that minted one
+ * per opened image without revoking would hold every image the operator had
+ * looked at, in memory, until the tab was closed.
+ *
+ * A non-image is deliberately **not** previewed. The console has no viewer for a
+ * PDF or a zip, and a browser plugin rendering one inside the app frame is not
+ * something this view can promise across browsers — so it shows what the file
+ * is, exactly, and hands over the download.
+ */
+function BinaryNodeView({
+  client,
+  company,
+  node,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  node: FsNode;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const isImage = (node.mime ?? "").startsWith("image/");
+
+  useEffect(() => {
+    let revoked = false;
+    let current: string | null = null;
+    setUrl(null);
+    setError(null);
+    fetchBlobUrl(client, company, node.id)
+      .then((next) => {
+        // The effect may have been torn down (or the node switched) while the
+        // fetch was in flight; revoking immediately is what stops that race
+        // from leaking the blob it just created.
+        if (revoked) {
+          URL.revokeObjectURL(next);
+          return;
+        }
+        current = next;
+        setUrl(next);
+      })
+      .catch((e) => {
+        if (!revoked) setError(message(e, "could not load this file"));
+      });
+    return () => {
+      revoked = true;
+      if (current) URL.revokeObjectURL(current);
+    };
+  }, [client, company, node.id]);
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-binary">
+      {error ? (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : isImage ? (
+        url ? (
+          <img
+            src={url}
+            alt={node.name}
+            data-testid="workspace-image"
+            className="max-h-[70vh] w-auto max-w-full rounded-md border bg-card object-contain"
+          />
+        ) : (
+          <Skeleton className="h-64 w-full" />
+        )
+      ) : null}
+      <div className="mt-4 rounded-md border bg-card/40 p-4" data-testid="workspace-binary-meta">
+        <p className="text-sm font-medium">{node.name}</p>
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <dt>Type</dt>
+          <dd className="font-mono">{node.mime}</dd>
+          <dt>Size</dt>
+          <dd>{formatBytes(node.size)}</dd>
+          {node.sha256 && (
+            <>
+              <dt>sha256</dt>
+              {/* Wrapped, not truncated: a digest an operator cannot read in
+                  full cannot be compared against anything, which is the only
+                  reason to show one. */}
+              <dd className="font-mono break-all">{node.sha256}</dd>
+            </>
+          )}
+        </dl>
+        <p className="mt-3 text-xs text-muted-foreground">
+          This file is stored as data, so it has no text to edit here.
+        </p>
+        {url && (
+          // A real anchor rather than a Button with an onClick: `download` on
+          // an <a> is what makes the browser save the file under the node's own
+          // name instead of navigating to a blob: URL.
+          <a
+            href={url}
+            download={node.name}
+            data-testid="workspace-download"
+            className="mt-3 inline-flex items-center rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-accent"
+          >
+            <Download className="mr-1 size-4" />
+            Download
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function NoteMarkdown({
   source,

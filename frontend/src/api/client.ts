@@ -112,6 +112,56 @@ export class OpenCompanyClient {
   }
 
   /**
+   * A POST carrying `FormData`, for the workspace upload route (issue #553).
+   *
+   * Separate from `post` because the two are incompatible in both directions:
+   * `request` sets `content-type: application/json` and `JSON.stringify`s its
+   * body, and a multipart upload must instead let the browser set the header so
+   * it can include the boundary it generated. Setting it by hand produces a
+   * body the server cannot parse.
+   *
+   * Like `getBlob`, this reaches `fetch` directly — the `Transport` surface
+   * takes a `string` body and cannot express a `FormData`.
+   */
+  async postForm<T>(path: string, form: FormData): Promise<T> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method: "POST",
+        headers,
+        body: form,
+        credentials: "include",
+      });
+    } catch {
+      throw new ApiError(
+        0,
+        "network_error",
+        `cannot reach the company host at ${this.baseUrl || "this origin"}`,
+      );
+    }
+    const text = await res.text();
+    if (!(res.status >= 200 && res.status < 300)) {
+      if (res.status === 401) this.onUnauthorized?.();
+      // Adapted to the shape `httpError` reads, so a failed direct-`fetch`
+      // read produces the same `ApiError` envelope as every other route.
+      throw httpError(
+        {
+          status: res.status,
+          statusText: res.statusText,
+          url: res.url,
+          text,
+          header: (name: string) => res.headers.get(name),
+        },
+        text,
+      );
+    }
+    return (text ? parseJson(text) : undefined) as T;
+  }
+
+  /**
    * A GET whose answer is a document, not JSON (issue #352).
    *
    * `request` parses every successful response as JSON and hands back
@@ -141,6 +191,63 @@ export class OpenCompanyClient {
       throw httpError(res, text);
     }
     return { text, filename: attachmentFilename(res.header("content-disposition")) };
+  }
+
+  /**
+   * A GET whose answer is **bytes** (issue #553).
+   *
+   * The workspace can hold images, PDFs and archives now, and the console has
+   * to be able to show one. `getDocument` above cannot: the whole `Transport`
+   * surface is text — `TransportResponse` exposes `res.text` and nothing else —
+   * so anything read through it has already been decoded and a PNG would come
+   * back mangled.
+   *
+   * So this is the one method that reaches past the transport to `fetch`
+   * directly, because it needs a `Blob` the transport has no way to express.
+   * Everything else about it matches `getDocument`: the same bearer header, the
+   * same `credentials: "include"`, the same 401 hand-off.
+   *
+   * It returns a `Blob` rather than a URL so the caller owns the object URL's
+   * lifetime — an object URL leaks until it is revoked, and only the component
+   * holding it knows when that is.
+   */
+  async getBlob(path: string): Promise<Blob> {
+    const headers: Record<string, string> = {};
+    if (this.token) headers["authorization"] = `Bearer ${this.token}`;
+
+    let res: Response;
+    try {
+      res = await fetch(`${this.baseUrl}${path}`, {
+        method: "GET",
+        headers,
+        credentials: "include",
+      });
+    } catch {
+      throw new ApiError(
+        0,
+        "network_error",
+        `cannot reach the company host at ${this.baseUrl || "this origin"}`,
+      );
+    }
+    if (!res.ok) {
+      if (res.status === 401) this.onUnauthorized?.();
+      // The body of a failed blob read is an error envelope, not bytes, so it
+      // is safe (and useful) to read it as text for the message.
+      const text = await res.text().catch(() => "");
+      // Adapted to the shape `httpError` reads, so a failed direct-`fetch`
+      // read produces the same `ApiError` envelope as every other route.
+      throw httpError(
+        {
+          status: res.status,
+          statusText: res.statusText,
+          url: res.url,
+          text,
+          header: (name: string) => res.headers.get(name),
+        },
+        text,
+      );
+    }
+    return res.blob();
   }
 
   /**

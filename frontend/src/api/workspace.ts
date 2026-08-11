@@ -69,6 +69,23 @@ export interface FsNode {
   createdBy: WorkspaceOrigin;
   /** Who last wrote this node's body. A rename or move does not change it. */
   updatedBy: WorkspaceOrigin;
+  /**
+   * The media type of a **binary** node's payload, e.g. `image/png` (#553).
+   *
+   * Present only on a binary node, and the single test for one — the host omits
+   * all three fields below on a prose note rather than sending nulls, so
+   * `mime !== undefined` means "render or download this instead of editing it".
+   */
+  mime?: string;
+  /** The payload's exact size in bytes. Host-computed. */
+  size?: number;
+  /** The payload's sha256, computed by the store from the stored bytes. */
+  sha256?: string;
+}
+
+/** Whether a node holds bytes rather than prose. */
+export function isBinary(node: Pick<FsNode, "mime">): boolean {
+  return node.mime !== undefined && node.mime !== null;
 }
 
 /** One file's body plus the notes that link to it, from `GET …/workspace/file/{id}`. */
@@ -203,4 +220,65 @@ export function deleteNode(
   id: string,
 ): Promise<void> {
   return client.del<void>(`${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Upload a file of any kind (issue #553).
+ *
+ * `createNode` sends a JSON body, which cannot carry bytes, so an image or a
+ * PDF has to arrive as `multipart/form-data` on its own route. The host — not
+ * this function — decides whether the result is a note or a binary node: a file
+ * that is typed as text *and* decodes as UTF-8 becomes a prose note, so an
+ * uploaded `.md` keeps its editor, its backlinks and its diffable history.
+ *
+ * `fetch` directly rather than `client.post`: the shared request helper sets a
+ * JSON content-type and `JSON.stringify`s its body, and a multipart upload must
+ * let the browser set the boundary itself.
+ */
+export async function uploadFile(
+  client: OpenCompanyClient,
+  company: string | null,
+  file: File,
+  parentId?: string | null,
+): Promise<FsNode> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  if (parentId) form.append("parentId", parentId);
+  const node = await client.postForm<FsNodeWire>(
+    `${client.scopeFor(company)}/workspace/upload`,
+    form,
+  );
+  return normalize(node);
+}
+
+/**
+ * Fetch a binary node's payload as an object URL.
+ *
+ * A plain `<img src="…/workspace/blob/{id}">` would not work: the route needs
+ * the bearer token the client holds, and an image element cannot carry one. So
+ * the bytes are fetched through the authenticated client and wrapped in an
+ * object URL the element can point at.
+ *
+ * **The caller must revoke the returned URL** when it is done with it —
+ * `URL.revokeObjectURL` — or the blob stays resident for the life of the
+ * document.
+ */
+export async function fetchBlobUrl(
+  client: OpenCompanyClient,
+  company: string | null,
+  id: string,
+): Promise<string> {
+  const blob = await client.getBlob(
+    `${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(id)}`,
+  );
+  return URL.createObjectURL(blob);
+}
+
+/** A human-readable size, for the metadata a binary node shows instead of a body. */
+export function formatBytes(bytes: number | undefined): string {
+  if (bytes === undefined) return "unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
