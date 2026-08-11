@@ -1577,7 +1577,7 @@ impl crate::ports::runs::RunStore for MongoStore {
         let runs = self.collection("runs");
         let mut find = runs
             .find(query)
-            .sort(doc! {"created_ms": 1, "attempt": -1, "run_id": -1});
+            .sort(doc! {"created_ms": -1, "attempt": -1, "run_id": -1});
         if let Some(limit) = filter.limit {
             match find_limit(limit) {
                 FindLimit::Empty => return Ok(Vec::new()),
