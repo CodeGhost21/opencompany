@@ -232,6 +232,18 @@ impl MongoStore {
             ))
             .await
             .map_err(mongo_err)?;
+        // Issue #596: one durable per-node output snapshot per run. The unique
+        // `(company_id, run_id)` index makes the upsert last-write-wins per run;
+        // the recency index backs the newest-N prune. Created outside the fixed
+        // array above so adding it does not disturb that array's length.
+        self.collection("run_outputs")
+            .create_index(unique(doc! {"company_id": 1, "run_id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection("run_outputs")
+            .create_index(nonunique(doc! {"company_id": 1, "at_ms": -1}))
+            .await
+            .map_err(mongo_err)?;
         Ok(())
     }
 
@@ -1576,6 +1588,77 @@ impl crate::ports::workflow_revisions::WorkflowRevisionStore for MongoStore {
             .await
             .map_err(mongo_err)?;
         Ok(res.deleted_count)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::run_output::WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        use crate::ports::run_output::MAX_RUN_OUTPUTS_PER_COMPANY;
+        let coll = self.collection("run_outputs");
+        // Upsert: last-write-wins per `(company, run_id)`, so a re-run overwrites
+        // rather than stacking. The unique index is what makes the filter a key.
+        coll.update_one(
+            doc! {"company_id": company.as_ref(), "run_id": &record.run_id},
+            doc! {"$set": {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "workflow_id": &record.workflow_id,
+                "at_ms": record.at_millis as i64,
+                "output_json": serde_json::to_string(record)?,
+            }},
+        )
+        .with_options(UpdateOptions::builder().upsert(true).build())
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap: collect this company's run ids newest-first and delete
+        // everything past `MAX`. Two statements, like the revision prune — Mongo
+        // has no "delete all but the newest N" operator; the recency index keeps
+        // the read cheap.
+        let mut cursor = coll
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"at_ms": -1, "run_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            ids.push(get_str(&doc, "run_id")?);
+        }
+        if ids.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
+            let stale: Vec<&String> = ids.iter().skip(MAX_RUN_OUTPUTS_PER_COMPANY).collect();
+            coll.delete_many(doc! {
+                "company_id": company.as_ref(),
+                "run_id": {"$in": stale},
+            })
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<crate::ports::run_output::WorkflowRunOutputRecord>> {
+        let found = self
+            .collection("run_outputs")
+            .find_one(doc! {"company_id": company.as_ref(), "run_id": run_id})
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(serde_json::from_str(&get_str(&doc, "output_json")?)?)),
+            None => Ok(None),
+        }
     }
 }
 

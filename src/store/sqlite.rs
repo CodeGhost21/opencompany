@@ -169,6 +169,16 @@ CREATE TABLE IF NOT EXISTS workflow_revisions (
 );
 CREATE INDEX IF NOT EXISTS workflow_revisions_by_workflow
     ON workflow_revisions (company_id, workflow_id, created_ms);
+CREATE TABLE IF NOT EXISTS run_outputs (
+    company_id  TEXT NOT NULL,
+    run_id      TEXT NOT NULL,
+    workflow_id TEXT NOT NULL,
+    at_ms       INTEGER NOT NULL,
+    output_json TEXT NOT NULL,
+    PRIMARY KEY (company_id, run_id)
+);
+CREATE INDEX IF NOT EXISTS run_outputs_by_recency
+    ON run_outputs (company_id, at_ms);
 CREATE TABLE IF NOT EXISTS usage_samples (
     company_id TEXT NOT NULL,
     seq        INTEGER NOT NULL,
@@ -1757,6 +1767,69 @@ impl crate::ports::workflow_revisions::WorkflowRevisionStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::run_output::WorkflowRunOutputStore for SqliteStore {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::run_output::WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        use crate::ports::run_output::MAX_RUN_OUTPUTS_PER_COMPANY;
+        let json = serde_json::to_string(record)?;
+        let mut guard = self.conn();
+        // Upsert + prune in ONE transaction, so a reader never observes an
+        // over-cap set. `INSERT OR REPLACE` keeps the write last-write-wins per
+        // `(company, run_id)`; the prune keeps the newest `MAX` rows for the
+        // company (by `at_ms DESC, run_id DESC`, matching `sort_newest_first`).
+        let tx = guard.transaction().map_err(sql_err)?;
+        tx.execute(
+            "INSERT OR REPLACE INTO run_outputs \
+             (company_id, run_id, workflow_id, at_ms, output_json) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                company.as_ref(),
+                record.run_id,
+                record.workflow_id,
+                record.at_millis as i64,
+                json,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "DELETE FROM run_outputs \
+             WHERE company_id = ?1 AND run_id NOT IN (\
+                 SELECT run_id FROM run_outputs \
+                 WHERE company_id = ?1 \
+                 ORDER BY at_ms DESC, run_id DESC LIMIT ?2)",
+            params![company.as_ref(), MAX_RUN_OUTPUTS_PER_COMPANY as i64],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<crate::ports::run_output::WorkflowRunOutputRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT output_json FROM run_outputs WHERE company_id = ?1 AND run_id = ?2")
+            .map_err(sql_err)?;
+        let mut rows = stmt
+            .query_map(params![company.as_ref(), run_id], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        match rows.next() {
+            Some(row) => Ok(Some(serde_json::from_str(&row.map_err(sql_err)?)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -2508,6 +2581,11 @@ mod test {
     #[tokio::test]
     async fn conformance_workflow_revision_store() {
         conformance::assert_workflow_revision_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_run_output_store() {
+        conformance::assert_workflow_run_output_store(store()).await;
     }
 
     #[tokio::test]
