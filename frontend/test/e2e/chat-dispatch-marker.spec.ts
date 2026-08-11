@@ -70,6 +70,33 @@ function markers(page: Page) {
   return page.getByRole("link", { name: /^finished → / });
 }
 
+/**
+ * The marker count, once the channel's rehydration has stopped adding to it.
+ *
+ * A channel opens empty and fills from `chat/history` a moment later, so a
+ * count taken on arrival is a count of nothing — and a "no new marker appeared"
+ * assertion against it would be measuring the hydration instead. Waits for two
+ * equal readings rather than a fixed sleep, the same shape
+ * `chat-live-events.spec.ts` uses for its bubble counts and for the same
+ * reason: this suite shares one host and one data root across tests, so an
+ * earlier test's marker is legitimately in this channel's history.
+ */
+async function settledMarkerCount(page: Page): Promise<number> {
+  let last = -1;
+  await expect
+    .poll(
+      async () => {
+        const current = await markers(page).count();
+        const settled = current === last;
+        last = current;
+        return settled;
+      },
+      { intervals: [400, 400, 400, 400, 400, 400, 400, 400], timeout: 20_000 },
+    )
+    .toBe(true);
+  return last;
+}
+
 test("a settled dispatch marks the channel its card was raised in — and only that one", async ({
   page,
 }) => {
@@ -206,7 +233,11 @@ test("a card raised on the board leaves no channel marker", async ({ page, reque
   test.setTimeout(120_000);
 
   await openChannel(page, ENGINEERING);
-  const before = await markers(page).count();
+  // Settle the baseline before touching anything. This suite shares one host
+  // and one data root, so a marker an earlier test legitimately left in this
+  // channel's history is still arriving while the page loads — counting before
+  // that stops would measure the hydration, not this card.
+  const before = await settledMarkerCount(page);
 
   // No `originChatId`: the board's own "+" opens a card exactly like this. No
   // conversation raised it, so no conversation is told it settled.
@@ -221,6 +252,10 @@ test("a card raised on the board leaves no channel marker", async ({ page, reque
 
   // Give the run the same window the test above allows before believing this.
   await page.waitForTimeout(20_000);
-  await expect(markers(page)).toHaveCount(before);
+  // The load-bearing assertion: nothing anywhere links *this* card. It is
+  // addressed by href rather than by count, so it cannot be satisfied or
+  // broken by any other test's marker.
   await expect(page.locator(`[href="#/tasks/${id}"]`)).toHaveCount(0);
+  // …and the channel grew nothing at all.
+  await expect(markers(page)).toHaveCount(before);
 });
