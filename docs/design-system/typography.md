@@ -78,77 +78,65 @@ carrying `data-numeric`, set once in the base layer rather than per component.
 
 ## Sizes below the scale
 
-15 sites currently set type under 10px. At these sizes glyphs lose their
-distinguishing features and antialiasing does the rest — this is
-unreadability, not density. Each should be raised to `text-3xs`.
+**None remain.** Below 10px is not a size, it is a bug, and the console no
+longer has one.
 
-| File | Line | Current |
-| --- | --- | --- |
-| `views/chat/MessageRow.tsx` | 247 | `text-[7px]` |
-| `views/overview/kg/KnowledgeDetail.tsx` | 22 | `text-[8px]` |
-| `views/overview/kg/KnowledgeGraphFullscreen.tsx` | 94 | `text-[8.5px]` |
-| `components/workflow-node.tsx` | 54 | `text-[9px]` |
-| `views/chat/ChannelRail.tsx` | 182 | `text-[9px]` |
-| `views/overview/kg/KnowledgeDetail.tsx` | 61, 86, 301 | `text-[9px]` |
-| `views/overview/kg/KnowledgeDetail.tsx` | 48, 84, 242, 306, 348 | `text-[9.5px]` |
-| `views/overview/kg/KnowledgeGraph.tsx` | 1496, 1506 | `text-[9.5px]` |
+The interesting case was `views/chat/MessageRow.tsx`, where a reply facepile
+set 7px initials in a 16px tile. Resizing could not fix it: two letters fit a
+16px tile only below 10px, and growing the tile would have reshaped the chat
+row. The facepile is `aria-hidden` decoration capped at three faces, so the
+glyph was carrying nothing a reader could use. `Avatar` gained a `markOnly`
+prop — the tile keeps the tone colour that distinguishes one voice from the
+next, and draws no glyph at all.
 
-The knowledge-graph cluster is the bulk of it. Those labels sit on a zoomable
-canvas, so the honest fix is to raise the base size and let zoom carry the
-density — not to keep shrinking type the viewport cannot resolve.
+That is the general shape of the answer whenever type wants to go under 10px:
+**it is not text, it is a mark**, and it should stop pretending otherwise.
 
 ---
 
 ## Migration
 
-192 arbitrary font sizes across the console. The mapping is mechanical for 159
-of them; 33 need a judgement call.
-
-### Mechanical — 159 sites
-
-| Find | Replace | Sites |
-| --- | --- | --- |
-| `text-[11px]` | `text-2xs` | 109 |
-| `text-[10px]` | `text-3xs` | 50 |
-
-These are exact matches to the new rungs. A find-and-replace is safe and
-changes nothing visually.
+**Complete.** The console has zero arbitrary font sizes. Verify with:
 
 ```sh
 cd frontend
-grep -rl 'text-\[11px\]' src --include="*.tsx" | xargs sed -i '' 's/text-\[11px\]/text-2xs/g'
-grep -rl 'text-\[10px\]' src --include="*.tsx" | xargs sed -i '' 's/text-\[10px\]/text-3xs/g'
+grep -rn 'text-\[' src --include="*.tsx" --include="*.ts"
 ```
 
-Run `npm run typecheck && npm run build` afterwards, then compare
-`#/styleguide` and a couple of dense views against a screenshot taken before.
+192 sites were migrated in two passes.
 
-### Judgement needed — 33 sites
+### The mechanical 159
 
-| Current | Sites | Where | Suggested |
-| --- | --- | --- | --- |
-| `text-[10.5px]` | 13 | almost all `kg/KnowledgeDetail.tsx` | `text-3xs` (10px) — half-pixel type does not render as a half pixel |
-| `text-[9.5px]` | 7 | `kg/*` | `text-3xs` — see above |
-| `text-[9px]` | 5 | `kg/*`, `workflow-node`, `ChannelRail` | `text-3xs` |
-| `text-[12.5px]` | 2 | `kg/KnowledgeDetail.tsx`, `KnowledgeGraphFullscreen.tsx` | `text-xs` (12px) |
-| `text-[8px]`, `text-[8.5px]`, `text-[7px]` | 3 | `kg/*`, `MessageRow.tsx` | `text-3xs` |
-| `text-[11.5px]` | 1 | `kg/KnowledgeDetail.tsx` | `text-2xs` (11px) |
-| `text-[13px]` | 1 | `tour/TourTooltip.tsx` | `text-sm` (14px) or `text-xs` |
-| `text-[15px]` | 1 | `tour/TourTooltip.tsx` | `text-base` (16px) |
+`text-[11px]` → `text-2xs` (109 sites) and `text-[10px]` → `text-3xs` (50).
 
-Half-pixel sizes are the clearest signal of drift: they were arrived at by
-nudging until something looked right, and the browser rounds them anyway. All
-of them collapse onto a real rung.
+Worth knowing, because it is easy to describe this as a no-op and it is not
+quite one: an arbitrary `text-[11px]` sets font size *alone* and inherits its
+line height, whereas `text-2xs` carries the scale's line height (16px) and
+tracking (+0.005em). 32 of the migrated sites pin an explicit `leading-*` and
+are unaffected; the rest tighten slightly, which is the scale doing its job.
 
-`TourTooltip` is the one genuinely separate case — it is onboarding copy at
-prose sizes, so it should sit on `text-sm`/`text-base` rather than the dense
-console rungs.
+### The 33 judgement calls
 
-### Order to do it in
+The knowledge panel carried its own six-level scale in half-pixels — 12.5 /
+11.5 / 10.5 / 9.5 / 9 / 8. Half-pixel type does not render as a half pixel;
+those sizes were arrived at by nudging until something looked right.
 
-1. The two mechanical replacements (159 sites, zero visual change).
-2. `kg/KnowledgeDetail.tsx` — 21 of the remaining 33 are in this one file.
-3. `TourTooltip.tsx` — 2 sites, prose sizes.
-4. Everything else, ad hoc, as files are touched for other reasons.
+They collapsed onto three rungs:
 
-Steps 1 and 2 remove 90% of the debt and can each be a single small commit.
+| Was | Now | Role |
+| --- | --- | --- |
+| 12.5px bold | `text-xs` | Panel title |
+| 11.5px semibold | `text-2xs` | Row title |
+| 10.5px mono | `text-2xs` | Link |
+| 9.5px mono dim | `text-3xs` | Sub-label |
+| 9px mono uppercase | `text-3xs` | Badge |
+| 8px uppercase | `text-3xs` | Tag |
+
+Six sizes became three, and nothing was lost: weight, case and colour were
+already carrying the hierarchy those extra sizes were standing in for.
+
+`TourTooltip` moved the other way — 15/13 to `text-base`/`text-sm`. It is
+onboarding prose, not console chrome, so it belongs on the reading rungs.
+
+`Button`'s `sm` size dropped shadcn's stock `text-[0.8rem]`: 12.8px is not a
+rung of this scale, and a button is not the place to invent one.

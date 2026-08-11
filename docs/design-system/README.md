@@ -144,16 +144,33 @@ styles propagate the rest. Do not fix a drift by editing a swatch's fill.
 
 ## Known debt
 
-Catalogued rather than hidden. Both lists are complete as of this document.
+Catalogued rather than hidden.
 
-| Debt | Sites | Detail |
+| Debt | Sites | Status |
 | --- | --- | --- |
-| Arbitrary font sizes | 192 | [`typography.md`](typography.md#migration) |
-| Font sizes below 10px | 15 | [`typography.md`](typography.md#sizes-below-the-scale) |
-| Hardcoded hex colours | 26 | [`color.md`](color.md#hardcoded-colour-debt) |
-| No vector logo asset | — | [`../brand/README.md`](../brand/README.md#6-logo--marks) |
-| Geist Mono not installed | — | [`typography.md`](typography.md#the-mono-face) |
-| Figma tokens transcribed by hand | — | [`figma-plugin/README.md`](../../figma-plugin/README.md#keeping-tokens-in-sync) |
+| Arbitrary font sizes | 192 | **Cleared** — [`typography.md`](typography.md#migration) |
+| Font sizes below 10px | 15 | **Cleared** — [`typography.md`](typography.md#sizes-below-the-scale) |
+| Hardcoded hex colours | 26 | **Cleared** — [`color.md`](color.md#hardcoded-colour-debt) |
+| Tailwind palette used for state | 87 | **Cleared** — [`color.md`](color.md#status) |
+| Identity colours colliding with status | 6 maps | **Cleared** — [`color.md`](color.md#identity-tones) |
+| No vector logo asset | — | Open — [`../brand/README.md`](../brand/README.md#6-logo--marks) |
+| Geist Mono not installed | — | Open — [`typography.md`](typography.md#the-mono-face) |
+| Figma tokens transcribed by hand | — | Open — [`figma-plugin/README.md`](../../figma-plugin/README.md#keeping-tokens-in-sync) |
+| Figma library covers 8 of N components | — | Open — [The Figma library](#the-figma-library) |
 
-None of these break the build; all of them are places where a future change
-will not propagate. They are safe to fix incrementally, file by file.
+### The two checks that keep it cleared
+
+Both should return nothing but `connections.ts` (third-party brand colours,
+which are correct as literals):
+
+```sh
+cd frontend
+# No arbitrary values.
+grep -rn 'text-\[' src --include="*.tsx" --include="*.ts"
+# No raw palette colours, no raw hex.
+grep -rn '\(text\|bg\|border\|ring\|fill\|stroke\)-\(emerald\|rose\|amber\|sky\|red\|green\|blue\|yellow\|violet\|indigo\|teal\|cyan\|slate\)-[0-9]' src --include="*.tsx" --include="*.ts"
+grep -rn '#[0-9a-fA-F]\{6\}' src --include="*.tsx" --include="*.ts"
+```
+
+Worth a CI job. Debt of this kind returns one convenient exception at a time,
+and a grep is cheaper than the argument.

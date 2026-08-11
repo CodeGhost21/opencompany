@@ -130,6 +130,28 @@ Each status ships three weights (`-mark`, `-text`, `-soft`) because one value
 cannot both fill a 6px dot and set legible 11px text. Use the named token; do
 not derive your own.
 
+### Identity is not status
+
+A desk, a teammate, a skill category, a memory kind — these need a colour to
+tell them apart, and it must not be a status colour. They use the **identity
+palette** (`--tone-1` … `--tone-5`), which deliberately holds no amber, green
+or red.
+
+This is not hypothetical tidiness. Identity used to be drawn from the same
+palette as status, so a desk was tinted the exact green that means "done" and
+a category the red that means "failed".
+
+Where the two palettes do come close — identity violet against brand indigo,
+identity blue against running cyan — **form separates them**:
+
+| | Shape |
+| --- | --- |
+| **Identity** | A tile with initials |
+| **Status** | A pill or dot with a label |
+
+They never take the same shape. When you build something that shows both at
+once, that is the rule to check first.
+
 ### Never
 
 - Colour as the *only* carrier of meaning. Always pair with an icon, a label,

@@ -153,6 +153,52 @@ red/green pair. Every status must also carry an icon, a label, or a position.
 
 ---
 
+## Identity tones
+
+A categorical palette for **who**, not what state: the tile behind a desk's
+initials, a teammate's avatar, a thread's tint, a skill's category, a memory's
+kind. Assigned by hash, so a name keeps its colour across reloads and carries
+no meaning beyond "not the other one".
+
+| Token | Mark | Light text | Dark text |
+| --- | --- | --- | --- |
+| `--tone-1` violet | `#8B5CF6` | `#6D28D9` 6.93:1 | `#C4B5FD` 10.58:1 |
+| `--tone-2` blue | `#3B82F6` | `#1D4ED8` 6.54:1 | `#93C5FD` 10.83:1 |
+| `--tone-3` teal | `#14B8A6` | `#0F766E` 5.34:1 | `#5EEAD4` 13.20:1 |
+| `--tone-4` fuchsia | `#D946EF` | `#A21CAF` 6.17:1 | `#F0ABFC` 11.10:1 |
+| `--tone-5` slate | `#64748B` | `#475569` 7.39:1 | `#CBD5E1` 13.16:1 |
+
+**No amber, no green, no red.** That is the whole design of this palette.
+Identity used to be drawn from the same Tailwind colours as status, which put
+the collision the brand doc warns about directly into the product: a desk
+keyed `emerald` wore the exact green that means "done", a skill filed under
+Finance wore the red that means "failed", and every task-outcome memory looked
+like a failed one.
+
+Five rather than eight, because five hues clear of the status vocabulary is
+what the hue circle has room for once brand and five states are spoken for. A
+hash over five still distributes well.
+
+**Where the hues do come close — violet against brand indigo, blue against
+running cyan — form separates them:**
+
+| | Shape | Carries |
+| --- | --- | --- |
+| **Identity** | A tile with initials | Who |
+| **Status** | A pill or dot with a label | What state |
+
+They never take the same shape. That rule is what makes the remaining hue
+proximity safe, and it is the first thing to check when adding a component
+that shows both at once.
+
+### Legacy slot names
+
+`TEAM_TONES` and the thread `TONES` map are keyed `sky`, `violet`, `amber`,
+`emerald`, `rose`, `cyan`, `indigo`, `teal`. Those keys are **persisted
+against desks and members and arrive from the host**, so they cannot be
+renamed — they name a slot, not a colour. A desk keyed `amber` resolves to
+`--tone-5` (slate), and that is correct.
+
 ## Charts
 
 | Slot | Light | Dark |
@@ -191,19 +237,28 @@ with status hues would imply a health they do not carry.
 
 ## Hardcoded colour debt
 
-26 raw hex literals remain in `.tsx`. None break the build; each is a place a
-theme change will not reach.
+**Cleared.** Every colour in `src/` now resolves through a token. Verify with:
 
-| Value | Sites | Files | Replace with |
-| --- | --- | --- | --- |
-| `#5865f2`, `#7f8ffa`, `#4752c4` | 8 | `sidebar-controls.tsx`, `FeedbackView.tsx` | Keep — Discord's own brand colour, correct to hardcode. Move to a named `--brand-discord` so intent is explicit. |
-| `#2a78d6`, `#3987e5` | 6 | `FinancesView.tsx`, `UsageView.tsx` | `var(--chart-1)` |
-| `#008300` | 2 | `UsageView.tsx` | `var(--chart-3)` |
-| `#1baf7a`, `#199e70` | 2 | `UsageView.tsx` | `var(--chart-3)` or `--chart-2` |
-| `#e35c35`, `#ffb08a` | 4 | `kg/KnowledgeGraph.tsx` | `var(--kg-brain-1)` |
-| `#3df08c`, `#ff6259` | 2 | `kg/KnowledgeDetail.tsx` | `var(--status-done)` / `var(--status-failed)` |
-| `#ffffff` | 4 | `kg/KnowledgeGraph.tsx` | Canvas-drawn; verify against `--card` before changing |
+```sh
+cd frontend
+grep -rn '\(text\|bg\|border\|ring\|fill\|stroke\)-\(emerald\|rose\|amber\|sky\|red\|green\|blue\|yellow\|violet\|indigo\|teal\|cyan\|slate\)-[0-9]' src --include="*.tsx" --include="*.ts"
+grep -rn '#[0-9a-fA-F]\{6\}' src --include="*.tsx" --include="*.ts"
+```
 
-The `UsageView`/`FinancesView` pairs are light/dark hex duplicates chosen
-manually — replacing them with `--chart-*` deletes the duplication *and* the
-manual theme switch.
+The first returns nothing. The second returns only `src/lib/connections.ts`.
+
+### The one file that keeps its hexes
+
+`connections.ts` holds eleven third-party provider brand colours — Gmail's
+red, Slack's aubergine, GitHub's near-black. They are correct as literals:
+they identify *someone else*, and a themed approximation of Slack's purple
+would be wrong in both themes. They are data about a third party, not a design
+decision this system gets to make, and the field says so.
+
+Discord's blurple is the same category but appears in markup rather than data,
+so it is named: `--brand-discord`, `--brand-discord-hover`,
+`--brand-discord-on-dark`. The token name is what stops a future cleanup
+"fixing" it into the palette.
+
+Anything drawn on top of a provider colour must not assume a light or dark
+ground — they span `#0F0F0F` to `#EA4335`.
