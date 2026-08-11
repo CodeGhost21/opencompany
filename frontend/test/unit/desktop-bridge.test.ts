@@ -145,7 +145,11 @@ describe("registering connections with the core", () => {
 
     const pending = registerConnection("conn-race", "https://acme.test");
     forgetConnection("conn-race");
-    // Nothing has gone out yet: the connect is parked, so the disconnect is too.
+    // Let the chained `oc_connect` actually be issued. `registerConnection`
+    // sequences behind whatever is parked under the id, so the invoke happens a
+    // microtask later rather than synchronously.
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // Nothing has completed yet: the connect is parked, so the disconnect is too.
     expect(order).toEqual([]);
 
     releaseConnect?.();
@@ -180,6 +184,49 @@ describe("registering connections with the core", () => {
     expect(calls.filter((c) => c.command === "oc_disconnect")).toEqual([
       { command: "oc_disconnect", args: { connectionId: id } },
     ]);
+  });
+
+  it("does not let a pending disconnect land on top of a fresh registration", async () => {
+    // The mirror of the test above. `forgetConnection` sequences behind a
+    // pending registration; if `registerConnection` did not do the same for a
+    // pending disconnect, a re-register racing an in-flight `oc_disconnect`
+    // could land first and then be torn down by it — the connection would be
+    // registered in the console and absent from the core.
+    const order: string[] = [];
+    let releaseDisconnect: (() => void) | undefined;
+    (window as unknown as { __TAURI__: { invoke: unknown } }).__TAURI__.invoke = (
+      command: string,
+    ) => {
+      if (command === "oc_disconnect") {
+        return new Promise<void>((resolve) => {
+          releaseDisconnect = () => {
+            order.push("oc_disconnect");
+            resolve();
+          };
+        });
+      }
+      order.push(command);
+      return Promise.resolve();
+    };
+
+    await registerConnection("conn-mirror", "https://acme.test");
+    forgetConnection("conn-mirror");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // Re-register while the disconnect is still parked, then let every
+    // microtask drain WITHOUT releasing it. The second `oc_connect` must not
+    // have been issued yet: that is the difference chaining makes, and without
+    // it the invoke fires here and only the resolution order differs — which is
+    // not something an assertion on the final order can see.
+    const again = registerConnection("conn-mirror", "https://acme.test");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(order).toEqual(["oc_connect"]);
+
+    releaseDisconnect?.();
+    await again;
+
+    // The reconnect is last, so the core ends up holding the connection.
+    expect(order).toEqual(["oc_connect", "oc_disconnect", "oc_connect"]);
   });
 
   it("keeps a failed registration from resurfacing on every later request", async () => {

@@ -80,12 +80,21 @@ export function registerConnection(
   const desktop = bridge();
   if (!desktop) return Promise.resolve();
 
-  const pending = desktop
-    .invoke<void>("oc_connect", {
-      connectionId: id,
-      baseUrl,
-      platformToken: credential.platformToken ?? null,
-    })
+  // Chained onto whatever is already parked under this id, in both directions.
+  // `forgetConnection` sequences its disconnect behind a pending registration;
+  // without the same courtesy here, a re-register racing an in-flight
+  // `oc_disconnect` can land first and then be disconnected by it — the same
+  // ordering bug, mirrored. Whichever call came last wins, which is what a
+  // caller means by calling it.
+  const previous = registrations.get(id) ?? Promise.resolve();
+  const pending = previous
+    .then(() =>
+      desktop.invoke<void>("oc_connect", {
+        connectionId: id,
+        baseUrl,
+        platformToken: credential.platformToken ?? null,
+      }),
+    )
     .then(
       () => undefined,
       (error: unknown) => {

@@ -110,7 +110,17 @@ export function DevicePairing() {
               Forget on this machine
             </Button>
           </div>
-        ) : (
+        ) : null}
+        {paired && error ? (
+          // The paired branch renders no form, so without this a failed forget
+          // sets state nobody can see: the row goes on saying "Paired" and the
+          // button appears to do nothing, which is the symptom the catch was
+          // added to prevent.
+          <p role="alert" className="mt-2 text-xs text-destructive">
+            {error}
+          </p>
+        ) : null}
+        {!paired ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Input
@@ -136,7 +146,7 @@ export function DevicePairing() {
               </p>
             ) : null}
           </div>
-        )}
+        ) : null}
       </CardContent>
     </Card>
   );
