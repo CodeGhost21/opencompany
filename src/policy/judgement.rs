@@ -34,13 +34,16 @@
 //! The invariant, phrased so it survives the next tier: **this arm only ever
 //! speaks where the mode allowed.** A tier that already parks or denies a call
 //! keeps its own answer, whatever the tier is called and however many there
-//! are. Spelling out which tiers those are dates the moment a tier lands — as
-//! it did when `auto` (issue #560) arrived mid-review.
+//! are.
 //!
-//! As it happens the arm today changes `full` alone: `supervised` parks a
-//! [`Reach::Consequence`] call, `readonly` denies it, and `auto` parks
-//! everything that is not `Grantable`, which covers every rule below.
-//! `the_arm_adds_nothing_under_auto` pins that rather than trusting it.
+//! Which tiers that leaves the arm speaking on is deliberately **not
+//! enumerated** — not here, not in [`crate::harness::policy`], and not in the
+//! spec. A prose tier list is a copy to miss the next time a tier lands, and
+//! `auto` (issue #560) landing mid-review is the proof that they land. The
+//! question is answered instead by the one copy that cannot go stale:
+//! `the_arm_adds_nothing_under_auto` walks **every declared tool** and asserts
+//! this arm is silent on each one a tier still allows — so a new tier or a new
+//! declaration fails a test rather than outdating a paragraph.
 //!
 //! # Where the classification lives
 //!
@@ -271,9 +274,10 @@ fn is_irreversible_group(group: EffectGroup) -> bool {
 /// Only the first warrants stopping a call that changes nothing outside the
 /// company. Deriving the set from the flag swept up `workspace_write` and
 /// `workspace_create`, which is how the company publishes to its own note
-/// tree — and stopping those broke publishing outright: thirteen
-/// `publish_turn_test` cases went from passing to "the model was never handed
-/// a publish receipt", because a parked call is a call that never happens.
+/// tree — and stopping those broke publishing outright: thirteen of the
+/// `publish_turn_test` cases as the suite then stood went from passing to "the
+/// model was never handed a publish receipt", because a parked call is a call
+/// that never happens.
 ///
 /// So the set is named. `every_unbounded_tool_is_declared` keeps it honest: a
 /// rename in the declaration table fails that test rather than silently
@@ -328,9 +332,12 @@ fn is_unbounded(tool: &str, consequence: Consequence) -> bool {
 /// who wants publishing gated names it in `always_approve`, which is read before
 /// this arm and is a thing they can see, change and revoke.
 ///
-/// The size of the alternative is visible in the tests: excluding it keeps the
-/// 11 `publish_turn_test` cases green, and gating it would need a grant minted
+/// The size of the alternative is visible in the tests: excluding it keeps all
+/// 19 `publish_turn_test` cases green, and gating it would need a grant minted
 /// per scripted call in a suite that is about publish mechanics, not approvals.
+/// That count is re-checked against #659's merged fixtures rather than carried
+/// forward — #659 landed first and touched this suite, so the evidence the
+/// carve-out rests on was re-measured on top of it, not assumed.
 ///
 /// `http_request`, `curl` and `web_fetch` **were** on this list pending #674 and
 /// are not deferred any more. #674 ruled that they are governed by #614 on the
@@ -572,10 +579,10 @@ mod tests {
         }
     }
 
-    /// The agent's own scratch space. These mutate, so `supervised` still parks
-    /// them and `readonly` still denies them — but they are the low-consequence
-    /// writes #444 found safe enough to hand over for a week, so the judgement
-    /// gate does not add a stop of its own under `full`.
+    /// The agent's own scratch space. These mutate, so any tier that parks or
+    /// denies a mutating call keeps its own answer — but they are the
+    /// low-consequence writes #444 found safe enough to hand over for a week,
+    /// so the judgement arm adds no stop of its own where a tier allowed them.
     #[test]
     fn the_agents_own_drafts_do_not_stop() {
         for tool in [
@@ -653,11 +660,12 @@ mod tests {
     }
 
     /// The company writing to its own note tree is not an unbounded act, and
-    /// stopping it broke publishing (13 `publish_turn_test` cases). They are
+    /// stopping it broke publishing (13 `publish_turn_test` cases at the
+    /// time; the suite now stands at 19, all green). They are
     /// `Standing::PerCall` — issue #444 refuses them a standing grant because
     /// they overwrite guidance the operator authored — and that is a different
-    /// reason from "what this reaches cannot be bounded". `supervised` still
-    /// parks them and `readonly` still denies them; this arm adds nothing.
+    /// reason from "what this reaches cannot be bounded". A tier that parks or
+    /// denies them keeps its own answer; this arm adds nothing on top.
     #[test]
     fn writing_the_companys_own_notes_is_not_unbounded() {
         for tool in ["workspace_write", "workspace_create"] {

@@ -26,14 +26,18 @@ where the mode allowed.** A tier that already parks or denies a call keeps its
 own answer, whatever it is called and however many tiers there are — so a tier
 an operator has already reasoned about does not shift under them.
 
-Today that leaves **`full` alone**. `supervised` parks a `Consequence` call,
-`readonly` denies it, and `auto` (#560) parks everything that is not
-`Grantable` — which covers every rule below, so this adds nothing there. That
-last one holds by a property of the declaration table rather than by
-construction: the day a `Grantable` + `Consequence` tool with a named
-consequence class is declared, `auto` would shift silently. The test
-`the_arm_adds_nothing_under_auto` walks the whole table and fails on that day,
-rather than the claim resting on a paragraph.
+Which tiers that leaves the arm speaking on is deliberately **not enumerated
+here, in `judgement.rs`, or in `policy.rs`**. A prose list of tiers is a copy to
+miss the next time one lands, and `auto` (#560) landing mid-review is the proof
+that they land. The question is answered in the one copy that cannot go stale:
+`the_arm_adds_nothing_under_auto` walks **every declared tool** and asserts this
+arm is silent on each one a tier still allows.
+
+Which matters most where the answer holds by a property of the declaration
+table rather than by construction. The day a `Grantable` + `Consequence` tool
+with a named consequence class is declared, a tier an operator has already
+reasoned about would shift under them silently — and that test fails that day,
+rather than the claim resting on a paragraph nobody re-reads.
 
 `full`'s contract is "act without asking, *except the few things on the
 always-ask list*", and this is what makes that exception mean something without

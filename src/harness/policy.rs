@@ -1,8 +1,11 @@
 //! [`ApprovalPolicy`] — a manifest `[policy]` → openhuman [`ToolPolicy`] bridge.
 //!
 //! Manifest `[policy].mode` deliberately uses OpenHuman's own security-tier
-//! words — `readonly` / `supervised` / `full` — so the mapping to
-//! [`PolicyMode`] is 1:1. On top of the tier the bridge honours the manifest's
+//! words, so the mapping to [`PolicyMode`] is 1:1 — and that enum is where the
+//! tiers are listed, deliberately the only place. Spelling them out here as
+//! well went stale the moment `auto` landed (issue #560), which is the whole
+//! reason this file stopped enumerating them. On top of the tier the bridge
+//! honours the manifest's
 //! `always_approve` effect kinds and the per-agent `budget_usd_daily` /
 //! `auto_approve_under_usd` thresholds.
 //!
