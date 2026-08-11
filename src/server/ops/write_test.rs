@@ -5969,6 +5969,14 @@ async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
             "/api/v1/company/composio/authorize",
             Some(json!({ "toolkit": "gmail" })),
         ),
+        // Revoking one of those accounts is the same decision as choosing it
+        // (issue #404) — a member who cannot connect must not be able to
+        // disconnect either.
+        (
+            "DELETE",
+            "/api/v1/company/composio/connections/conn-1",
+            None,
+        ),
         // The model every agent thinks with, and the key it is billed against.
         (
             "PUT",
