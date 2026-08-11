@@ -762,13 +762,23 @@ impl ApprovalPolicy {
         self.budget_usd_daily
     }
 
-    /// Whether `kind` is in the manifest's `always_approve` list. Matches either
-    /// the exact dotted kind or a leading segment (so `payment` matches
-    /// `payment.send`).
+    /// Whether `kind` is in the manifest's `always_approve` list.
+    ///
+    /// Delegates to [`always_approve::matches`](crate::policy::always_approve::matches)
+    /// so this path and the native-effect gate
+    /// ([`ManifestApprovalGate`](crate::policy::ManifestApprovalGate)) read one
+    /// rule. They used to hold two: this one matched the exact kind or a
+    /// leading segment, the gate matched exactly — so `always_approve =
+    /// ["payment"]` gated a tool call here and silently missed the
+    /// identically-named native effect there (issue #684).
+    ///
+    /// `kind` is the tool name on this path, which is not a coincidence to
+    /// paper over: [`effect_for`](Self::effect_for) below projects a flagged
+    /// call onto an [`Effect`] by making the tool name the effect kind
+    /// verbatim, so the two namespaces the issue describes are one namespace
+    /// read twice.
     fn always_requires_approval(&self, kind: &str) -> bool {
-        self.always_approve
-            .iter()
-            .any(|entry| entry == kind || kind.starts_with(&format!("{entry}.")))
+        crate::policy::always_approve::matches(&self.always_approve, kind)
     }
 
     /// Best-effort USD amount carried by a tool call's arguments, from either an
@@ -1456,6 +1466,102 @@ mod tests {
                 .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
+    }
+
+    /// The two approval paths must decide the same operator list the same way
+    /// (issue #684).
+    ///
+    /// This is the assertion whose absence let the defect ship. Each path had
+    /// its own matcher and its own tests, and each path's tests passed: the
+    /// native gate matched dotted kinds exactly, this one matched tool names
+    /// with a leading-segment rule, and nothing anywhere compared them. So
+    /// `always_approve = ["payment"]` parked here and waved through there, and
+    /// the shipped default — three dotted kinds, no tool names — was live on
+    /// the gate and inert on the harness, which is the path a company using the
+    /// openhuman toolbelt actually runs.
+    ///
+    /// It asserts agreement rather than a fixed verdict per path deliberately.
+    /// Pinning "the harness parks `payment`" would go green again the moment
+    /// the two implementations drifted apart in the other direction.
+    #[tokio::test]
+    async fn both_approval_paths_agree_on_the_same_always_approve_list() {
+        use crate::policy::ManifestApprovalGate;
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::PolicyDecision;
+
+        // A leading segment, an exact dotted kind, a bare tool name, a
+        // near-miss that must NOT be gated, and a case variant.
+        //
+        // Every name here is one the tier itself has no opinion about under
+        // `full`, so the only thing that can make the two paths disagree is the
+        // fence. A priced name like `web_search` would drag the harness's
+        // metered-read and budget arms into a comparison that is not about
+        // `always_approve`, so it is deliberately absent.
+        let fence = &["payment", "filing.submit", "publish_artifact"];
+        let names = [
+            "payment.send",
+            "payment",
+            "filing.submit",
+            "publish_artifact",
+            "PUBLISH_ARTIFACT",
+            "payroll.export",
+        ];
+
+        // `full` on both sides, so the tier decides nothing and any parking
+        // observed is the override's doing.
+        let harness = policy("full", fence, None);
+        let gate = ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: fence.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: None,
+        });
+
+        let mut agreed = 0;
+        for name in names {
+            let harness_parks = matches!(
+                harness.check(&request(name, serde_json::json!({}))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            );
+            let effect = Effect {
+                kind: name.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: None,
+            };
+            let gate_parks = matches!(
+                gate.evaluate(&CompanyId::new("acme"), &effect)
+                    .await
+                    .unwrap(),
+                PolicyDecision::RequireApproval
+            );
+            assert_eq!(
+                harness_parks, gate_parks,
+                "`{name}` parks on one approval path and not the other — \
+                 one operator list, two answers (issue #684)"
+            );
+            agreed += 1;
+        }
+        assert_eq!(agreed, names.len(), "every name must have been compared");
+
+        // Non-vacuity: the comparison above is only worth something if the
+        // fence actually separates these names. Two paths that both allowed
+        // everything would agree perfectly and prove nothing.
+        assert!(matches!(
+            harness
+                .check(&request("payment.send", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(
+            harness
+                .check(&request("payroll.export", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
     }
 
     /// Issue #560's contract, stated as the operator reads it: the agent works

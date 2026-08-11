@@ -71,7 +71,9 @@ search_daily_calls = 200           # per-company daily web_search cap (0 = pause
 
 [policy]                           # see company-brain/approvals.md
 mode = "supervised"                # readonly | supervised (default) | auto | full
-always_approve = ["payment.send", "filing.submit", "external.publish"]
+always_approve = ["publish_artifact"]   # default []; names a tool or an effect
+                                   # kind — see approvals.md. An entry that
+                                   # matches neither is a validation error
 auto_approve_under_usd = 1.0
 
 [place]                            # see company-as-agent/
@@ -197,8 +199,14 @@ prompt = "Weekly review and operator digest"
   outward reads run unattended, anything that leaves the company or spends on
   submit still parks). `always_approve` lists effect kinds that park for
   approval regardless of amount and wins over every tier including `full`;
-  `auto_approve_under_usd` lets small spends through. Defaults are
-  conservative: `supervised`, with all money/publish/filing effects gated.
+  `auto_approve_under_usd` lets small spends through. **A tool name is an
+  effect kind** — the harness projects one onto the other — so
+  `["publish_artifact"]` and `["payment.send"]` are the same syntax at
+  different segment counts, and an entry matching neither a declared tool nor a
+  consequence-bearing kind is a validation error rather than a silent
+  no-match (issue #684). The default is **empty**: `supervised` already parks
+  every money / publish / filing effect through the checkpoint taxonomy, so the
+  conservative default is the mode, not the list.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
