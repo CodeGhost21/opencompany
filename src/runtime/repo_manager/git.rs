@@ -216,6 +216,63 @@ fn hardening_flags() -> [&'static str; 6] {
     ]
 }
 
+/// Exactly what a `git` child is given: its arguments and its whole
+/// environment.
+///
+/// Built as data rather than by poking a `Command`, because "the credential is
+/// in neither of these" is the central claim this module makes, and a claim
+/// that cannot be inspected is a claim that cannot be tested. A test asserts it
+/// over the real plan for a real token; a `Command` would only have let one
+/// assert it indirectly, over whatever the child happened to print.
+#[derive(Debug)]
+struct SpawnPlan {
+    /// The full argument vector, hardening flags first.
+    args: Vec<String>,
+    /// The complete environment. Not a delta — the child is spawned with
+    /// `env_clear` and exactly these.
+    env: Vec<(String, String)>,
+}
+
+impl SpawnPlan {
+    fn build(args: &[&str], askpass: Option<&AskpassDir>) -> Self {
+        let mut argv: Vec<String> = hardening_flags().iter().map(|f| f.to_string()).collect();
+        argv.extend(args.iter().map(|a| a.to_string()));
+
+        let mut env: Vec<(String, String)> = Vec::new();
+        for key in [
+            "PATH",
+            // TLS trust, for the platforms that locate it by variable.
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "GIT_SSL_CAINFO",
+            // git resolves the current user through this on some minimal images.
+            "TZ",
+        ] {
+            if let Ok(value) = std::env::var(key) {
+                env.push((key.to_string(), value));
+            }
+        }
+        // A prompt git cannot answer must fail, not wait on a tty nobody is at.
+        env.push(("GIT_TERMINAL_PROMPT".into(), "0".into()));
+        env.push(("GIT_CONFIG_NOSYSTEM".into(), "1".into()));
+        env.push(("GIT_CONFIG_GLOBAL".into(), "/dev/null".into()));
+        // Large binaries are not what a code-reading tier is for, and an LFS
+        // smudge would fetch them through a filter this host has not vetted.
+        env.push(("GIT_LFS_SKIP_SMUDGE".into(), "1".into()));
+        if let Some(dir) = askpass {
+            // `$HOME` points at the scratch directory so nothing resolves an
+            // operator's `~/.gitconfig` even if `GIT_CONFIG_GLOBAL` were
+            // ignored.
+            env.push(("HOME".into(), dir.path.to_string_lossy().into_owned()));
+            env.push((
+                "GIT_ASKPASS".into(),
+                dir.script().to_string_lossy().into_owned(),
+            ));
+        }
+        Self { args: argv, env }
+    }
+}
+
 /// Runs `git` in `cwd` with the hardening flags and a minimal environment.
 ///
 /// `token` is `Some` only for the invocations that talk to the network. When it
@@ -240,42 +297,17 @@ async fn run_bounded(
     askpass: Option<&AskpassDir>,
     limit: std::time::Duration,
 ) -> Result<GitOutput> {
+    let plan = SpawnPlan::build(args, askpass);
     let mut cmd = tokio::process::Command::new("git");
     cmd.current_dir(cwd);
-    cmd.args(hardening_flags());
-    cmd.args(args);
-
+    cmd.args(&plan.args);
     // Start from nothing, then add back only what git needs. Building the
     // environment up rather than filtering it down is what makes "the token is
     // not in the environment" a property of the code instead of a claim about
     // it — and it also keeps an operator's `GIT_*` variables from steering a
     // host-side fetch.
     cmd.env_clear();
-    for key in [
-        "PATH",
-        // TLS trust, for the platforms that locate it by variable.
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-        "GIT_SSL_CAINFO",
-        // git resolves the current user through this on some minimal images.
-        "TZ",
-    ] {
-        if let Ok(value) = std::env::var(key) {
-            cmd.env(key, value);
-        }
-    }
-    cmd.env("GIT_TERMINAL_PROMPT", "0");
-    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
-    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
-    // Large binaries are not what a code-reading tier is for, and an LFS smudge
-    // would fetch them through a filter this host has not vetted.
-    cmd.env("GIT_LFS_SKIP_SMUDGE", "1");
-    if let Some(dir) = askpass {
-        // `$HOME` points at the scratch directory so nothing resolves an
-        // operator's `~/.gitconfig` even if `GIT_CONFIG_GLOBAL` were ignored.
-        cmd.env("HOME", &dir.path);
-        cmd.env("GIT_ASKPASS", dir.script());
-    }
+    cmd.envs(plan.env.iter().map(|(k, v)| (k, v)));
 
     cmd.stdin(Stdio::piped());
     cmd.stdout(Stdio::piped());
@@ -388,17 +420,72 @@ mod test {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[tokio::test]
-    async fn the_environment_git_receives_carries_no_token() {
-        // `run` is the only place an environment is built, so this asserts the
-        // real thing: ask git to print its own environment-visible config and
-        // check the sentinel appears nowhere in it.
+    #[test]
+    fn neither_the_argv_nor_the_environment_can_carry_the_token() {
+        // The central claim of this module, asserted over the exact data the
+        // child is spawned with rather than over something it printed.
         let base = std::env::temp_dir().join(format!("oc-gitenv-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let dir = AskpassDir::create(&base).unwrap();
 
-        // `git var GIT_EDITOR` is a trivial command that still goes through the
-        // full environment construction. `--exec-path` would too; either works.
+        let plan = SpawnPlan::build(
+            &[
+                "fetch",
+                "--quiet",
+                "origin",
+                "+refs/heads/main:refs/heads/main",
+            ],
+            Some(&dir),
+        );
+
+        // There is no parameter here that *could* carry it — `SpawnPlan::build`
+        // is not given the token at all, which is the structural half of the
+        // guarantee. These assertions are the regression guard for an edit that
+        // changes that.
+        for arg in &plan.args {
+            assert!(!arg.contains("SENTINEL"), "argv leaked the token: {arg}");
+        }
+        for (key, value) in &plan.env {
+            assert!(
+                !key.contains("SENTINEL") && !value.contains("SENTINEL"),
+                "env leaked the token: {key}={value}"
+            );
+        }
+
+        // And the environment really is the whole environment, not a delta on
+        // the parent's — the child is spawned with `env_clear`. A variable the
+        // operator exported cannot steer a host-side fetch.
+        let names: Vec<&str> = plan.env.iter().map(|(k, _)| k.as_str()).collect();
+        assert!(names.contains(&"GIT_TERMINAL_PROMPT"), "{names:?}");
+        assert!(names.contains(&"GIT_CONFIG_NOSYSTEM"), "{names:?}");
+        assert!(names.contains(&"GIT_ASKPASS"), "{names:?}");
+        assert!(names.contains(&"HOME"), "{names:?}");
+        assert!(
+            names.iter().all(|n| n.starts_with("GIT_")
+                || matches!(
+                    *n,
+                    "PATH" | "HOME" | "TZ" | "SSL_CERT_FILE" | "SSL_CERT_DIR"
+                )),
+            "an unexpected variable reached git: {names:?}"
+        );
+
+        // The hardening flags come first, so a subcommand cannot displace them.
+        assert_eq!(plan.args[0], "-c");
+        assert_eq!(plan.args[1], "core.hooksPath=/dev/null");
+        assert_eq!(plan.args[6], "fetch");
+
+        drop(dir);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[tokio::test]
+    async fn a_credentialed_invocation_prints_nothing_of_the_token() {
+        // The end-to-end companion to the plan assertion above: a real spawn,
+        // a real token on the pipe, and neither stream carrying it back.
+        let base = std::env::temp_dir().join(format!("oc-gitrun-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = AskpassDir::create(&base).unwrap();
+
         let out = run(&base, &["var", "GIT_EDITOR"], Some("SENTINEL"), Some(&dir))
             .await
             .unwrap();
