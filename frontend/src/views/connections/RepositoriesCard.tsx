@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Check, GitBranch, Info, Loader2, Trash2 } from "lucide-react";
+import { AlertTriangle, Check, GitBranch, Info, Loader2, Trash2 } from "lucide-react";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -9,6 +9,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
+import { repoCoverage } from "@/lib/repos";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 
@@ -31,20 +32,34 @@ type Load = "loading" | "ready" | "unavailable";
  * credential; nothing an agent runs ever sees the token, and no read on this
  * page returns it — a stored credential shows only as a fingerprint.
  *
- * The card is deliberately honest about two things the operator cannot see
+ * The card is deliberately honest about three things the operator cannot see
  * from here:
  *
- * - **Nothing reads these yet.** Binding a repository in this release stages
- *   the code on the host. The tools that let an agent open it are a follow-up,
- *   and saying so beats an operator wiring a token and waiting for a capability
- *   that has not shipped.
+ * - **Who can actually read this.** Binding a repository and granting agents
+ *   the `repo` namespace are two separate decisions made on two different
+ *   surfaces (this page, and the version-controlled manifest), and either one
+ *   alone looks like a finished setup from where it was made. So the card
+ *   states the coverage and names whichever half is missing — a granted company
+ *   with nothing bound, or bound repositories no teammate is allowed to open.
+ *   Both are silent otherwise: the tools simply are not wired, and the only
+ *   symptom is an agent that says it cannot see the code.
+ * - **Diffs need a build that links a GitHub client**, which not every host
+ *   does.
  * - **A classic token will be refused**, so the field says which kind to make
  *   *before* they paste one, rather than after.
+ *
+ * Grants are not editable here, and that is not an omission. A tool grant is
+ * version-controlled manifest state — `AgentDetailDto.editable` excludes tools
+ * for both sources — so the honest console move is to *report* the gap and name
+ * the exact edit, not to offer a control that would write to a file the console
+ * does not own.
  */
 export function RepositoriesCard({ client, company, canManage }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [repos, setRepos] = useState<Repo[]>([]);
   const [diffsAvailable, setDiffsAvailable] = useState(false);
+  const [grantedAgents, setGrantedAgents] = useState<string[]>([]);
+  const [repoGranted, setRepoGranted] = useState<boolean | undefined>(undefined);
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
   const [branches, setBranches] = useState("");
@@ -55,7 +70,18 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
       const list = await listRepos(client, company);
       setRepos(list.repos);
       setDiffsAvailable(list.pullRequestsAvailable);
+      setGrantedAgents(list.grantedAgents);
       setLoad("ready");
+      // The company-level grant, read separately because it is a property of
+      // the manifest rather than of the bindings. Its failure is swallowed on
+      // purpose: a host that cannot answer it should cost the card one notice,
+      // not the whole list.
+      try {
+        const caps = await client.capabilityStatus(company);
+        setRepoGranted(caps.repoGranted);
+      } catch {
+        setRepoGranted(undefined);
+      }
     } catch {
       // No repository surface on this host — hide the card entirely rather
       // than showing an error for a capability that was never offered.
@@ -123,6 +149,11 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
 
   if (load === "unavailable") return null;
 
+  // Which half of the setup is missing, decided in one place so the three
+  // states that look identical on screen cannot be confused by a condition
+  // written twice. See `lib/repos.ts`.
+  const { notice, readableBy } = repoCoverage({ repos, grantedAgents, repoGranted });
+
   return (
     <section className="space-y-3">
       <div className="flex items-center justify-between gap-3">
@@ -142,22 +173,49 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
             <p className="text-sm font-medium">GitHub repositories</p>
             <p className="text-sm text-muted-foreground">
               Bind a repository and this host keeps its own copy, refreshed with the token you
-              give it. The token stays on the host — it is never written into a workspace, an
+              give it. Teammates granted <code className="font-mono">repo</code> can check that
+              copy out and read pull requests. The token stays on the host — it is never written into a workspace, an
               agent&apos;s environment, or any file your agents can read.
             </p>
           </div>
 
-          <Alert>
-            <Info className="size-4" />
-            <AlertTitle>Nothing reads these yet</AlertTitle>
-            <AlertDescription>
-              This release stages the code on the host and stops there. The tools that let a
-              teammate open a bound repository, and read a pull request&apos;s diff, arrive in a
-              follow-up — binding now just means they will have something to read when they do.
-              {!diffsAvailable &&
-                " Pull-request diffs also need a build of this host with GitHub access compiled in; this one does not have it."}
-            </AlertDescription>
-          </Alert>
+          {/* The two silent misconfigurations, each naming the exact edit.
+              Rendered only once the list has loaded, so a slow host never
+              flashes "nothing is bound" at an operator who just bound one. */}
+          {load === "ready" && notice === "granted-unbound" && (
+            <Alert>
+              <AlertTriangle className="size-4" />
+              <AlertTitle>Granted, but nothing is bound</AlertTitle>
+              <AlertDescription>
+                This company&apos;s teammates are allowed to read repositories, and there are none
+                to read. Bind one below and the tools switch on for them on their next turn.
+              </AlertDescription>
+            </Alert>
+          )}
+          {load === "ready" && notice === "bound-ungranted" && (
+            <Alert>
+              <AlertTriangle className="size-4" />
+              <AlertTitle>Bound, but no teammate can read them</AlertTitle>
+              <AlertDescription>
+                Nobody on this roster holds the <code className="font-mono">repo</code> tool grant,
+                so no teammate can open any of these. Add <code className="font-mono">repo</code>{" "}
+                to <code className="font-mono">[tools].allow</code> in the company manifest — a
+                broad <code className="font-mono">*</code> deliberately does not confer it, because
+                a checkout puts somebody else&apos;s source in a teammate&apos;s sandbox.
+              </AlertDescription>
+            </Alert>
+          )}
+
+          {!diffsAvailable && (
+            <Alert>
+              <Info className="size-4" />
+              <AlertTitle>Pull-request diffs are off on this host</AlertTitle>
+              <AlertDescription>
+                Reading a pull request needs a build with GitHub access compiled in; this one does
+                not have it. Checking a repository out still works.
+              </AlertDescription>
+            </Alert>
+          )}
 
           {load === "loading" ? (
             <p className="text-sm text-muted-foreground">Loading…</p>
@@ -200,6 +258,18 @@ export function RepositoriesCard({ client, company, canManage }: Props) {
                 </li>
               ))}
             </ul>
+          )}
+
+          {/* Who can actually open them. The names are the roster ids the host
+              resolved through the same grant walk the harness builds agents
+              with, so this says what is wired rather than what the manifest
+              looks like it should wire. */}
+          {load === "ready" && readableBy.length > 0 && (
+            <p className="text-xs text-muted-foreground">
+              Readable by {readableBy.join(", ")}. A checkout lands in that teammate&apos;s own
+              workspace, is disconnected from this host&apos;s copy, and is deleted when the task
+              ends.
+            </p>
           )}
 
           {!canManage ? (
