@@ -799,8 +799,17 @@ impl Tool for WorkspaceListTool {
             // every subsequent entry behind a single pathological name. The
             // clamp announces its own drop, and `id=` (never truncated) stays
             // the addressable handle, so a bounded entry is still usable.
+            // A binary node announces itself in the listing (issue #553). An
+            // agent that cannot see the difference here would go on to
+            // `workspace_read` a video to find out — spending a tool call to
+            // learn something the index already knew.
+            let payload = match (&entry.node.mime, entry.node.size) {
+                (Some(mime), Some(size)) => format!("\t{mime}\t{size}B"),
+                (Some(mime), None) => format!("\t{mime}"),
+                _ => String::new(),
+            };
             let line = format!(
-                "{kind}\t{path}\tid={id}\trev={rev}\n",
+                "{kind}\t{path}\tid={id}\trev={rev}{payload}\n",
                 kind = kind_label(entry.node.kind),
                 path = echo_path(&entry.path),
                 id = entry.node.id,
@@ -928,6 +937,33 @@ impl Tool for WorkspaceReadTool {
                  `{WORKSPACE_LIST_TOOL}` and a `prefix` of \"{path}\".",
                 path = entry.path
             )));
+        }
+
+        // A payload is described, never returned (issue #553). This is a
+        // *success*, not an error: the agent asked a reasonable question and
+        // gets a complete answer — what the file is, how big, and its digest —
+        // just not the bytes, which it could do nothing with and which would
+        // blow the result budget `MAX_CONTENT_BYTES` exists to defend. The
+        // operator's console is where a payload is actually looked at.
+        if let Some(mime) = &entry.node.mime {
+            let mut out = format!(
+                "Workspace file `{path}` (id={id}, rev={rev}) holds {mime} data, not text.\n",
+                path = echo_path(&entry.path),
+                id = entry.node.id,
+                rev = entry.node.updated_at_millis,
+            );
+            if let Some(size) = entry.node.size {
+                out.push_str(&format!("Size: {size} bytes.\n"));
+            }
+            if let Some(sha) = &entry.node.sha256 {
+                out.push_str(&format!("sha256: {sha}\n"));
+            }
+            out.push_str(
+                "Its contents are not text and are not returned here. You can refer to this file \
+                 by its path when you talk about it, and the operator can open it in the \
+                 console. Do not try to read or rewrite it as text.\n",
+            );
+            return Ok(ToolResult::success(out));
         }
 
         // The `id` handed to the store came out of this company's own index, so
@@ -1138,6 +1174,20 @@ impl Tool for WorkspaceWriteTool {
             return Ok(ToolResult::error(format!(
                 "Refused: `{}` is a folder, not a note. Only notes have a body to overwrite.",
                 entry.path
+            )));
+        }
+
+        // A payload is not editable as text (issue #553). The store refuses this
+        // too, so this is not the guarantee — it is the *message*: caught here,
+        // the agent is told what the file actually is and what to do instead,
+        // rather than being handed a store-level error to interpret.
+        if let Some(mime) = &entry.node.mime {
+            return Ok(ToolResult::error(format!(
+                "Refused: `{path}` holds {mime} data, not text, so it has no body to overwrite. \
+                 Writing text over it would leave its recorded size and checksum describing bytes \
+                 that are no longer there. If you meant to produce a new version of this file, \
+                 create it and publish it; the operator can replace it in the console.",
+                path = entry.path,
             )));
         }
 
@@ -1501,6 +1551,9 @@ impl Tool for WorkspaceCreateTool {
             updated_at_millis: crate::ports::now_millis(),
             created_by: origin.clone(),
             updated_by: origin,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         match self
             .workspace
@@ -1602,6 +1655,9 @@ mod tests {
             updated_at_millis: 1_000,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         }
     }
 
@@ -1614,6 +1670,9 @@ mod tests {
             updated_at_millis: 2_000,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         }
     }
 
@@ -2269,6 +2328,31 @@ mod tests {
         }
         async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
             unreachable!("the listing never deletes")
+        }
+        async fn create_binary(
+            &self,
+            _company: &CompanyId,
+            _node: &WorkspaceNode,
+            _bytes: &[u8],
+        ) -> crate::Result<()> {
+            unreachable!("the listing never creates")
+        }
+        async fn write_binary(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _bytes: &[u8],
+            _mime: Option<&str>,
+            _author: WorkspaceOrigin,
+        ) -> crate::Result<WorkspaceNode> {
+            unreachable!("the listing never writes")
+        }
+        async fn read_bytes(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+        ) -> crate::Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            unreachable!("the listing never reads a payload")
         }
         async fn is_empty(&self, _company: &CompanyId) -> crate::Result<bool> {
             Ok(self.0.is_empty())
@@ -3138,6 +3222,9 @@ mod tests {
             updated_by: WorkspaceOrigin::Agent {
                 id: "maya".to_string(),
             },
+            mime: None,
+            size: None,
+            sha256: None,
         };
         store
             .create(&id, &node, Some("maya's draft"))
@@ -3211,6 +3298,9 @@ mod tests {
             updated_at_millis: 2_000,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         store.create(&id, &node, Some("a note")).await.unwrap();
 
@@ -3366,5 +3456,103 @@ mod tests {
                 "the brief dropped {phrase:?}: {brief}"
             );
         }
+    }
+
+    // -- binary nodes (issue #553) ------------------------------------------
+
+    /// A binary node, created through the port so its size and digest are the
+    /// store's own.
+    async fn with_payload(company: &str) -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
+        let (dir, ops) = seeded(company).await;
+        let id = CompanyId::new(company);
+        let node = WorkspaceNode {
+            mime: Some("image/png".to_string()),
+            ..file("n-img", "hero.png", None)
+        };
+        ops.create_binary(&id, &node, &[0x89, b'P', b'N', b'G', 0xff, 0xfe])
+            .await
+            .expect("payload");
+        (dir, ops)
+    }
+
+    /// `workspace_read` of a payload is a **success** carrying metadata — not
+    /// an error, and never the bytes. The agent asked a reasonable question and
+    /// gets a complete answer; the bytes would be unusable to it and would blow
+    /// the result budget (issue #417) that the text cap exists to defend.
+    #[tokio::test]
+    async fn reading_a_binary_node_returns_metadata_and_never_bytes() {
+        let (_dir, store) = with_payload("acme").await;
+        let tool = WorkspaceReadTool::new(ws(store, CompanyId::new("acme")));
+
+        let result = tool.execute(json!({"id": "n-img"})).await.unwrap();
+        assert!(
+            !result.is_error,
+            "describing a payload is an answer, not a failure"
+        );
+        let out = text(&result);
+        assert!(out.contains("image/png"), "{out}");
+        assert!(out.contains("6 bytes"), "the store's size: {out}");
+        let (_, sha) =
+            crate::ports::workspace::blob_metadata(&[0x89, b'P', b'N', b'G', 0xff, 0xfe]);
+        assert!(out.contains(&sha), "the store's digest: {out}");
+        // The payload's own bytes must not appear, in any rendering.
+        assert!(!out.contains("PNG"), "the bytes must not be echoed: {out}");
+        assert!(
+            !out.contains("BEGIN WORKSPACE NOTE"),
+            "a payload is not fenced as prose: {out}"
+        );
+    }
+
+    /// `workspace_write` refuses a payload, and says what the file actually is.
+    /// The store refuses this too — this layer exists to make the refusal
+    /// legible to a model rather than to be the guarantee.
+    #[tokio::test]
+    async fn writing_over_a_binary_node_is_refused_with_a_reason() {
+        let (_dir, store) = with_payload("acme").await;
+        let tool = WorkspaceWriteTool::new(ws(store.clone(), CompanyId::new("acme")));
+
+        let result = tool
+            .execute(json!({
+                "id": "n-img",
+                "content": "# not an image",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(result.is_error, "{}", text(&result));
+        let out = text(&result);
+        assert!(out.contains("image/png"), "{out}");
+
+        // And the payload is untouched.
+        let (node, _) = store
+            .read_bytes(&CompanyId::new("acme"), "n-img")
+            .await
+            .unwrap()
+            .expect("still a payload");
+        assert_eq!(node.size, Some(6));
+    }
+
+    /// The listing marks a payload, so an agent never spends a `workspace_read`
+    /// call to discover that a file is not text.
+    #[tokio::test]
+    async fn the_listing_marks_binary_entries_with_their_type_and_size() {
+        let (_dir, store) = with_payload("acme").await;
+        let tool = WorkspaceListTool::new(ws(store, CompanyId::new("acme")));
+
+        let out = text(&tool.execute(json!({})).await.unwrap());
+        let line = out
+            .lines()
+            .find(|l| l.contains("hero.png"))
+            .expect("the payload is listed");
+        assert!(line.contains("image/png"), "{line}");
+        assert!(line.contains("6B"), "{line}");
+
+        // A prose note carries no such marker — presence of the type is the
+        // discriminator, so it must not appear on text entries.
+        let note = out
+            .lines()
+            .find(|l| l.contains("README.md"))
+            .expect("the note is listed");
+        assert!(!note.contains("image/"), "{note}");
     }
 }

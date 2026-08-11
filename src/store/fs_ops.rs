@@ -942,7 +942,10 @@ impl WorkspaceStore for FsOps {
         let Some(node) = index.get(id).cloned() else {
             return Ok(None);
         };
-        let content = if node.kind == NodeKind::File {
+        // A binary node reads as an empty body, like a folder — see the port's
+        // trait docs. Checked before touching the disk, so a 200 MiB video is
+        // never loaded to be thrown away (and never attempted as UTF-8).
+        let content = if node.kind == NodeKind::File && !node.is_binary() {
             let path = self.physical_path(company, &index, id)?;
             read_optional(&path).await?
         } else {
@@ -968,6 +971,11 @@ impl WorkspaceStore for FsOps {
         if node.kind != NodeKind::File {
             return Err(OpenCompanyError::InvalidRequest(
                 "cannot write content to a folder".to_string(),
+            ));
+        }
+        if let Some(mime) = node.mime.clone() {
+            return Err(OpenCompanyError::InvalidRequest(
+                crate::ports::workspace::binary_write_refusal(&node.name, &mime),
             ));
         }
         node.updated_at_millis = now_millis();
@@ -1042,6 +1050,130 @@ impl WorkspaceStore for FsOps {
             }
         }
         self.save_index(company, &index).await
+    }
+
+    /// Writes the payload to its real path, then indexes it.
+    ///
+    /// **File first, index second — the same order the text path already uses.**
+    /// A crash between the two leaves a file on disk that the index does not
+    /// name: invisible to every reader, costing only disk, and overwritten by
+    /// the next create at that path. The opposite order would leave the index
+    /// naming a node whose bytes are absent — a download that 404s from a tree
+    /// that says the file is there. Only one of those is survivable, so it is
+    /// the one this picks; there is no sweep because there is nothing a sweep
+    /// would protect a reader from.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<()> {
+        let node = crate::ports::workspace::stamped_binary(node, bytes)?;
+        reject_unsafe_name(&node.name)?;
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        if index.contains_key(&node.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "workspace node {} already exists",
+                node.id
+            )));
+        }
+        if let Some(parent) = &node.parent_id {
+            match index.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        index.insert(node.id.clone(), node.clone());
+        // The same sanitized derivation the text path uses, so a binary node
+        // cannot reach a path a note could not.
+        let physical = self.physical_path(company, &index, &node.id)?;
+        if let Some(parent) = physical.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| io_err(parent, e))?;
+        }
+        tokio::fs::write(&physical, bytes)
+            .await
+            .map_err(|e| io_err(&physical, e))?;
+        self.save_index(company, &index).await
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
+        let path = self.bundle(company).workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        let node = index
+            .get_mut(id)
+            .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("workspace node {id}")))?;
+        crate::ports::workspace::rebind_binary(node, bytes, mime, author)?;
+        let node = node.clone();
+        let file = self.physical_path(company, &index, id)?;
+        if let Some(parent) = file.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| io_err(parent, e))?;
+        }
+        tokio::fs::write(&file, bytes)
+            .await
+            .map_err(|e| io_err(&file, e))?;
+        self.save_index(company, &index).await?;
+        Ok(node)
+    }
+
+    /// Streams the file straight off disk — the payload is never resident.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        let index = self.load_index(company).await?;
+        let Some(node) = index.get(id).cloned() else {
+            return Ok(None);
+        };
+        if !node.is_binary() {
+            return Ok(None);
+        }
+        let path = self.physical_path(company, &index, id)?;
+        let file = match tokio::fs::File::open(&path).await {
+            Ok(file) => file,
+            // The index names it but the bytes are gone — the benign half of the
+            // write ordering above, seen from the read side. Reported as absent
+            // rather than as an I/O error: there is no payload to serve, which
+            // is exactly what `None` means here.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(io_err(&path, e)),
+        };
+        let stream = tokio_util::io::ReaderStream::new(file);
+        Ok(Some((
+            node,
+            Box::pin(futures::StreamExt::map(stream, |chunk| {
+                chunk.map_err(|e| {
+                    OpenCompanyError::Store(format!("reading a workspace blob failed: {e}"))
+                })
+            })),
+        )))
     }
 
     async fn rename_move(
@@ -1451,6 +1583,13 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_binary_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
     async fn workspace_files_land_on_disk_under_folders() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
@@ -1470,6 +1609,9 @@ mod test {
                 updated_at_millis: now,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             None,
         )
@@ -1486,6 +1628,9 @@ mod test {
                 updated_at_millis: now,
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("# Voice"),
         )

@@ -57,6 +57,11 @@ pub struct AppConfig {
     pub max_companies_per_tenant: Option<usize>,
     /// Outbound webhook delivery configuration. `None` disables webhooks.
     pub webhook: Option<WebhookConfig>,
+    /// The byte limits every company's workspace tree is held to (issue #553),
+    /// resolved from the `[workspace]` section of `config.toml`. Threaded onto
+    /// each company's builder so the store-level quota decorator is configured
+    /// from one place rather than re-read per company.
+    pub workspace_quota: crate::runtime::WorkspaceQuota,
     /// Tenant namespace for shared-single-DB deployments
     /// (`OPENCOMPANY_TENANT_ID`). When set, provisioned/booted company ids are
     /// prefixed with `<tenant>--` via [`Self::namespaced_company_id`] so many
@@ -98,6 +103,7 @@ impl Default for AppConfig {
             platform_auth: None,
             max_companies: None,
             max_companies_per_tenant: None,
+            workspace_quota: crate::runtime::WorkspaceQuota::default(),
             webhook: None,
             tenant_namespace: None,
             admin_email: None,

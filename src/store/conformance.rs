@@ -2076,6 +2076,9 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
         updated_by: WorkspaceOrigin::Agent {
             id: "ceo".to_string(),
         },
+        mime: None,
+        size: None,
+        sha256: None,
     };
 
     assert!(ws.is_empty(&alpha).await.unwrap());
@@ -2198,6 +2201,317 @@ pub async fn assert_workspace_store(ws: Arc<dyn WorkspaceStore>) {
     let tree = ws.tree(&alpha).await.unwrap();
     assert!(tree.iter().all(|n| n.id != "root" && n.id != "child"));
     assert!(!ws.delete(&alpha, "root").await.unwrap());
+}
+
+/// Collects a [`BlobStream`](crate::ports::workspace::BlobStream) into bytes.
+///
+/// Only the suite buffers: the port streams so a production download never has
+/// to be resident, but an assertion about byte-exactness has to hold the whole
+/// payload to make it.
+async fn drain(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
+    use futures::StreamExt;
+    let mut out = Vec::new();
+    let mut stream = stream;
+    while let Some(chunk) = stream.next().await {
+        out.extend_from_slice(&chunk.expect("a blob chunk must not fail"));
+    }
+    out
+}
+
+/// Asserts the **binary** half of the [`WorkspaceStore`] contract (issue #553).
+///
+/// Kept separate from [`assert_workspace_store`] rather than folded into it,
+/// because the two answer different questions: that one pins the tree every
+/// backend has always had, this one pins the payload path added on top. A
+/// backend can be wired into the first and not yet the second, and the split
+/// makes that state visible instead of turning it into one large failure.
+///
+/// The suite deliberately includes a payload **larger than MongoDB's 16 MB BSON
+/// document cap**. That is the case GridFS exists for, and it is the reason
+/// this is a shared suite rather than a Mongo-only test: fs and sqlite run the
+/// identical assertion, so "the big file round-trips" is a property of the
+/// port, not a property of whichever backend somebody remembered to test.
+pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
+    let alpha = CompanyId::new("bin-alpha");
+    let beta = CompanyId::new("bin-beta");
+    let agent = || WorkspaceOrigin::Agent {
+        id: "designer".to_string(),
+    };
+    let node = |id: &str, name: &str, mime: Option<&str>, parent: Option<&str>| WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::File,
+        parent_id: parent.map(str::to_string),
+        updated_at_millis: now_millis(),
+        created_by: agent(),
+        updated_by: agent(),
+        mime: mime.map(str::to_string),
+        // Deliberately wrong, and deliberately not `None`: the store must
+        // compute these from the bytes and must not carry a caller's claim
+        // about them through to storage.
+        size: Some(999_999),
+        sha256: Some("not-a-real-digest".to_string()),
+    };
+
+    // A payload that is emphatically not text: a lone continuation byte, an
+    // interior NUL, and a byte sequence no UTF-8 decoder accepts. A backend
+    // that round-trips through `String` anywhere fails here rather than
+    // silently replacing bytes with U+FFFD.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0xff, 0xfe, 0xc0, 0x80, 0x01,
+    ];
+
+    ws.create(&alpha, &folder_node("shots", "Shots"), None)
+        .await
+        .unwrap();
+    ws.create_binary(
+        &alpha,
+        &node("img", "hero.png", Some("image/png"), Some("shots")),
+        &png,
+    )
+    .await
+    .unwrap();
+
+    // -- Metadata is computed, not accepted -------------------------------
+    let (meta, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(meta.mime.as_deref(), Some("image/png"));
+    assert_eq!(
+        meta.size,
+        Some(png.len() as u64),
+        "size must come from the bytes, not from the caller's claim"
+    );
+    let (_, expected_sha) = crate::ports::workspace::blob_metadata(&png);
+    assert_eq!(
+        meta.sha256.as_deref(),
+        Some(expected_sha.as_str()),
+        "sha256 must be computed from the stored bytes, not trusted from the caller"
+    );
+    assert_eq!(
+        drain(stream).await,
+        png,
+        "the payload must round-trip byte-exactly"
+    );
+
+    // -- Authorship survives the binary path ------------------------------
+    assert_eq!(meta.created_by, agent());
+    assert_eq!(meta.updated_by, agent());
+
+    // -- The tree carries the metadata ------------------------------------
+    let in_tree = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|n| n.id == "img")
+        .expect("the binary node is in the tree");
+    assert_eq!(in_tree.mime.as_deref(), Some("image/png"));
+    assert_eq!(in_tree.size, Some(png.len() as u64));
+    assert!(in_tree.is_binary());
+
+    // -- A text read of a binary node is empty, never bytes-as-text -------
+    let (text_node, body) = ws.read(&alpha, "img").await.unwrap().unwrap();
+    assert!(body.is_empty(), "a binary node reads as an empty body");
+    assert!(text_node.is_binary());
+
+    // -- A text write over a payload is refused ---------------------------
+    let refused = ws
+        .write(&alpha, "img", "# not an image", WorkspaceOrigin::Operator)
+        .await
+        .expect_err("writing text over a payload must be refused");
+    assert!(
+        refused.to_string().contains("image/png"),
+        "the refusal must name what the node actually holds, got: {refused}"
+    );
+    // …and the refusal changed nothing.
+    let (still, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(still.sha256.as_deref(), Some(expected_sha.as_str()));
+    assert_eq!(drain(stream).await, png);
+
+    // -- `read_bytes` of a prose note, and of a folder, is None -----------
+    ws.create(
+        &alpha,
+        &WorkspaceNode {
+            mime: None,
+            size: None,
+            sha256: None,
+            ..node("note", "brief.md", None, None)
+        },
+        Some("# Brief"),
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.read_bytes(&alpha, "note").await.unwrap().is_none(),
+        "a prose note has no payload"
+    );
+    assert!(
+        ws.read_bytes(&alpha, "shots").await.unwrap().is_none(),
+        "a folder has no payload"
+    );
+    assert!(ws.read_bytes(&alpha, "nope").await.unwrap().is_none());
+
+    // -- Replacing a payload keeps the node and restamps it ---------------
+    let replaced = ws
+        .write_binary(&alpha, "img", &[0x00, 0x01, 0x02], Some("image/jpeg"), {
+            WorkspaceOrigin::Operator
+        })
+        .await
+        .unwrap();
+    assert_eq!(replaced.mime.as_deref(), Some("image/jpeg"));
+    assert_eq!(replaced.size, Some(3));
+    assert_eq!(
+        replaced.updated_by,
+        WorkspaceOrigin::Operator,
+        "a payload replacement restamps updated_by like a text write"
+    );
+    assert_eq!(
+        replaced.created_by,
+        agent(),
+        "and never rewrites created_by"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "the old payload must be gone, not merely shadowed"
+    );
+
+    // Writing bytes over a prose note is the mirror refusal of the text case.
+    assert!(
+        ws.write_binary(&alpha, "note", &[1, 2], Some("image/png"), agent())
+            .await
+            .is_err(),
+        "a prose note must not be convertible into a payload by a write"
+    );
+
+    // -- Rename/move leaves the payload intact ----------------------------
+    ws.create(&alpha, &folder_node("archive", "Archive"), None)
+        .await
+        .unwrap();
+    let moved = ws
+        .rename_move(&alpha, "img", Some("hero-final.jpg"), Some(Some("archive")))
+        .await
+        .unwrap();
+    assert_eq!(moved.name, "hero-final.jpg");
+    assert_eq!(
+        moved.mime.as_deref(),
+        Some("image/jpeg"),
+        "a move must not disturb the payload metadata"
+    );
+    let (after_move, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(after_move.size, Some(3));
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "the bytes must survive a rename and reparent"
+    );
+
+    // -- Cross-company isolation, including through the blob store --------
+    ws.create_binary(
+        &beta,
+        &node("img", "other.png", Some("image/png"), None),
+        b"beta-only-bytes",
+    )
+    .await
+    .unwrap();
+    let (_, stream) = ws.read_bytes(&beta, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        b"beta-only-bytes".to_vec(),
+        "the same node id in another company must resolve to that company's payload"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        vec![0x00, 0x01, 0x02],
+        "and must not have been overwritten by it"
+    );
+
+    // -- Delete removes the payload, not just the node --------------------
+    assert!(ws.delete(&beta, "img").await.unwrap());
+    assert!(
+        ws.read_bytes(&beta, "img").await.unwrap().is_none(),
+        "deleting a node must delete its payload"
+    );
+    // A folder delete takes its binary descendants' payloads with it.
+    assert!(ws.delete(&alpha, "archive").await.unwrap());
+    assert!(
+        ws.read_bytes(&alpha, "img").await.unwrap().is_none(),
+        "a recursive delete must remove descendants' payloads too"
+    );
+
+    // -- Past the 16 MB BSON document cap, under the per-write cap --------
+    //
+    // 17 MiB does double duty. It is past MongoDB's 16 MB BSON document limit,
+    // which is the case GridFS exists for — and it is comfortably under
+    // `DEFAULT_MAX_BLOB_BYTES` (64 MiB), so it is also the proof that a large
+    // but legitimate payload still round-trips on **all three** backends rather
+    // than being caught by the cap. The boundary either side of the cap itself
+    // is asserted on the quota decorator, where the comparison lives.
+    //
+    // Patterned rather than zeroed so a backend that silently truncates or pads
+    // is caught by the digest instead of matching by luck.
+    let big: Vec<u8> = (0..17 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+    let (big_size, big_sha) = crate::ports::workspace::blob_metadata(&big);
+    ws.create_binary(
+        &alpha,
+        &node("big", "render.mp4", Some("video/mp4"), None),
+        &big,
+    )
+    .await
+    .unwrap();
+    let (big_meta, stream) = ws.read_bytes(&alpha, "big").await.unwrap().unwrap();
+    assert_eq!(big_meta.size, Some(big_size));
+    assert_eq!(big_meta.sha256.as_deref(), Some(big_sha.as_str()));
+    let got = drain(stream).await;
+    assert_eq!(
+        got.len(),
+        big.len(),
+        "a payload past the BSON document cap must round-trip whole"
+    );
+    assert_eq!(
+        crate::ports::workspace::blob_metadata(&got).1,
+        big_sha,
+        "…and byte-exactly"
+    );
+
+    // -- A binary node must carry a mime ----------------------------------
+    assert!(
+        ws.create_binary(&alpha, &node("nomime", "x.bin", None, None), b"x")
+            .await
+            .is_err(),
+        "a binary node without a mime type is refused"
+    );
+    // …and must be a file.
+    assert!(
+        ws.create_binary(
+            &alpha,
+            &WorkspaceNode {
+                kind: NodeKind::Folder,
+                ..node("asfolder", "Nope", Some("image/png"), None)
+            },
+            b"x"
+        )
+        .await
+        .is_err(),
+        "a folder cannot hold a payload"
+    );
+}
+
+/// A folder node for the binary suite.
+fn folder_node(id: &str, name: &str) -> WorkspaceNode {
+    WorkspaceNode {
+        id: id.to_string(),
+        name: name.to_string(),
+        kind: NodeKind::Folder,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    }
 }
 
 // ---------------------------------------------------------------------------

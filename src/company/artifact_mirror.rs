@@ -98,12 +98,31 @@ pub struct PublishTarget<'a> {
     /// The normalized workspace-relative path the agent published, e.g.
     /// `specs/launch.md`. Interior segments become folders.
     pub source: &'a str,
-    /// The body to store — the file's text, or the reference block a
-    /// non-UTF-8 or over-cap file produced. Written verbatim.
-    pub body: &'a str,
+    /// What to store — the file's text, or its bytes (issue #553). Text lands
+    /// as an ordinary note; bytes land as a binary node, which is what stopped
+    /// a paid image generation from becoming a dangling digest.
+    pub payload: MirrorPayload<'a>,
     /// The node the previous version of this artifact was mirrored into, when
     /// there was one. Reused if it still resolves; see [`materialize`].
     pub existing_node_id: Option<&'a str>,
+}
+
+/// What [`materialize`] is being asked to put in the tree.
+///
+/// Borrowed rather than owned: the drain already holds the bytes it read, and a
+/// copy of a 200 MiB video to cross one function boundary would be the single
+/// largest allocation on the publish path.
+#[derive(Debug, Clone, Copy)]
+pub enum MirrorPayload<'a> {
+    /// Prose — an editable, diffable, backlinkable note.
+    Text(&'a str),
+    /// Opaque bytes, with the media type the publisher inferred.
+    Bytes {
+        /// The file's contents, written verbatim.
+        bytes: &'a [u8],
+        /// The media type to store the node under.
+        mime: &'a str,
+    },
 }
 
 /// Put `target`'s body into the shared tree and return the node id holding it.
@@ -146,13 +165,20 @@ pub async fn materialize(
     // The cheap path, and the common one on a re-publish: the node from last
     // time still exists, so revise it in place and keep every reference to it
     // (the console's deep link, an operator's bookmark) working.
+    //
+    // A node whose *shape* changed — a markdown draft re-exported as a PDF, or
+    // a PDF replaced by prose — cannot be revised in place, because neither
+    // write path will convert one kind of node into the other (and the store
+    // refuses if asked). Falling through to the path resolution below mints a
+    // fresh node of the right kind, which is the same answer this function
+    // already gives when the operator deleted the old one: the new version
+    // carries the new id, older versions keep the id that actually held them.
     if let Some(existing) = target.existing_node_id
         && let Some((node, _)) = workspace.read(company, existing).await?
         && node.kind == NodeKind::File
+        && node.is_binary() == matches!(target.payload, MirrorPayload::Bytes { .. })
     {
-        workspace
-            .write(company, existing, target.body, origin(target.agent_id))
-            .await?;
+        write_payload(workspace, company, existing, target).await?;
         return Ok(existing.to_string());
     }
 
@@ -189,25 +215,81 @@ pub async fn materialize(
         // permanently ambiguous, which the tool layer's resolver then refuses
         // for every agent.
         Some(id) => {
-            workspace
-                .write(company, &id, target.body, origin(target.agent_id))
-                .await?;
+            // The same shape guard as above: a node already at this path whose
+            // kind disagrees with what is being published is deleted and
+            // replaced, because no write can turn one into the other. Deleting
+            // is safe here in a way it is not above — the path is the
+            // deliverable's identity, so this node IS the thing being
+            // superseded, and its history lives on the artifact chain.
+            let replace = match workspace.read(company, &id).await? {
+                Some((node, _)) => {
+                    node.is_binary() != matches!(target.payload, MirrorPayload::Bytes { .. })
+                }
+                None => false,
+            };
+            if replace {
+                workspace.delete(company, &id).await?;
+                return create_payload(workspace, company, Some(parent), filename, target).await;
+            }
+            write_payload(workspace, company, &id, target).await?;
             Ok(id)
         }
-        None => {
-            let node = WorkspaceNode {
-                id: crate::ports::generate_id(),
-                name: filename.to_string(),
-                kind: NodeKind::File,
-                parent_id: Some(parent),
-                updated_at_millis: now_millis(),
-                created_by: origin(target.agent_id),
-                updated_by: origin(target.agent_id),
-            };
-            workspace.create(company, &node, Some(target.body)).await?;
-            Ok(node.id)
+        None => create_payload(workspace, company, Some(parent), filename, target).await,
+    }
+}
+
+/// Overwrites `node_id` with whatever `target` carries, on the matching path.
+async fn write_payload(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    node_id: &str,
+    target: PublishTarget<'_>,
+) -> Result<()> {
+    match target.payload {
+        MirrorPayload::Text(body) => {
+            workspace
+                .write(company, node_id, body, origin(target.agent_id))
+                .await?;
+        }
+        MirrorPayload::Bytes { bytes, mime } => {
+            workspace
+                .write_binary(company, node_id, bytes, Some(mime), origin(target.agent_id))
+                .await?;
         }
     }
+    Ok(())
+}
+
+/// Creates a fresh node of the right kind holding `target`'s payload.
+async fn create_payload(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    parent: Option<String>,
+    filename: &str,
+    target: PublishTarget<'_>,
+) -> Result<String> {
+    let mut node = WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: filename.to_string(),
+        kind: NodeKind::File,
+        parent_id: parent,
+        updated_at_millis: now_millis(),
+        created_by: origin(target.agent_id),
+        updated_by: origin(target.agent_id),
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    match target.payload {
+        MirrorPayload::Text(body) => {
+            workspace.create(company, &node, Some(body)).await?;
+        }
+        MirrorPayload::Bytes { bytes, mime } => {
+            node.mime = Some(mime.to_string());
+            workspace.create_binary(company, &node, bytes).await?;
+        }
+    }
+    Ok(node.id)
 }
 
 /// Record an edit to `node_id` on the artifact chain that owns it, when one
@@ -396,6 +478,9 @@ async fn resolve_folder(
                 updated_at_millis: now_millis(),
                 created_by: origin(agent_id),
                 updated_by: origin(agent_id),
+                mime: None,
+                size: None,
+                sha256: None,
             });
             Ok(id)
         }
@@ -474,7 +559,7 @@ mod test {
             agent_id: "cmo",
             task_id: "t-1",
             source,
-            body,
+            payload: MirrorPayload::Text(body),
             existing_node_id: None,
         }
     }
@@ -508,6 +593,108 @@ mod test {
                 id: "cmo".to_string()
             },
             "a published deliverable is the agent's work, and the tree must say so"
+        );
+    }
+
+    /// A **binary** publish lands real bytes in the tree (issue #553).
+    ///
+    /// This is the payoff of the whole issue: before it, a generated image
+    /// became a reference record naming a sandbox path, and wiping the sandbox
+    /// left the digest pointing at nothing. Now the same publish produces a
+    /// node the operator can open, on every backend.
+    #[tokio::test]
+    async fn a_binary_publish_lands_real_bytes_under_the_agents_folder() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+        let png: Vec<u8> = vec![0x89, b'P', b'N', b'G', 0xff, 0xfe, 0x00];
+
+        let id = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &png,
+                    mime: "image/png",
+                },
+                ..target("shots/hero.png", "")
+            },
+        )
+        .await
+        .expect("materialize");
+
+        assert_eq!(
+            path_of(ws, &co, &id).await,
+            format!("{AGENTS_ROOT}/cmo/t-1/shots/hero.png")
+        );
+        let (node, stream) = ws
+            .read_bytes(&co, &id)
+            .await
+            .unwrap()
+            .expect("the payload is retrievable");
+        assert_eq!(node.mime.as_deref(), Some("image/png"));
+        assert_eq!(node.size, Some(png.len() as u64));
+        assert_eq!(
+            node.created_by,
+            WorkspaceOrigin::Agent {
+                id: "cmo".to_string()
+            }
+        );
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, png, "the published bytes are the stored bytes");
+    }
+
+    /// Re-publishing the same path as a different shape replaces the node
+    /// rather than failing.
+    ///
+    /// Neither write path converts a note into a payload or back — the store
+    /// refuses both — so a markdown draft later re-exported as a PDF would
+    /// otherwise error on every publish. The path is the deliverable's
+    /// identity, so the node is replaced and the history stays on the artifact
+    /// chain.
+    #[tokio::test]
+    async fn republishing_a_note_as_a_payload_replaces_the_node() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        let first = materialize(ws, &co, target("report.md", "# Draft"))
+            .await
+            .unwrap();
+        let second = materialize(
+            ws,
+            &co,
+            PublishTarget {
+                payload: MirrorPayload::Bytes {
+                    bytes: &[0x25, 0x50, 0x44, 0x46],
+                    mime: "application/pdf",
+                },
+                existing_node_id: Some(&first),
+                ..target("report.md", "")
+            },
+        )
+        .await
+        .expect("a shape change must not fail the publish");
+
+        let (node, _) = ws
+            .read_bytes(&co, &second)
+            .await
+            .unwrap()
+            .expect("the new node holds bytes");
+        assert_eq!(node.mime.as_deref(), Some("application/pdf"));
+        assert_eq!(
+            path_of(ws, &co, &second).await,
+            format!("{AGENTS_ROOT}/cmo/t-1/report.md"),
+            "the deliverable keeps its path"
+        );
+        assert!(
+            ws.read(&co, &first).await.unwrap().is_none(),
+            "the superseded node is gone, not left beside its replacement"
         );
     }
 

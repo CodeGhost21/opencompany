@@ -1491,7 +1491,7 @@ impl HarnessBrain {
                     let mut found = on_card.remove(index);
                     prior_node = found.workspace_node_id().map(str::to_string);
                     version = found.push_version(
-                        &pending.body,
+                        pending.payload.artifact_body(),
                         ArtifactAuthor::Agent,
                         author,
                         at,
@@ -1511,7 +1511,7 @@ impl HarnessBrain {
                         &card.id,
                         &pending.title,
                         pending.kind,
-                        &pending.body,
+                        pending.payload.artifact_body(),
                         author,
                         at,
                     )
@@ -1571,7 +1571,14 @@ impl HarnessBrain {
                     agent_id: author,
                     task_id: &card.id,
                     source: &pending.source,
-                    body: &pending.body,
+                    payload: match &pending.payload {
+                        crate::harness::publish::PublishPayload::Text(text) => {
+                            artifact_mirror::MirrorPayload::Text(text)
+                        }
+                        crate::harness::publish::PublishPayload::Bytes { bytes, mime } => {
+                            artifact_mirror::MirrorPayload::Bytes { bytes, mime }
+                        }
+                    },
                     existing_node_id: prior_node.as_deref(),
                 };
                 match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
@@ -2863,7 +2870,7 @@ members = ["engineer"]
             title: "Launch spec".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         }
     }
 
@@ -3118,7 +3125,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "the spec body".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "the spec body".to_string(),
+                    ),
                 }],
                 Some("run-1"),
             )
@@ -3174,7 +3183,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "what maya produced".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "what maya produced".to_string(),
+                    ),
                 }],
                 None,
             )
@@ -3223,7 +3234,7 @@ members = ["engineer"]
             title: "Launch spec".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         brain
@@ -3294,7 +3305,7 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "body".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("body".to_string()),
                 }],
                 None,
             )
@@ -3344,6 +3355,9 @@ members = ["engineer"]
                 updated_at_millis: now_millis(),
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("an operator's note, in the way"),
         )
@@ -3360,7 +3374,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "the deliverable".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "the deliverable".to_string(),
+                    ),
                 }],
                 None,
             )
@@ -3661,7 +3677,7 @@ members = ["engineer"]
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         // Run 1 publishes both files.
@@ -3771,7 +3787,7 @@ members = ["engineer"]
             title: "spec.md".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         brain
@@ -3833,7 +3849,7 @@ members = ["engineer"]
                     title: "spec.md".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Spec".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Spec".to_string()),
                 }],
                 None,
             )
@@ -3876,7 +3892,7 @@ members = ["engineer"]
                     title: "Q3 board memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3933,7 +3949,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3964,7 +3980,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -4006,7 +4022,7 @@ members = ["engineer"]
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: format!("# {source}"),
+            payload: crate::harness::publish::PublishPayload::Text(format!("# {source}")),
         };
 
         brain
@@ -4063,7 +4079,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
                 None,
             )

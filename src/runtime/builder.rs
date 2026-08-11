@@ -224,6 +224,10 @@ pub struct RuntimeBuilder {
     mail: Option<CompanyMail>,
     tasks: Option<Arc<dyn TaskStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
+    /// Issue #553: the byte limits the workspace is held to. Defaults to a
+    /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
+    /// naming a quota is still not a way to write an unbounded file.
+    workspace_quota: crate::runtime::WorkspaceQuota,
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
@@ -316,6 +320,7 @@ impl RuntimeBuilder {
             mail: None,
             tasks: None,
             workspace: None,
+            workspace_quota: crate::runtime::WorkspaceQuota::default(),
             facts: None,
             artifacts: None,
             runs: None,
@@ -481,6 +486,13 @@ impl RuntimeBuilder {
     /// Swaps the workspace store (default: fs-backed).
     pub fn with_workspace(mut self, workspace: Arc<dyn WorkspaceStore>) -> Self {
         self.workspace = Some(workspace);
+        self
+    }
+
+    /// Sets the workspace's byte limits (default: 256 MiB per file, unlimited
+    /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
+    pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
+        self.workspace_quota = quota;
         self
     }
 
@@ -835,8 +847,15 @@ impl RuntimeBuilder {
                 // console routes, the agent tools, the publish drain, the
                 // seeder below — passes through this port, so none of them has
                 // to remember to emit. See [`WorkspaceAnnouncer`].
+                // Issue #553: and the tree refuses what it cannot afford,
+                // wrapped INSIDE the announcer so a refused write is never
+                // announced — the feed must not claim a file appeared that the
+                // quota rejected. See [`QuotaEnforcedWorkspace`].
                 workspace: Arc::new(WorkspaceAnnouncer::new(
-                    self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                    Arc::new(crate::runtime::QuotaEnforcedWorkspace::new(
+                        self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                        self.workspace_quota,
+                    )),
                     events.clone(),
                 )),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
@@ -2070,6 +2089,9 @@ async fn seed_workspace(
             // nor an agent, and the console says exactly that (issue #326).
             created_by: WorkspaceOrigin::Seed,
             updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         workspace.create(id, &node, seed.content.as_deref()).await?;
         path_to_id.insert(seed.rel_path.clone(), node.id);

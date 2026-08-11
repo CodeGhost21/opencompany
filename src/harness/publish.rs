@@ -89,7 +89,6 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 use openhuman_core::openhuman as oh;
 
@@ -100,13 +99,17 @@ use crate::ports::artifacts::ArtifactKind;
 /// Tool name: promote a workspace file to a versioned deliverable.
 pub const PUBLISH_ARTIFACT_TOOL: &str = "publish_artifact";
 
-/// The largest body stored inline, in bytes.
+/// The largest body stored inline on the artifact chain, in bytes.
 ///
-/// Text at or under this is stored whole. Anything over it — or anything that
-/// is not UTF-8 — is stored as a structured **reference** instead, never as
-/// silently-truncated content presented as complete. A half-spec that looks
-/// finished is worse than an honest pointer to a file that is too big to
-/// inline.
+/// Text at or under this is stored whole, as prose. Anything over it — or
+/// anything that is not UTF-8 — is stored as **bytes** in a binary workspace
+/// node instead (issue #553), never as silently-truncated content presented as
+/// complete.
+///
+/// This decides *how* a deliverable is stored, not whether it survives. Before
+/// #553 it decided the latter: over-cap meant a reference record pointing into
+/// the agent's sandbox, which is exactly the payload that a wipe made
+/// unreachable.
 pub const MAX_ARTIFACT_BODY_BYTES: usize = 256 * 1024;
 
 /// Directory names the workspace scan never descends into.
@@ -203,9 +206,8 @@ pub struct PendingPublish {
     pub kind: ArtifactKind,
     /// Why this revision exists, if the agent said.
     pub note: Option<String>,
-    /// The stored body: the file's text, or a reference block for an over-cap
-    /// or non-UTF-8 file.
-    pub body: String,
+    /// What was captured: the file's text, or its bytes (issue #553).
+    pub payload: PublishPayload,
 }
 
 /// Where the publishes staged on a queue are going to be recorded — and
@@ -527,76 +529,93 @@ fn parse_kind(raw: &str) -> Option<ArtifactKind> {
 
 /// What was actually captured from a file: either its text, or a reference to
 /// it.
-#[derive(Debug, PartialEq, Eq)]
-pub struct CapturedBody {
-    /// The stored body.
-    pub body: String,
-    /// The kind the capture forces, when it forces one. A reference body is
-    /// never `Text`/`Markdown` — presenting a pointer under a kind the console
-    /// renders as prose would be a lie about what the operator is reading.
-    pub forced_kind: Option<ArtifactKind>,
-    /// Whether the body is a reference rather than the content.
-    pub is_reference: bool,
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PublishPayload {
+    /// UTF-8 prose, small enough to live inline on the artifact chain and to be
+    /// stored as an editable, diffable, backlinkable note.
+    Text(String),
+    /// Opaque bytes, stored as a binary workspace node (issue #553).
+    Bytes {
+        /// The file's exact contents.
+        bytes: Vec<u8>,
+        /// The media type inferred from the file's extension.
+        mime: String,
+    },
 }
 
-/// Reads `file` into a stored body, deciding inline-versus-reference **now**.
+impl PublishPayload {
+    /// What the artifact chain records as this version's body.
+    ///
+    /// For prose, the prose. For bytes, a one-line description — because the
+    /// version's real content is the workspace node the same publish creates,
+    /// and the record points at it
+    /// ([`stamp_workspace_node`](crate::ports::artifacts::ArtifactRecord::stamp_workspace_node)).
+    /// That is issue #187's rule for a binary version: a reference to a node,
+    /// never an inline body.
+    ///
+    /// **No digest here.** The store computes one from the same bytes when it
+    /// writes the node, and a second hash on this path would be a second
+    /// opportunity for the two to disagree about what was published.
+    pub fn artifact_body(&self) -> String {
+        match self {
+            Self::Text(text) => text.clone(),
+            Self::Bytes { bytes, mime } => format!(
+                "{mime}, {} bytes — stored as a file in the company workspace. Open it there; \
+                 this record is the version history, not the content.",
+                bytes.len()
+            ),
+        }
+    }
+
+    /// The kind this payload forces, when it forces one.
+    ///
+    /// Bytes are never `Text`/`Markdown`: presenting them under a kind the
+    /// console renders as prose would be a lie about what the operator is
+    /// looking at. An image stays an image; anything else is a file.
+    pub fn forced_kind(&self, inferred: ArtifactKind) -> ArtifactKind {
+        match self {
+            Self::Text(_) => inferred,
+            Self::Bytes { .. } if matches!(inferred, ArtifactKind::Image) => ArtifactKind::Image,
+            Self::Bytes { .. } => ArtifactKind::File,
+        }
+    }
+}
+
+/// Reads `file` into a payload, deciding text-versus-bytes **now**.
 ///
-/// Over-cap or non-UTF-8 produces a structured reference block naming the
-/// workspace-relative path, the exact byte size and the sha256 of the bytes on
-/// disk at this moment. That digest is what makes the reference verifiable
-/// later: the record survives a wiped sandbox even though the payload does not,
-/// and a reader can tell whether the file they are holding is the one that was
-/// published.
+/// # The reference record is gone (issue #553)
+///
+/// This used to answer an over-cap or non-UTF-8 file with a structured
+/// *reference* — path, size, sha256 — and the sentence "the file lives in the
+/// agent's own sandbox. Wiping the sandbox leaves this record intact and the
+/// payload unreachable." That was honest and useless: the most expensive thing
+/// the product can produce, a paid image or video generation, became a dangling
+/// digest pointing into a directory that gets wiped.
+///
+/// The workspace tree can hold bytes now, on every backend, so there is nothing
+/// left for a fallback to fall back to and none is kept. Over-cap or non-UTF-8
+/// simply means the payload is stored as bytes instead of as prose.
+///
+/// The cap still decides *how* a file is stored, not whether it survives: prose
+/// under it stays a note — diffable, backlinkable, editable in the console —
+/// and everything else becomes a binary node.
 pub fn capture_body(
     file: &Path,
     source: &str,
-    inferred: ArtifactKind,
-) -> std::io::Result<CapturedBody> {
+    _inferred: ArtifactKind,
+) -> std::io::Result<PublishPayload> {
     let bytes = std::fs::read(file)?;
-    let size = bytes.len();
-    if size <= MAX_ARTIFACT_BODY_BYTES
+    if bytes.len() <= MAX_ARTIFACT_BODY_BYTES
         && let Ok(text) = String::from_utf8(bytes.clone())
     {
-        return Ok(CapturedBody {
-            body: text,
-            forced_kind: None,
-            is_reference: false,
-        });
+        return Ok(PublishPayload::Text(text));
     }
-    let mut hasher = Sha256::new();
-    hasher.update(&bytes);
-    let digest = hasher.finalize();
-    let sha = digest.iter().fold(String::new(), |mut acc, b| {
-        use std::fmt::Write as _;
-        let _ = write!(acc, "{b:02x}");
-        acc
-    });
-    let why = if size > MAX_ARTIFACT_BODY_BYTES {
-        format!("{size} bytes exceeds the {MAX_ARTIFACT_BODY_BYTES}-byte inline cap")
-    } else {
-        "the file is not UTF-8 text".to_string()
-    };
-    // A reference to an image stays an image; anything else is a file. Either
-    // way it is NOT prose, so the console will not try to render or diff it as
-    // though it were.
-    let forced = if matches!(inferred, ArtifactKind::Image) {
-        ArtifactKind::Image
-    } else {
-        ArtifactKind::File
-    };
-    Ok(CapturedBody {
-        body: format!(
-            "Reference — the content is not stored inline because {why}.\n\
-             \n\
-             path: {source}\n\
-             bytes: {size}\n\
-             sha256: {sha}\n\
-             \n\
-             The file lives in the agent's own sandbox. Wiping the sandbox leaves this record \
-             intact and the payload unreachable."
-        ),
-        forced_kind: Some(forced),
-        is_reference: true,
+    Ok(PublishPayload::Bytes {
+        mime: mime_guess::from_path(source)
+            .first_raw()
+            .unwrap_or("application/octet-stream")
+            .to_string(),
+        bytes,
     })
 }
 
@@ -714,15 +733,15 @@ impl Tool for PublishArtifactTool {
             None => kind_for_extension(&file),
         };
 
-        let captured = match capture_body(&file, &source, inferred) {
-            Ok(captured) => captured,
+        let payload = match capture_body(&file, &source, inferred) {
+            Ok(payload) => payload,
             Err(err) => {
                 return Ok(ToolResult::error(format!(
                     "Could not read `{source}`: {err}"
                 )));
             }
         };
-        let kind = captured.forced_kind.unwrap_or(inferred);
+        let kind = payload.forced_kind(inferred);
 
         let title = args
             .get("title")
@@ -748,16 +767,19 @@ impl Tool for PublishArtifactTool {
             title: title.clone(),
             kind,
             note,
-            body: captured.body,
+            payload: payload.clone(),
         });
 
         // The message describes what was **captured**, in the past tense,
         // because that is the only thing still true after a later shell step
         // rewrites the file.
-        let how = if captured.is_reference {
-            "recorded as a reference (path, size and sha256) because it is too large or not text"
-        } else {
-            "captured in full"
+        // Both arms are "captured in full" now: the reference record is gone
+        // (issue #553), so nothing published is left pointing at the sandbox.
+        let how = match &payload {
+            PublishPayload::Text(_) => "captured in full".to_string(),
+            PublishPayload::Bytes { bytes, .. } => {
+                format!("captured in full as a {}-byte file", bytes.len())
+            }
         };
         // The tail comes from the claim (#445), so the destination named is the
         // one this caller actually has. The single hard-coded task sentence is
