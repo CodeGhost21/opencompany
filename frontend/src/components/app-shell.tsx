@@ -44,6 +44,7 @@ import {
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
+import type { WorkspaceEvent } from "@/views/WorkspaceView";
 import { useHashView } from "@/hooks/use-hash-view";
 import { toast } from "sonner";
 
@@ -267,6 +268,15 @@ export function AppShell({
   // React batch still means "re-read" — the frame-loss the workflow canvas had
   // to fold an event window to avoid cannot happen to a tick.
   const [taskEventTick, setTaskEventTick] = useState(0);
+  // Issue #327: the latest workspace write, as the Workspace view needs it.
+  //
+  // The payload-carrying variant of the `taskEventTick` pattern above, and the
+  // one place a counter genuinely is not enough: the view always refetches the
+  // tree, but what it does to the OPEN note depends on which node moved — leave
+  // it alone, refetch it, or close the pane because it was deleted. `tick` rides
+  // alongside so two frames naming the same node in one React batch are still
+  // two events rather than a state update React coalesces away.
+  const [workspaceEvent, setWorkspaceEvent] = useState<WorkspaceEvent | null>(null);
   // Issue #228: bumped on every `workflow_run_finished` so the Workflows view
   // refreshes its run history live. Same shape as `taskEventTick` — a counter,
   // not the payload, so the view owns what it refetches.
@@ -862,6 +872,18 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    // Issue #327. The payload is carried, not folded into a counter — see
+    // `workspaceEvent` above. The view still re-reads the tree from the host
+    // rather than patching it from the frame: the frame carries no node name
+    // and no body by design.
+    onWorkspaceEvent: useCallback((event: CompanyStreamEvent) => {
+      if (event.type !== "workspace_changed") return;
+      setWorkspaceEvent((prev) => ({
+        tick: (prev?.tick ?? 0) + 1,
+        nodeId: event.nodeId,
+        change: event.change,
+      }));
+    }, []),
     onTurnEvent,
     onWorkflowRunEvent: useCallback((event: CompanyStreamEvent) => {
       // Both halves. The tick refreshes the durable history; the frames drive
@@ -1043,7 +1065,20 @@ export function AppShell({
                 </div>
               }
             >
-              <WorkspaceView client={client} company={company} />
+              <WorkspaceView
+                client={client}
+                company={company}
+                // Issue #327: live writes, so a note an agent creates or a
+                // deliverable the publish drain lands shows up without a
+                // refresh.
+                event={workspaceEvent}
+                // Issue #552: the Artifacts tab's "Open in workspace" link
+                // sets `#/workspace/<nodeId>`, and `useHashView` hands the
+                // second segment back unvalidated — only this view knows
+                // which node ids exist, so it resolves an unknown one against
+                // the host rather than this shell guessing here.
+                initialNodeId={sub}
+              />
             </Suspense>
           )}
           {view === "approvals" && (

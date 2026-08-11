@@ -781,6 +781,14 @@ fn summarize_event(event: &CompanyEvent) -> String {
             Some(column) => format!("card {change}: {task_id} → {column}"),
             None => format!("card {change}: {task_id}"),
         },
+        // Issue #327. Structural only, like the board arm above: the id and the
+        // change word, from a fixed vocabulary. The node's NAME is deliberately
+        // absent — it is operator-authored free text, and this string is a
+        // non-sensitive one-liner for the insight surface, which is exactly
+        // where free text does not belong.
+        CompanyEvent::WorkspaceChanged { node_id, change } => {
+            format!("workspace {change}: {node_id}")
+        }
         CompanyEvent::ScheduleFired { cron, .. } => format!("schedule fired: {cron}"),
         CompanyEvent::WebhookReceived { channel, .. } => format!("webhook on {channel}"),
         CompanyEvent::A2aTaskReceived { from, .. } => format!("A2A task from {from}"),
@@ -2413,6 +2421,28 @@ mod tests {
             !summary.contains("finished"),
             "a stopped run must not read as a finished one: {summary}"
         );
+    }
+
+    /// **Issue #327.** A workspace write summarizes structurally — the change
+    /// word and the node id, nothing else.
+    ///
+    /// The node's *name* is the exclusion with teeth. It is operator-authored
+    /// free text that routinely carries the substance of the note ("Q3 layoffs
+    /// shortlist"), and this string is a non-sensitive one-liner for the
+    /// insight surface, which is precisely where free text does not belong.
+    /// Same reasoning as the recipient exclusion two tests up; the arm was
+    /// written this way, and this is what pins it.
+    #[test]
+    fn a_workspace_write_summarizes_to_the_change_and_node_without_the_notes_name() {
+        let summary = summarize_event(&CompanyEvent::WorkspaceChanged {
+            node_id: "n-42".to_string(),
+            change: "updated".to_string(),
+        });
+
+        // Exact, not `contains`: the whole claim is that nothing *else* is in
+        // here. A future arm that looked the node up to add its name would keep
+        // passing every `contains` assertion and fail this one.
+        assert_eq!(summary, "workspace updated: n-42");
     }
 
     #[test]

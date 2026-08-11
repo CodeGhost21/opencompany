@@ -472,6 +472,11 @@ pub fn build_agent(
         Some(store) if grants_cover(grants, "workspace") => {
             Some(crate::harness::workspace_tools::workspace_tools(
                 store.clone(),
+                // Issue #552: so an overwrite of a *published* note is recorded
+                // on that deliverable's artifact chain rather than diverging
+                // from it. Read-only for the write tool's mirroring — no tool
+                // here opens or deletes an artifact.
+                deps.artifacts.clone(),
                 company.clone(),
                 manifest_agent.id.clone(),
                 workspace_writes,

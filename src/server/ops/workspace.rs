@@ -44,11 +44,14 @@ use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_links::file_with_backlinks;
 use crate::error::OpenCompanyError;
+use crate::ports::artifacts::ArtifactAuthor;
 use crate::ports::generate_id;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 use crate::server::error::ApiError;
+use crate::server::ops::artifacts::OPERATOR_EDIT_NOTE;
 use crate::server::ops::{ScopedCompany, scoped};
 
 /// Builds the workspace route fragment.
@@ -253,11 +256,76 @@ async fn create_node(
     Ok(Json(FsNode::from_node(node, content)))
 }
 
+/// `PUT …/workspace/file/{node_id}` — overwrite a note's body.
+///
+/// # A published deliverable is edited on both surfaces (issue #552)
+///
+/// Since #552 a note in this tree may be the projection of a task artifact, and
+/// an operator's save of one is *the human edit* — the single datum the artifact
+/// port exists to capture. Overwriting only the node would leave the version
+/// history saying the agent's draft was shipped unchanged, and
+/// `human_edit_diff` answering `None` for an artifact a human rewrote.
+///
+/// So the chain is written **first**, then the node. The two failure modes are
+/// not symmetric: a version recorded whose node write then fails leaves a stale
+/// node, which is visible and heals on the next write; a node written whose
+/// version was never recorded is silent, permanent, and corrupts the diff. Of
+/// the two, only the first is survivable, so it is the one this ordering
+/// chooses. See [`artifact_mirror`](crate::company::artifact_mirror).
+///
+/// An ordinary note — which is nearly all of them — matches no artifact, so the
+/// lookup answers `Ordinary` and this behaves exactly as it did before. The
+/// lookup is a scan of the company's artifacts per save; it is bounded by what
+/// artifacts are (a task's drafts, not a repository) and is named as the place
+/// to add an index if it ever hurts.
+///
+/// # When the artifact store cannot answer at all
+///
+/// The lookup is the only reason this route reads the artifact store, and it
+/// runs for every note. Propagating its failure would mean an artifact-store
+/// fault rejects the save of a plain note — losing an operator's edit to a
+/// store that note does not depend on, to protect a chain it does not have.
+/// So a lookup that *fails* is warned about and the node write proceeds.
+///
+/// This is a deliberate narrowing of the ordering guarantee, not an exception
+/// to it. Fail-closed still holds wherever it can be applied: once the store
+/// answers and names this node a deliverable, a version that cannot be appended
+/// still refuses the save. What is given up is only the case where the store
+/// cannot be read at all — there, a published deliverable edited during the
+/// outage lands node-ahead-of-chain, the silent direction. The window is an
+/// unreachable artifact store, the alternative is refusing every note in the
+/// company for the same duration, and the divergence heals on the next
+/// successful save of that note.
 async fn write_file(
     company: ScopedCompany,
     Path(NodePath { node_id }): Path<NodePath>,
     Json(body): Json<WriteFile>,
 ) -> Result<Json<WriteAck>, ApiError> {
+    // No kind check first: a folder id can never match an artifact (nothing
+    // stamps one), so the lookup answers `None` for it and the `write` below
+    // still rejects it — an extra read per save to pre-empt an error case would
+    // cost every ordinary save to save nothing.
+    if let MirrorOutcome::Undetermined(err) = mirror_node_edit(
+        company.runtime.artifacts().as_ref(),
+        company.id(),
+        &node_id,
+        &body.content,
+        ArtifactAuthor::Operator,
+        "operator",
+        Some(OPERATOR_EDIT_NOTE.to_string()),
+    )
+    .await?
+    {
+        tracing::warn!(
+            company = %company.id(),
+            node = %node_id,
+            error = %err,
+            "[workspace] could not read the artifact store, so whether this note is a \
+             published deliverable is unknown; saving it anyway. If it was published, its \
+             chain is one version behind until the next successful save"
+        );
+    }
+
     let node = company
         .runtime
         .workspace()

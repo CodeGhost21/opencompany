@@ -39,6 +39,22 @@ export interface ArtifactVersion {
   stepSeq?: number;
   /** Why this revision exists, e.g. `"operator edit before approval"`. */
   note?: string;
+  /**
+   * The workspace node this revision's body was mirrored into (#552).
+   *
+   * A published deliverable lives twice: here, as the authoritative version
+   * history, and as one note in the shared workspace tree holding the current
+   * body. This is the link, and it is what the "Open in workspace" control
+   * navigates to.
+   *
+   * Per *version*, not per record: an operator may delete a published note, and
+   * the next publish materializes a fresh one — so an older version names the
+   * node that actually held it, which may no longer exist.
+   *
+   * Absent on a legacy capture, on an artifact recorded while the host had no
+   * workspace store, and on one whose node write failed.
+   */
+  workspaceNodeId?: string;
 }
 
 /** What happened to one diff line. */

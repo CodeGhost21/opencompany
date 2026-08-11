@@ -49,6 +49,7 @@ use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
 use crate::runtime::journal::RuntimeJournal;
 use crate::runtime::tools::{StubToolProvider, grant_matches};
+use crate::runtime::workspace_events::WorkspaceAnnouncer;
 use crate::store::paths::Bundle;
 use crate::store::{
     FsCompanyStore, FsContextStore, FsEventLog, FsInboxStore, FsMemoryStore, FsOps, FsSecretStore,
@@ -804,7 +805,15 @@ impl RuntimeBuilder {
                     self.tasks.unwrap_or_else(|| fs_ops.clone()),
                     events.clone(),
                 )),
-                workspace: self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #327: and the tree announces its own writes, for the
+                // same reason and in the same place. Every writer — the
+                // console routes, the agent tools, the publish drain, the
+                // seeder below — passes through this port, so none of them has
+                // to remember to emit. See [`WorkspaceAnnouncer`].
+                workspace: Arc::new(WorkspaceAnnouncer::new(
+                    self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                    events.clone(),
+                )),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),

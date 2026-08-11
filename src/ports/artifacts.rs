@@ -113,6 +113,39 @@ pub struct ArtifactVersion {
     /// loads with `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run_id: Option<String>,
+    /// The workspace node this revision's body was mirrored into (issue #552).
+    ///
+    /// # What the two surfaces are, and which one is authoritative
+    ///
+    /// A published deliverable now lives twice: here, as the **authoritative
+    /// version history**, and as one node in the company's shared workspace
+    /// tree, which holds only the *current* body. The tree is the surface every
+    /// agent and the operator can browse, so a deliverable that never reached
+    /// it was invisible to everybody but the Artifacts tab of one card.
+    ///
+    /// The chain stays the truth. The node is a projection of its latest
+    /// version, and this field is the link between them. The invariant both
+    /// write paths keep is `node.body == chain.latest().body` after any
+    /// successful write on either surface.
+    ///
+    /// # Per version, not per record — and deliberately so
+    ///
+    /// Same reasoning as [`run_id`](Self::run_id) directly above. An operator
+    /// may delete a published node (deletions stick), and the next publish of
+    /// that path materializes a **fresh** node with a new id. Recording the id
+    /// per record would rewrite history and claim the old versions had always
+    /// lived in the new node; recording it per version says the honest thing —
+    /// v1 and v2 were mirrored into a node that no longer exists, v3 into this
+    /// one.
+    ///
+    /// `None` for a version nobody mirrored: an artifact recorded while no
+    /// workspace store was wired, a version whose node write failed (the
+    /// deliverable is still recorded — see
+    /// `harness::publish_node`), and every artifact stored before this field
+    /// existed. Artifacts persist as a JSON blob on every backend, so this
+    /// needs **no schema migration** and a pre-#552 record loads with `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_node_id: Option<String>,
 }
 
 /// A versioned output of one task.
@@ -206,6 +239,7 @@ impl ArtifactRecord {
                 step_seq: None,
                 note: None,
                 run_id: None,
+                workspace_node_id: None,
             }],
             created_at_millis: at_millis,
             updated_at_millis: at_millis,
@@ -260,6 +294,7 @@ impl ArtifactRecord {
             step_seq: None,
             note,
             run_id: None,
+            workspace_node_id: None,
         });
         self.updated_at_millis = at_millis;
         next
@@ -276,6 +311,32 @@ impl ArtifactRecord {
         if let Some(latest) = self.versions.last_mut() {
             latest.run_id = Some(run_id.into());
         }
+    }
+
+    /// Stamps the newest revision with the workspace node its body was mirrored
+    /// into (#552).
+    ///
+    /// [`stamp_run`](Self::stamp_run)'s sibling, and a separate call for
+    /// exactly the same reason: only the two mirroring paths (the publish drain
+    /// and the console's node write) have a node to name, and widening
+    /// [`push_version`](Self::push_version) / [`new`](Self::new) would make the
+    /// REST create route, the conformance suite and every test pass a `None`
+    /// that means nothing to them. A no-op on an empty record.
+    pub fn stamp_workspace_node(&mut self, node_id: impl Into<String>) {
+        if let Some(latest) = self.versions.last_mut() {
+            latest.workspace_node_id = Some(node_id.into());
+        }
+    }
+
+    /// The workspace node the newest revision was mirrored into, if any.
+    ///
+    /// The re-publish and console-edit paths both ask this question — "is there
+    /// already a node for this deliverable?" — and both must ask it of the
+    /// *latest* version rather than of any version, because an operator's
+    /// deletion of a node is honoured: older versions keep pointing at the node
+    /// that held them, and only the newest says where the body lives now.
+    pub fn workspace_node_id(&self) -> Option<&str> {
+        self.latest()?.workspace_node_id.as_deref()
     }
 
     /// The diff of what a human changed before approving: the last
@@ -481,6 +542,7 @@ mod test {
             step_seq: None,
             note: None,
             run_id: None,
+            workspace_node_id: None,
         }
     }
 
@@ -528,7 +590,77 @@ mod test {
         let mut a = ArtifactRecord::new("a1", "t-1", "Draft", ArtifactKind::Text, "one", "ceo", 1);
         a.versions.clear();
         a.stamp_run("run-1");
+        a.stamp_workspace_node("n-1");
         assert!(a.versions.is_empty());
+    }
+
+    /// Issue #552: the workspace node a revision was mirrored into is recorded
+    /// **on that revision**, for the same reason `run_id` is one field up.
+    ///
+    /// The case that forces it: an operator deletes a published node (deletions
+    /// stick), and the next publish materializes a fresh one. v1 must keep
+    /// naming the node that actually held it — a record-level field would
+    /// rewrite history and claim it had always lived in the new node.
+    #[test]
+    fn each_revision_remembers_the_node_it_was_mirrored_into() {
+        let mut a =
+            ArtifactRecord::new("a1", "t-1", "Spec", ArtifactKind::Markdown, "v1", "ceo", 1);
+        a.stamp_workspace_node("node-old");
+        assert_eq!(a.workspace_node_id(), Some("node-old"));
+
+        // Re-publish after the operator deleted `node-old`: a fresh node, and
+        // the old version keeps pointing at the one that held it.
+        a.push_version("v2", ArtifactAuthor::Agent, "ceo", 2, None);
+        a.stamp_workspace_node("node-new");
+        assert_eq!(
+            a.version(1).unwrap().workspace_node_id.as_deref(),
+            Some("node-old")
+        );
+        assert_eq!(
+            a.version(2).unwrap().workspace_node_id.as_deref(),
+            Some("node-new")
+        );
+        assert_eq!(
+            a.workspace_node_id(),
+            Some("node-new"),
+            "the record-level answer is the newest revision's node, which is where the body lives"
+        );
+
+        let json = serde_json::to_string(&a).expect("serialize");
+        assert!(json.contains(r#""workspaceNodeId":"node-old""#), "{json}");
+        assert_eq!(a, serde_json::from_str(&json).expect("round trip"));
+    }
+
+    /// A pre-#552 blob is exactly what an unmirrored record serializes to — the
+    /// field is skipped when absent — so it must still load, with `None`. All
+    /// three backends store an artifact as an opaque JSON blob, so this
+    /// `#[serde(default)]` is the whole of the migration.
+    #[test]
+    fn a_pre_mirror_record_loads_with_no_workspace_node() {
+        let legacy = r##"{
+            "id": "a1",
+            "taskId": "t-1",
+            "title": "Launch spec",
+            "kind": "markdown",
+            "versions": [
+                {
+                    "version": 1,
+                    "body": "# Spec",
+                    "author": "agent",
+                    "authorId": "maya",
+                    "createdAtMillis": 5
+                }
+            ],
+            "createdAtMillis": 5,
+            "updatedAtMillis": 5,
+            "source": "specs/launch.md"
+        }"##;
+        let loaded: ArtifactRecord =
+            serde_json::from_str(legacy).expect("a pre-#552 record parses");
+        assert_eq!(loaded.workspace_node_id(), None);
+        // Round-tripping one must not mint a node id for it.
+        let json = serde_json::to_string(&loaded).unwrap();
+        assert!(!json.contains("workspaceNodeId"), "{json}");
     }
 
     #[test]

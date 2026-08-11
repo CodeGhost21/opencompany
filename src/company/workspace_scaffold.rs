@@ -261,7 +261,11 @@ fn find(nodes: &[WorkspaceNode], parent: Option<&str>, name: &str) -> Found {
 }
 
 /// Create one folder and hand back its id.
-async fn create_folder(
+///
+/// `pub(crate)` so [`artifact_mirror`](crate::company::artifact_mirror) mints
+/// the folders beneath `Agents/<id>/` the same way this module mints the ones
+/// above them — one creation shape, one set of origin-stamping rules.
+pub(crate) async fn create_folder(
     store: &dyn WorkspaceStore,
     company: &CompanyId,
     name: &str,

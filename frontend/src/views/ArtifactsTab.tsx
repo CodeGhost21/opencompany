@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
   FileText,
+  FolderOpen,
   History,
   Image as ImageIcon,
   Loader2,
@@ -511,6 +512,28 @@ function ArtifactDetail({
         <p className="mt-2 text-[11px] text-muted-foreground">
           Created {whenOf(artifact.createdAtMillis)} · updated {whenOf(artifact.updatedAtMillis)}
         </p>
+        {shown?.workspaceNodeId && (
+          // Issue #552: a published deliverable also lives in the shared
+          // workspace tree, which is where teammates and the operator actually
+          // browse. Without this the two surfaces are related only in the
+          // host's data.
+          //
+          // Read off the *shown* version, not the record: the node id is per
+          // version, so an older revision points at the note that held it —
+          // which the operator may since have deleted. The hash router follows
+          // `hashchange`, so setting the hash is the whole navigation; no
+          // navigate prop is threaded down for one link.
+          <button
+            type="button"
+            className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-primary hover:underline"
+            onClick={() => {
+              window.location.hash = `/workspace/${shown.workspaceNodeId}`;
+            }}
+          >
+            <FolderOpen className="size-3" />
+            Open in workspace
+          </button>
+        )}
       </div>
 
       {pinnedBehindLatest && latest && (

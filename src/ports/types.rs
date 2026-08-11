@@ -711,6 +711,42 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         column: Option<String>,
     },
+    /// A workspace node was written (issue #327) — created, changed, or
+    /// removed.
+    ///
+    /// [`TaskCardChanged`](Self::TaskCardChanged)'s counterpart for the note
+    /// tree, and missing for exactly the same reason: nothing on the feed said
+    /// the workspace had moved, so a console with the Workspace tab open saw an
+    /// agent's write only on a manual refresh or a window refocus. Now that
+    /// agents create notes (#551) and published deliverables land in the tree
+    /// (#552), that stale window is where most of the tree's activity happens.
+    ///
+    /// **Emitted from the store, not from the callers.** Appended by the
+    /// [`WorkspaceAnnouncer`](crate::runtime::WorkspaceAnnouncer) decorator
+    /// wrapping the company's
+    /// [`WorkspaceStore`](crate::ports::workspace::WorkspaceStore) — the one
+    /// place the seeder, the console routes, the agent tools and the publish
+    /// drain all pass through. An emit per call site is the shape of the bug:
+    /// correct only for the paths somebody remembered.
+    ///
+    /// **A record, never a stimulus.** Appended after the write it describes and
+    /// never fed into a cycle. A note that started work by existing would
+    /// re-enter this store and announce again.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    WorkspaceChanged {
+        /// The written node's id.
+        node_id: String,
+        /// What happened to it, as a stable wire word: `opened` (the write
+        /// brought the node into existence), `updated` (its body or its place
+        /// in the tree changed), or `removed` (it was deleted).
+        ///
+        /// The same three words [`TaskCardChanged`](Self::TaskCardChanged)
+        /// uses, deliberately — a console that already knows how to read one
+        /// change vocabulary should not have to learn a second.
+        change: String,
+    },
     /// A dispatched board task finished its run (issue #185) — the terminal
     /// anchor a per-task timeline ends on and a lineage rollup counts.
     ///
@@ -1094,6 +1130,7 @@ impl CompanyEvent {
             Self::WorkflowDeleted { .. } => "WorkflowDeleted",
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
+            Self::WorkspaceChanged { .. } => "WorkspaceChanged",
             Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
             Self::EmergencyPauseChanged { .. } => "EmergencyPauseChanged",
             Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
@@ -1142,7 +1179,30 @@ impl CompanyEvent {
             Self::WorkflowRunStarted { .. }
             | Self::WorkflowRunFinished { .. }
             | Self::WorkflowNodeFinished { .. }
-            | Self::McpCallFailed { .. } => Prunable,
+            | Self::McpCallFailed { .. }
+            // Issue #327, and the one place this diverges from its sibling
+            // `TaskCardChanged` — which is Permanent — so the reasoning is
+            // spelled out rather than assumed.
+            //
+            // It passes all three of the tests the doc comment above sets. It
+            // is not evidence: the tree IS the record of what the workspace
+            // holds, and this frame carries no body, only "something moved".
+            // Nothing points at it: no entry is addressed by its sequence, the
+            // way a reaction or a redaction tombstone addresses a chat message.
+            // And nothing reads it back: no boot-time fold consults it, unlike
+            // `WorkflowReportDelivered`.
+            //
+            // What it is instead is high-volume machine exhaust — one frame per
+            // keystroke-debounced console save, per agent write, per seeded
+            // node at first boot — whose entire meaning is "re-read the tree",
+            // and which is worthless the moment the console has done so.
+            //
+            // `TaskCardChanged` stays Permanent because a board card's
+            // lifecycle is the company's work history. A note's revision
+            // history is not kept here at all: for a published deliverable it
+            // lives on the artifact chain (#552), and for an ordinary note it
+            // is not kept anywhere, which pruning this does not change.
+            | Self::WorkspaceChanged { .. } => Prunable,
 
             Self::OperatorMessage { .. }
             | Self::WebhookReceived { .. }
@@ -4314,6 +4374,51 @@ mod test {
                 error: None,
                 cancelled: false,
             }
+        );
+    }
+
+    /// Issue #327: the workspace announcement survives the JSONL round trip the
+    /// journal puts every event through, and carries its discriminant.
+    #[test]
+    fn workspace_changed_round_trips() {
+        let event = CompanyEvent::WorkspaceChanged {
+            node_id: "n-1".to_string(),
+            change: "updated".to_string(),
+        };
+        assert_eq!(round_trip(&event), event);
+        assert_eq!(event.kind(), "WorkspaceChanged");
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains(r#""kind":"WorkspaceChanged""#), "{json}");
+        assert!(json.contains(r#""node_id":"n-1""#), "{json}");
+    }
+
+    /// The one variant whose retention class diverges from its sibling's, so
+    /// the choice is pinned rather than left to the next reader's memory.
+    ///
+    /// `WorkspaceChanged` is Prunable: it is high-volume machine exhaust whose
+    /// whole meaning is "re-read the tree", nothing addresses it by sequence,
+    /// and nothing folds it at boot. `TaskCardChanged` stays Permanent because
+    /// a board card's lifecycle is the company's work history.
+    #[test]
+    fn a_workspace_announcement_is_prunable_though_its_board_sibling_is_not() {
+        use crate::ports::events::RetentionClass;
+
+        assert_eq!(
+            CompanyEvent::WorkspaceChanged {
+                node_id: "n-1".to_string(),
+                change: "updated".to_string(),
+            }
+            .retention_class(),
+            RetentionClass::Prunable
+        );
+        assert_eq!(
+            CompanyEvent::TaskCardChanged {
+                task_id: "t-1".to_string(),
+                change: "opened".to_string(),
+                column: Some("todo".to_string()),
+            }
+            .retention_class(),
+            RetentionClass::Permanent
         );
     }
 

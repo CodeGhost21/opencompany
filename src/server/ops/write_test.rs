@@ -5642,3 +5642,495 @@ async fn an_admin_is_refused_by_none_of_them() {
         );
     }
 }
+
+/// Issue #552: a published deliverable lives on two surfaces, and the console's
+/// workspace `PUT` is where an operator edits one. Saving that note must record
+/// an **operator version** on the artifact chain, because that edit is exactly
+/// the datum `human_edit_diff` exists to answer — and overwriting only the node
+/// would leave the history claiming the agent's draft shipped unchanged.
+///
+/// The ordering is asserted too, by refusing the node write: an artifact
+/// stamped with a node id the tree does not have makes the chain append
+/// succeed and the node write fail, and the version must still be there
+/// afterwards. Chain-ahead-of-node is the survivable direction and
+/// node-ahead-of-chain is the silent one, so a failed save must land on the
+/// first.
+#[tokio::test]
+async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A note in the tree…
+    let (status, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "the agent's draft"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    // …that is the projection of a published artifact.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(artifact["versions"].as_array().unwrap().len(), 2);
+    assert_eq!(artifact["versions"][1]["body"], "the operator's rewrite");
+    assert_eq!(artifact["versions"][1]["author"], "operator");
+    assert_eq!(
+        artifact["versions"][1]["note"], "operator edit before approval",
+        "the wording the console recognises, shared with the append route"
+    );
+    assert_eq!(
+        artifact["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version must inherit the node, or the NEXT save mirrors nothing"
+    );
+    assert!(
+        artifact["humanEditDiff"].is_object(),
+        "the whole point: a console edit of a deliverable is now diffable"
+    );
+
+    // And the node itself carries the operator's text.
+    let (node, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(body, "the operator's rewrite");
+    assert_eq!(
+        node.updated_by,
+        crate::ports::workspace::WorkspaceOrigin::Operator
+    );
+
+    // -- and now the ordering, with the node write refused ------------------
+    //
+    // A deliverable whose node the operator deleted still carries that node's
+    // id on its latest version, so the reverse lookup matches and the append
+    // runs — then the write fails, because the node is gone. That is the
+    // failure this route's ordering was chosen for, and it is reachable
+    // without a mock: the refusal comes from the real store.
+    let mut orphaned = ArtifactRecord::new(
+        "art-2",
+        "t-1",
+        "Retired spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("retired.md");
+    orphaned.stamp_workspace_node("node-the-operator-deleted");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &orphaned)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-the-operator-deleted",
+        Some(json!({"content": "an edit the tree cannot take"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "the node write must fail — there is no such node"
+    );
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        2,
+        "the version must survive the refused node write: chain-ahead-of-node is \
+         the direction that heals, and this is the ordering that guarantees it"
+    );
+    assert_eq!(
+        artifact["versions"][1]["body"],
+        "an edit the tree cannot take"
+    );
+}
+
+/// Nearly every note in the tree is an ordinary note, not a deliverable.
+/// Saving one must append nothing anywhere — the reverse lookup answering
+/// "no artifact owns this" is the common case, and deliberately silent.
+#[tokio::test]
+async fn saving_an_unpublished_note_appends_no_artifact_version() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A published artifact exists, but points at a DIFFERENT node.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "deliverable",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("some-other-node");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "still just a note"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        1,
+        "an ordinary note's save must not touch an unrelated artifact"
+    );
+}
+
+/// The other direction of the same invariant: appending a version through the
+/// Artifacts tab must push the new body into the deliverable's workspace note,
+/// or the tree keeps serving a draft the history has superseded.
+#[tokio::test]
+async fn appending_an_artifact_version_updates_its_workspace_note() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "v1"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "v1",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts/art-1/versions",
+        Some(json!({"body": "v2, edited in the Artifacts tab"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        appended["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version keeps naming the node it lives in"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note exists");
+    assert_eq!(
+        body, "v2, edited in the Artifacts tab",
+        "the shared tree must not keep serving a superseded draft"
+    );
+}
+
+/// An artifact with no workspace note — a legacy capture, or one recorded
+/// while no tree was wired — appends exactly as it always did, with no node
+/// write attempted and nothing invented for it.
+#[tokio::test]
+async fn appending_to_an_unmirrored_artifact_touches_no_note() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({"taskId": "t-1", "title": "Draft", "body": "v1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/artifacts/{id}/versions"),
+        Some(json!({"body": "v2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(appended["versions"].as_array().unwrap().len(), 2);
+    assert!(
+        appended["versions"][1].get("workspaceNodeId").is_none(),
+        "nothing may invent a node for an artifact that has none"
+    );
+}
+
+/// An artifact store with one chosen fault, so a test can ask for exactly the
+/// failure it means: unreadable (`list`) or unwritable (`upsert`).
+struct FaultyArtifacts {
+    listed: Vec<crate::ports::artifacts::ArtifactRecord>,
+    list_fails: bool,
+    upsert_fails: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::ports::artifacts::ArtifactStore for FaultyArtifacts {
+    async fn list(
+        &self,
+        _: &CompanyId,
+        _: Option<&str>,
+    ) -> crate::Result<Vec<crate::ports::artifacts::ArtifactRecord>> {
+        if self.list_fails {
+            return Err(crate::error::OpenCompanyError::Store(
+                "the artifact store is down".into(),
+            ));
+        }
+        Ok(self.listed.clone())
+    }
+    async fn get(
+        &self,
+        _: &CompanyId,
+        _: &str,
+    ) -> crate::Result<Option<crate::ports::artifacts::ArtifactRecord>> {
+        Ok(None)
+    }
+    async fn upsert(
+        &self,
+        _: &CompanyId,
+        _: &crate::ports::artifacts::ArtifactRecord,
+    ) -> crate::Result<()> {
+        if self.upsert_fails {
+            return Err(crate::error::OpenCompanyError::Store(
+                "the disk is full".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn delete(&self, _: &CompanyId, _: &str) -> crate::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// [`state_with_company`] with the artifact store swapped for a faulty one, so
+/// the workspace `PUT` can be exercised against a store that will not answer.
+async fn state_with_faulty_artifacts(
+    home: &std::path::Path,
+    artifacts: FaultyArtifacts,
+) -> (AppState, CompanyId) {
+    let state = state_with_company(home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(company.clone())
+        .with_artifacts(std::sync::Arc::new(artifacts))
+        .build()
+        .await
+        .expect("runtime");
+    // `insert` replaces, so the routes now resolve through the faulty store
+    // while the seeded admin on `state` carries over untouched.
+    state
+        .registry()
+        .insert(company.clone(), std::sync::Arc::new(runtime));
+    (state, company)
+}
+
+/// Issue #552 made every note save consult the artifact store, and an ordinary
+/// note must not inherit that store's health.
+///
+/// Nearly the whole tree is ordinary notes. They own no artifact chain, and
+/// their save touches the artifact store for one reason only — to ask whether
+/// they are a deliverable. When that question cannot be answered, refusing the
+/// save would discard an operator's typing to protect a chain the note does not
+/// have.
+#[tokio::test]
+async fn an_ordinary_note_still_saves_when_the_artifact_store_cannot_be_read() {
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, company) = state_with_faulty_artifacts(
+        &home,
+        FaultyArtifacts {
+            listed: Vec::new(),
+            list_fails: true,
+            upsert_fails: false,
+        },
+    )
+    .await;
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator kept typing"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unreadable artifact store must not reject a plain note's save"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(
+        body, "the operator kept typing",
+        "the edit must actually land, not merely report success"
+    );
+}
+
+/// The other direction, and the one the availability fix must not have cost:
+/// once the store *has* answered and named this node a published deliverable,
+/// a version that cannot be recorded still refuses the save.
+///
+/// This is the fail-closed guarantee the module exists for. A node written
+/// behind a version that was never appended is the silent, permanent direction
+/// — `human_edit_diff` would answer for a draft the operator had already
+/// rewritten.
+#[tokio::test]
+async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord};
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+
+    // The store answers the lookup — this node IS a deliverable — but refuses
+    // the append.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("node-published");
+    let (state, company) = state_with_faulty_artifacts(
+        &home,
+        FaultyArtifacts {
+            listed: vec![published],
+            list_fails: false,
+            upsert_fails: true,
+        },
+    )
+    .await;
+    let runtime = state.registry().get(&company).expect("company");
+
+    // The node the artifact points at, created directly so its id is the one
+    // the record was stamped with.
+    WorkspaceStore::create(
+        runtime.workspace().as_ref(),
+        &company,
+        &WorkspaceNode {
+            id: "node-published".to_string(),
+            name: "launch.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+        },
+        Some("the agent's draft"),
+    )
+    .await
+    .expect("seed the node");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-published",
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a deliverable whose version cannot be recorded must not have its node written"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, "node-published")
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(
+        body, "the agent's draft",
+        "the node must be untouched — writing it would strand the chain behind it"
+    );
+}
