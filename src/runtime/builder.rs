@@ -1532,6 +1532,68 @@ impl RuntimeBuilder {
             .or_else(|| self.template_provenance.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
+        // Issue #245: the company's repository mirror cache, rooted at the same
+        // `companies/<slug>/` prefix the bundle uses so a company's whole
+        // footprint sits in one subtree — and therefore inside the one quota
+        // walk `DataLayout::usage_bytes` already does.
+        //
+        // Built here rather than lazily in the route because the location is a
+        // property of *this* runtime's home, and a route that had to derive it
+        // would be the second place that knows where a company's bytes live.
+        //
+        // The cache is capped by the same `tree_quota_bytes` that bounds the
+        // workspace tree: both answer "how much may one company hold on this
+        // host", and a mirror is company-held binary payload like any other. It
+        // needs no new knob, and a hosted tenant that already sets one gets the
+        // cache covered without touching its config.
+        let repos = {
+            let manager = crate::runtime::RepoManager::new(
+                id.clone(),
+                Bundle::new(home.clone(), &id).repos_dir(),
+                secrets.clone(),
+            )
+            .with_quota(self.workspace_quota.tree_quota_bytes);
+            // The forge REST client (pull-request metadata + diff). Without the
+            // feature there is no HTTP client to give it, and the PR route says
+            // so rather than answering with an empty diff. Shadowed rather than
+            // reassigned, the same way `ops::router` folds in its feature-gated
+            // fragment.
+            #[cfg(feature = "github")]
+            let manager =
+                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
+            std::sync::Arc::new(manager)
+        };
+
+        // Issue #245, agent half: the bindings, read once here so the
+        // synchronous `build_agent` can name them in a tool description and
+        // resolve against them. Read only when the company explicitly grants
+        // `repo` — everything else has no repository tools to feed — and a
+        // read error degrades to empty with a warning rather than failing a
+        // boot over a capability the company may not even use.
+        // `HarnessPool::ensure` re-reads this every turn, so a bind, a rotation
+        // or a revoke lands without a restart; this is only the first value.
+        #[cfg(feature = "openhuman")]
+        let repo_bindings = if crate::company::grants_repo_explicit(&self.manifest.tools.allow) {
+            repos.list().await.unwrap_or_else(|err| {
+                tracing::warn!(
+                    company = %id,
+                    error = %err,
+                    "reading the repository bindings failed; agents start with none"
+                );
+                Vec::new()
+            })
+        } else {
+            Vec::new()
+        };
+
+        // Issue #245: a checkout's lifecycle is one turn's, and a host killed
+        // mid-turn ends no turn — so whatever the last process left under
+        // `<harness>/<company>/*/workspace/repos` is deleted before this one
+        // starts. Tenant-scoped (issue #664): it walks this company's subtree
+        // and nothing above it.
+        #[cfg(feature = "openhuman")]
+        crate::harness::repo::sweep_orphaned_checkouts(&home.join("harness"), &id).await;
+
         let brain: Arc<dyn Brain> = match self.brain {
             Some(brain) => brain,
             None => {
@@ -1828,6 +1890,18 @@ impl RuntimeBuilder {
                                 // nothing, so no rebuild is needed for an edit
                                 // to take effect.
                                 workspace: Some(ops.workspace.clone()),
+                                // Issue #245, agent half: the SAME manager the
+                                // console's bind/revoke routes write through
+                                // (wired onto the runtime below), so an operator
+                                // binding a repository is what the next turn's
+                                // `repo_checkout` resolves against — and the
+                                // one thing in this process holding the token.
+                                repos: Some(repos.clone()),
+                                repo_bindings,
+                                // One ledger per company runtime, shared by every
+                                // agent's tools and claimed per turn by the
+                                // brain's `CheckoutJanitor`.
+                                checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
                             let record = CompanyRecord {
                                 id: id.clone(),
@@ -2001,38 +2075,6 @@ impl RuntimeBuilder {
                 )
                 .await
             }
-        };
-
-        // Issue #245: the company's repository mirror cache, rooted at the same
-        // `companies/<slug>/` prefix the bundle uses so a company's whole
-        // footprint sits in one subtree — and therefore inside the one quota
-        // walk `DataLayout::usage_bytes` already does.
-        //
-        // Built here rather than lazily in the route because the location is a
-        // property of *this* runtime's home, and a route that had to derive it
-        // would be the second place that knows where a company's bytes live.
-        //
-        // The cache is capped by the same `tree_quota_bytes` that bounds the
-        // workspace tree: both answer "how much may one company hold on this
-        // host", and a mirror is company-held binary payload like any other. It
-        // needs no new knob, and a hosted tenant that already sets one gets the
-        // cache covered without touching its config.
-        let repos = {
-            let manager = crate::runtime::RepoManager::new(
-                id.clone(),
-                Bundle::new(home.clone(), &id).repos_dir(),
-                secrets.clone(),
-            )
-            .with_quota(self.workspace_quota.tree_quota_bytes);
-            // The forge REST client (pull-request metadata + diff). Without the
-            // feature there is no HTTP client to give it, and the PR route says
-            // so rather than answering with an empty diff. Shadowed rather than
-            // reassigned, the same way `ops::router` folds in its feature-gated
-            // fragment.
-            #[cfg(feature = "github")]
-            let manager =
-                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
-            std::sync::Arc::new(manager)
         };
 
         let mut runtime = CompanyRuntime::new(

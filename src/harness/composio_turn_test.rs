@@ -368,6 +368,9 @@ async fn harness(
         delivery: None,
         search: None,
         workspace: None,
+        repos: None,
+        repo_bindings: Vec::new(),
+        checkouts: crate::harness::repo::CheckoutLedger::default(),
     };
 
     let record = CompanyRecord {
