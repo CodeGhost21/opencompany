@@ -17,10 +17,16 @@ import { useSyncExternalStore } from "react";
 
 import { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import { defaultTransport, isDesktopRuntime } from "@/api/transport";
+import { defaultTransport, isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
 import type { Transport } from "@/api/transport";
 import { forgetConnection, registerConnection } from "@/api/transport/desktop";
-import { findProfile, forgetProfile, readProfiles, saveProfile } from "./profileStore";
+import {
+  type ConnectionProfile,
+  findProfile,
+  forgetProfile,
+  readProfiles,
+  saveProfile,
+} from "./profileStore";
 import {
   type Connection,
   type ConnectionId,
@@ -263,15 +269,36 @@ function sameCredential(a: Credential, b: Credential): boolean {
 }
 
 export function restoreConnections(transport?: Transport): ConnectionId[] {
-  return readProfiles().map((profile) =>
-    addConnection({
-      baseUrl: profile.baseUrl,
-      label: profile.label,
-      defaultCompany: profile.defaultCompany,
-      credential: profile.credential,
-      transport,
-    }),
-  );
+  return readProfiles()
+    .filter(keepIfReachable)
+    .map((profile) =>
+      addConnection({
+        baseUrl: profile.baseUrl,
+        label: profile.label,
+        defaultCompany: profile.defaultCompany,
+        credential: profile.credential,
+        transport,
+      }),
+    );
+}
+
+/**
+ * Drops a stored profile this runtime could never reach, and forgets it.
+ *
+ * There is exactly one such profile in practice: the same-origin entry a
+ * desktop build wrote before it stopped adding one (issue #613). Not adding it
+ * any more is not enough on its own — this store is what brings a connection
+ * back, so the dead row would be restored on every launch forever, and it sorts
+ * ahead of the embedded host because it was written first.
+ *
+ * Forgotten rather than merely skipped: a row the console refuses to restore is
+ * a row nothing will ever remove, and `oc.connections.v1` is a registry people
+ * read when a host misbehaves. It should say what the console holds.
+ */
+function keepIfReachable(profile: ConnectionProfile): boolean {
+  if (isAddressableBaseUrl(profile.baseUrl)) return true;
+  forgetProfile(profile.id);
+  return false;
 }
 
 /**

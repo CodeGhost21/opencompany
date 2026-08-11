@@ -19,6 +19,7 @@
 import { Plus, Building2 } from "lucide-react";
 import { useState } from "react";
 
+import { isDesktopRuntime } from "@/api/transport";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -64,12 +65,18 @@ export const CONNECTION_RAIL_WIDTH = "3.5rem";
  * One host is the ordinary web deployment, and a rail listing exactly one
  * thing is furniture. It appears when there is a choice to make.
  *
+ * Zero is the exception, and only in the desktop: a browser always has its
+ * bootstrap connection, so no count of zero there is real, but a desktop whose
+ * embedded host did not start holds nothing at all. That is precisely when
+ * someone needs to reach a host elsewhere — and the "+" lives here, so hiding
+ * the rail would leave them a dead end with no way out of it.
+ *
  * Exported so the shell can offset the sidebar by the same condition that
  * draws the rail — two copies of this rule is how the sidebar ends up clipped
  * under it again.
  */
 export function connectionRailVisible(count: number): boolean {
-  return count >= 2;
+  return count >= 2 || (count === 0 && isDesktopRuntime());
 }
 
 export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {

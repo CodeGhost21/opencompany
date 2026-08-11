@@ -36,6 +36,30 @@ export function isDesktopRuntime(): boolean {
 }
 
 /**
+ * Whether a base url names a host this runtime can actually reach.
+ *
+ * An empty base url means *same origin*, and that is a real host only in a
+ * browser: `opencompany serve` mounts the console at the origin serving these
+ * assets, so `BrowserTransport` resolves `/api/v1/…` against a document origin
+ * that answers. In the desktop the document origin is `tauri://localhost`.
+ * Nothing serves an API there and nothing ever will — and the request does not
+ * even reach a socket to fail: `ProxyTransport` hands the base url to Rust,
+ * where joining it to a path yields a *relative* url `reqwest` cannot request.
+ *
+ * So this is a property of the transport rather than a preference. The same
+ * empty string is a working host in one shell and an unaddressable one in the
+ * other, which is why the check is a runtime one and lives beside
+ * `defaultTransport` — the two decisions are the same decision.
+ *
+ * See issue #613: the desktop added such a connection on launch, selected it,
+ * and showed "Couldn't reach a company host at this origin" every time, while
+ * its embedded host sat healthy and unselected in the rail.
+ */
+export function isAddressableBaseUrl(baseUrl: string): boolean {
+  return baseUrl !== "" || !isDesktopRuntime();
+}
+
+/**
  * The transport for this environment.
  *
  * Selected here so no caller has to learn the difference. A `connectionId` is

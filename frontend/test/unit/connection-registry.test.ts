@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   addConnection,
@@ -213,5 +213,65 @@ describe("credentials", () => {
       credential: { kind: "device", ref: "keychain-handle-1" },
     });
     expect(readProfiles()[0]?.credential).toEqual({ kind: "device", ref: "keychain-handle-1" });
+  });
+});
+
+/**
+ * The same-origin connection, which is a host in one runtime and nothing at all
+ * in the other.
+ *
+ * An empty base url means "the origin serving this page". A browser is served
+ * by its host, so that resolves; a desktop webview is served by
+ * `tauri://localhost`, where no host has ever listened. Issue #613: the desktop
+ * added one anyway, selected it, and reported "couldn't reach a company host at
+ * this origin" on every launch with a healthy embedded host in the same rail.
+ */
+describe("a same-origin profile", () => {
+  const desktop = (present: boolean) => {
+    if (present) (window as unknown as { __TAURI__: unknown }).__TAURI__ = {};
+    else delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+  };
+
+  // The registry is module state, so a runtime marker left set would follow the
+  // suite into the next file.
+  afterEach(() => desktop(false));
+
+  it("is dropped and forgotten when the desktop restores its hosts", () => {
+    // Written by a build that added the bootstrap connection unconditionally.
+    // Skipping the add is not enough on its own — this store is what brings a
+    // connection back, so the dead row would return on every launch forever.
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        { id: "5pnbp7zfx7w6", baseUrl: "", label: "This host", defaultCompany: null, credential: { kind: "cookie" } },
+        {
+          id: "4g4392soz5vm",
+          baseUrl: "http://127.0.0.1:65364",
+          label: "This computer",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+    desktop(true);
+
+    const restored = restoreConnections();
+
+    expect(restored).toHaveLength(1);
+    expect(getConnection(restored[0])?.baseUrl).toBe("http://127.0.0.1:65364");
+    // Forgotten, not merely skipped: a row nothing restores is a row nothing
+    // ever removes, and this store is what someone reads to see what the
+    // console holds.
+    expect(readProfiles().map((p) => p.baseUrl)).toEqual(["http://127.0.0.1:65364"]);
+  });
+
+  it("is still a host in a browser, where the origin serves one", () => {
+    // The other half of the rule, and the one that must not change: this is how
+    // every web deployment finds its host.
+    const id = addConnection({ baseUrl: "" });
+    resetConnections();
+
+    expect(restoreConnections()).toEqual([id]);
+    expect(getConnection(id)?.label).toBe("This host");
   });
 });
