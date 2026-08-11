@@ -271,10 +271,23 @@ pub(crate) struct ProviderConnection {
 
 /// Ask Composio which toolkits this company has connected.
 ///
-/// Best-effort by construction: a company that does not grant `composio`, a
-/// build without the feature, or a missing credential all yield
-/// [`ComposioView::NotApplicable`], and a live probe that errors yields
-/// [`ComposioView::Unavailable`]. Nothing here can fail the connections page.
+/// Best-effort by construction: a build without the feature or a missing
+/// credential yields [`ComposioView::NotApplicable`], and a live probe that
+/// errors yields [`ComposioView::Unavailable`]. Nothing here can fail the
+/// connections page.
+///
+/// **Not gated on the `composio` tool grant** (issue #582). It used to be, and
+/// that gate was the page's contradiction: `GET …/composio/connections` — which
+/// the console's provider list reads — has never consulted the grant, so a
+/// company holding a credential without an explicit `composio` grant got
+/// "connected" from one route and "not connected" from this one, for the same
+/// account, on the same screen. 13 of the 21 shipped companies grant no
+/// `composio`, so this was the steady state rather than a race.
+///
+/// The grant answers a *different* question — whether agents receive Composio
+/// tools — and the console states that separately from the `granted` flag on
+/// `GET …/composio`. Discarding a real connection here never answered it; it
+/// only made the page disagree with itself.
 ///
 /// **Bounded on purpose.** This is a network call on a page-load path, so a
 /// backend that stops answering must degrade the Composio half of one row — not
@@ -282,10 +295,7 @@ pub(crate) struct ProviderConnection {
 /// lands in [`ComposioView::Unavailable`], which the console renders as "could
 /// not check" rather than as a confident disconnected state.
 #[cfg(feature = "composio")]
-async fn composio_view(runtime: &CompanyRuntime, granted: bool) -> ComposioView {
-    if !granted {
-        return ComposioView::NotApplicable;
-    }
+async fn composio_view(runtime: &CompanyRuntime) -> ComposioView {
     let Ok(config) = super::composio::resolve_tenant(runtime).await else {
         // No credential of any tier resolves, so there is no Composio path to
         // reconcile against — not a failure to report.
@@ -322,7 +332,7 @@ const COMPOSIO_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_se
 /// Without the `composio` feature there is no second namespace to reconcile
 /// against, so every provider's answer is the native one alone.
 #[cfg(not(feature = "composio"))]
-async fn composio_view(_runtime: &CompanyRuntime, _granted: bool) -> ComposioView {
+async fn composio_view(_runtime: &CompanyRuntime) -> ComposioView {
     ComposioView::NotApplicable
 }
 
@@ -335,14 +345,25 @@ async fn composio_view(_runtime: &CompanyRuntime, _granted: bool) -> ComposioVie
 pub(crate) async fn project_connections(
     runtime: &CompanyRuntime,
 ) -> Result<Vec<ProviderConnection>, crate::error::OpenCompanyError> {
+    reconcile(runtime, composio_view(runtime).await).await
+}
+
+/// [`project_connections`] over an already-resolved [`ComposioView`].
+///
+/// Split out purely as a test seam, and worth one: the probe is a network call
+/// with no injection point, so before this the *reconciliation* — which is the
+/// part that decides what the console shows — could only be exercised through
+/// the `NotApplicable` arm. The gate that issue #582 removed lived on the far
+/// side of that line, which is how it survived: nothing could assert that a
+/// company granting no `composio` still gets its Composio-connected providers,
+/// because no test could produce a [`ComposioView::Known`] to assert it with.
+async fn reconcile(
+    runtime: &CompanyRuntime,
+    composio: ComposioView,
+) -> Result<Vec<ProviderConnection>, crate::error::OpenCompanyError> {
     let Some(record) = runtime.store().load(runtime.id()).await? else {
         return Ok(Vec::new());
     };
-    let composio = composio_view(
-        runtime,
-        crate::company::grants_composio_explicit(&record.manifest.tools.allow),
-    )
-    .await;
     // Host-level, so resolved once rather than per connection below.
     let host = HostConnectRoutes::from_env();
 
@@ -957,6 +978,87 @@ mod tests {
                  different key"
             );
         }
+    }
+
+    /// Issue #582: the Composio half of a row does **not** depend on the
+    /// `composio` tool grant.
+    ///
+    /// This is the contradiction the Connections page reported. `GET
+    /// …/connections` used to discard every Composio connection unless the
+    /// company explicitly granted the `composio` namespace, while `GET
+    /// …/composio/connections` — which the console's provider list reads —
+    /// never consulted the grant. 13 of the 21 shipped companies grant no
+    /// `composio`, so for most of them "connected here, not connected there"
+    /// was the steady state rather than a race.
+    ///
+    /// The manifest below grants nothing at all, which is the case that used to
+    /// return an empty list: no `[[connection]]` to project natively, and a
+    /// Composio view thrown away before it was read.
+    #[tokio::test]
+    async fn composio_state_survives_a_company_that_does_not_grant_composio() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let rows = super::reconcile(
+            runtime.as_ref(),
+            super::ComposioView::Known(
+                [("gmail".to_string(), true), ("slack".to_string(), false)]
+                    .into_iter()
+                    .collect(),
+            ),
+        )
+        .await
+        .expect("reconcile");
+
+        let gmail = rows
+            .iter()
+            .find(|row| row.provider == "gmail")
+            .expect("a Composio-connected provider must reach the console even with no grant");
+        assert!(
+            gmail.connected,
+            "gmail should be connected: {:?}",
+            gmail.via
+        );
+        assert_eq!(gmail.via, vec!["composio"]);
+        // A toolkit Composio knows but has not connected is not a row: the page
+        // lists what is connected plus what the catalog offers, and the catalog
+        // is the other route's job.
+        assert!(
+            !rows.iter().any(|row| row.provider == "slack"),
+            "a disconnected toolkit should not become a connection row"
+        );
+    }
+
+    /// An unread probe is reported as unknown, not as disconnected — the
+    /// distinction the console renders as "could not check".
+    #[tokio::test]
+    async fn an_unreadable_composio_probe_is_unverified_not_disconnected() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[connection]]\nprovider = \"gmail\"\n",
+        )
+        .await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let rows = super::reconcile(runtime.as_ref(), super::ComposioView::Unavailable)
+            .await
+            .expect("reconcile");
+
+        let gmail = rows.iter().find(|row| row.provider == "gmail").unwrap();
+        assert!(!gmail.connected);
+        assert!(
+            gmail.unverified,
+            "an unanswered probe must not read as 'no'"
+        );
     }
 
     /// A company with no `[[connection]]` entries returns an empty list (200),
