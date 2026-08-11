@@ -8,8 +8,9 @@ chain documented there, and the placement is most of the argument.
 
 Steps 1–6 are all decided before the run starts, by an operator writing a
 manifest. Nothing in them looks at what the run is about to do. That is a bad
-trade in both directions: a low bar stops the run constantly, and `full` lets it
-send, publish, pay or delete without asking anyone.
+trade in both directions: a low bar stops the run constantly, and `full` lets an
+agent-picked call send, pay, delete or otherwise cross an unbounded boundary
+without asking anyone. Publishing is the deliberate #658 exception below.
 
 Step 7 closes that gap. `src/policy/judgement.rs` asks, per candidate call,
 whether it warrants a human on its own merits — and it can **only ever add a
@@ -69,27 +70,76 @@ broke publishing outright. What keeps it narrow at the other end is
 `apply_patch`, `memory_store`) are `Consequence` too and do not stop, so "a run
 that only reads, searches, or drafts does not stop" stays true.
 
-**What it deliberately does not stop.** #338's acceptance says "send, publish,
-pay, or delete". Of those, **send, pay and delete are gated; publish is not**,
-and the outward-HTTP family is held back as well. Both carve-outs live in
-`DEFERRED` in `src/policy/judgement.rs`:
+## Which path the call arrived on
 
-- **`publish_artifact`** — issue #658. It qualifies under rule 1
-  (`EffectGroup::Publish` + `Reach::Consequence`), but this gate's only escape
-  is a per-call grant, so stopping it would end unattended publishing for every
-  `full` company with no operator override. That is a product decision owned by
-  #244, not a side effect of adding a classifier.
-- **`http_request`, `curl`, `web_fetch`** — issue #674. They qualify under rule
-  3, and #614 (merged as #627) states the opposite premise in a test named
-  `an_http_request_node_does_not_gate_under_full`. A named test is a stated
-  position; choosing between two defensible premises belongs to #614's owner.
+The three rules above do not apply to every call the same way. **Issue #674 split
+them by path**, and the split is not a convention — it is a difference in what an
+operator actually consented to.
 
-**`shell` stays gated**, which is what keeps "or delete" real: destruction has
-no `EffectGroup` of its own, `shell` is how a run deletes, and #614 does not
-touch it. `git_operations` and `run_workflow` stay too.
+A workflow `tool_call` node is **refused at author time** unless its namespace is
+one the workflow invoker wires *and* the company's `[tools].allow` grants it. So
+a saved `shell` node has passed **two operator gates** — the manifest grant, then
+authoring — and the operator saw the command they saved. An agent turn has passed
+**neither**: the model picks the tool and the arguments at run time. That is why
+`full` meaning "do not ask me about what I authored" is coherent, while "do not
+ask me about anything the model decides to run" is not.
 
-A test asserts every deferred tool *qualifies* on the declaration and is silent
-anyway, so deleting a carve-out fails loudly rather than silently re-opening
+- **Agent path** (`CallPath::Agent`) — #338's rules govern. The default at every
+  construction site, because it is the strict one.
+- **Authored workflow node** (`CallPath::AuthoredWorkflowNode`) — #614's position
+  governs: this step is silent. The workflow gate pass opts in explicitly, on the
+  private policy instance it builds for that pass. The operator's controls there
+  are the two gates above plus `always_approve`, which still gates a node the
+  tier would allow.
+
+**The boundary condition, without which the split is a hole.** A node whose
+arguments are **templated from an upstream node's output is not pre-declared**,
+and follows the *agent* rule. The operator declared the *shape*; the *content*
+arrives at run time from data they never saw. Without it, one `shell` node whose
+`command` is `=previous.output` defeats the split outright — the two-gate
+argument stops describing what actually runs while still being cited as the
+reason not to ask. `an_authored_node_templated_from_upstream_output_follows_the_agent_rule`
+pins the rule and
+`a_shell_node_templated_from_upstream_output_gates_under_full` pins it at the
+gate pass itself.
+
+### The acceptance verbs, per path
+
+#338's acceptance says "a run that would **send, publish, pay, or delete** stops
+for approval regardless of mode". Restated so it is true of the code:
+
+| Verb | Agent path | Authored workflow node |
+|---|---|---|
+| **send** | **Stops** — rule 1 (`Send` + `Consequence`), or fail-closed if the tool is undeclared | Not stopped here. `always_approve` and `[tools].allow` are the operator's controls — **unless templated**, then the agent rule |
+| **publish** | **Not stopped** — `publish_artifact` is carved out; see #658 below | Not stopped, on the same carve-out. The carve-out is not part of the split, and holds on both paths even when templated |
+| **pay** | **Stops** — rule 1 (`Spend` + `Consequence`) and rule 2 (a positive `amount_usd`) | Not stopped here — **unless templated**, then the agent rule |
+| **delete** | **Stops** — rule 3, via `shell`; destruction has no `EffectGroup` of its own | Not stopped here — **unless templated**, then the agent rule |
+
+"Regardless of mode" is exact and unchanged: on the agent path no tier exempts a
+call from this step. "Regardless of *path*" was never claimed and is now
+explicitly not true.
+
+**What it deliberately does not stop, on either path.** `publish_artifact`, named
+in `DEFERRED` in `src/policy/judgement.rs`. It qualifies under rule 1
+(`EffectGroup::Publish` + `Reach::Consequence`) and is silent anyway.
+
+**#658 ruled this correct behaviour rather than a stopgap.** Under `full` a
+company publishes without asking, and `always_approve` is the operator's
+override. The argument it settled: this step's only escape is a single-use,
+argument-exact per-call grant (#243), and there is no manifest knob — so stopping
+`publish_artifact` here would end unattended publishing for every `full` company
+permanently, with no way to opt out short of editing the declaration table. An
+operator who wants publishing gated names it in `always_approve`, which is read
+at step 4 and is a thing they can see, change and revoke.
+
+`http_request`, `curl` and `web_fetch` **were** deferred pending #674 and are
+not any more. They are **scoped by path**, not excluded from the rule: governed
+by #614 on the authored-node path and by #338 on the agent path. `shell`,
+`git_operations` and `run_workflow` are the same.
+
+`every_deferred_tool_would_otherwise_be_stopped` asserts every remaining
+carve-out *qualifies* on the declaration and is silent anyway — and fails if the
+list is emptied — so deleting one fails loudly rather than silently re-opening
 the question.
 
 **It does not learn.** If an operator approves the same shape of call five
@@ -115,8 +165,13 @@ tool reaches `consequence_of`'s cautious fallback and a Composio slug nobody
 has classified is treated as a send, so both stop. Fail-closed is not a branch
 to remember — it falls out of reusing a classifier that is already cautious.
 
-**Coverage.** The workflow `tool_call` path never consults `ApprovalPolicy` at
-all (issue #460), so nothing here reaches it. The acceptance criterion "stops
-regardless of mode" holds on the harness path; on that path it is unreachable
-until #460 lands.
+**Coverage.** This step is reached from two places, and both are deliberate.
+`ApprovalPolicy::check` on the agent path, and `apply_policy_gates` on the
+workflow path — where #612 (closing #460) and #627 (closing #614) made
+`tool_call` and `http_request` nodes consult the same policy. The earlier
+statement that "the workflow path never consults `ApprovalPolicy`" was true when
+this was written and is not any more; the path split above is what governs there
+now, rather than the step being unreachable.
 
+`sub_workflow` children remain ungated on that path — the engine cannot resume a
+child across the boundary — which is issue #617, not this step's scope.

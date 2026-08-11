@@ -12,8 +12,9 @@
 //!
 //! That is a bad trade in both directions. Set the bar low and every run stops
 //! constantly, which is the batching pressure #183 decision 3 exists to avoid.
-//! Set it high — `full` — and the run sends, publishes, pays or deletes without
-//! asking anyone.
+//! Set it high — `full` — and an agent-picked call can send, pay, delete or
+//! otherwise reach beyond a boundary this layer can see without asking anyone.
+//! Publishing is the deliberate #658 exception described below.
 //!
 //! `full`'s stated contract is "the agents act without asking, **except the few
 //! things on the always-ask list**". Without this module that exception is
@@ -79,21 +80,51 @@
 //! quietly repeal that. It is recorded as a signal on the trace instead, where
 //! it informs a human without deciding anything.
 //!
+//! # Which path a call arrives on decides whether this speaks at all
+//!
+//! Issue #674's ruling, and the reason this module takes a [`CallPath`] rather
+//! than judging every call the same way.
+//!
+//! A workflow `tool_call` node is **refused at author time** unless its
+//! namespace is one the workflow invoker wires *and* the company's
+//! `[tools].allow` grants it. So a saved `shell` node has already passed **two
+//! operator gates** — the manifest grant, then authoring — and the operator has
+//! seen the actual command they saved.
+//!
+//! An agent turn has passed **neither**. The model picks the tool and the
+//! arguments at run time. That is a real difference in what the operator
+//! consented to, which is why `full` meaning "do not ask me about what I
+//! authored" is coherent while "do not ask me about anything the model decides
+//! to run" is not.
+//!
+//! So: **#338's rules govern [`CallPath::Agent`]. #614's position governs
+//! [`CallPath::AuthoredWorkflowNode`]** — on that path this module is silent,
+//! and the operator's controls are the two gates above plus `always_approve`,
+//! which still gates a node the tier would allow.
+//!
+//! ## The boundary condition, without which the split is a hole
+//!
+//! **A node whose arguments are templated from an upstream node's output is not
+//! pre-declared**, and follows the *agent* rule. The operator declared the
+//! *shape*; the *content* arrives at run time from data they never saw.
+//!
+//! Without this the split is trivially defeated: author one `shell` node whose
+//! `command` is `=previous.output` and the two-gate argument stops describing
+//! what actually runs. See [`any_argument_is_templated`].
+//!
 //! # What this deliberately does NOT stop
 //!
-//! #338's acceptance says "send, publish, pay, or delete". Of those, **send,
-//! pay and delete are gated; publish is not**, and the outward-HTTP family is
-//! held back too. See `DEFERRED`:
+//! #338's acceptance says "send, publish, pay, or delete". Read against the
+//! split above: on the agent path **send, pay and delete are gated and publish
+//! is not**; on the authored-node path none of the four are gated here unless
+//! the boundary condition returns the node to the agent rule.
 //!
-//! * `publish_artifact` — issue #658. This gate's only escape is a per-call
-//!   grant, so stopping it would end unattended publishing for every `full`
-//!   company with no operator override.
-//! * `http_request`, `curl`, `web_fetch` — issue #674. #614 states the opposite
-//!   premise in a named test; that contradiction has an owner, and it is not
-//!   this module.
+//! `publish_artifact` is carved out on **both** paths, permanently — see
+//! `DEFERRED` and issue #658.
 //!
-//! `shell` stays gated, which is what keeps "or delete" real: destruction has
-//! no `EffectGroup` of its own, and `shell` is how a run deletes.
+//! `shell` stays gated on the agent path, which is what keeps "or delete" real:
+//! destruction has no `EffectGroup` of its own, and `shell` is how a run
+//! deletes.
 //!
 //! # Failure is a stop
 //!
@@ -275,49 +306,97 @@ fn is_unbounded(tool: &str, consequence: Consequence) -> bool {
     consequence.reach == Reach::Consequence && UNBOUNDED.contains(&tool)
 }
 
-/// Tools held back from this gate pending a decision that is not this issue's
-/// to take.
+/// Tools this gate never speaks about, on either path.
 ///
-/// **This is a deliberate exclusion, not an oversight. Do not delete it without
-/// reading issue #658.**
+/// **This is a deliberate exclusion, not an oversight, and it is not
+/// provisional. Do not delete it without reading issue #658.**
 ///
 /// `publish_artifact` is declared `EffectGroup::Publish` + `Reach::Consequence`,
 /// under a table comment reading "Externally visible and not reversible by the
-/// company alone" — so by rule 1 below it should stop, and #338's acceptance
-/// names "publish" outright. It is excluded anyway, because stopping it decides
-/// a product question that belongs to whoever owns #244:
+/// company alone" — so by rule 1 below it qualifies, and #338's acceptance names
+/// "publish" outright. It is excluded anyway, and **#658 has now ruled that this
+/// is the correct behaviour rather than a stopgap**: under `full` a company
+/// publishes without asking, and `always_approve` is the operator's override for
+/// companies that want to be asked.
 ///
-/// This gate has exactly one escape — a single-use, argument-exact grant per
-/// call (#243). There is no manifest knob. So stopping `publish_artifact` means
-/// **every company running `full` stops for a human on every deliverable it
-/// publishes**, permanently, with no way to opt out short of editing the
-/// declaration table. That may be right; it is not a call to make as a side
-/// effect of adding a classifier.
+/// The argument #658 settled: this gate has exactly one escape — a single-use,
+/// argument-exact grant per call (#243). There is no manifest knob. So stopping
+/// `publish_artifact` here would mean **every company running `full` stops for a
+/// human on every deliverable it publishes**, permanently, with no way to opt
+/// out short of editing the declaration table. That is not a call to make as a
+/// side effect of adding a classifier, and #658 declined to make it: an operator
+/// who wants publishing gated names it in `always_approve`, which is read before
+/// this arm and is a thing they can see, change and revoke.
 ///
-/// The size of the change is visible in the tests: excluding it keeps the 11
-/// `publish_turn_test` cases green, and shipping it needs a grant minted per
-/// scripted call in a suite that is about publish mechanics, not approvals.
+/// The size of the alternative is visible in the tests: excluding it keeps the
+/// 11 `publish_turn_test` cases green, and gating it would need a grant minted
+/// per scripted call in a suite that is about publish mechanics, not approvals.
 ///
-/// Issues #658 and #674 carry the arguments and the options. When they are
-/// settled, each entry goes away in one direction or the other.
+/// `http_request`, `curl` and `web_fetch` **were** on this list pending #674 and
+/// are not deferred any more. #674 ruled that they are governed by #614 on the
+/// authored-node path and by #338 on the agent path — which is a scoping of the
+/// rule, not an exclusion from it, so it is expressed by [`CallPath`] rather
+/// than here. See the module docs.
 const DEFERRED: &[&str] = &[
-    // Issue #658 — see the note above.
+    // Issue #658 — see the note above. Ruled, not pending.
     "publish_artifact",
-    // Issue #674. These reach an arbitrary address with the tenant's own
-    // credentials, so `UNBOUNDED` names them and rule 3 would stop them. #614
-    // (merged as #627) states the opposite premise, in a test named
-    // `an_http_request_node_does_not_gate_under_full` — and a named test is a
-    // stated position, not an accident.
-    //
-    // Both are defensible and they cannot both hold. Choosing between them is a
-    // product decision belonging to #614's owner, so it is deferred rather than
-    // taken here: #674 puts the two premises side by side and asks which one it
-    // is. `shell`, `git_operations` and `run_workflow` stay gated — `shell` is
-    // how a run deletes, and #614 does not touch it.
-    "http_request",
-    "curl",
-    "web_fetch",
 ];
+
+/// The prefix tinyflows gives an expression bound at run time.
+///
+/// Both binding forms wear it: the dotted shorthand (`=item.brief`) and a jq
+/// program (`=.items | length`). `t_transform_resolves_expr_bindings_engine_side`
+/// in [`crate::workflows::runner`] pins that they resolve engine-side, and
+/// `every_reachable_workflow_tool_is_classified_by_name_alone` in
+/// [`crate::workflows::gate`] pins that a node's args may still be carrying them
+/// unresolved when the gate pass runs — which is exactly the window this reads.
+const EXPRESSION_PREFIX: &str = "=";
+
+/// Which of the two paths a candidate call arrived on.
+///
+/// Issue #674's ruling made this the first thing [`judge`] asks. The variants
+/// are not two flavours of caller; they are two different things an operator
+/// consented to. See the module docs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallPath {
+    /// A model picked this tool and these arguments during a turn. Nobody saw
+    /// the call before it was made, so #338's rules apply in full.
+    Agent,
+    /// An operator authored this node into a saved workflow, past the manifest
+    /// grant and the authoring refusal. #614's position applies: this module is
+    /// silent — **unless the arguments are templated**, which un-declares the
+    /// call and returns it to the agent rule.
+    AuthoredWorkflowNode,
+}
+
+/// Does any argument of this call arrive from the run rather than from the
+/// author?
+///
+/// **The boundary condition of #674's split, and the part that stops it being a
+/// hole.** The authored-node path is silent because an operator saw the call.
+/// They did not see `=previous.output`; they saw the *shape*, and the content
+/// arrives at run time from data they never read. So a templated node is judged
+/// as an agent call.
+///
+/// Without this, one `shell` node whose `command` is `=previous.output` defeats
+/// the split outright: the two-gate argument stops describing what actually runs
+/// while still being cited as the reason not to ask.
+///
+/// Recurses through objects and arrays, because an expression is a *value*
+/// anywhere in the descriptor, not a top-level key — `{"body": {"cmd":
+/// "=item.x"}}` is as templated as `{"cmd": "=item.x"}`.
+///
+/// Errs toward "templated": a literal string that merely starts with `=` is read
+/// as an expression, which sends the call to the stricter rule. That is the
+/// direction to be wrong in, and tinyflows reads it that way too.
+fn any_argument_is_templated(args: &Value) -> bool {
+    match args {
+        Value::String(text) => text.starts_with(EXPRESSION_PREFIX),
+        Value::Array(items) => items.iter().any(any_argument_is_templated),
+        Value::Object(fields) => fields.values().any(any_argument_is_templated),
+        Value::Null | Value::Bool(_) | Value::Number(_) => false,
+    }
+}
 
 /// The argument key a declared amount of money arrives under.
 ///
@@ -342,13 +421,32 @@ fn declared_amount_usd(args: &Value) -> Option<f64> {
 /// run. Consulted only where the rest of the chain has already decided to
 /// allow — see the module docs for why that placement is the whole safety
 /// argument.
-pub fn judge(tool: &str, args: &Value) -> Judgement {
+///
+/// `path` decides whether this speaks at all (issue #674). It is a required
+/// argument rather than a defaulted one on purpose: a caller that has not
+/// thought about which path it is on should not compile.
+pub fn judge(tool: &str, args: &Value, path: CallPath) -> Judgement {
+    // Issue #674's split, FIRST — before any rule can reach the call.
+    //
+    // An authored node passed two operator gates (the manifest grant, then
+    // authoring) and the operator saw the call. An agent turn passed neither.
+    //
+    // The `!any_argument_is_templated` half is the boundary condition, not a
+    // refinement: an authored node whose arguments come from an upstream node's
+    // output was never pre-declared — the operator declared the shape, the
+    // content arrives at run time — so it is judged as an agent call. Deleting
+    // that half leaves a split that one `=previous.output` defeats.
+    if path == CallPath::AuthoredWorkflowNode && !any_argument_is_templated(args) {
+        return Judgement::Silent;
+    }
+
     let consequence = consequence_of(tool, args);
     let name = tool.to_ascii_lowercase();
     let declared = declared_tools().any(|d| d == name);
 
-    // Held back pending issue #658 — see `DEFERRED`. First, so that no rule
-    // below can reach it and so the exclusion is impossible to miss.
+    // Carved out on both paths — see `DEFERRED` and issue #658. Ahead of every
+    // rule, so none of them can reach it and so the exclusion is impossible to
+    // miss.
     if DEFERRED.contains(&name.as_str()) {
         return Judgement::Silent;
     }
@@ -408,25 +506,37 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Every test below that does not name a path is about the **agent** path —
+    /// the one #338's rules govern. The authored-node path has its own section
+    /// at the end of this module.
     fn judge_bare(tool: &str) -> Judgement {
-        judge(tool, &json!({}))
+        judge_agent(tool, &json!({}))
     }
 
-    /// #338's acceptance, stated as it is written: "a run that would send,
-    /// publish, pay, or delete stops for approval regardless of mode".
+    fn judge_agent(tool: &str, args: &Value) -> Judgement {
+        judge(tool, args, CallPath::Agent)
+    }
+
+    fn judge_node(tool: &str, args: &Value) -> Judgement {
+        judge(tool, args, CallPath::AuthoredWorkflowNode)
+    }
+
+    /// The agent-path half of #338's acceptance after #658's ruling: sends,
+    /// payments and deletes stop, and an undeclared publish-shaped call fails
+    /// closed. The declared `publish_artifact` exception is pinned separately.
     ///
     /// `delete` has no declared [`EffectGroup`] of its own — the taxonomy names
     /// six consequence classes and destruction is not one — so it arrives here
     /// as the unbounded-reach case. `shell` is how a run deletes.
     #[test]
-    fn a_send_publish_pay_or_delete_stops() {
+    fn agent_calls_that_send_pay_delete_or_use_an_undeclared_publish_shape_stop() {
         // Declared, so the verdict names the consequence the table declares.
         assert_eq!(
             judge_bare("media_generate_image"),
             Judgement::Stop(StopReason::Irreversible(EffectGroup::Spend)),
         );
         assert_eq!(
-            judge("composio_execute", &json!({ "tool": "GMAIL_SEND_EMAIL" })),
+            judge_agent("composio_execute", &json!({ "tool": "GMAIL_SEND_EMAIL" })),
             Judgement::Stop(StopReason::Irreversible(EffectGroup::Send)),
         );
         // Undeclared, so they stop on the fail-closed ground instead — see
@@ -517,11 +627,22 @@ mod tests {
 
     /// Arbitrary code and arbitrary addresses, which the table already refuses
     /// a standing grant for the same reason.
+    ///
+    /// The outward-HTTP family — `http_request`, `curl`, `web_fetch` — is
+    /// asserted here rather than carved out. Before #674 it sat in `DEFERRED`
+    /// and this loop skipped it; the ruling put it back under the rule **on this
+    /// path**, and under #614's position on the authored-node path.
     #[test]
     fn unbounded_tools_stop() {
-        // Minus the ones held back — `UNBOUNDED` says what the rule *names*,
-        // `DEFERRED` says what is withheld from it, and this test is about the
-        // rule. The carve-outs have their own tests.
+        for tool in ["http_request", "curl", "web_fetch"] {
+            assert!(
+                !DEFERRED.contains(&tool),
+                "#674 ruled `{tool}` scoped by path, not deferred"
+            );
+        }
+        // The filter is retained rather than dropped: nothing in `UNBOUNDED` is
+        // deferred today, but `DEFERRED` is what is withheld from the rule and
+        // this test is about the rule. The carve-outs have their own tests.
         for tool in UNBOUNDED.iter().filter(|t| !DEFERRED.contains(t)) {
             assert_eq!(
                 judge_bare(tool),
@@ -551,10 +672,15 @@ mod tests {
     /// The carve-out, pinned so it is a decision rather than a drift.
     ///
     /// `publish_artifact` satisfies rule 1 outright — declared `Publish` and
-    /// `Consequence` — and is excluded anyway pending issue #658. If somebody
-    /// deletes `DEFERRED` without settling that issue, this fails and says why.
+    /// `Consequence` — and is silent anyway. Issue #658 **ruled** that this is
+    /// the behaviour it wants rather than a stopgap: under `full` a company
+    /// publishes without asking, and an operator who wants to be asked names it
+    /// in `always_approve`, which is read before this arm.
+    ///
+    /// Asserted on **both** paths: the carve-out is not part of #674's split, so
+    /// a rework of that split must not accidentally make one path speak.
     #[test]
-    fn publish_artifact_is_deliberately_excluded_pending_658() {
+    fn publish_artifact_is_excluded_by_the_658_ruling() {
         let c = consequence_of("publish_artifact", &json!({}));
         assert_eq!(c.group, EffectGroup::Publish);
         assert_eq!(c.reach, Reach::Consequence);
@@ -562,10 +688,20 @@ mod tests {
             is_irreversible_group(c.group),
             "it qualifies — the exclusion is what keeps it silent"
         );
+        for path in [CallPath::Agent, CallPath::AuthoredWorkflowNode] {
+            assert_eq!(
+                judge("publish_artifact", &json!({}), path),
+                Judgement::Silent,
+                "{path:?}: #658 ruled `full` publishes without asking; \
+                 `always_approve` is the override"
+            );
+        }
+        // Templated arguments return an authored node to the agent rule — and
+        // the agent rule is silent here too, so the carve-out survives the one
+        // condition that reopens every other node.
         assert_eq!(
-            judge_bare("publish_artifact"),
+            judge_node("publish_artifact", &json!({ "body": "=previous.output" })),
             Judgement::Silent,
-            "excluded pending #658; do not 'fix' this without reading it"
         );
     }
 
@@ -582,20 +718,30 @@ mod tests {
     /// Reach::Consequence)`, `auto` would shift silently under operators who
     /// chose it — exactly the failure the placement argument exists to prevent.
     /// This walks every declared tool and fails on that day instead.
+    ///
+    /// Judged on [`CallPath::Agent`] deliberately: that is the strict path, so
+    /// this asserts the strongest form of the claim. If it held only on the
+    /// authored-node path it would be asserting #674's split, not `auto`.
     #[test]
     fn the_arm_adds_nothing_under_auto() {
+        let mut checked = 0;
         for tool in declared_tools() {
             let c = consequence_of(tool, &json!({}));
             if c.parks_under_auto() {
                 continue; // `auto` already stops it; this arm is never reached.
             }
+            checked += 1;
             assert_eq!(
-                judge(tool, &json!({})),
+                judge_agent(tool, &json!({})),
                 Judgement::Silent,
                 "`{tool}` runs under `auto` but this arm would stop it — `auto` \
                  has shifted under operators who chose it"
             );
         }
+        assert!(
+            checked > 0,
+            "no declared tool runs under `auto` — the walk asserted nothing"
+        );
     }
 
     /// Every carve-out must be a tool a rule would otherwise have stopped.
@@ -605,8 +751,22 @@ mod tests {
     /// and it would sit there looking like a decision. This fails if the
     /// declaration table moves under a carve-out, so a deferral cannot quietly
     /// become a no-op.
+    ///
+    /// It also fails if `DEFERRED` is emptied. Without that, deleting the
+    /// `publish_artifact` carve-out would make this loop over nothing and pass —
+    /// a test that scores green having asserted zero things, which is the
+    /// failure mode it exists to prevent.
+    ///
+    /// `http_request` / `curl` / `web_fetch` were here and are not any more:
+    /// #674 ruled them **scoped by path**, not deferred, so they are governed by
+    /// `CallPath` and are asserted in the authored-node section below.
     #[test]
     fn every_deferred_tool_would_otherwise_be_stopped() {
+        assert!(
+            !DEFERRED.is_empty(),
+            "DEFERRED is empty — this test would assert nothing. #658 ruled the \
+             `publish_artifact` carve-out correct; read it before removing it"
+        );
         for tool in DEFERRED {
             let c = consequence_of(tool, &json!({}));
             let would_stop = (is_irreversible_group(c.group) && c.reach == Reach::Consequence)
@@ -618,7 +778,7 @@ mod tests {
             assert_eq!(
                 judge_bare(tool),
                 Judgement::Silent,
-                "`{tool}` is deferred; do not 'fix' this without reading #658 / #674"
+                "`{tool}` is deferred; do not 'fix' this without reading #658"
             );
         }
     }
@@ -688,7 +848,7 @@ mod tests {
     fn an_unclassified_composio_action_stops() {
         let args = json!({ "tool": "SOME_TOOLKIT_ACTION_NOBODY_CLASSIFIED" });
         assert_eq!(
-            judge("composio_execute", &args),
+            judge_agent("composio_execute", &args),
             Judgement::Stop(StopReason::Irreversible(EffectGroup::Send))
         );
     }
@@ -700,7 +860,7 @@ mod tests {
         // `list` is a declared pure read: silent on its own.
         assert_eq!(judge_bare("list"), Judgement::Silent);
         assert_eq!(
-            judge("list", &json!({ "amount_usd": 12.5 })),
+            judge_agent("list", &json!({ "amount_usd": 12.5 })),
             Judgement::Stop(StopReason::MoneyLeaves)
         );
     }
@@ -709,11 +869,11 @@ mod tests {
     #[test]
     fn a_zero_or_negative_amount_is_not_money_leaving() {
         assert_eq!(
-            judge("list", &json!({ "amount_usd": 0 })),
+            judge_agent("list", &json!({ "amount_usd": 0 })),
             Judgement::Silent
         );
         assert_eq!(
-            judge("list", &json!({ "amount_usd": -5 })),
+            judge_agent("list", &json!({ "amount_usd": -5 })),
             Judgement::Silent
         );
     }
@@ -724,10 +884,10 @@ mod tests {
     #[test]
     fn the_gate_does_not_learn_from_repetition() {
         let args = json!({ "to": "customer@example.com" });
-        let first = judge("send_email", &args);
+        let first = judge_agent("send_email", &args);
         for _ in 0..5 {
             assert_eq!(
-                judge("send_email", &args),
+                judge_agent("send_email", &args),
                 first,
                 "repetition must not soften the verdict"
             );
@@ -739,7 +899,10 @@ mod tests {
     #[test]
     fn the_verdict_is_deterministic() {
         let args = json!({ "body": "hello", "to": "a@example.com" });
-        assert_eq!(judge("send_email", &args), judge("send_email", &args));
+        assert_eq!(
+            judge_agent("send_email", &args),
+            judge_agent("send_email", &args)
+        );
     }
 
     /// Every stop can say why, in the operator's terms rather than this
@@ -761,5 +924,136 @@ mod tests {
         assert!(!StopReason::UnboundedReach.describe().is_empty());
         assert!(!StopReason::MoneyLeaves.describe().is_empty());
         assert!(!StopReason::Undeclared.describe().is_empty());
+    }
+
+    // ---- #674: the split by path ------------------------------------------
+    //
+    // Everything above is the agent path. These are the authored-node path and
+    // the boundary condition that governs when a node leaves it.
+
+    /// #614's position, stated as a rule over the whole strict set rather than
+    /// as the three tools whose tests forced the question.
+    ///
+    /// A node an operator authored has passed the manifest grant and the
+    /// authoring refusal, and they saw the call. This module is silent on it.
+    #[test]
+    fn an_authored_node_with_literal_arguments_is_not_judged() {
+        // Every tool the agent path stops for a reason other than a carve-out,
+        // so this is the rule and not a sample of it.
+        let cases: &[(&str, Value)] = &[
+            ("shell", json!({ "command": "echo hello > out.txt" })),
+            ("curl", json!({ "url": "https://api.example.com/x" })),
+            (
+                "http_request",
+                json!({ "url": "https://api.example.com/x" }),
+            ),
+            ("web_fetch", json!({ "url": "https://example.com" })),
+            ("git_operations", json!({ "op": "push" })),
+            ("run_workflow", json!({ "workflow_id": "nightly" })),
+            ("media_generate_image", json!({ "prompt": "a cat" })),
+            (
+                "composio_execute",
+                json!({ "tool": "GMAIL_SEND_EMAIL", "to": "a@example.com" }),
+            ),
+            ("frobnicate_the_widget", json!({})),
+            ("list", json!({ "amount_usd": 400.0 })),
+        ];
+        for (tool, args) in cases {
+            assert!(
+                matches!(judge_agent(tool, args), Judgement::Stop(_)),
+                "`{tool}` must stop on the agent path — otherwise this case \
+                 proves nothing about the split"
+            );
+            assert_eq!(
+                judge_node(tool, args),
+                Judgement::Silent,
+                "`{tool}` was authored into a saved workflow: two operator gates \
+                 and the operator saw the call (#674 / #614)"
+            );
+        }
+    }
+
+    /// **The boundary condition.** An authored node whose arguments come from an
+    /// upstream node's output was never pre-declared, so it is judged as an
+    /// agent call.
+    ///
+    /// This is the test that stops the split being a hole. Delete it and one
+    /// `shell` node whose `command` is `=previous.output` walks through a gate
+    /// justified by an operator having seen a command they never saw.
+    #[test]
+    fn an_authored_node_templated_from_upstream_output_follows_the_agent_rule() {
+        assert_eq!(
+            judge_node("shell", &json!({ "command": "=previous.output" })),
+            Judgement::Stop(StopReason::UnboundedReach),
+            "the operator declared the shape; the content arrives at run time"
+        );
+        // The same node with the command actually written out is silent — which
+        // is what makes the assertion above about templating rather than about
+        // `shell`.
+        assert_eq!(
+            judge_node("shell", &json!({ "command": "echo hi" })),
+            Judgement::Silent,
+        );
+        // Money, and the jq binding form as well as the dotted shorthand.
+        assert_eq!(
+            judge_node(
+                "list",
+                &json!({ "amount_usd": 400.0, "note": "=.items[0]" })
+            ),
+            Judgement::Stop(StopReason::MoneyLeaves),
+        );
+    }
+
+    /// An expression is a *value* anywhere in the descriptor, not a top-level
+    /// key — so the check recurses. A node that buried `=previous.output` one
+    /// object deep would otherwise read as fully authored.
+    #[test]
+    fn a_templated_value_is_found_at_any_depth() {
+        for args in [
+            json!("=item.everything"),
+            json!({ "cmd": "=item.x" }),
+            json!({ "body": { "cmd": "=item.x" } }),
+            json!({ "argv": ["bash", "-c", "=item.x"] }),
+            json!({ "body": { "steps": [{ "cmd": "=item.x" }] } }),
+        ] {
+            assert!(
+                any_argument_is_templated(&args),
+                "{args} is templated and must be judged as an agent call"
+            );
+            assert_eq!(
+                judge_node("shell", &args),
+                Judgement::Stop(StopReason::UnboundedReach),
+                "{args}"
+            );
+        }
+    }
+
+    /// ...and a descriptor with nothing templated in it is not dragged back to
+    /// the agent rule by a value that merely looks structured.
+    #[test]
+    fn a_fully_authored_descriptor_is_not_templated() {
+        for args in [
+            json!({}),
+            json!({ "command": "echo hi", "timeout": 30, "quiet": true }),
+            json!({ "url": "https://example.com/a=b?c=d" }),
+            json!({ "argv": ["bash", "-c", "ls"], "env": { "A": "1" } }),
+            json!({ "body": null }),
+        ] {
+            assert!(!any_argument_is_templated(&args), "{args}");
+            assert_eq!(judge_node("shell", &args), Judgement::Silent, "{args}");
+        }
+    }
+
+    /// The two paths are not two names for one behaviour. If a refactor
+    /// collapsed them — passing `Agent` everywhere, or `AuthoredWorkflowNode`
+    /// everywhere — every test above could still pass while the split was gone.
+    #[test]
+    fn the_two_paths_actually_differ() {
+        let args = json!({ "command": "echo hi" });
+        assert_ne!(
+            judge_agent("shell", &args),
+            judge_node("shell", &args),
+            "the paths have collapsed into one — #674's split is not implemented"
+        );
     }
 }

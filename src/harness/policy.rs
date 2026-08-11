@@ -80,8 +80,18 @@
 //! It is **last**, and consulted only where the mode already said allow. That
 //! placement is the whole safety argument: it can turn an allow into a stop and
 //! can do nothing else, so every arm above keeps its authority unchanged. The
-//! practical effect is confined to `full` — `supervised` already parks a
-//! consequence and `readonly` already denies one.
+//! invariant, phrased so it survives the next tier: **this arm only ever speaks
+//! where the mode allowed.**
+//!
+//! It is also scoped by **which path the call arrived on** (issue #674). A
+//! policy built by [`ApprovalPolicy::new`] judges an agent turn, where the model
+//! picked the tool and the arguments and nobody saw the call first. The workflow
+//! gate pass opts into
+//! [`for_authored_workflow_nodes`](ApprovalPolicy::for_authored_workflow_nodes),
+//! where an operator authored the node past the manifest grant and the authoring
+//! refusal — unless its arguments are templated from an upstream node's output,
+//! which un-declares it. Only this last arm reads the path; every arm above
+//! decides identically on both.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -94,6 +104,7 @@ use oh::agent::tool_policy::{ToolPolicy, ToolPolicyDecision, ToolPolicyRequest};
 
 use crate::company::Policy;
 use crate::metering::{usd_spent_by_agent, utc_day_start_millis};
+use crate::policy::CallPath;
 use crate::ports::UsageMeter;
 use crate::ports::types::{CompanyId, Effect, EffectGroup};
 use crate::runtime::grants::{GrantSet, GrantedCall};
@@ -702,6 +713,17 @@ pub struct ApprovalPolicy {
     /// projected before: no agent, so no grant, so the runtime executes it
     /// natively. Only `build_roster` sets it.
     agent: Option<String>,
+    /// Which of the two paths the calls this instance judges arrive on (issue
+    /// #674), read by the per-call judgement arm and by nothing else.
+    ///
+    /// [`CallPath::Agent`] — the strict one — at every construction site except
+    /// the workflow gate pass, which opts in via
+    /// [`for_authored_workflow_nodes`](Self::for_authored_workflow_nodes). A
+    /// field rather than a `check` parameter because the trait's signature is
+    /// openhuman's, and because the path is a property of the instance: the
+    /// gate pass builds its own policy for its own pass, and nothing else shares
+    /// it.
+    call_path: CallPath,
 }
 
 /// Where the per-agent daily spend cap reads today's spend from (issue #304):
@@ -739,6 +761,8 @@ impl ApprovalPolicy {
             agent: None,
             spend: None,
             no_meter_warned: AtomicBool::new(false),
+            // The strict path by default — see `for_authored_workflow_nodes`.
+            call_path: CallPath::Agent,
         }
     }
 
@@ -763,6 +787,27 @@ impl ApprovalPolicy {
     /// effect knows whose tool call it came from (issue #243).
     pub fn with_agent(mut self, agent: impl Into<String>) -> Self {
         self.agent = Some(agent.into());
+        self
+    }
+
+    /// Declares that this policy instance judges calls an operator **authored**
+    /// into a saved workflow, not calls a model chose during a turn (issue
+    /// #674).
+    ///
+    /// It changes one arm and one arm only: the per-call judgement at the end of
+    /// [`check`](ToolPolicy::check). Every arm above — the reserved `never_do`
+    /// slot, the `readonly` brake, both grant arms, `always_approve`, the daily
+    /// cap, `auto_approve_under_usd` and the tier — decides exactly as it does
+    /// on the agent path. An operator who wants a node gated still names it in
+    /// `always_approve` and still gets it, on either path.
+    ///
+    /// **Opt-in, and deliberately so.** [`new`](Self::new) yields the agent
+    /// path, which is the strict one, so a construction site that has not
+    /// thought about this gets judged in full rather than silently exempted.
+    /// Only [`apply_policy_gates`](crate::workflows::gate) calls this, on the
+    /// private instance it builds for exactly that pass.
+    pub fn for_authored_workflow_nodes(mut self) -> Self {
+        self.call_path = CallPath::AuthoredWorkflowNode;
         self
     }
 
@@ -1322,7 +1367,8 @@ impl ToolPolicy for ApprovalPolicy {
         // something without requiring an operator to have anticipated each one
         // by name.
         if matches!(by_mode, ToolPolicyDecision::Allow)
-            && let Some(stop) = crate::policy::judge(tool, &request.arguments).stop_reason()
+            && let Some(stop) =
+                crate::policy::judge(tool, &request.arguments, self.call_path).stop_reason()
         {
             return self.require_approval(
                 tool,
@@ -1992,8 +2038,9 @@ mod tests {
         // it stops: it is internal, and the gate is scoped to what leaves the
         // company or cannot be bounded. These tools keep their own safeguards:
         // writes and deletes require an `expected_updated_at` compare-and-swap
-        // token, creates refuse paths that already resolve, and deletes refuse
-        // folders that still hold anything.
+        // token, creates refuse paths that already resolve, deletes refuse
+        // folders that still hold anything, and renames refuse occupied
+        // destinations.
         //
         // This is the assertion that caught the first version of that gate,
         // which stopped both: publishing runs through them, and thirteen
@@ -4146,9 +4193,9 @@ mod tests {
         }
     }
 
-    /// The behaviour change, stated as #338's acceptance states it: a call that
-    /// sends, publishes or pays stops **regardless of mode** — and `full` is
-    /// the mode where that was not already true.
+    /// The agent-path behaviour change after #658's ruling: sends, payments and
+    /// undeclared publish-shaped calls stop regardless of mode. The declared
+    /// `publish_artifact` exception has its own tests in `judgement.rs`.
     #[tokio::test]
     async fn full_autonomy_stops_for_an_irreversible_call() {
         let p = policy("full", &[], None);
@@ -4307,5 +4354,101 @@ mod tests {
             ),
             other => panic!("expected a park, got {}", decision_name(&other)),
         }
+    }
+
+    // ---- The path split (issue #674) --------------------------------------
+
+    /// A policy nobody told about the path judges the strict way.
+    ///
+    /// The default is the safety property: a construction site added later,
+    /// which has not thought about #674 at all, gets the agent rule rather than
+    /// being silently exempted from it.
+    #[tokio::test]
+    async fn the_default_path_is_the_strict_one() {
+        let p = policy("full", &[], None);
+        assert_eq!(p.call_path, CallPath::Agent);
+        let d = p
+            .check(&request(
+                "shell",
+                serde_json::json!({ "command": "rm -rf ." }),
+            ))
+            .await;
+        assert_eq!(decision_name(&d), "park");
+    }
+
+    /// ...and the workflow gate pass opts out of exactly that arm, because an
+    /// operator authored the node past the manifest grant.
+    #[tokio::test]
+    async fn an_authored_node_is_not_stopped_by_the_judgement_arm() {
+        let p = policy("full", &[], None).for_authored_workflow_nodes();
+        let d = p
+            .check(&request(
+                "shell",
+                serde_json::json!({ "command": "rm -rf ." }),
+            ))
+            .await;
+        assert_eq!(decision_name(&d), "allow");
+    }
+
+    /// The opt-out scopes ONE arm. This is the assertion that keeps it from
+    /// becoming a way to run a workflow node past the whole chain.
+    ///
+    /// Each case below is decided by an arm ABOVE the judgement one, so each
+    /// must decide identically on both paths. A refactor that moved the path
+    /// check any earlier — the obvious "simplification", since it would let
+    /// `check` return before doing any work — fails here rather than shipping a
+    /// bypass.
+    #[tokio::test]
+    async fn the_authored_path_changes_nothing_above_the_judgement_arm() {
+        let cases: &[(&str, &[&str], &str, &str)] = &[
+            // `readonly` denies an external effect; it does not park it, and it
+            // certainly does not allow it because a workflow authored it.
+            ("readonly", &[], "send_email", "deny"),
+            // `always_approve` is the operator asking to be told. It outranks
+            // the tier on both paths — and on the authored path it is now the
+            // operator's whole control surface, so it had better work.
+            ("full", &["shell"], "shell", "park"),
+            // `supervised` parks a consequence on its own.
+            ("supervised", &[], "shell", "park"),
+        ];
+        for (mode, always, tool, expected) in cases {
+            let args = serde_json::json!({ "command": "ls" });
+            let agent_path = policy(mode, always, None)
+                .check(&request(tool, args.clone()))
+                .await;
+            let node_path = policy(mode, always, None)
+                .for_authored_workflow_nodes()
+                .check(&request(tool, args))
+                .await;
+            assert_eq!(
+                decision_name(&agent_path),
+                *expected,
+                "{mode}/{tool}: the arm under test is not the one deciding here"
+            );
+            assert_eq!(
+                decision_name(&node_path),
+                *expected,
+                "{mode}/{tool}: the authored path must only scope the judgement \
+                 arm, and this decision is made above it"
+            );
+        }
+    }
+
+    /// The boundary condition, at the chain rather than in the pure module: the
+    /// same node, the same tier, the same path — and templated arguments.
+    #[tokio::test]
+    async fn an_authored_node_templated_from_upstream_output_still_stops() {
+        let p = policy("full", &[], None).for_authored_workflow_nodes();
+        let d = p
+            .check(&request(
+                "shell",
+                serde_json::json!({ "command": "=previous.output" }),
+            ))
+            .await;
+        assert_eq!(
+            decision_name(&d),
+            "park",
+            "the operator declared the shape, not the command"
+        );
     }
 }

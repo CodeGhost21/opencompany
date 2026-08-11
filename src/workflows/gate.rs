@@ -195,6 +195,29 @@ pub(crate) struct GatedCall {
 /// no agent, which is precisely the synthetic-principal decision this module's
 /// docs record. The context below names that principal so a log line says which
 /// workflow asked.
+///
+/// # Why it declares the authored-node path (issue #674)
+///
+/// [`for_authored_workflow_nodes`](ApprovalPolicy::for_authored_workflow_nodes)
+/// scopes one arm — the per-call judgement #338 added — and nothing else.
+///
+/// A node reaching this pass has passed **two operator gates**: the company's
+/// `[tools].allow` grant, which [`WorkflowToolInvoker`](super::caps) checks
+/// fail-closed, and authoring, which refuses a namespace the invoker does not
+/// wire. The operator saw the call. An agent turn has passed neither — the model
+/// picks the tool and the arguments at run time — so #338's rules stay in force
+/// there and #614's position holds here. #674 ruled the split.
+///
+/// The boundary condition lives in [`judge`](crate::policy::judge) rather than
+/// here, because it is about the call and not about the caller: a node whose
+/// arguments are templated from an upstream node's output was never
+/// pre-declared, so it is judged as an agent call. This pass is exactly where
+/// that matters — `every_reachable_workflow_tool_is_classified_by_name_alone`
+/// records that node args may still be unresolved `=`-expressions when it runs.
+///
+/// The policy instance is private to this pass, so the declaration cannot leak
+/// onto the agent path: no other caller shares it, and
+/// [`ApprovalPolicy::new`] yields the strict path.
 pub(crate) async fn apply_policy_gates(
     graph: &mut WorkflowGraph,
     record: &CompanyRecord,
@@ -246,7 +269,7 @@ pub(crate) async fn policy_gates(
     // same `auto_approve_under_usd` the roster runs under. No per-agent budget:
     // a workflow node is not a teammate, and the company-wide ceiling is
     // enforced elsewhere.
-    let policy = ApprovalPolicy::new(company_policy, None);
+    let policy = ApprovalPolicy::new(company_policy, None).for_authored_workflow_nodes();
     let mut gated = Vec::new();
 
     for node in &graph.nodes {
@@ -534,6 +557,60 @@ description = "Runs Acme."
 
         assert!(gated.is_empty());
         assert_eq!(after.nodes[0].config, before.nodes[0].config);
+    }
+
+    /// #674's boundary condition, at the seam rather than in a unit test.
+    ///
+    /// The `full` company above runs an authored `shell` node without asking,
+    /// because the operator passed the `[tools].allow` grant, authored the node
+    /// and saw the command. Template that command from an upstream node's output
+    /// and they saw a *shape*: the content arrives at run time from data they
+    /// never read, so the node is judged as an agent call and gates.
+    ///
+    /// Without this the split is defeated by one line of authoring, and the
+    /// judgement unit tests cannot catch it — they prove `judge` answers
+    /// correctly, not that this pass hands it the arguments it must see.
+    #[tokio::test]
+    async fn a_shell_node_templated_from_upstream_output_gates_under_full() {
+        let mut node = tool_node("run-it", "shell");
+        node.config = json!({ "slug": "shell", "args": { "command": "=previous.output" } });
+        let mut g = graph(vec![node]);
+
+        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+
+        assert_eq!(gate_ids(&g), vec!["run-it"]);
+        assert_eq!(gated.len(), 1, "{gated:?}");
+        assert_eq!(gated[0].slug, "shell");
+        assert!(
+            gated[0].reason.contains("arbitrary code"),
+            "the card must say what it is asking about: {}",
+            gated[0].reason
+        );
+    }
+
+    /// The same condition on the other gated node kind: an `http_request` node
+    /// with a literal URL does not gate under `full`
+    /// (`an_http_request_node_does_not_gate_under_full`), and one whose
+    /// destination is decided by the run does.
+    ///
+    /// This is the pair that shows the rule is about the *arguments* and not
+    /// about `tool_call` nodes specifically.
+    #[tokio::test]
+    async fn an_http_request_node_with_a_templated_url_gates_under_full() {
+        let mut node = tool_node("fetch", "unused");
+        node.kind = NodeKind::HttpRequest;
+        node.config = json!({ "method": "POST", "url": "=item.endpoint" });
+        let mut g = graph(vec![node]);
+
+        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+
+        assert_eq!(gated.len(), 1, "{gated:?}");
+        assert_eq!(
+            gated[0].target.as_deref(),
+            Some("POST (destination resolved at run time)"),
+            "an operator approving an outbound request with no host shown \
+             should be told that is what they are doing"
+        );
     }
 
     /// A pure read of the agent's own workspace is `Reach::Nothing`, and a

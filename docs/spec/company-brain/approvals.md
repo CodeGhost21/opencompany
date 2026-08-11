@@ -378,9 +378,17 @@ manifest; nothing in them looks at what the run is about to do. Step 7 closes
 that gap: `src/policy/judgement.rs` asks, per candidate call, whether it
 warrants a human on its own merits, and it can **only ever add a stop**.
 
-It is documented in full — the placement argument, the three rules, the
-no-learning boundary against #563, why it is not a model call, fail-closed, and
-the deliberate `publish_artifact` exclusion — in
+Step 7 is also the one step scoped by **which path the call arrived on** (issue
+#674): #338's rules govern an agent turn, and #614's position governs a node an
+operator authored into a saved workflow — unless that node's arguments are
+templated from an upstream node's output, which returns it to the agent rule.
+Steps 1–6 decide identically on both paths, so `always_approve` still gates a
+workflow node.
+
+It is documented in full — the placement argument, the three rules, the path
+split and its boundary condition, the acceptance verbs per path, the no-learning
+boundary against #563, why it is not a model call, fail-closed, and the
+`publish_artifact` carve-out #658 ruled correct — in
 [per-call-judgement.md](per-call-judgement.md).
 
 ## Approvals inside a workflow run (issue #395)

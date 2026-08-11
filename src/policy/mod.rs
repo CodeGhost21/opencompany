@@ -30,4 +30,4 @@ pub(crate) mod test_support;
 
 pub use consequence::{Consequence, Reach, Standing, consequence_of};
 pub use gate::{DEFAULT_TTL_MILLIS, ManifestApprovalGate};
-pub use judgement::{Judgement, StopReason, judge};
+pub use judgement::{CallPath, Judgement, StopReason, judge};
