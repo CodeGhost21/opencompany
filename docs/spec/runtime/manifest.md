@@ -276,8 +276,10 @@ prompt = "Weekly review and operator digest"
     a `mkdir -p`. The single exception is the agent's own
     `Agents/<agent-id>/`, which is created on demand when the agent writes
     directly into it, because that folder is minted on first use rather than
-    provisioned at boot and this call is the only thing that ever brings it into
-    existence. Renaming and deleting stay operator-only.
+    provisioned at boot. Since issue #552 this call is one of two paths that
+    bring it into existence; publishing a deliverable
+    (`artifact_mirror::materialize`) is the other, and both go through the same
+    `ensure_agent_folder` seam. Renaming and deleting stay operator-only.
 
     Agent writes are **unconfined**: an agent may create or edit anywhere in its
     company's tree. Confining creation while leaving overwrite free would
