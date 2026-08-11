@@ -474,25 +474,69 @@ pub(crate) fn effect_from_frame(frame: &EffectFrame) -> Effect {
     }
 }
 
+/// Splits an effect kind into its lowercase segments.
+///
+/// Both delimiters are live, which is why neither can be dropped (issue #704).
+/// `kind` is free `string(1..64)` on the wire — [`effect_from_frame`] copies it
+/// verbatim out of the `orch:effect:<kind>` event name — and real traffic uses
+/// each: `payment.received` and `x402.spend` are dotted, while `send_dm` is
+/// underscore-joined and carries no dot at all.
+fn segments(kind: &str) -> Vec<&str> {
+    kind.split(['.', '_']).filter(|s| !s.is_empty()).collect()
+}
+
+/// Whether `needle`'s own segments appear as a **contiguous run** in `segments`.
+///
+/// A run rather than a single segment because one needle — `send_dm` — is itself
+/// two segments, and it must keep matching the kind of the same name. Matching it
+/// as a run also keeps it from matching `payment.send`, which would be the worst
+/// possible reclassification here: `Send` is tested before `Spend`, so a bare
+/// `send` needle would route money movement into the messaging group and past the
+/// gate that reads `amount_usd`.
+fn has_segment_run(segments: &[&str], needle: &str) -> bool {
+    let want: Vec<&str> = needle.split(['.', '_']).filter(|s| !s.is_empty()).collect();
+    if want.is_empty() || want.len() > segments.len() {
+        return false;
+    }
+    segments.windows(want.len()).any(|window| window == want)
+}
+
 /// Maps a dotted effect kind to its supervised-policy [`EffectGroup`].
+///
+/// # Segments, not bare substrings (issue #704)
+///
+/// Each needle below is matched against whole `.`/`_` segments. It used to be
+/// matched with `contains`, which fires *inside* a word: `de-sign.review` and
+/// `as-sign-ment.create` both classified as [`Sign`](EffectGroup::Sign), and a
+/// misspelled `pay-mnt.send` classified as [`Spend`](EffectGroup::Spend).
+///
+/// Both directions of that were wrong in a way worth naming. A wrong `Sign`
+/// parks a routine effect for a human on *every* call under `supervised` — the
+/// standing interruption EPIC #558 exists to remove — while a wrong `Spend`
+/// hands an effect to the money gate, which then reads an `amount_usd` that a
+/// non-payment effect never carried.
+///
+/// The needle set is deliberately unchanged, including `pay`. Under segment
+/// matching `pay` can no longer fire inside `paymnt`, so the false positive that
+/// made it look redundant is gone; dropping it would only lose a literal `pay`
+/// segment, and losing a *true* `Spend` is the one error here with real
+/// consequence — an ungated payment rather than an annoyed operator.
 pub(crate) fn effect_group_for(kind: &str) -> EffectGroup {
-    let k = kind.to_ascii_lowercase();
-    if k.contains("send_dm") || k.contains("message") || k.contains("email") || k.contains("reply")
-    {
+    let lowered = kind.to_ascii_lowercase();
+    let segments = segments(&lowered);
+    let has = |needle: &str| has_segment_run(&segments, needle);
+
+    if has("send_dm") || has("message") || has("email") || has("reply") {
         EffectGroup::Send
-    } else if k.contains("payment")
-        || k.contains("spend")
-        || k.contains("x402")
-        || k.contains("pay")
-    {
+    } else if has("payment") || has("spend") || has("x402") || has("pay") {
         EffectGroup::Spend
-    } else if k.contains("sign") || k.contains("filing") || k.contains("contract") {
+    } else if has("sign") || has("filing") || has("contract") {
         EffectGroup::Sign
-    } else if k.contains("publish") {
+    } else if has("publish") {
         EffectGroup::Publish
-    } else if k.contains("hire") || k.contains("engage") {
+    } else if has("hire") || has("engage") {
         EffectGroup::Hire
-    } else if k.contains("identity") || k.contains("register") {
+    } else if has("identity") || has("register") {
         EffectGroup::Identity
     } else {
         EffectGroup::Other
@@ -712,6 +756,87 @@ mod test {
         // Still says what happened: a human posted, and on which card.
         assert!(wired.body.contains("t-42"), "{}", wired.body);
         assert_eq!(wired.kind, "task.discussion_posted");
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #704: the effect classifier matches segments, not bare substrings
+    // -----------------------------------------------------------------------
+
+    /// **The table that actually guards #704.**
+    ///
+    /// The defect is a *false positive*, so the intended-match table in the test
+    /// below cannot catch a regression on its own: a bare `contains` satisfies
+    /// every row of it and still misclassifies everything here. This is the half
+    /// that fails if segment matching is ever undone.
+    ///
+    /// `design.review` and `assignment.create` are the expensive direction —
+    /// under `supervised` a spurious `Sign` parks a routine effect for a human on
+    /// every single call, which is the standing interruption EPIC #558 exists to
+    /// remove. `paymnt.send` is the dangerous one: a misspelling was handed to the
+    /// money gate, which then reads an `amount_usd` the effect never carried.
+    #[test]
+    fn a_needle_spelled_inside_a_word_does_not_classify_the_kind() {
+        for kind in [
+            "design.review",     // de-SIGN
+            "design.approve",    // de-SIGN
+            "assignment.create", // as-SIGN-ment
+            "signal.emit",       // SIGN-al
+            "paymnt.send",       // PAY-mnt, a typo that must not reach the money gate
+        ] {
+            assert_eq!(
+                effect_group_for(kind),
+                EffectGroup::Other,
+                "`{kind}` spells a needle inside a word and must not be classified by it"
+            );
+        }
+    }
+
+    /// A word that merely *contains* an earlier arm's needle must not be stolen
+    /// by that arm — it must fall through to the group it really belongs to.
+    ///
+    /// `redesign.publish` is the sharp case: `Sign` is tested before `Publish`,
+    /// so under bare-substring matching re-de-**sign** captured it and the effect
+    /// was classified `Sign` while never reaching `Publish` at all. Asserting
+    /// `Publish` rather than `Other` is the point — it shows the fix restores the
+    /// correct group instead of merely dropping the wrong one.
+    #[test]
+    fn an_infix_match_does_not_steal_a_kind_from_a_later_arm() {
+        assert_eq!(effect_group_for("redesign.publish"), EffectGroup::Publish);
+    }
+
+    /// `Send` is tested before `Spend`, so a bare `send` needle would route money
+    /// movement into the messaging group — past the gate that reads `amount_usd`.
+    /// This is why `send_dm` is matched as a two-segment *run* rather than by its
+    /// segments individually, and it is asserted because the cheap simplification
+    /// (splitting on `_` and then looking for a lone `send`) is silently wrong.
+    #[test]
+    fn a_payment_that_sends_is_spend_rather_than_send() {
+        assert_eq!(effect_group_for("payment.send"), EffectGroup::Spend);
+        assert_eq!(effect_group_for("payment.send_dm"), EffectGroup::Send);
+    }
+
+    /// Every intended match still classifies, including the underscore-joined
+    /// `send_dm` — a live kind that carries no dot at all, which is why the
+    /// segment split has to accept `_` as well as `.`.
+    #[test]
+    fn the_intended_kinds_still_classify() {
+        for (kind, group) in [
+            ("send_dm", EffectGroup::Send),
+            ("operator.message", EffectGroup::Send),
+            ("email.deliver", EffectGroup::Send),
+            ("payment.received", EffectGroup::Spend),
+            ("x402.spend", EffectGroup::Spend),
+            ("pay.invoice", EffectGroup::Spend),
+            ("document.sign", EffectGroup::Sign),
+            ("filing.submit", EffectGroup::Sign),
+            ("contract.execute", EffectGroup::Sign),
+            ("workspace.publish", EffectGroup::Publish),
+            ("hire.contractor", EffectGroup::Hire),
+            ("identity.register", EffectGroup::Identity),
+            ("echo.noop", EffectGroup::Other),
+        ] {
+            assert_eq!(effect_group_for(kind), group, "`{kind}`");
+        }
     }
 
     /// **Issue #382: the per-node start bracket wires out structurally.** The
