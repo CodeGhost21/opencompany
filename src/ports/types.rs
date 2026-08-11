@@ -2176,6 +2176,19 @@ pub struct OverlayAgent {
     /// An optional description of the teammate's mandate.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// The per-teammate tool grant: a manifest `[[agent]].tools`-style glob list,
+    /// **intersected** with the company's `[tools].allow` at roster-build time
+    /// (issue #661 / L5). An **empty** list is the standard company-wide grant
+    /// (every allowed tool), exactly as an omitted manifest `tools` line is —
+    /// never "no tools". The intersection is narrow-only: this can restrict a
+    /// teammate below the company grant, never widen it past it.
+    ///
+    /// `#[serde(default)]` keeps every overlay record written before this field
+    /// existed deserializing unchanged (as an empty list → standard grant), and
+    /// `skip_serializing_if` keeps the common empty case out of the persisted
+    /// JSON so a standard-grant teammate serializes exactly as it did before.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<String>,
 }
 
 /// An operator-added desk membership that the version-controlled manifest does
@@ -4210,10 +4223,43 @@ mod test {
             name: "Nova".into(),
             role: "Growth".into(),
             description: None,
+            tools: Vec::new(),
         });
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
         assert!(!record.is_roster_agent("ghost"));
+    }
+
+    /// Issue #661 / L5 serde: the new per-teammate `tools` grant is optional and
+    /// empty-by-default on the wire, so an overlay record written before the
+    /// field existed deserializes unchanged, and a standard-grant teammate
+    /// serializes exactly as it did before (no `tools` key).
+    #[test]
+    fn overlay_agent_tools_defaults_empty_and_skips_when_empty() {
+        // An old record with no `tools` key deserializes to an empty grant.
+        let legacy: OverlayAgent =
+            serde_json::from_str(r#"{"id":"a","name":"A","role":"r"}"#).expect("legacy overlay");
+        assert!(legacy.tools.is_empty());
+
+        // An empty grant is omitted from the serialized form — a standard-grant
+        // teammate is byte-for-byte what it was before this field existed.
+        let value = serde_json::to_value(&legacy).unwrap();
+        assert!(
+            value.get("tools").is_none(),
+            "an empty grant must not serialize a `tools` key: {value}"
+        );
+
+        // A non-empty grant round-trips in order.
+        let scoped = OverlayAgent {
+            id: "s".into(),
+            name: "S".into(),
+            role: "r".into(),
+            description: None,
+            tools: vec!["docs.*".into(), "email".into()],
+        };
+        let round: OverlayAgent =
+            serde_json::from_str(&serde_json::to_string(&scoped).unwrap()).unwrap();
+        assert_eq!(round.tools, vec!["docs.*".to_string(), "email".to_string()]);
     }
 
     /// A record with one manifest agent and no desks, for the minting tests.
@@ -4231,6 +4277,7 @@ mod test {
             name: name.into(),
             role: "Worker".into(),
             description: None,
+            tools: Vec::new(),
         });
     }
 
@@ -4668,6 +4715,7 @@ mod test {
             name: "Shane".to_string(),
             role: "Growth".to_string(),
             description: None,
+            tools: Vec::new(),
         });
         assert_eq!(record.effective_budget("shane"), None);
 
