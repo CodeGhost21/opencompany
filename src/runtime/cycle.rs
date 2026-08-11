@@ -1606,7 +1606,23 @@ fn cycle_conversation(
             // finer key is dropped. Escalating this to a full rival would move
             // an approval that lands correctly today off its conversation
             // entirely — see the asymmetry note in the doc above.
-            Some((_, parent)) if *parent != candidate.1 => *parent = None,
+            Some((thread, parent)) if *parent != candidate.1 => {
+                // Say so, because from the outside this is indistinguishable
+                // from the bug #435 fixed: the operator sees a threaded request
+                // answered in the channel and has no way to tell "we dropped the
+                // thread on purpose, the batch named two" from "the thread was
+                // lost again". Debug rather than warn — the outcome is correct
+                // and is the pre-#435 behaviour, so it is an explanation on
+                // demand, not an incident.
+                tracing::debug!(
+                    channel = %thread,
+                    dropped_parent = ?*parent,
+                    rival_parent = ?candidate.1,
+                    "[approval] two threads in this batch, resuming in the channel; \
+                     the channel is unambiguous so only the thread root is dropped (#435)"
+                );
+                *parent = None;
+            }
             Some(_) => {}
             None => found = Some(candidate),
         }
