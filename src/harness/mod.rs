@@ -108,6 +108,12 @@ pub mod toolbelt;
 /// Issue #339: the staging queue the orchestrator's `run_workflow` /
 /// `create_workflow` tools push a workflow reference onto and the
 /// [`HarnessBrain`] drains at the end of a dispatch, so a card that built or
+/// Issue #580: the workflow builder pass — turns a `workflow`-deliverable card's
+/// plan into a proposed graph that lands In Review for approval. Modeled on the
+/// planning station (one card, one tool-less model call, one settled outcome),
+/// but it mints an attempt row because building the workflow is the card's work.
+/// See [`workflow_build`].
+pub mod workflow_build;
 /// ran a workflow can link to it. See [`workflow_refs`].
 pub mod workflow_refs;
 /// End-to-end proof that an agent granted `files` and **not** `shell` can write

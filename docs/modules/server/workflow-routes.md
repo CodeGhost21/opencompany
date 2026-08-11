@@ -238,3 +238,24 @@ responses expose only non-secret status. The networked seams (DNS, SMTP, OAuth
 exchange) are dependency-inverted behind traits carried on `ConnectionsRuntime`
 and default to empty (offline) — a surface whose seam is absent returns
 `404 {"code":"not_wired"}`, which the console degrades gracefully.
+## Building a workflow from a task card (issue #580)
+
+A board card marked `deliverable: "workflow"` does not dispatch to a teammate
+when it enters In Progress — it builds a *reusable workflow* instead. The builder
+pass (`src/harness/workflow_build.rs`) proposes a graph and lands the card **In
+Review** with a `TaskWorkflowProposal`; the graph does not exist yet. Two task
+routes finish the loop:
+
+- `POST …/tasks/{id}/workflow-proposal/apply` rebuilds a `RawWorkflow` from the
+  **stored** proposal `ops` (host authority — the browser's copy is never
+  trusted) and runs it through the **same** `create_company_workflow` core this
+  page's `POST …/workflows` uses, so a proposed graph passes exactly the checks a
+  hand-authored one does — including #276's create-disarm for a scheduled graph.
+  On success the card links to the created workflow (issue #339) and moves to
+  Done; a refused create (roster drift, a name taken since) keeps the card In
+  Review with the reason and returns a 400.
+- `POST …/tasks/{id}/workflow-proposal/reject` clears the proposal and returns
+  the card to To-do.
+
+The full contract — the deliverable choice, the builder pass, and the
+review-before-creation gate — is [workflow-build.md](../../spec/runtime/workflow-build.md).

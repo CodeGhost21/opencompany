@@ -310,6 +310,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     }
 }
 

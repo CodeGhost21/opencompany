@@ -1701,6 +1701,8 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -1793,6 +1795,8 @@ impl<'a> CycleHostImpl<'a> {
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -2294,6 +2298,8 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
                 },
             )
             .await
@@ -2351,6 +2357,8 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
                 },
             )
             .await
@@ -5016,6 +5024,8 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
                 },
             )
             .await
@@ -5084,6 +5094,8 @@ mod test {
                     // (issue #339). The first successful settle stamps it.
                     output: None,
                     plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
                 },
             )
             .await

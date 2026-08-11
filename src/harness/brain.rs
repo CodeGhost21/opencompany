@@ -1785,6 +1785,8 @@ impl HarnessBrain {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
         // card that exists. If the artifact writes then fail, the failure
@@ -3359,6 +3361,8 @@ members = ["engineer"]
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         }
     }
 
@@ -6187,6 +6191,8 @@ members = ["eng1", "eng2"]
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         }
     }
 

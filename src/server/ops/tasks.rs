@@ -21,9 +21,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::AppState;
 use crate::company::steer::{InflightEntry, MAX_REDIRECT_CHARS, SteerAction, SteerError};
+use crate::company::{WorkflowGraphSpec, create_company_workflow, raw_workflow_from_spec};
 use crate::error::OpenCompanyError;
 use crate::ports::tasks::{
-    BOARD_COLUMNS, COLUMN_TODO, TaskRecord, cap_discussion, is_board_column,
+    BOARD_COLUMNS, COLUMN_DONE, COLUMN_TODO, TaskDeliverable, TaskOutput, TaskOutputAction,
+    TaskOutputWorkflow, TaskRecord, TaskWorkflowProposal, cap_discussion, is_board_column,
 };
 use crate::ports::types::CompanyEvent;
 use crate::ports::{generate_id, now_millis};
@@ -53,6 +55,19 @@ pub fn router() -> Router<AppState> {
             get(task_detail).patch(patch_task).delete(delete_task),
         ))
         .merge(scoped("/tasks/{task_id}/steer", post(steer_task)))
+        // Issue #580: apply or reject the workflow the builder pass proposed for a
+        // `workflow`-deliverable card sitting In Review. Apply is the ONE place a
+        // proposal becomes a real workflow (through `create_company_workflow`);
+        // reject clears it and returns the card to To-do. Both under the same
+        // `ScopedCompany` guard as every other task write.
+        .merge(scoped(
+            "/tasks/{task_id}/workflow-proposal/apply",
+            post(apply_workflow_proposal),
+        ))
+        .merge(scoped(
+            "/tasks/{task_id}/workflow-proposal/reject",
+            post(reject_workflow_proposal),
+        ))
         .merge(scoped("/tasks/{task_id}/discussion", post(post_discussion)))
         // Issue #358. `DELETE` on one message, under the same `ScopedCompany`
         // guard as every other task write — see `redact_discussion` for why
@@ -113,6 +128,19 @@ pub(crate) struct TaskCard {
     /// verdict. See `docs/spec/runtime/planning.md`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) plan: Option<crate::ports::tasks::TaskPlan>,
+    /// Whether the card produces a one-off result or a reusable workflow
+    /// (issue #580). Omitted when `once` — the console's default — so every card
+    /// the board rendered before #580 keeps its exact wire shape; a `workflow`
+    /// card sends `"workflow"` so the composer toggle and the review panel know
+    /// to render.
+    #[serde(skip_serializing_if = "TaskDeliverable::is_once")]
+    pub(crate) deliverable: TaskDeliverable,
+    /// The workflow the builder pass proposed, awaiting approval (issue #580).
+    /// Present only while a `workflow` card sits In Review with a built proposal;
+    /// the review panel reads its `summary` and `ops` graph. Omitted otherwise,
+    /// so the existing wire shape is unchanged for every card without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow_proposal: Option<TaskWorkflowProposal>,
 }
 
 impl From<TaskRecord> for TaskCard {
@@ -129,6 +157,8 @@ impl From<TaskRecord> for TaskCard {
             origin_chat_id: t.origin_chat_id,
             output: t.output,
             plan: t.plan,
+            deliverable: t.deliverable,
+            workflow_proposal: t.workflow_proposal,
         }
     }
 }
@@ -158,6 +188,11 @@ struct CreateTask {
     /// so no existing caller changes.
     #[serde(default)]
     origin_chat_id: Option<String>,
+    /// Whether this card produces a one-off result or a reusable workflow
+    /// (issue #580) — the operator's explicit choice (D2a). Absent means `once`,
+    /// the historical behaviour, so no existing caller changes.
+    #[serde(default)]
+    deliverable: Option<TaskDeliverable>,
 }
 
 /// The partial patch body (any subset; a drag sends `{column}`).
@@ -178,6 +213,13 @@ struct PatchTask {
     /// same partial-patch contract every other field here follows.
     #[serde(default)]
     parent_task_id: Option<String>,
+    /// Switches the card between a one-off result and a reusable workflow
+    /// (issue #580). Omitting it leaves the choice untouched — so an operator can
+    /// flip a To-do card to `workflow` before dragging it into In Progress, where
+    /// the builder pass fires. The same partial-patch contract every field here
+    /// follows.
+    #[serde(default)]
+    deliverable: Option<TaskDeliverable>,
 }
 
 /// The sub-resource path (`task_id`); the scope `id` is consumed by the extractor.
@@ -361,6 +403,13 @@ async fn create_task(
         // cannot post a card that already claims to be planned — and cannot
         // forge the prerequisite verdicts that decide whether it dispatches.
         plan: None,
+        // Issue #580: the operator's explicit once-vs-workflow choice (D2a),
+        // defaulting to the historical one-off. A `workflow` card created here
+        // lands in To-do like any other; the builder pass fires only when it is
+        // dragged into In Progress. There is no proposal yet — the builder mints
+        // one.
+        deliverable: body.deliverable.unwrap_or_default(),
+        workflow_proposal: None,
     };
     company.runtime.upsert_task(&record).await?;
     Ok(Json(record.into()))
@@ -409,6 +458,13 @@ async fn patch_task(
         validate_parent(&parent_task_id, Some(&task_id), &board)?;
         record.parent_task_id = Some(parent_task_id);
     }
+    // Issue #580: flip the once-vs-workflow choice. Applied before the upsert, so
+    // a patch that both sets `deliverable: "workflow"` and drags the card into
+    // In Progress dispatches through the builder pass rather than an ordinary
+    // dispatch — the edge in `upsert_task` reads the record this write persists.
+    if let Some(deliverable) = body.deliverable {
+        record.deliverable = deliverable;
+    }
     record.updated_at_millis = now_millis();
     company.runtime.upsert_task(&record).await?;
     Ok(Json(record.into()))
@@ -434,6 +490,163 @@ async fn delete_task(
             "task {task_id}"
         ))))
     }
+}
+
+// ---------------------------------------------------------------------------
+// The plan → workflow bridge: apply / reject a proposal (issue #580)
+// ---------------------------------------------------------------------------
+
+/// `POST …/tasks/{task_id}/workflow-proposal/apply` — approve and create the
+/// workflow a builder pass proposed (issue #580).
+///
+/// This is the **one** path a proposal becomes a real workflow. It rebuilds the
+/// [`RawWorkflow`](crate::company::RawWorkflow) from the **stored** `ops` — the
+/// host is the authority, the browser's copy is never trusted — and runs it
+/// through [`create_company_workflow`], which takes the company write lock,
+/// re-validates shape + roster + id/name uniqueness, and (issue #276) lands any
+/// schedule-carrying graph switched off until a person arms it.
+///
+/// On success the card is stamped with a [`TaskOutput`] linking the created
+/// workflow to the build attempt (issue #339) and moved to **Done**, and the
+/// proposal is cleared. If the create is refused — the roster drifted since the
+/// proposal was generated, a name has since been taken — the reason is appended
+/// to the card's note and the card **stays In Review** with its proposal intact,
+/// and the refusal is returned to the caller.
+async fn apply_workflow_proposal(
+    company: ScopedCompany,
+    Path(TaskPath { task_id }): Path<TaskPath>,
+) -> Result<Json<TaskCard>, ApiError> {
+    let _serialized = company.runtime.task_writes.lock().await;
+    let mut record = company
+        .runtime
+        .tasks()
+        .list(company.id())
+        .await?
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("task {task_id}")))?;
+
+    let proposal = record.workflow_proposal.clone().ok_or_else(|| {
+        OpenCompanyError::InvalidRequest("this card has no workflow proposal to apply".to_string())
+    })?;
+
+    // Host authority: rebuild and re-validate a graph from the STORED ops rather
+    // than trusting any client-supplied body.
+    let spec: WorkflowGraphSpec = serde_json::from_value(proposal.ops.clone()).map_err(|err| {
+        OpenCompanyError::InvalidRequest(format!(
+            "the stored workflow proposal could not be read as a graph: {err}"
+        ))
+    })?;
+    let draft = raw_workflow_from_spec(&spec)?;
+
+    let file = match create_company_workflow(
+        company.id(),
+        company.runtime.source_dir(),
+        company.runtime.store(),
+        Some(company.runtime.events()),
+        draft,
+    )
+    .await
+    {
+        Ok(file) => file,
+        Err(err) => {
+            // Roster drift, or a name taken since the proposal was generated.
+            // Keep the card In Review with its proposal, name the reason on the
+            // note, and surface the error — best-effort, so a note write that also
+            // fails cannot mask the real create failure.
+            let reason = format!(
+                "could not create the proposed workflow, so it is still waiting for review: {err}"
+            );
+            record.note = Some(crate::runtime::advance::append_result(
+                record.note.as_deref(),
+                crate::runtime::advance::SYSTEM_ATTRIBUTION,
+                &reason,
+            ));
+            record.updated_at_millis = now_millis();
+            let _ = company.runtime.tasks().upsert(company.id(), &record).await;
+            return Err(ApiError(err));
+        }
+    };
+
+    // Link the created workflow to the build attempt (issue #339) and finish the
+    // card. #276 already left a scheduled graph disarmed inside the create;
+    // nothing here arms it. The attempt ordinal is a nicety — a failed run read
+    // costs the label, never the link.
+    let attempt = company
+        .runtime
+        .runs()
+        .get_run(company.id(), &proposal.run_id)
+        .await
+        .ok()
+        .flatten()
+        .map(|run| run.attempt);
+    record.output = Some(TaskOutput {
+        run_id: proposal.run_id.clone(),
+        attempt,
+        at_millis: now_millis(),
+        artifacts: Vec::new(),
+        workflows: vec![TaskOutputWorkflow {
+            workflow_id: file.id.clone(),
+            run_id: None,
+            action: TaskOutputAction::Created,
+        }],
+    });
+    record.workflow_proposal = None;
+    let note = format!("approved — created the `{}` workflow", file.name);
+    record.note = Some(crate::runtime::advance::append_result(
+        record.note.as_deref(),
+        crate::runtime::advance::SYSTEM_ATTRIBUTION,
+        &note,
+    ));
+    record.column = COLUMN_DONE.to_string();
+    record.updated_at_millis = now_millis();
+    company
+        .runtime
+        .tasks()
+        .upsert(company.id(), &record)
+        .await?;
+    Ok(Json(record.into()))
+}
+
+/// `POST …/tasks/{task_id}/workflow-proposal/reject` — discard the proposed
+/// workflow and return the card to To-do (issue #580, decision D2c).
+///
+/// The card keeps its `workflow` deliverable, so dragging it back into In
+/// Progress runs the builder pass again; an operator who wanted a one-off instead
+/// flips `deliverable` with a patch. Nothing about the company's workflow list
+/// changes — the proposal never was a workflow.
+async fn reject_workflow_proposal(
+    company: ScopedCompany,
+    Path(TaskPath { task_id }): Path<TaskPath>,
+) -> Result<Json<TaskCard>, ApiError> {
+    let _serialized = company.runtime.task_writes.lock().await;
+    let mut record = company
+        .runtime
+        .tasks()
+        .list(company.id())
+        .await?
+        .into_iter()
+        .find(|t| t.id == task_id)
+        .ok_or_else(|| OpenCompanyError::CompanyNotFound(format!("task {task_id}")))?;
+    if record.workflow_proposal.is_none() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "this card has no workflow proposal to reject".to_string(),
+        )));
+    }
+    record.workflow_proposal = None;
+    record.note = Some(crate::runtime::advance::append_result(
+        record.note.as_deref(),
+        crate::runtime::advance::SYSTEM_ATTRIBUTION,
+        "the proposed workflow was rejected — the card is back in To-do",
+    ));
+    record.column = COLUMN_TODO.to_string();
+    record.updated_at_millis = now_millis();
+    company
+        .runtime
+        .tasks()
+        .upsert(company.id(), &record)
+        .await?;
+    Ok(Json(record.into()))
 }
 
 // ---------------------------------------------------------------------------
