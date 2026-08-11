@@ -160,6 +160,101 @@ export async function fetchFile(
   };
 }
 
+/**
+ * One search hit from `GET …/workspace/search` (issue #607).
+ *
+ * A hit is a node plus the two things only a search knows: where it sits, and
+ * why it came back. `path` matters because the tree view derives location from
+ * `parentId` by walking the tree, and a flat hit list has no tree to walk.
+ */
+export interface SearchHit extends FsNode {
+  /** The node's logical path, e.g. `Standards/Engineering.md`. */
+  path: string;
+  /** Whether the query matched the node's name or its body. */
+  matched: "name" | "content";
+  /**
+   * Text around the first body match.
+   *
+   * Absent for a name match, a folder, and a binary node — the host never
+   * excerpts a payload.
+   */
+  excerpt?: string;
+}
+
+/** A page of search hits plus how many matched in total. */
+export interface SearchResults {
+  hits: SearchHit[];
+  /** Matches before the limit — so the console can say "20 of 137". */
+  total: number;
+}
+
+/**
+ * Which notes mention `query`, matched case-insensitively as a substring of
+ * note names and note bodies.
+ *
+ * The host refuses an empty query with a 400 rather than treating it as "match
+ * everything", so callers must not send one — a cleared search box shows the
+ * tree again instead of fetching every note. {@link searchWorkspace} does not
+ * guard that itself: swallowing it here would hide a caller bug behind a silent
+ * empty result.
+ */
+export async function searchWorkspace(
+  client: OpenCompanyClient,
+  company: string | null,
+  query: string,
+  options?: { prefix?: string; limit?: number },
+): Promise<SearchResults> {
+  const params = new URLSearchParams({ q: query });
+  if (options?.prefix) params.set("prefix", options.prefix);
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  const results = await client.get<{
+    hits: (FsNodeWire & { path: string; matched: "name" | "content"; excerpt?: string })[];
+    total: number;
+  }>(`${client.scopeFor(company)}/workspace/search?${params.toString()}`);
+  return {
+    total: results.total,
+    // Destructured so the node half goes through the same {@link normalize} the
+    // tree read uses — spreading the raw hit back over it afterwards would undo
+    // the `parentId` and origin defaults it just applied.
+    hits: results.hits.map(({ path, matched, excerpt, ...node }) => ({
+      ...normalize(node),
+      path,
+      matched,
+      excerpt,
+    })),
+  };
+}
+
+/**
+ * Split `text` into alternating non-matching / matching runs for `query`,
+ * so a hit's excerpt can bold what matched.
+ *
+ * Case-insensitive, like the host's own matching, and it returns the **original**
+ * text in every run rather than the lowercased comparison copy — highlighting
+ * must not silently rewrite the operator's prose to lower case.
+ *
+ * An empty query yields one unmatched run, which is what keeps a cleared box
+ * from marking every character.
+ */
+export function highlightRuns(text: string, query: string): { text: string; hit: boolean }[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [{ text, hit: false }];
+  const haystack = text.toLowerCase();
+  const runs: { text: string; hit: boolean }[] = [];
+  let at = 0;
+  // `indexOf` on the lowercased copy is safe here in a way it would not be in
+  // Rust: JavaScript indexes strings by UTF-16 code unit and `toLowerCase` is
+  // length-preserving for every character the browser will render in a note
+  // title, so the two strings stay aligned.
+  for (let found = haystack.indexOf(needle); found !== -1; found = haystack.indexOf(needle, at)) {
+    if (found > at) runs.push({ text: text.slice(at, found), hit: false });
+    runs.push({ text: text.slice(found, found + needle.length), hit: true });
+    at = found + needle.length;
+  }
+  if (at < text.length) runs.push({ text: text.slice(at), hit: false });
+  return runs;
+}
+
 /** Create a folder or file. The host mints the id and the timestamp. */
 export async function createNode(
   client: OpenCompanyClient,
