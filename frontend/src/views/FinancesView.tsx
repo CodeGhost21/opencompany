@@ -27,8 +27,10 @@ function usd(n: number, maxFrac = 2): string {
   return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: maxFrac });
 }
 
+/* The brand leads slot 1, and the token already themes itself — see the note
+   in UsageView on why the hex pair this replaced was a liability. */
 const chartConfig = {
-  amount: { label: "Spend", theme: { light: "#2a78d6", dark: "#3987e5" } },
+  amount: { label: "Spend", color: "var(--chart-1)" },
 } satisfies ChartConfig;
 
 interface Props {

@@ -235,7 +235,13 @@ export function AgentHarnessCard({
           <div className="flex items-start gap-2">
             <span
               className="mt-1 h-2 w-2 shrink-0 rounded-full"
-              style={{ background: lastRun.ok ? 'var(--ok, #3df08c)' : 'var(--err, #ff6259)' }}
+              /* The run-status vocabulary, not the graph's private one: a run
+                 that finished is the same "done" here as on the task board.
+                 The hex fallbacks these replaced could only ever fire outside
+                 `.oc-kg`, where this panel never renders. */
+              style={{
+                background: lastRun.ok ? 'var(--status-done)' : 'var(--status-failed)',
+              }}
             />
             <p className="text-2xs leading-relaxed text-os-muted">
               {lastRun.summary}

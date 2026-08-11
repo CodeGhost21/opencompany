@@ -37,8 +37,12 @@ const TONE_TEXT: Record<string, string> = {
 };
 
 // Discord's brand blurple, lifted a step in dark mode so it clears the
-// sidebar's surface instead of sinking into it.
-const DISCORD_BLURPLE = "text-[#5865f2] dark:text-[#7f8ffa]";
+// sidebar's surface instead of sinking into it. Named tokens rather than raw
+// hex — the colour is deliberately not ours, and saying so in the token name
+// is what stops it being "fixed" into the palette later. See `--brand-discord`
+// in index.css.
+const DISCORD_BLURPLE =
+  "text-(--brand-discord) dark:text-(--brand-discord-on-dark)";
 
 /**
  * A sidebar row at rest: dimmed until you reach for it.
@@ -165,7 +169,7 @@ export function SidebarControls({
           tooltip="Join our Discord"
           className={cn(
             DISCORD_BLURPLE,
-            "hover:text-[#5865f2] dark:hover:text-[#7f8ffa]",
+            "hover:text-(--brand-discord) dark:hover:text-(--brand-discord-on-dark)",
             RESTING_ROW,
           )}
           render={<a href={DISCORD_INVITE_URL} target="_blank" rel="noreferrer" />}

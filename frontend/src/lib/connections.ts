@@ -25,7 +25,19 @@ export interface ConnectionProvider {
   name: string;
   description: string;
   category: ConnectionCategory;
-  /** Brand-ish color for the provider's monogram tile. */
+  /**
+   * The provider's own brand colour, for its monogram tile.
+   *
+   * A raw hex on purpose, and one of only two places in the console where
+   * that is correct (the other is `--brand-discord`). These identify
+   * *someone else* — Slack's aubergine is Slack's, and a themed
+   * approximation of it would be wrong in both themes. They are data about
+   * a third party, not a design decision this system gets to make, so they
+   * do not belong in the token layer.
+   *
+   * Anything drawn on top of one must not assume a light or dark ground:
+   * these span `#0F0F0F` to `#EA4335`.
+   */
   color: string;
   /** Short glyph for the tile (1–2 chars). Falls back to the name initial. */
   glyph?: string;

@@ -207,6 +207,19 @@
     /* A brand-tinted glow for the focused/selected state on a raised
        surface. Not a substitute for the focus ring — an addition to it. */
     --shadow-brand: 0 2px 8px -2px color-mix(in oklab, var(--brand-500) 32%, transparent);
+
+    /*
+     * Third-party brand colours.
+     *
+     * The one legitimate reason to pin a hex: these are not ours to choose.
+     * Discord's blurple identifies Discord, and a themed approximation of it
+     * would be wrong in both themes. Named here rather than inlined at the
+     * four call sites so the intent — "this is deliberately not our palette"
+     * — is legible, and so a future provider row has somewhere to live.
+     */
+    --brand-discord: #5865f2;
+    --brand-discord-hover: #4752c4;
+    --brand-discord-on-dark: #7f8ffa;
 }
 
 .dark {
@@ -483,6 +496,10 @@
        status hues would imply a health that they do not carry. */
     --kg-brain-1: var(--pink-mark);
     --kg-brain-2: var(--cyan-mark);
+    /* The travelling spark that fires along a memory link. A lightened
+       brain-1 rather than its own hue, so the constellation stays one
+       colour family however brain-1 is retuned. */
+    --kg-spark: color-mix(in oklab, var(--kg-brain-1) 55%, white);
 }
 
 .dark {
@@ -491,6 +508,7 @@
     --kg-warn: var(--status-blocked);
     --kg-brain-1: var(--pink-bright);
     --kg-brain-2: var(--cyan-bright);
+    --kg-spark: color-mix(in oklab, var(--kg-brain-1) 65%, white);
 }
 
 @theme inline {

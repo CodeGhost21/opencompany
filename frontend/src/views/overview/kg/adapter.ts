@@ -70,12 +70,22 @@ export function departmentIdOfDesk(deskId: string): string {
 }
 
 /**
- * The pillar colours, in order. The console's chart hues — the same five the
- * hardcoded department list used, now dealt to desks by position. A company
- * with more desks than hues wraps, which is a repeated tint rather than a
- * wrong one.
+ * The pillar colours, in order — dealt to desks by position. A company with
+ * more desks than hues wraps, which is a repeated tint rather than a wrong
+ * one.
+ *
+ * These now *are* the console's chart hues, which the comment here has always
+ * claimed. They were a stale copy of them in hex: five values that no longer
+ * matched `--chart-*` and could not follow the theme, so the org graph drifted
+ * a little further from the rest of the console with every palette change.
  */
-const PILLAR_COLORS = ["#2a78d6", "#1baf7a", "#eb6834", "#4a3aa7", "#eda100"];
+const PILLAR_COLORS = [
+  "var(--chart-1)",
+  "var(--chart-2)",
+  "var(--chart-3)",
+  "var(--chart-4)",
+  "var(--chart-5)",
+];
 
 /** `Product Design` → `product-design`, for the department's slug. */
 function slugify(s: string): string {

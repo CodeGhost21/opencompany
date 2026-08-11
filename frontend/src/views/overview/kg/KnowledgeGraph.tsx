@@ -119,16 +119,19 @@ const hashStr = (s: string) => {
   return h;
 };
 
-// Notes-style folder tinting from the theme's existing palette — stable
-// hash so a folder keeps its color across reloads.
-// The whole vault burns one HARD reddish orange
-// — the per-node shimmer opacity plus the synapse sparks carry all the
-// variation. Hubs are the same fire, just bigger, with their radiating spokes.
-const HUB_COLOR = '#e35c35';
-const NOTE_COLOR = '#e35c35';
-const ORPHAN_COLOR = '#e35c35'; // rim dust dims via its lower fill opacity
+// The whole vault burns one colour — the per-node shimmer opacity plus the
+// synapse sparks carry all the variation. Hubs are the same fire, just bigger,
+// with their radiating spokes.
+//
+// Token rather than hex: these were pinned to a reddish orange that no longer
+// matched `--kg-brain-1`, so the memory constellation had quietly drifted out
+// of the palette the rest of the graph follows. Naming the token also means
+// the constellation themes itself.
+const HUB_COLOR = 'var(--kg-brain-1)';
+const NOTE_COLOR = 'var(--kg-brain-1)';
+const ORPHAN_COLOR = 'var(--kg-brain-1)'; // rim dust dims via its lower fill opacity
 // the bright traveling sparks that fire along the links like synapses
-const SYNAPSE_COLOR = '#ffb08a';
+const SYNAPSE_COLOR = 'var(--kg-spark)';
 const SYNAPSE_N = 22;
 
 const memColor = (m: { id: string; cluster: number; links: number; type: string }) =>
@@ -2091,7 +2094,7 @@ export function KnowledgeGraph({
                           <title>{`${m.label} · memory`}</title>
                           <circle r={Math.max(4, mr + 3)} fill="transparent" />
                           <polygon points={hexPts(mr + 0.4)} fill={memColor(m)} />
-                          <circle r={mr + 1.6} fill="none" stroke="#ffffff" strokeWidth={0.5} opacity={0.9} />
+                          <circle r={mr + 1.6} fill="none" stroke="var(--text)" strokeWidth={0.5} opacity={0.9} />
                           <g className="kg-mem-upright" transform={`rotate(${(-memRotRef.current * 180) / Math.PI})`}>
                             <text
                               y={mr + 4}
@@ -2119,8 +2122,8 @@ export function KnowledgeGraph({
                         if (!np || !nm) return null;
                         return (
                           <g key={nid}>
-                            <line x1={hp.x} y1={hp.y} x2={np.x} y2={np.y} stroke="#ffffff" strokeWidth={0.4} opacity={0.5} />
-                            <circle cx={np.x} cy={np.y} r={memNodeR(nm) + 1} fill="none" stroke="#ffffff" strokeWidth={0.4} opacity={0.7} />
+                            <line x1={hp.x} y1={hp.y} x2={np.x} y2={np.y} stroke="var(--text)" strokeWidth={0.4} opacity={0.5} />
+                            <circle cx={np.x} cy={np.y} r={memNodeR(nm) + 1} fill="none" stroke="var(--text)" strokeWidth={0.4} opacity={0.7} />
                           </g>
                         );
                       });
@@ -2133,7 +2136,7 @@ export function KnowledgeGraph({
                       const isSel = selectedMemoryId === id;
                       return (
                         <g key={id} transform={`translate(${p.x},${p.y})`}>
-                          <circle r={mr + 1.4} fill="none" stroke="#ffffff" strokeWidth={isSel ? 0.9 : 0.55} opacity={0.95} />
+                          <circle r={mr + 1.4} fill="none" stroke="var(--text)" strokeWidth={isSel ? 0.9 : 0.55} opacity={0.95} />
                           <g className="kg-mem-upright" transform={`rotate(${(-memRotRef.current * 180) / Math.PI})`}>
                             <text
                               y={mr + 4}
