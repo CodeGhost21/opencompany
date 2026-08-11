@@ -345,6 +345,12 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
     /// change can add. Workspace quota counts binary payloads only, and a
     /// shape-changing swap has exactly one binary side, so forwarding the swap
     /// cannot transiently double-count two blobs.
+    ///
+    /// A first publish (issue #697, `expected_id` of `None`) is charged the
+    /// same way and needs no separate accounting: its staged create paid, and
+    /// there is no superseded side at all. A publisher that *loses* that race
+    /// has its stage consumed by the store, so the charge is released rather
+    /// than stranded on bytes nothing can reach.
     async fn swap_files(
         &self,
         company: &CompanyId,
