@@ -13,7 +13,9 @@ import {
   PanelLeft,
   Download,
   RefreshCw,
+  Search,
   Upload,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -31,9 +33,12 @@ import {
   isBinary,
   originLabel,
   renameMoveNode,
+  searchWorkspace,
   uploadFile,
   writeFile,
   OPERATOR_ORIGIN,
+  type SearchHit,
+  type SearchResults as SearchResultsPage,
   type WorkspaceFile,
   type WorkspaceOrigin,
 } from "@/api/workspace";
@@ -75,6 +80,7 @@ import {
   titleOf,
 } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { SearchResults } from "@/views/workspace/SearchResults";
 
 /**
  * The latest workspace write off the SSE feed (issue #327), as the shell hands
@@ -116,6 +122,17 @@ interface Props {
 
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
+
+/**
+ * How long the search box waits after the last keystroke before asking the host
+ * (issue #607).
+ *
+ * The host's search is an O(N) scan over every note in the company, so a request
+ * per keystroke would put the whole tree through it several times for one word.
+ * Long enough to collapse a typed word into one call, short enough that the
+ * results still feel like they belong to what is on screen.
+ */
+const SEARCH_DEBOUNCE_MS = 250;
 
 /** The folder created to hold notes rescued from the retired local scratchpad. */
 const IMPORT_FOLDER_NAME = "Imported from this browser";
@@ -325,6 +342,16 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // whatever note is open, and this text belongs to one that no longer is.
   const [rescued, setRescued] = useState<Rescued | null>(null);
 
+  // Search (issue #607). `searchInput` is what the operator is typing;
+  // `searchQuery` is the debounced value the results below actually answer.
+  // Keeping them apart is what lets the header say "no notes mention X" about
+  // the query that ran rather than about the half-word in the box.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchPage, setSearchPage] = useState<SearchResultsPage | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [moving, setMoving] = useState<FsNode | null>(null);
@@ -344,6 +371,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // file that has since been closed) can never overwrite the current one.
   const treeGen = useRef(0);
   const fileGen = useRef(0);
+  const searchGen = useRef(0);
   // Whether the explorer's initial folder expansion has happened yet, so a later
   // refresh never re-opens folders the operator collapsed.
   const expandedSeeded = useRef(false);
@@ -391,6 +419,57 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     [client, company],
   );
 
+  /* ---- search (#607) ---- */
+
+  // Resolves when the results are installed. Separated from the effect below so
+  // the refocus and live-write handlers can re-run the *active* search — a hit
+  // list that outlived the notes it names is worse than a stale tree, because
+  // clicking one 404s.
+  const runSearch = useCallback(
+    async (query: string) => {
+      const mine = ++searchGen.current;
+      setSearching(true);
+      try {
+        const page = await searchWorkspace(client, company, query);
+        if (mine !== searchGen.current) return;
+        setSearchPage(page);
+        setSearchError(null);
+      } catch (e) {
+        if (mine !== searchGen.current) return;
+        // The previous page is dropped rather than left standing: results that
+        // do not answer the query on screen are a lie the operator cannot see.
+        setSearchPage(null);
+        setSearchError(message(e, "could not search this workspace"));
+      } finally {
+        if (mine === searchGen.current) setSearching(false);
+      }
+    },
+    [client, company],
+  );
+
+  // Debounce the box into `searchQuery`.
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (!trimmed) {
+      // Clearing the box restores the tree immediately — no debounce, and no
+      // request: the host refuses an empty query with a 400 because "" is not
+      // "everything", so the console must not send one.
+      searchGen.current++;
+      setSearchQuery("");
+      setSearchPage(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    const timer = setTimeout(() => setSearchQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    if (!searchQuery) return;
+    void runSearch(searchQuery);
+  }, [searchQuery, runSearch]);
+
   // Mount / company change: reset every scoped piece of state, then load.
   useEffect(() => {
     expandedSeeded.current = false;
@@ -399,6 +478,13 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     setOpenFile(null);
     setDraft(null);
     setSaveState("idle");
+    // Another company's notes are another namespace; a hit list surviving the
+    // switch would offer nodes this company does not have.
+    searchGen.current++;
+    setSearchInput("");
+    setSearchQuery("");
+    setSearchPage(null);
+    setSearchError(null);
     // Another company's note is another namespace, and rescued text offering to
     // be saved into the wrong workspace is worse than no offer at all.
     setRescued(null);
@@ -516,7 +602,13 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // the tab is the moment an operator most expects to see current state.
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === "visible") void loadTree({ silent: true });
+      if (document.visibilityState !== "visible") return;
+      void loadTree({ silent: true });
+      // An active search is the *only* thing in the explorer pane while it
+      // runs, so refreshing the tree behind it and leaving the hits alone would
+      // refresh nothing the operator can see — and would leave them clicking
+      // rows for notes that may since have been deleted.
+      if (searchQuery) void runSearch(searchQuery);
     };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
@@ -524,7 +616,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [loadTree]);
+  }, [loadTree, runSearch, searchQuery]);
 
   /* ---- live writes (#327) ---- */
 
@@ -552,6 +644,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     const frame = event;
     void (async () => {
       const tree = await loadTree({ silent: true });
+      // Same reasoning as the refocus handler: a live write can add, change or
+      // delete a note the hit list is naming, and the hit list is what is on
+      // screen.
+      if (searchQuery) void runSearch(searchQuery);
       const plan = planOpenNote({
         openId,
         event: frame,
@@ -727,6 +823,33 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     const node = nodeById(nodes, id);
     if (node && isBinary(node)) return;
     await loadFile(id);
+  }
+
+  /**
+   * Act on a search hit.
+   *
+   * A file goes through the ordinary `open` flow, so a hit behaves exactly like
+   * a tree click — including the binary case, which `open` already knows not to
+   * fetch a text body for. The search stays up: the operator is usually working
+   * a list of candidates, and clearing it on the first click would make them
+   * retype the query to reach the second.
+   *
+   * A folder cannot be "opened" — there is no pane for one — so it exits the
+   * search and reveals the folder in the tree, which is the only thing that
+   * could have been meant.
+   */
+  async function openHit(hit: SearchHit) {
+    if (hit.kind === "folder") {
+      setSearchInput("");
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const a of pathOf(nodes, hit.id)) if (a.kind === "folder") next.add(a.id);
+        next.add(hit.id);
+        return next;
+      });
+      return;
+    }
+    await open(hit.id);
   }
 
   function toggle(id: string) {
@@ -920,8 +1043,50 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
             }}
           />
         </div>
+        {/* Search (issue #607). In the explorer header beside the refresh
+            button, because it answers the same question the tree below it does
+            — "which note do I want?" — and an operator who cannot find a note
+            by eye reaches here next. */}
+        <div className="relative border-b px-2 py-1.5">
+          <Search className="pointer-events-none absolute top-1/2 left-4 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Escape restores the tree, the shortcut every search box has.
+              if (e.key === "Escape") setSearchInput("");
+            }}
+            placeholder="Search notes…"
+            aria-label="Search workspace notes"
+            className="h-8 pr-7 pl-7 text-sm"
+            data-testid="workspace-search"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              aria-label="Clear search"
+              data-testid="workspace-search-clear"
+              className="absolute top-1/2 right-4 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
         <div className="flex-1 overflow-y-auto py-1" data-testid="workspace-tree">
-          {loading ? (
+          {/* An active search replaces the tree rather than sitting beside it —
+              showing both would leave the operator reading a tree that is not
+              what they just asked for. */}
+          {searchInput.trim() ? (
+            <SearchResults
+              query={searchQuery || searchInput.trim()}
+              hits={searchPage?.hits ?? []}
+              total={searchPage?.total ?? 0}
+              loading={searching || searchQuery !== searchInput.trim()}
+              error={searchError}
+              onOpen={(hit) => void openHit(hit)}
+            />
+          ) : loading ? (
             <div className="space-y-2 px-2 py-2">
               <Skeleton className="h-5 w-4/5" />
               <Skeleton className="h-5 w-3/5" />
