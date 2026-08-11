@@ -2005,6 +2005,65 @@ mod test {
             .is_ok_and(|value| !value.is_empty() && value != "0")
     }
 
+    /// The URI with any `user:password@` replaced by `***@`, for the panic
+    /// message below.
+    ///
+    /// The unreachable-server panic names the URI so the failure says *which*
+    /// server it could not reach — a bare "connection refused" in a CI log is
+    /// most of a debugging session. But a connection string carries its
+    /// credentials inline, and a panic lands in the CI log, the terminal
+    /// scrollback and any artifact that captures either. CI points at an
+    /// unauthenticated localhost, so nothing leaks there; a developer pointing
+    /// this suite at a real cluster is the case that would, and that is exactly
+    /// when the message is most useful. Redacting keeps the host and port,
+    /// which is the part worth printing.
+    fn redact_credentials(uri: &str) -> String {
+        let Some((scheme, rest)) = uri.split_once("://") else {
+            return uri.to_string();
+        };
+        // Userinfo, when present, precedes the first `/` of the path — so only
+        // an `@` before that boundary delimits it. A password may itself
+        // contain `@`, so split at the LAST one within the authority.
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        match authority.rfind('@') {
+            Some(at) => format!("{scheme}://***{}{tail}", &authority[at..]),
+            None => uri.to_string(),
+        }
+    }
+
+    #[test]
+    fn redaction_keeps_the_host_and_drops_the_credentials() {
+        // The CI shape: nothing to redact, nothing changed.
+        assert_eq!(
+            redact_credentials("mongodb://localhost:27017"),
+            "mongodb://localhost:27017"
+        );
+        // The shape that would leak.
+        assert_eq!(
+            redact_credentials("mongodb://user:hunter2@cluster.example:27017"),
+            "mongodb://***@cluster.example:27017"
+        );
+        // A password containing `@` — splitting at the FIRST one would leave
+        // the tail of the password in the message.
+        assert_eq!(
+            redact_credentials("mongodb://user:p@ss@cluster.example:27017"),
+            "mongodb://***@cluster.example:27017"
+        );
+        // An `@` in the path or query must not be mistaken for userinfo.
+        assert_eq!(
+            redact_credentials("mongodb://localhost:27017/db?replicaSet=a@b"),
+            "mongodb://localhost:27017/db?replicaSet=a@b"
+        );
+        // A credentialed URI that also carries a path keeps the path.
+        assert_eq!(
+            redact_credentials("mongodb+srv://u:p@host/admin?retryWrites=true"),
+            "mongodb+srv://***@host/admin?retryWrites=true"
+        );
+        // Not a URI at all: returned untouched rather than mangled.
+        assert_eq!(redact_credentials("localhost:27017"), "localhost:27017");
+    }
+
     async fn store() -> Option<Arc<MongoStore>> {
         let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
             Ok(uri) => uri,
@@ -2035,9 +2094,12 @@ mod test {
         // than resolving lazily: an unreachable host fails HERE, after the
         // driver's server-selection timeout, instead of much later inside
         // whichever assertion happened to touch the database first.
-        let store = MongoStore::connect(&uri, &db)
-            .await
-            .unwrap_or_else(|err| panic!("could not reach the MongoDB server at {uri}: {err}"));
+        let store = MongoStore::connect(&uri, &db).await.unwrap_or_else(|err| {
+            panic!(
+                "could not reach the MongoDB server at {}: {err}",
+                redact_credentials(&uri)
+            )
+        });
         Some(Arc::new(store))
     }
 
