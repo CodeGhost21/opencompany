@@ -198,8 +198,10 @@ impl TenantComposio {
     ///
     /// The credential contributes its **identity**, not its bytes: a projected
     /// platform token rotates every few minutes, and hashing the value would
-    /// rebuild the whole roster on that schedule. A pasted per-company token does
-    /// contribute its value, since changing it is a real identity change.
+    /// rebuild the whole roster on that schedule. A pasted per-company token —
+    /// and the company's own TinyHumans key — does contribute its value, since
+    /// an admin changing either is a real identity change and must reach the
+    /// agents on the next cycle.
     pub fn fingerprint(config: &Option<TenantComposio>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
