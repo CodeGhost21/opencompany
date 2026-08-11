@@ -44,11 +44,25 @@ import { DeskCreateDialog } from "@/views/company/DeskCreateDialog";
 interface Props {
   client: OpenCompanyClient;
   company: string | null;
+  /**
+   * A desk to bring into view on arrival — the second segment of
+   * `#/company/<deskId>`, which the chat member pane links to (issue #485).
+   *
+   * Best-effort on purpose. `useHashView` hands the segment back unvalidated,
+   * this chart loads over the network, and a link outlives the desk it names —
+   * so an id this chart does not draw is a **silent no-op**, never an error. A
+   * stale bookmark should show the company, not a banner about it.
+   *
+   * The hash is never rewritten from here either: `#/company/<deskId>` is a
+   * shareable address, and canonicalising it away would break the link the
+   * operator just followed.
+   */
+  focusDeskId?: string | null;
 }
 
 type Load = "loading" | "ready" | "error";
 
-export function OrgChartView({ client, company }: Props) {
+export function OrgChartView({ client, company, focusDeskId }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [tree, setTree] = useState<OrgTree | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
@@ -57,6 +71,11 @@ export function OrgChartView({ client, company }: Props) {
   // A generation token so a response for a company we have navigated away from
   // cannot overwrite the one on screen. Same guard `SkillsView` uses.
   const gen = useRef(0);
+  /** Which desk id the arriving link has already been honoured for. */
+  const focused = useRef<string | null>(null);
+  /** The desk currently wearing the arrival ring, if any. */
+  const [focusMark, setFocusMark] = useState<string | null>(null);
+  const chartRef = useRef<HTMLDivElement | null>(null);
 
   const boot = useCallback(async () => {
     const mine = ++gen.current;
@@ -103,6 +122,57 @@ export function OrgChartView({ client, company }: Props) {
   }, [boot]);
 
   /**
+   * Bring the linked-to desk into view, once per id.
+   *
+   * Once, because every write here refetches the whole chart: re-running this
+   * on each refetch would yank the page back to the linked desk while the
+   * operator is editing a different one. `focused` records the id already
+   * honoured rather than a boolean, so following a second link still works.
+   *
+   * The desk is also given DOM focus, not just a scroll position. A ring is
+   * invisible to a screen reader, and "where did that link land me" is exactly
+   * the question focus answers; `preventScroll` keeps `scrollIntoView`'s
+   * centring rather than letting the browser re-scroll to its own idea of
+   * visible.
+   *
+   * An id with no node — a deleted desk, a typo, a chart that 404'd — falls
+   * through without marking itself honoured, so a desk that appears later
+   * (created in another tab, or a refetch that finally succeeds) is still
+   * caught.
+   */
+  useEffect(() => {
+    if (load !== "ready" || !focusDeskId || focused.current === focusDeskId) return;
+    const node = chartRef.current?.querySelector<HTMLElement>(
+      `[data-desk-id="${CSS.escape(focusDeskId)}"]`,
+    );
+    if (!node) return;
+    focused.current = focusDeskId;
+    node.scrollIntoView({ block: "center", behavior: "smooth" });
+    node.focus({ preventScroll: true });
+    setFocusMark(focusDeskId);
+  }, [load, focusDeskId, tree]);
+
+  /**
+   * Drop the ring on the operator's first move, rather than after a guessed
+   * number of milliseconds.
+   *
+   * A timer has to be picked against a chart that loads over the network: too
+   * short and the ring expires before a slow load painted it, too long and it
+   * outstays the moment it was drawn for. A click or a keypress is the actual
+   * signal that the desk has been found.
+   */
+  useEffect(() => {
+    if (!focusMark) return;
+    const clear = () => setFocusMark(null);
+    window.addEventListener("pointerdown", clear, { once: true });
+    window.addEventListener("keydown", clear, { once: true });
+    return () => {
+      window.removeEventListener("pointerdown", clear);
+      window.removeEventListener("keydown", clear);
+    };
+  }, [focusMark]);
+
+  /**
    * Run a write, then re-read the whole chart.
    *
    * Refetch rather than patch in place: every write here changes something the
@@ -124,7 +194,7 @@ export function OrgChartView({ client, company }: Props) {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto">
+    <div ref={chartRef} className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-4xl space-y-6 px-4 py-6">
         <div className="flex items-start justify-between gap-4">
           <div className="space-y-1">
@@ -174,6 +244,7 @@ export function OrgChartView({ client, company }: Props) {
               <Chart
                 tree={tree}
                 busy={busy}
+                focusMark={focusMark}
                 onCreate={() => setCreateOpen(true)}
                 onAdd={(desk, agentId) =>
                   void mutate(`${desk.id}:${agentId}`, () =>
@@ -223,6 +294,7 @@ export function OrgChartView({ client, company }: Props) {
 function Chart({
   tree,
   busy,
+  focusMark,
   onCreate,
   onAdd,
   onRemove,
@@ -231,6 +303,8 @@ function Chart({
 }: {
   tree: OrgTree;
   busy: string | null;
+  /** The desk a `#/company/<deskId>` link landed on, ringed until first input. */
+  focusMark: string | null;
   onCreate: () => void;
   onAdd: (desk: OrgDesk, agentId: string) => void;
   onRemove: (desk: OrgDesk, agentId: string) => void;
@@ -262,6 +336,7 @@ function Chart({
                 desk={desk}
                 addable={addableTo(tree, desk)}
                 busy={busy}
+                focused={focusMark === desk.id}
                 onAdd={(agentId) => onAdd(desk, agentId)}
                 onRemove={(agentId) => onRemove(desk, agentId)}
                 onMove={(index, direction) => onMove(desk, index, direction)}
@@ -280,6 +355,7 @@ function DeskNode({
   desk,
   addable,
   busy,
+  focused,
   onAdd,
   onRemove,
   onMove,
@@ -288,6 +364,8 @@ function DeskNode({
   desk: OrgDesk;
   addable: { id: string; name: string }[];
   busy: string | null;
+  /** This desk is the one a `#/company/<deskId>` link asked for. */
+  focused: boolean;
   onAdd: (agentId: string) => void;
   onRemove: (agentId: string) => void;
   onMove: (index: number, direction: "up" | "down") => void;
@@ -295,7 +373,26 @@ function DeskNode({
 }) {
   const locked = busy !== null;
   return (
-    <div role="treeitem" aria-level={2} aria-expanded="true" aria-selected="false">
+    <div
+      role="treeitem"
+      aria-level={2}
+      aria-expanded="true"
+      aria-selected="false"
+      // The desk's anchor for `#/company/<deskId>` (issue #485). A data
+      // attribute rather than an `id`: the desk id is the host's, and minting
+      // document-wide ids from it would collide with anything else on the page
+      // that names the same desk.
+      data-desk-id={desk.id}
+      data-desk-focused={focused ? "true" : undefined}
+      // Programmatically focusable, not tab-reachable: the arrival focus is
+      // how a screen reader is told where the link landed, but a desk wrapper
+      // is not a control and does not belong in the tab order.
+      tabIndex={-1}
+      className={cn(
+        "scroll-mt-4 rounded-xl outline-none",
+        focused && "ring-2 ring-primary ring-offset-2 ring-offset-background",
+      )}
+    >
       <div className="rounded-xl border">
         <div className="flex items-start justify-between gap-2 px-3 py-2.5">
           <div className="min-w-0">
