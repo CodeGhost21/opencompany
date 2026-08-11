@@ -59,15 +59,7 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
   const chips = reactionChips(message.reactions);
   const actionsUnavailable = actionsUnavailableFor(message);
 
-  if (sender.kind === "system") {
-    return (
-      <div className="flex justify-center px-4 py-1">
-        <p className="rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground">
-          {message.text}
-        </p>
-      </div>
-    );
-  }
+  if (sender.kind === "system") return <SystemPill message={message} />;
 
   return (
     <article
@@ -125,6 +117,39 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
         disabledReason={actionsUnavailable}
       />
     </article>
+  );
+}
+
+/**
+ * A centred system line — an approval decision, or a dispatch marker (issue
+ * #377).
+ *
+ * The pill becomes a **link to the card** when the line names one. That is what
+ * makes a marker useful rather than merely informative: `finished → Paused`
+ * tells a reader the run stopped, and the next thing they want is the card
+ * itself. Without the link they would have to find it on the board by title.
+ *
+ * A system line with no card — every approval line — renders exactly as it
+ * always has, as plain text. There is no icon and no chip here on purpose: this
+ * is one short sentence, and dressing it up would give a status line more visual
+ * weight than the messages around it.
+ */
+function SystemPill({ message }: { message: ChatMessage }) {
+  const className =
+    "rounded-full bg-muted px-3 py-1 text-center text-xs text-muted-foreground";
+  return (
+    <div className="flex justify-center px-4 py-1">
+      {message.taskId ? (
+        <a
+          href={`#/tasks/${encodeURIComponent(message.taskId)}`}
+          className={cn(className, "transition-opacity hover:opacity-80 hover:underline")}
+        >
+          {message.text}
+        </a>
+      ) : (
+        <p className={className}>{message.text}</p>
+      )}
+    </div>
   );
 }
 
