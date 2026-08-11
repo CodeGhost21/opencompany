@@ -2597,6 +2597,137 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         Ok(node)
     }
 
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
+        use crate::ports::workspace::NodeKind;
+
+        let nodes = self.collection("workspace_nodes");
+        let Some(staged_doc) = nodes
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+            })
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        let staged_json = get_str(&staged_doc, "node_json")?.to_string();
+        let replacement: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&staged_json)?;
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        let expected_doc = nodes
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": expected_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        let expected = expected_doc
+            .as_ref()
+            .map(
+                |document| -> Result<crate::ports::workspace::WorkspaceNode> {
+                    let json = get_str(document, "node_json")?;
+                    Ok(serde_json::from_str(&json)?)
+                },
+            )
+            .transpose()?;
+        let still_current = expected.as_ref().is_some_and(|node| {
+            node.kind == NodeKind::File
+                && node.name == name
+                && node.parent_id == replacement.parent_id
+        });
+
+        // Detach the private staging document before changing the expected
+        // document's id: `(company_id, node_id)` is unique. The GridFS payload
+        // deliberately stays in place, already keyed by `replacement_id`.
+        // A crash here leaves the old deliverable intact and, at worst, an
+        // orphan the boot sweep reclaims.
+        let detached = nodes
+            .delete_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+                "node_json": &staged_json,
+            })
+            .await
+            .map_err(mongo_err)?;
+        if detached.deleted_count != 1 {
+            return Err(OpenCompanyError::Conflict(
+                "the staged workspace replacement changed before it could be promoted".to_string(),
+            ));
+        }
+
+        if !still_current {
+            self.drop_blobs(company, replacement_id, None).await?;
+            return Ok(None);
+        }
+
+        let expected_doc = expected_doc.expect("still_current requires an expected document");
+        let expected_json = get_str(&expected_doc, "node_json")?.to_string();
+        let expected_content = expected_doc
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+        let staged_content = staged_doc
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+        let mut promoted = replacement;
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+
+        // One document update is the compare-and-swap. Including the complete
+        // old JSON and content makes an in-place writer count as a competing
+        // revision even if two timestamps happen to share a millisecond.
+        let swapped = nodes
+            .update_one(
+                doc! {
+                    "company_id": company.as_ref(),
+                    "node_id": expected_id,
+                    "node_json": &expected_json,
+                    "content": expected_content,
+                },
+                doc! {"$set": {
+                    "node_id": replacement_id,
+                    "node_json": serde_json::to_string(&promoted)?,
+                    "content": staged_content,
+                    "updated_ms": promoted.updated_at_millis as i64,
+                }},
+            )
+            .await
+            .map_err(mongo_err)?;
+        if swapped.matched_count == 0 {
+            self.drop_blobs(company, replacement_id, None).await?;
+            return Ok(None);
+        }
+
+        // The new document already points at durable replacement bytes. Old
+        // bytes are now unreachable; a cleanup failure must not turn a
+        // successful atomic swap into a reported publish failure, because the
+        // boot orphan sweep can safely finish this work later.
+        if let Err(err) = self.drop_blobs(company, expected_id, None).await {
+            tracing::warn!(
+                company = %company,
+                node_id = %expected_id,
+                error = %err,
+                "workspace file swap succeeded but old GridFS payload cleanup was deferred"
+            );
+        }
+        Ok(Some(promoted))
+    }
+
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let nodes = self.workspace_nodes(company).await?;
         if !nodes.contains_key(id) {

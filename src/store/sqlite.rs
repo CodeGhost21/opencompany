@@ -29,7 +29,7 @@ use std::sync::{Arc, Mutex as StdMutex, MutexGuard};
 
 use async_trait::async_trait;
 use futures::stream::BoxStream;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use tokio::sync::broadcast;
 
 use crate::Result;
@@ -2578,6 +2578,73 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         )
         .map_err(sql_err)?;
         Ok(node)
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
+        use crate::ports::workspace::NodeKind;
+
+        let mut conn = self.conn();
+        // Acquire the write reservation before reading either row. Two
+        // SqliteStore instances can point at the same database; an immediate
+        // transaction serializes their compare-and-swap decisions rather than
+        // letting both read the same expected node first.
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
+        let Some(replacement) = nodes.get(replacement_id).cloned() else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        let still_current = nodes.get(expected_id).is_some_and(|node| {
+            node.kind == NodeKind::File
+                && node.name == name
+                && node.parent_id == replacement.parent_id
+        });
+        if !still_current {
+            tx.execute(
+                "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), replacement_id],
+            )
+            .map_err(sql_err)?;
+            tx.commit().map_err(sql_err)?;
+            return Ok(None);
+        }
+
+        let mut promoted = replacement;
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+        tx.execute(
+            "DELETE FROM workspace_nodes WHERE company_id = ?1 AND id = ?2",
+            params![company.as_ref(), expected_id],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "UPDATE workspace_nodes SET node_json = ?1, updated_ms = ?2 \
+             WHERE company_id = ?3 AND id = ?4",
+            params![
+                serde_json::to_string(&promoted)?,
+                promoted.updated_at_millis as i64,
+                company.as_ref(),
+                replacement_id
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(Some(promoted))
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
