@@ -14,7 +14,9 @@
 //! - skills → `skills.json` (operator deltas)
 //! - workspace → real folders + Markdown files under `workspace/`, indexed by
 //!   `.workspace-index.json` (ULID → node metadata; physical paths derive from
-//!   the folder/name tree so a rename physically relocates the subtree)
+//!   the folder/name tree so a rename physically relocates the subtree). The
+//!   filesystem store therefore refuses duplicate sibling names: two ids may
+//!   never alias the same on-disk path (issue #666).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1086,6 +1088,7 @@ impl WorkspaceStore for FsOps {
                 }
             }
         }
+        reject_sibling_name_collision(&index, &node.id, &node.name, node.parent_id.as_deref())?;
         index.insert(node.id.clone(), node.clone());
         let physical = self.physical_path(company, &index, &node.id)?;
         match node.kind {
@@ -1153,6 +1156,7 @@ impl WorkspaceStore for FsOps {
                 }
             }
         }
+        reject_sibling_name_collision(&index, &node.id, &node.name, node.parent_id.as_deref())?;
         index.insert(node.id.clone(), node.clone());
         // The same sanitized derivation the text path uses, so a binary node
         // cannot reach a path a note could not.
@@ -1268,6 +1272,10 @@ impl WorkspaceStore for FsOps {
                 ));
             }
         }
+        let current = index.get(id).expect("node present");
+        let target_name = name.unwrap_or(&current.name);
+        let target_parent = parent.unwrap_or(current.parent_id.as_deref());
+        reject_sibling_name_collision(&index, id, target_name, target_parent)?;
         let old_physical = self.physical_path(company, &index, id)?;
         {
             let node = index.get_mut(id).expect("node present");
@@ -1468,6 +1476,35 @@ fn descendants(index: &HashMap<String, WorkspaceNode>, id: &str) -> HashSet<Stri
         }
     }
     out
+}
+
+/// Refuses two siblings whose logical names would resolve to one physical path.
+///
+/// Node ids are the workspace's durable identity, but the filesystem backend
+/// intentionally mirrors the operator-visible folder/name tree on disk. That
+/// representation cannot safely carry duplicate sibling names: the second
+/// create would overwrite the first node's bytes while leaving both metadata
+/// rows behind, and a later read would serve one payload under the other row's
+/// size and digest (issue #666).
+///
+/// The check runs while the workspace-index lock is held by every caller, so
+/// two concurrent creates cannot both observe an available name. `self_id` is
+/// ignored so a no-op rename remains valid.
+fn reject_sibling_name_collision(
+    index: &HashMap<String, WorkspaceNode>,
+    self_id: &str,
+    name: &str,
+    parent: Option<&str>,
+) -> Result<()> {
+    if index
+        .values()
+        .any(|node| node.id != self_id && node.parent_id.as_deref() == parent && node.name == name)
+    {
+        return Err(OpenCompanyError::Conflict(format!(
+            "workspace already contains `{name}` in that folder"
+        )));
+    }
+    Ok(())
 }
 
 /// Rejects a node name that contains a path separator or a parent-dir hop, so a

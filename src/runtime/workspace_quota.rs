@@ -261,6 +261,25 @@ impl QuotaEnforcedWorkspace {
 
 #[async_trait]
 impl WorkspaceStore for QuotaEnforcedWorkspace {
+    /// The upload route's question, answered with this company's own limits
+    /// (issue #665).
+    ///
+    /// Only [`admit`](Self::admit)'s per-file half applies: `tree_quota_bytes`
+    /// totals `size`, which only a binary node carries, so a payload about to be
+    /// stored as prose contributes nothing to the tree total and must not be
+    /// measured against it. That is the documented narrowing above, unchanged —
+    /// this bounds a single upload, it does not start counting notes.
+    async fn admit_upload(&self, _company: &CompanyId, name: &str, len: u64) -> Result<()> {
+        if len > self.quota.max_blob_bytes {
+            return Err(OpenCompanyError::WorkspaceQuota(format!(
+                "`{name}` is {}, over the {} limit for a single file. Nothing was stored.",
+                human(len),
+                human(self.quota.max_blob_bytes),
+            )));
+        }
+        Ok(())
+    }
+
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
         self.inner.tree(company).await
     }
@@ -525,6 +544,30 @@ mod test {
             .write(&co, "note", &"y".repeat(9_000), WorkspaceOrigin::Operator)
             .await
             .expect("nor is an overwrite");
+    }
+
+    /// The upload-only admission seam uses the company's configured per-file
+    /// cap without applying the binary-tree total to prose that remains
+    /// deliberately uncounted.
+    #[tokio::test]
+    async fn upload_admission_uses_the_custom_cap_but_not_the_tree_total() {
+        let (_dir, store, co) = wired(WorkspaceQuota {
+            max_blob_bytes: 64,
+            tree_quota_bytes: Some(1),
+        });
+
+        store
+            .admit_upload(&co, "at.csv", 64)
+            .await
+            .expect("exactly at the configured per-file cap is admitted");
+        let err = store
+            .admit_upload(&co, "over.csv", 65)
+            .await
+            .expect_err("one byte over the configured cap is refused");
+        let message = err.to_string();
+        assert!(message.contains("over.csv"), "{message}");
+        assert!(message.contains("65 bytes"), "{message}");
+        assert!(message.contains("64 bytes"), "{message}");
     }
 
     /// The digest is the store's, not the caller's — the decorator forwards

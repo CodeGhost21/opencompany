@@ -230,6 +230,17 @@ including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:
 decode as UTF-8 is stored as a note instead, so an uploaded `.md` keeps its
 editor and backlinks.
 
+An upload is still bounded by the company's `max_blob_mb` before that
+text/binary choice (#665). The bound is a property of bytes entering through
+the upload route, not their eventual representation; ordinary text writes stay
+unmetered and text nodes still do not contribute to `tree_quota_gb`.
+
+The filesystem backend mirrors logical names as real paths, so it refuses a
+create, rename, or move that would duplicate a sibling name (#666). The check
+runs under the workspace-index lock: a refused upload leaves the existing node,
+payload, size, and digest unchanged. Id-keyed database backends can continue to
+represent duplicate sibling names without aliasing payloads.
+
 **A stored `mime` does not decide how the blob route serves it (#667).** That
 value is the uploader's declared `Content-Type`, or `mime_guess` on a published
 deliverable's filename — a claim, not a property of the bytes — and the route is
