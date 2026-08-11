@@ -24,6 +24,35 @@ import type { OpenCompanyClient } from "./client";
  */
 export type ComposioCredentialSource = "attested" | "static" | "none";
 
+/**
+ * One provider in the catalog the host offers, with the backend's own display
+ * metadata (issue #600).
+ *
+ * Every field but `slug` is best-effort and may be empty — a manifest
+ * allowlist, a degraded fallback, and a backend predating Composio's dynamic
+ * catalog all yield slug-only entries. The console fills those in from
+ * `@/lib/composio-catalog`, which is why that local typography table survives
+ * rather than being deleted in favour of the backend's names.
+ */
+export interface ComposioToolkitEntry {
+  /** Toolkit slug, e.g. `googlecalendar`. The key every host call is made with. */
+  slug: string;
+  /** Human-readable name, e.g. `Google Calendar`. Empty when unpublished. */
+  name: string;
+  /** One-line description. Empty when unpublished. Searched alongside the name. */
+  description: string;
+  /** Composio-hosted logo URL, or `null` when unpublished. */
+  logo: string | null;
+  /**
+   * Composio's own free-form category names, e.g. `["productivity", "email"]`.
+   *
+   * Forwarded verbatim by the host and bucketed here by substring — which is
+   * what means a Composio integration added tomorrow lands in the right group
+   * with no code change on either side of the wire.
+   */
+  categories: string[];
+}
+
 /** The company's Composio status. Never carries the token. */
 export interface ComposioStatus {
   /** Whether the `composio` feature is compiled into this build at all. */
@@ -54,6 +83,20 @@ export interface ComposioStatus {
    * "other provider" field is for.
    */
   effectiveToolkits: string[];
+  /**
+   * The same providers as {@link effectiveToolkits}, in the same order, each
+   * carrying whatever display metadata the backend published for it (issue
+   * #600).
+   *
+   * This is what makes the panel browsable. Before it, the host reduced every
+   * catalog entry to a bare slug one layer before the console, so 123 providers
+   * could only be a flat list: there was nothing to group by, nothing to brand
+   * with, and nothing to search but the slug.
+   *
+   * Additive rather than a replacement — {@link effectiveToolkits} is still the
+   * slug contract, and it is still all an authorize call needs.
+   */
+  effectiveCatalog: ComposioToolkitEntry[];
   /**
    * Where {@link effectiveToolkits} came from (issue #397).
    *

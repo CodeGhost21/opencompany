@@ -228,6 +228,7 @@ mod live {
     use async_trait::async_trait;
     use serde_json::{Value, json};
 
+    use crate::company::composio::CatalogEntry;
     use crate::harness::composio_catalog as catalog;
     use crate::harness::mcp_probe::{redact, scrub};
     use crate::metering::record_oauth_call;
@@ -454,7 +455,23 @@ mod live {
     /// all; their plain slug allowlist is used instead. Slugs are trimmed,
     /// lowercased, de-duplicated and sorted for a stable render order. Any
     /// upstream error is scrubbed of the tenant bearer before it bubbles.
-    pub async fn list_catalog_toolkits(config: &TenantComposio) -> Result<Vec<String>> {
+    ///
+    /// ## Why this returns entries rather than slugs (issue #600)
+    ///
+    /// It used to return `Vec<String>`, and that one `.map(|e| e.slug)` was the
+    /// whole of #600. The backend publishes `name`, `logo`, `description` and
+    /// `categories` on every entry and states plainly that it assembles them so
+    /// the frontend can read them straight from there — and this function threw
+    /// five of the six fields away one layer before the console, which then had
+    /// nothing to group by, nothing to brand with, and nothing to search but the
+    /// slug. A hundred-and-twenty-three-item flat list was the honest rendering
+    /// of what it was handed.
+    ///
+    /// Nothing about *admission* changed. The agent-side gate is
+    /// [`toolkit_allowed`], which takes slugs and never consulted this function;
+    /// the console's slug list is still derived from these entries. This widens
+    /// what is *described*, not what is permitted.
+    pub async fn list_catalog_toolkits(config: &TenantComposio) -> Result<Vec<CatalogEntry>> {
         tracing::debug!("[composio] ops list_catalog_toolkits");
         let (client, secrets) = live_call(config).await?;
         let resp = match client.list_toolkits().await {
@@ -462,22 +479,59 @@ mod live {
             Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
         };
         let normalize = |slug: &str| slug.trim().to_ascii_lowercase();
-        let mut slugs: std::collections::BTreeSet<String> = resp
-            .catalog
-            .iter()
-            .filter(|entry| entry.enabled.unwrap_or(false))
-            .map(|entry| normalize(&entry.slug))
-            .filter(|slug| !slug.is_empty())
-            .collect();
-        if slugs.is_empty() {
-            slugs = resp
+        // A `BTreeMap` keyed on the normalized slug keeps the de-duplication and
+        // the stable sort the slug set gave us, while carrying the metadata that
+        // is the entire point of the widening.
+        //
+        // `or_insert_with`, NOT `collect()` into the map: collecting keeps the
+        // LAST value for a repeated key, and a duplicate catalog entry is
+        // typically the degenerate one — the mock's `Gmail (dup)` carries no
+        // description, and collecting would let it silently blank the real
+        // Gmail's. First entry wins, which is also what the `BTreeSet<String>`
+        // this replaced effectively did.
+        let mut entries: std::collections::BTreeMap<String, CatalogEntry> =
+            std::collections::BTreeMap::new();
+        for entry in resp.catalog.iter().filter(|e| e.enabled.unwrap_or(false)) {
+            let slug = normalize(&entry.slug);
+            if slug.is_empty() {
+                continue;
+            }
+            entries.entry(slug.clone()).or_insert_with(|| CatalogEntry {
+                slug,
+                name: entry.name.trim().to_string(),
+                description: entry
+                    .description
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or_default()
+                    .to_string(),
+                logo: entry
+                    .logo
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|logo| !logo.is_empty())
+                    .map(str::to_string),
+                categories: entry
+                    .categories
+                    .iter()
+                    .map(|c| c.trim().to_string())
+                    .filter(|c| !c.is_empty())
+                    .collect(),
+            });
+        }
+        if entries.is_empty() {
+            // A backend predating the dynamic catalog. Slugs are all it has, so
+            // slugs are all the console gets — rendered with local typography
+            // rather than dropped.
+            entries = resp
                 .toolkits
                 .iter()
                 .map(|slug| normalize(slug))
                 .filter(|slug| !slug.is_empty())
+                .map(|slug| (slug.clone(), CatalogEntry::from_slug(slug)))
                 .collect();
         }
-        Ok(slugs.into_iter().collect())
+        Ok(entries.into_values().collect())
     }
 
     // ── composio_list_toolkits ──────────────────────────────────────────
@@ -1256,6 +1310,8 @@ mod ops_helper_tests {
 
     use std::net::SocketAddr;
 
+    use crate::company::composio::CatalogEntry;
+
     use axum::Router;
     use axum::routing::{get, post};
     use serde_json::{Value, json};
@@ -1289,14 +1345,32 @@ mod ops_helper_tests {
     /// entries carry an `enabled` gate. `zendesk` is present but not connectable
     /// and must not be advertised; the casing and whitespace on `HubSpot` must
     /// normalise.
+    ///
+    /// Entries carry the display metadata (`logo`, `description`, `categories`)
+    /// the backend actually publishes — issue #600 is that all of it was dropped
+    /// on the way through, so a mock that omitted it could not have caught the
+    /// bug.
     async fn toolkits_handler() -> axum::Json<Value> {
         axum::Json(json!({
             "success": true,
             "data": {
                 "toolkits": ["gmail", "slack"],
                 "catalog": [
-                    { "slug": " HubSpot ", "name": "HubSpot", "enabled": true },
-                    { "slug": "gmail", "name": "Gmail", "enabled": true },
+                    {
+                        "slug": " HubSpot ",
+                        "name": "HubSpot",
+                        "enabled": true,
+                        "logo": " https://logos.composio.dev/api/hubspot ",
+                        "description": "  CRM and marketing automation.  ",
+                        "categories": ["crm", " marketing ", ""]
+                    },
+                    {
+                        "slug": "gmail",
+                        "name": "Gmail",
+                        "enabled": true,
+                        "description": "Send and read email.",
+                        "categories": ["email"]
+                    },
                     { "slug": "zendesk", "name": "Zendesk", "enabled": false },
                     { "slug": "gmail", "name": "Gmail (dup)", "enabled": true }
                 ]
@@ -1389,9 +1463,58 @@ mod ops_helper_tests {
             .await
             .expect("catalog fetch");
         assert_eq!(
-            catalog,
-            vec!["gmail".to_string(), "hubspot".to_string()],
+            catalog.iter().map(|e| e.slug.as_str()).collect::<Vec<_>>(),
+            vec!["gmail", "hubspot"],
             "connectable entries only, normalised, de-duplicated and sorted"
+        );
+    }
+
+    /// Issue #600: the display metadata the backend publishes reaches the
+    /// caller instead of being reduced to a slug.
+    ///
+    /// This is the regression test for the defect itself. Every field asserted
+    /// here was present in the response and discarded by a single
+    /// `.map(|entry| entry.slug)`, which is why the console had nothing to
+    /// group by, nothing to brand with, and nothing to search but the slug.
+    #[tokio::test]
+    async fn list_catalog_toolkits_carries_the_display_metadata() {
+        let url = spawn_backend().await;
+        let catalog = list_catalog_toolkits(&config(&url, Vec::new()))
+            .await
+            .expect("catalog fetch");
+
+        let hubspot = catalog
+            .iter()
+            .find(|e| e.slug == "hubspot")
+            .expect("hubspot is connectable");
+        assert_eq!(hubspot.name, "HubSpot");
+        assert_eq!(hubspot.description, "CRM and marketing automation.");
+        assert_eq!(
+            hubspot.logo.as_deref(),
+            Some("https://logos.composio.dev/api/hubspot"),
+            "the logo URL is what lets a tile be branded rather than a text row"
+        );
+        assert_eq!(
+            hubspot.categories,
+            vec!["crm".to_string(), "marketing".to_string()],
+            "categories are trimmed and emptied-out entries dropped, but otherwise \
+             forwarded verbatim — the console buckets them, not this layer"
+        );
+
+        let gmail = catalog
+            .iter()
+            .find(|e| e.slug == "gmail")
+            .expect("gmail is connectable");
+        assert_eq!(gmail.description, "Send and read email.");
+        assert_eq!(
+            gmail.logo, None,
+            "an unpublished logo is None, not an empty string the console would \
+             render as a broken image"
+        );
+        assert_eq!(
+            gmail.name, "Gmail",
+            "the FIRST entry for a slug wins, matching the de-duplication the slug \
+             set used to do — not the later `Gmail (dup)`"
         );
     }
 
@@ -1404,7 +1527,15 @@ mod ops_helper_tests {
         let catalog = list_catalog_toolkits(&config(&url, Vec::new()))
             .await
             .expect("catalog fetch");
-        assert_eq!(catalog, vec!["gmail".to_string(), "notion".to_string()]);
+        assert_eq!(
+            catalog,
+            vec![
+                CatalogEntry::from_slug("gmail"),
+                CatalogEntry::from_slug("notion"),
+            ],
+            "slug-only entries: the backend published nothing else, and the console \
+             renders these with its own typography rather than dropping them"
+        );
     }
 
     /// An unreachable backend is an error, never a quietly-empty catalog — the
