@@ -361,6 +361,8 @@ async fn create_task(
         // cannot post a card that already claims to be planned — and cannot
         // forge the prerequisite verdicts that decide whether it dispatches.
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     };
     company.runtime.upsert_task(&record).await?;
     Ok(Json(record.into()))
