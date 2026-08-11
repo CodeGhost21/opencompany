@@ -178,7 +178,7 @@ async fn run_workflow_inner(
     let gated = if ctx.dry_run {
         Vec::new()
     } else {
-        super::gate::apply_tool_call_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+        super::gate::apply_policy_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
     };
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     // Issue #371: the caller's run id, not a freshly minted one. Correlating the
@@ -516,7 +516,7 @@ struct PausedGates<'a> {
     deliveries: &'a [crate::ports::DeliveryReport],
     /// The policy-raised gates, so a card can say which tool and why. An
     /// authored gate has no entry here and its card stays as #395 shipped it.
-    gated: &'a [super::gate::GatedToolCall],
+    gated: &'a [super::gate::GatedCall],
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -589,17 +589,21 @@ async fn park_pending_gates(
         // Issue #460: when the policy is what stopped this node, the card says
         // which tool and why. An authored gate carries neither — nobody asked a
         // question on its behalf — so it stays exactly as #395 shipped it.
-        let tool = gated
+        let call = gated
             .iter()
             .find(|gate| gate.node_id == *node_id)
-            .map(|gate| (gate.slug.as_str(), gate.reason.as_str()));
+            .map(|gate| crate::runtime::workflow_resume::GateCall {
+                tool: gate.slug.as_str(),
+                reason: gate.reason.as_str(),
+                target: gate.target.as_deref(),
+            });
         let effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
-            tool,
+            call,
         );
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(

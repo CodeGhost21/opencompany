@@ -1,5 +1,9 @@
-//! Issue #460: the company's [`ApprovalPolicy`] decides which `tool_call` nodes
+//! Issues #460 and #614: the company's [`ApprovalPolicy`] decides which nodes
 //! stop for an operator, before the run reaches them.
+//!
+//! Two node kinds reach an outside-world capability with no turn behind them,
+//! and both are gated here so they answer to one declaration: `tool_call`
+//! (issue #460) and `http_request` (issue #614). See [`call_of`].
 //!
 //! # The hole this closes
 //!
@@ -9,6 +13,16 @@
 //! node running `shell` or `http_request` on a `supervised` company produced no
 //! approval card, no recorded decision and no grant accounting — while the
 //! *same call* from an agent node in the *same graph* did, ever since #395.
+//!
+//! The `http_request` node kind had the identical hole on a different seam —
+//! [`GuardedHttpClient`](super::caps) calls `tool.execute(args)` directly, never
+//! `ToolInvoker` — so #460's fix did not reach it. What still held there, and
+//! still does: the SSRF `url_guard` on every request and redirect, the
+//! company's `web_allowed_domains` allowlist, the size/timeout caps, and
+//! `readonly` blocking the call outright via `can_act()`. What was missing is
+//! the same operator-facing half. Worth stating precisely, because "no approval
+//! card under `supervised`" and "ungated arbitrary HTTP" are very different
+//! claims and only the first one is true.
 //!
 //! What was NOT missing is exec-security: `[policy].mode` has always fed
 //! [`toolbelt::exec_security`](crate::harness::toolbelt), which sets the
@@ -103,8 +117,8 @@
 //!   across the boundary (`nodes/integration/sub_workflow.rs`), and a paused
 //!   child *halts the parent* with an unresumable error. Gating a child would
 //!   convert a working run into a dead one with no card to decide, so children
-//!   keep today's behaviour. This is a real residual hole in #460 and it needs
-//!   engine work to close.
+//!   keep today's behaviour. Filed as its own issue (#617) rather than left in
+//!   a merged PR body; it needs engine work to close.
 //! * **Dry runs are not gated.** Every effect is stubbed
 //!   ([`dry_run`](super::caps)), so there is nothing to approve, and pausing
 //!   would stop a dry run from walking the rest of the graph — which is the one
@@ -119,20 +133,41 @@ use openhuman_core::openhuman as oh;
 use crate::harness::policy::ApprovalPolicy;
 use crate::ports::types::CompanyRecord;
 
-/// One `tool_call` node the company's policy stopped, and why.
+/// The tool name an `http_request` node's call is classified as (issue #614).
+///
+/// The node kind has no slug of its own — it is not a `tool_call` — but the
+/// call it makes is the same one `WorkflowToolInvoker` would run under this
+/// name, and [`consequence_of`](crate::policy::consequence_of) already
+/// classifies it (`Reach::Consequence`). Naming it here is what makes the two
+/// node kinds answer to the same declaration instead of drifting.
+const HTTP_REQUEST_TOOL: &str = "http_request";
+
+/// One node the company's policy stopped, and why.
 ///
 /// Carried from the gate pass to [`park_pending_gates`](super::runner) so the
-/// operator's card can name the tool and the reason rather than a bare node id
+/// operator's card can name the call and the reason rather than a bare node id
 /// — the complaint #468 makes about the Approvals tab.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct GatedToolCall {
+pub(crate) struct GatedCall {
     /// The node the engine will pause on.
     pub node_id: String,
-    /// The toolbelt slug that node would have run.
+    /// The tool this node would have run — a `tool_call` node's slug, or
+    /// [`HTTP_REQUEST_TOOL`] for an `http_request` node.
     pub slug: String,
     /// The policy's own words for why it stopped — the same string the agent
     /// path puts on its card.
     pub reason: String,
+    /// What the call would reach, when that is knowable and worth showing:
+    /// `"POST api.example.com"` for an `http_request` node (issue #614), so the
+    /// operator is deciding about a destination rather than a node id.
+    ///
+    /// **Method and host only, never the path or query.** A URL's query string
+    /// is a routine place for tokens and signed parameters to sit, and this
+    /// string is written to the durable journal, rendered on the Approvals page
+    /// and kept after the decision. The host is what the decision actually turns
+    /// on; the full URL is already in the node's own config for anyone who needs
+    /// it.
+    pub target: Option<String>,
 }
 
 /// Marks every `tool_call` node whose call the company's [`ApprovalPolicy`]
@@ -159,12 +194,12 @@ pub(crate) struct GatedToolCall {
 /// no agent, which is precisely the synthetic-principal decision this module's
 /// docs record. The context below names that principal so a log line says which
 /// workflow asked.
-pub(crate) async fn apply_tool_call_gates(
+pub(crate) async fn apply_policy_gates(
     graph: &mut WorkflowGraph,
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
-) -> Vec<GatedToolCall> {
+) -> Vec<GatedCall> {
     // The manifest's `[policy]` verbatim — same mode, same `always_approve`,
     // same `auto_approve_under_usd` the roster runs under. No per-agent budget:
     // a workflow node is not a teammate, and the company-wide ceiling is
@@ -173,22 +208,12 @@ pub(crate) async fn apply_tool_call_gates(
     let mut gated = Vec::new();
 
     for node in &mut graph.nodes {
-        if node.kind != NodeKind::ToolCall {
-            continue;
-        }
-        // A `tool_call` without a slug fails in the engine's own node with a
-        // clear error; there is no call to classify, so leave it be.
-        let Some(slug) = node.config.get("slug").and_then(Value::as_str) else {
+        let Some((slug, args, target)) = call_of(node) else {
             continue;
         };
-        let args = node
-            .config
-            .get("args")
-            .cloned()
-            .unwrap_or_else(|| json!({}));
 
         let request = ToolPolicyRequest::new(
-            slug,
+            &slug,
             args,
             ToolCallContext::session(
                 run_id,
@@ -203,13 +228,12 @@ pub(crate) async fn apply_tool_call_gates(
             continue;
         };
 
-        let slug = slug.to_string();
         tracing::debug!(
             company = %record.id,
             workflow = workflow_id,
             node = %node.id,
             tool = %slug,
-            "workflow tool_call: the company's policy stops this call for an operator"
+            "workflow: the company's policy stops this node's call for an operator"
         );
         // Written LAST and unconditionally: the policy's gate outranks an
         // authored `requires_approval`, in both directions. An author may add a
@@ -217,14 +241,75 @@ pub(crate) async fn apply_tool_call_gates(
         if let Value::Object(config) = &mut node.config {
             config.insert("requires_approval".to_string(), json!(true));
         }
-        gated.push(GatedToolCall {
+        gated.push(GatedCall {
             node_id: node.id.clone(),
             slug,
             reason,
+            target,
         });
     }
 
     gated
+}
+
+/// The call a node would make, as `(tool, args, target)` — or `None` for a node
+/// kind that makes no classifiable call.
+///
+/// Two node kinds reach an outside-world capability without a turn behind them,
+/// and both are read here so they answer to one declaration:
+///
+/// * **`tool_call`** (issue #460) — the authored `slug` and its `args`.
+/// * **`http_request`** (issue #614) — a different capability
+///   ([`GuardedHttpClient`](super::caps), never `ToolInvoker`) making the same
+///   call the toolbelt's `http_request` tool makes, so it is classified under
+///   that name. The whole node config is handed over as the arguments, which is
+///   what the descriptor already is: `{ method, url, headers, body }`.
+///
+/// An `agent` node is deliberately absent: its gated calls already park through
+/// #395's drain, and gating it here would park the same call twice.
+fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<String>)> {
+    match node.kind {
+        NodeKind::ToolCall => {
+            // A `tool_call` without a slug fails in the engine's own node with a
+            // clear error; there is no call to classify, so leave it be.
+            let slug = node.config.get("slug").and_then(Value::as_str)?;
+            let args = node
+                .config
+                .get("args")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+            Some((slug.to_string(), args, None))
+        }
+        NodeKind::HttpRequest => Some((
+            HTTP_REQUEST_TOOL.to_string(),
+            node.config.clone(),
+            http_target(&node.config),
+        )),
+        _ => None,
+    }
+}
+
+/// `"POST api.example.com"` for an `http_request` node's config — method and
+/// host only, for the reasons on [`GatedCall::target`].
+///
+/// Returns `None` rather than guessing when the URL is missing or unparseable,
+/// which includes the common authoring case of a `=`-expression the run has not
+/// resolved yet (`url = "=item.endpoint"`). A card that names no destination is
+/// honest; one that names `=item.endpoint` as a host is not.
+fn http_target(config: &Value) -> Option<String> {
+    let url = config.get("url").and_then(Value::as_str)?;
+    let host = url
+        .split_once("://")
+        .map(|(_, rest)| rest)?
+        .split(['/', '?', '#'])
+        .next()
+        .filter(|host| !host.is_empty())?;
+    let method = config
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("GET")
+        .to_uppercase();
+    Some(format!("{method} {host}"))
 }
 
 /// The synthetic principal a workflow `tool_call` acts as.
@@ -325,7 +410,7 @@ description = "Runs Acme."
     #[tokio::test]
     async fn a_consequential_call_gates_under_supervised() {
         let mut g = graph(vec![tool_node("run-it", "shell")]);
-        let gated = apply_tool_call_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
 
         assert_eq!(gate_ids(&g), ["run-it"]);
         assert_eq!(gated.len(), 1);
@@ -345,7 +430,7 @@ description = "Runs Acme."
     async fn full_autonomy_leaves_the_graph_untouched() {
         let before = graph(vec![tool_node("run-it", "shell")]);
         let mut after = before.clone();
-        let gated = apply_tool_call_gates(&mut after, &company("full", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(&mut after, &company("full", &[]), "wf", "run-1").await;
 
         assert!(gated.is_empty());
         assert_eq!(after.nodes[0].config, before.nodes[0].config);
@@ -362,7 +447,7 @@ description = "Runs Acme."
             tool_node("read", "read_workspace_state"),
             tool_node("search", "web_search"),
         ]);
-        let gated = apply_tool_call_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
@@ -375,7 +460,7 @@ description = "Runs Acme."
     async fn always_approve_gates_a_call_the_tier_would_allow() {
         let mut g = graph(vec![tool_node("search", "web_search")]);
         let gated =
-            apply_tool_call_gates(&mut g, &company("full", &["web_search"]), "wf", "run-1").await;
+            apply_policy_gates(&mut g, &company("full", &["web_search"]), "wf", "run-1").await;
 
         assert_eq!(gate_ids(&g), ["search"]);
         assert!(gated[0].reason.contains("always-approve"), "{gated:?}");
@@ -389,25 +474,106 @@ description = "Runs Acme."
         node.config = json!({ "slug": "shell", "requires_approval": false });
         let mut g = graph(vec![node]);
 
-        apply_tool_call_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
 
         assert_eq!(g.nodes[0].config["requires_approval"], json!(true));
     }
 
-    /// Only `tool_call` nodes are touched. An `agent` node already parks
-    /// through #395's drain, and gating it here would park the same call twice.
+    /// An `agent` node is never touched: its gated calls already park through
+    /// #395's drain, and gating it here would park the same call twice.
+    ///
+    /// This test previously also asserted that an `http_request` node is left
+    /// alone. Issue #614 is precisely that this was wrong, so that half moved to
+    /// [`an_http_request_node_gates_under_supervised`] with the opposite
+    /// expectation — recorded here rather than silently inverted.
     #[tokio::test]
-    async fn other_node_kinds_are_never_gated() {
+    async fn an_agent_node_is_never_gated_here() {
         let mut agent = tool_node("think", "shell");
         agent.kind = NodeKind::Agent;
-        let mut http = tool_node("fetch", "http_request");
-        http.kind = NodeKind::HttpRequest;
-        let mut g = graph(vec![agent, http]);
+        let mut transform = tool_node("shape", "shell");
+        transform.kind = NodeKind::Transform;
+        let mut g = graph(vec![agent, transform]);
 
-        let gated = apply_tool_call_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
 
         assert!(gated.is_empty(), "{gated:?}");
         assert!(gate_ids(&g).is_empty());
+    }
+
+    /// Issue #614's defect: an `http_request` node reached an external address
+    /// on a `supervised` company with no card. It runs through
+    /// [`GuardedHttpClient`](super::super::caps), never `ToolInvoker`, so #460's
+    /// fix did not reach it.
+    #[tokio::test]
+    async fn an_http_request_node_gates_under_supervised() {
+        let mut node = tool_node("fetch", "unused");
+        node.kind = NodeKind::HttpRequest;
+        node.config =
+            json!({ "method": "post", "url": "https://api.example.com/v1/pay?token=s3cret" });
+        let mut g = graph(vec![node]);
+
+        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+
+        assert_eq!(gate_ids(&g), ["fetch"]);
+        assert_eq!(gated[0].slug, "http_request");
+        // Method and host, uppercased — and NOT the path or the query, which is
+        // where tokens live. This string goes to the durable journal.
+        assert_eq!(gated[0].target.as_deref(), Some("POST api.example.com"));
+        assert!(
+            !gated[0].target.as_deref().unwrap().contains("s3cret"),
+            "the card must not carry the query string"
+        );
+    }
+
+    /// `full` autonomy leaves an `http_request` node alone, the same as a
+    /// `tool_call` one — the operator opted out of being asked.
+    #[tokio::test]
+    async fn an_http_request_node_does_not_gate_under_full() {
+        let mut node = tool_node("fetch", "unused");
+        node.kind = NodeKind::HttpRequest;
+        node.config = json!({ "url": "https://api.example.com/x" });
+        let before = node.config.clone();
+        let mut g = graph(vec![node]);
+
+        let gated = apply_policy_gates(&mut g, &company("full", &[]), "wf", "run-1").await;
+
+        assert!(gated.is_empty(), "{gated:?}");
+        assert_eq!(g.nodes[0].config, before);
+    }
+
+    /// A URL the run has not resolved yet is the common authoring case
+    /// (`url = "=item.endpoint"`). The node still gates — the call is no less
+    /// consequential — but the card names no destination rather than claiming
+    /// `=item.endpoint` is a host.
+    #[tokio::test]
+    async fn an_unresolved_url_gates_without_naming_a_target() {
+        let mut node = tool_node("fetch", "unused");
+        node.kind = NodeKind::HttpRequest;
+        node.config = json!({ "method": "GET", "url": "=item.endpoint" });
+        let mut g = graph(vec![node]);
+
+        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+
+        assert_eq!(gate_ids(&g), ["fetch"]);
+        assert_eq!(gated[0].target, None, "{gated:?}");
+    }
+
+    /// The default method matters: an `http_request` node with no `method` is a
+    /// GET, and the card should say so rather than leaving it blank.
+    #[test]
+    fn a_target_defaults_to_get_and_drops_path_query_and_fragment() {
+        assert_eq!(
+            http_target(&json!({ "url": "https://h.test/a/b?q=1#f" })).as_deref(),
+            Some("GET h.test")
+        );
+        assert_eq!(
+            http_target(&json!({ "method": "delete", "url": "http://h.test:8080/x" })).as_deref(),
+            Some("DELETE h.test:8080")
+        );
+        // No URL, no scheme, or an empty host: nothing to name.
+        assert_eq!(http_target(&json!({ "method": "GET" })), None);
+        assert_eq!(http_target(&json!({ "url": "not-a-url" })), None);
+        assert_eq!(http_target(&json!({ "url": "https:///only-path" })), None);
     }
 
     /// A slugless `tool_call` has no call to classify; the engine's own node
@@ -419,7 +585,7 @@ description = "Runs Acme."
         node.config = json!({});
         let mut g = graph(vec![node]);
 
-        let gated = apply_tool_call_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
+        let gated = apply_policy_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
 
         assert!(gated.is_empty());
         assert!(gate_ids(&g).is_empty());

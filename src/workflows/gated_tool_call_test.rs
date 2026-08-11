@@ -1,5 +1,6 @@
-//! Issue #460 — end-to-end proof that a `tool_call` node the company's policy
-//! stops does not execute, and leaves a card the operator can decide.
+//! Issues #460 and #614 — end-to-end proof that a node the company's policy
+//! stops does not execute, and leaves a card the operator can decide. Covers
+//! both gated node kinds: `tool_call` (#460) and `http_request` (#614).
 //!
 //! # Why a unit test could not have caught this
 //!
@@ -39,7 +40,8 @@ use crate::harness::HarnessPool;
 use crate::ports::WorkflowRunContext;
 use crate::ports::types::CompanyRecord;
 use crate::runtime::workflow_resume::{
-    PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID, WORKFLOW_APPROVE_KIND,
+    PAYLOAD_NODE_ID, PAYLOAD_REASON, PAYLOAD_TARGET, PAYLOAD_TOOL, PAYLOAD_WORKFLOW_ID,
+    WORKFLOW_APPROVE_KIND,
 };
 
 /// A graph whose only working node is a `tool_call` running `shell`. The
@@ -225,6 +227,108 @@ async fn the_same_call_executes_when_the_policy_does_not_gate_it() {
     assert!(
         marker_written(dir.path()),
         "the ungated shell call must have executed"
+    );
+    assert!(
+        journal
+            .pending()
+            .iter()
+            .all(|p| p.effect.kind != WORKFLOW_APPROVE_KIND),
+        "an ungated run must leave no gate card"
+    );
+}
+
+/// A graph whose only working node is an `http_request` node (issue #614) — a
+/// different capability from `tool_call`: `GuardedHttpClient`, never
+/// `ToolInvoker`.
+const HTTP_GRAPH: &str = r#"
+id = "gated-http"
+name = "Gated http"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "call"
+kind = "http_request"
+name = "Call"
+[node.config]
+method = "POST"
+url = "http://127.0.0.1:9/notify"
+[[edge]]
+from = "start"
+to = "call"
+"#;
+
+/// Runs the `http_request` graph once, returning the journal and the run result
+/// (which may be an error — see [`an_ungated_http_node_reaches_the_capability`]).
+async fn run_http_graph(
+    dir: &std::path::Path,
+    always_approve: &str,
+) -> (
+    Arc<crate::runtime::journal::RuntimeJournal>,
+    crate::Result<crate::ports::WorkflowRun>,
+) {
+    let (deps, journal) =
+        super::gated_tool_turn_test::deps("http://127.0.0.1:1/unused".to_string(), dir);
+    let record = record(always_approve);
+    let pool = Arc::new(HarnessPool::new());
+    pool.ensure(&record, &deps).await.expect("roster builds");
+
+    let file = parse_workflow(HTTP_GRAPH).expect("graph parses");
+    let ctx = WorkflowRunContext::new(false);
+    let run =
+        super::runner::run_workflow(pool, deps.clone(), &record, &file, json!({}), &ctx).await;
+    (journal, run)
+}
+
+/// Issue #614's defect: an `http_request` node reached an external address on a
+/// `supervised` company with no card. It must now stop, and the card must name
+/// the destination.
+#[tokio::test]
+async fn a_policy_gated_http_request_node_parks_instead_of_requesting() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, run) = run_http_graph(dir.path(), "\"http_request\"").await;
+
+    let run = run.expect("a gated node pauses the run, it does not error");
+    assert_eq!(
+        run.pending_approvals,
+        vec!["call".to_string()],
+        "the gated http_request node must pause the run"
+    );
+
+    let pending = journal.pending();
+    let card = pending
+        .iter()
+        .find(|p| p.effect.kind == WORKFLOW_APPROVE_KIND)
+        .unwrap_or_else(|| panic!("the paused node should be on the Approvals page: {pending:?}"));
+    assert_eq!(card.effect.payload[PAYLOAD_NODE_ID], "call");
+    assert_eq!(card.effect.payload[PAYLOAD_TOOL], "http_request");
+    assert_eq!(
+        card.effect.payload[PAYLOAD_TARGET], "POST 127.0.0.1:9",
+        "the card must name the destination the operator is deciding about"
+    );
+}
+
+/// The control, and the reason the assertions above are not hollow: with the
+/// policy not gating, the node genuinely reaches the HTTP capability.
+///
+/// It cannot be proved by a successful request — OpenHuman's `url_guard`
+/// rejects loopback unconditionally, and that guard is one of the layers #614
+/// is careful NOT to claim is missing. So the proof is the *shape of the
+/// failure*: the run reaches the node and fails with the guard's own refusal,
+/// which only happens if the request was attempted. A change that simply broke
+/// `http_request` nodes would fail here with a different error, and a change
+/// that gated them under `full` would not fail at all — it would pause.
+#[tokio::test]
+async fn an_ungated_http_node_reaches_the_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let (journal, run) = run_http_graph(dir.path(), "").await;
+
+    let err = run.expect_err("the SSRF guard refuses loopback, so the node fails");
+    let message = err.to_string();
+    assert!(
+        message.contains("http_request"),
+        "the failure must come from the http_request node: {message}"
     );
     assert!(
         journal

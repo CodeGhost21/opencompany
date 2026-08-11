@@ -149,6 +149,28 @@ pub const PAYLOAD_TOOL: &str = "tool";
 /// (issue #460) — the same sentence the agent path puts on its card. Absent for
 /// the same reason as [`PAYLOAD_TOOL`].
 pub const PAYLOAD_REASON: &str = "reason";
+/// The payload key holding what a policy-gated call would reach — `"POST
+/// api.example.com"` for an `http_request` node (issue #614). Absent when the
+/// node's call has no destination worth naming, or when the URL is still an
+/// unresolved `=`-expression at gate time.
+pub const PAYLOAD_TARGET: &str = "target";
+
+/// What a policy-gated node's card says about the call being decided
+/// (issues #460, #614).
+///
+/// Grouped rather than passed as three more arguments to [`gate_effect`]: they
+/// are written together or not at all, and an authored `requires_approval` gate
+/// passes `None` for the lot — no particular call is being decided there.
+#[derive(Debug, Clone, Copy)]
+pub struct GateCall<'a> {
+    /// The tool the node would run.
+    pub tool: &'a str,
+    /// The policy's own words for why it stopped.
+    pub reason: &'a str,
+    /// Method and host, when knowable. Never the path or query — see
+    /// `GatedCall::target` in `crate::workflows::gate` for why.
+    pub target: Option<&'a str>,
+}
 
 /// The reserved trigger-input key the delivery ledger rides into a continuation
 /// run under (issue #438).
@@ -263,9 +285,9 @@ fn delivery_ledger(input: &Value, deliveries: &[DeliveryReport]) -> Vec<Delivere
 /// reason the input is copied in: a card that needs a side table is a card that
 /// stops working after a restart.
 ///
-/// `tool` is `Some((slug, reason))` when the company's `ApprovalPolicy` is what
-/// stopped this node (issue #460), and `None` for an authored
-/// `requires_approval` gate, where no particular call is being decided. It is
+/// `call` is `Some(..)` when the company's `ApprovalPolicy` is what stopped this
+/// node (issues #460, #614), and `None` for an authored `requires_approval`
+/// gate, where no particular call is being decided. It is
 /// deliberately outside the dedupe identity ([`is_same_gate`]): it describes the
 /// *same* decision in more words, so two cards that differ only here are still
 /// one question.
@@ -275,7 +297,7 @@ pub fn gate_effect(
     input: &Value,
     run_id: &str,
     deliveries: &[DeliveryReport],
-    tool: Option<(&str, &str)>,
+    call: Option<GateCall<'_>>,
 ) -> Effect {
     let mut payload = Map::new();
     payload.insert(PAYLOAD_WORKFLOW_ID.to_string(), json!(workflow_id));
@@ -295,9 +317,12 @@ pub fn gate_effect(
     // rather than null on an authored gate — a card that names no tool is a
     // different thing from one whose tool could not be determined, and a
     // console reading `payload.tool` should be able to tell them apart.
-    if let Some((slug, reason)) = tool {
-        payload.insert(PAYLOAD_TOOL.to_string(), json!(slug));
-        payload.insert(PAYLOAD_REASON.to_string(), json!(reason));
+    if let Some(call) = call {
+        payload.insert(PAYLOAD_TOOL.to_string(), json!(call.tool));
+        payload.insert(PAYLOAD_REASON.to_string(), json!(call.reason));
+        if let Some(target) = call.target {
+            payload.insert(PAYLOAD_TARGET.to_string(), json!(target));
+        }
     }
 
     Effect {
