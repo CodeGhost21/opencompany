@@ -83,6 +83,19 @@ closed tab or a proxy giving up no longer cancels it mid-graph — before this i
 did, and because a run journals a start first, the abandoned run then folded as
 `running: true` until the next host restart swept it.
 
+**A company bounds how many runs it will execute at once** (issue #401). Every
+run — this manual route, a cron fire, an approved gate's continuation, and one
+an orchestrator agent starts — counts against `[workflows].max_in_flight_runs`
+(default 8; see `manifest.md`). A run over the ceiling is **refused, never
+queued**: the route answers **`429 Too Many Requests`** with the standard
+`{ "error", "code": "workflow_run_limit" }` envelope and **no `runId`**, because
+nothing started. Both `detach` modes refuse identically — the check precedes the
+detach/sync branch, so a rejected run journals no `WorkflowRunStarted`. The
+message names the three levers: wait for a run to finish, stop one via
+`…/workflows/runs/{runId}/cancel`, or raise the manifest cap. A slot frees the
+moment a run settles (including on cancel or panic), so a refused run succeeds on
+the next attempt once the company is back under its ceiling.
+
 `…/runs/{runId}/cancel` answers `200 { "cancelling": true }` when the run is
 live and `404` when the run is unknown **or has already settled** — one answer,
 because they mean the same thing to the caller: there is nothing to stop. It is
