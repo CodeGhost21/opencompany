@@ -145,13 +145,15 @@ export type CompanyStreamEvent =
        */
       cancelled?: boolean;
     }
-  // Issue #371: the live per-node progress trail. A run announces itself, then
-  // reports each non-trigger node as it finishes, so the canvas can show which
-  // nodes are done while the run is still going — the whole point of the issue.
+  // Issue #371/#382: the live per-node progress trail. A run announces itself,
+  // then brackets each non-trigger node with a *started* frame as it begins and
+  // a *finished* frame as it settles, so the canvas can show which node is
+  // executing right now and which are done while the run is still going — the
+  // whole point of the issue.
   //
-  // There is deliberately no *node started* frame: the engine's observer has no
-  // such hook, so "currently executing" is derived from the graph topology the
-  // console already holds.
+  // Issue #382 added the *started* frame: the engine's observer gained an
+  // `on_step_start` hook, so "currently executing" is now REPORTED by the host
+  // rather than derived from the graph topology the console holds.
   | {
       type: "workflow_run_started";
       seq: number;
@@ -159,6 +161,16 @@ export type CompanyStreamEvent =
       workflowId: string;
       runId: string;
       scheduled: boolean;
+    }
+  // Issue #382: a non-trigger node began executing. Structural ids only — the
+  // node has not run, so there is no status or duration, and never any input.
+  | {
+      type: "workflow_node_started";
+      seq: number;
+      atMillis: number;
+      workflowId: string;
+      runId: string;
+      nodeId: string;
     }
   | {
       type: "workflow_node_finished";
@@ -641,15 +653,17 @@ export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers)
       }
       break;
     }
-    // Issue #371: progress frames route to the same subscriber the finished
+    // Issue #371/#382: progress frames route to the same subscriber the finished
     // event does, and deliberately raise NO toast. Progress is not an attention
-    // signal — a six-node run would fire eight toasts and train the operator to
-    // dismiss the one that matters. The canvas is where this belongs.
+    // signal — a six-node run would fire a dozen-plus toasts and train the
+    // operator to dismiss the one that matters. The canvas is where this belongs.
     //
     // These arms exist because this file has already been bitten by events
     // falling through to `default:` and vanishing; a new event type without an
-    // arm here is silently dropped, with nothing to debug.
+    // arm here is silently dropped, with nothing to debug. `workflow_node_started`
+    // (#382) is the newest such frame — it lights a node up on the canvas.
     case "workflow_run_started":
+    case "workflow_node_started":
     case "workflow_node_finished":
       onWorkflowRunEvent?.(event);
       break;
