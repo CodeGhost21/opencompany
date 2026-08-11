@@ -16,9 +16,11 @@
 //! what says so in the signature.
 //!
 //! A set / rotate / clear takes effect on the agents' **next cycle** with no
-//! restart: every brokered surface re-resolves through
+//! restart: every surface **wired to this credential** re-resolves through
 //! [`company_key::resolve`](crate::company::company_key::resolve) and the roster
-//! fingerprint moves with the key's value.
+//! fingerprint moves with the key's value. That is Composio today; inference and
+//! embeddings still resolve from the environment (#585), so "wired to it" is a
+//! smaller set than "brokered" until that lands.
 
 use axum::Json;
 use axum::Router;
@@ -34,8 +36,15 @@ use crate::server::error::ApiError;
 use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
 /// The reminder attached to every mutating response.
+///
+/// Names Composio rather than claiming "every brokered surface". The seam is
+/// built so that any surface wired to it moves together, but Composio is the
+/// only one wired **today** — inference and embeddings still resolve from the
+/// environment (#585). Promising breadth the build does not have would be the
+/// same overclaim this PR removed from the status route.
 const SWITCH_NOTE: &str = "Agents present the new credential on their next cycle — no restart \
-     needed. It reaches every surface the platform brokers at once.";
+     needed. Composio picks it up at once, and any other surface wired to this credential moves \
+     with it.";
 
 /// What an admin most needs to understand before pasting: this key is the
 /// company's wallet, and membership in the company is what grants access to it.

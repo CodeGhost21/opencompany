@@ -410,8 +410,8 @@ impl Credential {
     }
 
     /// The company's own TinyHumans credential, treating blank as "not
-    /// configured". The seam every brokered surface resolves through — see
-    /// [`company_key`](crate::company::company_key).
+    /// configured". The seam a brokered surface resolves its company identity
+    /// through — see [`company_key`](crate::company::company_key).
     pub fn from_company_key(value: impl Into<String>) -> Self {
         let value = value.into();
         if value.trim().is_empty() {
@@ -482,7 +482,8 @@ impl Credential {
             // credential its admin rotates deliberately, not one the cluster
             // rotates on a timer, so a new value really is a new identity and
             // the roster must rebuild. That is what makes a console rotation
-            // reach every brokered surface on the next cycle (issue #586).
+            // reach every surface wired to this credential on the next cycle —
+            // Composio today (issue #586).
             Self::Company(value) => {
                 3u8.hash(hasher);
                 value.hash(hasher);

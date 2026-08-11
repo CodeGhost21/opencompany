@@ -30,8 +30,10 @@
 //!
 //! Tiers 2 and 3 are not resolved here: they are
 //! [`company_key::resolve`](crate::company::company_key::resolve), the one seam
-//! every brokered surface shares. That is what makes rotating the company key
-//! reach all of them rather than whichever remembered to re-read.
+//! a brokered surface resolves a company identity through. That is what makes
+//! rotating the company key reach every surface wired to it rather than
+//! whichever remembered to re-read — Composio today, with inference and
+//! embeddings still on the environment until #585.
 //!
 //! With none of the three, resolution yields `None` and no tools are wired (fail
 //! closed) — an absent credential must mean "no tools", never a borrowed
