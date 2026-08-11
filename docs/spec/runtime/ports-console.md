@@ -176,8 +176,11 @@ the store at the single assembly site, inside the announcer, and sees the full
 size **before** anything is written — so a refused write leaves no partial
 blob, no node and no orphan. It meters payloads only (prose is uncounted; the
 threat model is media) against a per-file cap (`[workspace] max_blob_mb`,
-default 256 MiB) and a per-company total (`[workspace] tree_quota_gb`,
-unlimited by default), answering 413.
+default 64 MiB) and a per-company total (`[workspace] tree_quota_gb`,
+unlimited by default), answering 413. The console's upload route holds a
+separate 256 MiB body limit — a backstop against buffering an unbounded
+request, deliberately above the cap so the store's refusal is the one an
+operator sees (#647); see `storage.md`.
 
 Backends: sqlite keeps the blob in the node's own row, so it cannot orphan one.
 `FsOps` writes the file then the index — the benign order the text path already
