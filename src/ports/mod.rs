@@ -46,7 +46,7 @@ pub use context::ContextStore;
 pub use economy::AgentEconomy;
 pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
-pub use ids::{generate_id, now_millis};
+pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;

@@ -1131,25 +1131,39 @@ async fn run_chat(
     } else {
         None
     };
-    // Deterministic task card: an actionable operator request ("build the
-    // landing page", "can you set up the newsletter") opens a `todo` card so
-    // "do X" always leaves a visible work item on the dashboard — independent of
-    // whether the orchestrator model also calls `spawn_task` (it may open
-    // sub-tasks on top). Pure questions, greetings, and acknowledgements don't
-    // fire, so the board fills with work, not small talk. Best-effort: a card
-    // write failure must never sink the chat reply.
+    // Deterministic task card, opened only for a message the triage calls
+    // `Track`: an actionable operator request ("build the landing page", "can
+    // you set up the newsletter") opens a `todo` card so "do X" always leaves a
+    // visible work item on the dashboard — independent of whether the
+    // orchestrator model also calls `spawn_task` (it may open sub-tasks on top).
+    // Best-effort: a card write failure must never sink the chat reply.
+    //
+    // Issue #267 turned the boolean this used to read into a positive three-way
+    // classification. `Answer` (a question about state, a read request) and
+    // `Chatter` (greetings, acknowledgements, anything ambiguous) both open
+    // nothing here — but they are NOT the same answer, and the difference
+    // matters one layer down: `Answer` additionally takes the model's own
+    // board-writing tools away for the turn, in
+    // `DelegationRunner::handle_operator_message`, because a question was the
+    // other door dead cards came through. This site is Layer A of that pair: it
+    // is compiled into every build and fronts both cognition brains, whereas the
+    // gate is on the harness path only.
     //
     // NOT on a workflow copilot thread (issue #416). A copilot question is
     // phrased at the workflow — "add a node that emails the report", "why does
-    // this fail on Mondays" — and the intent detector reads the first of those
-    // as a request to the company, which would put a card on the board from a
+    // this fail on Mondays" — and the triage reads the first of those as a
+    // request to the company, which would put a card on the board from a
     // conversation the operator was having *about a graph*. The confinement in
     // the harness stops the turn from acting; this stops the route from acting
     // on its behalf, and it holds in every build because it is here rather than
     // behind the `openhuman` feature.
     if let Some(title) = (!confined)
-        .then(|| crate::company::task_intent::detect_task_intent(&message.text))
-        .flatten()
+        .then(|| crate::company::task_intent::triage_message(&message.text))
+        .and_then(|triage| match triage {
+            crate::company::task_intent::MessageTriage::Track(title) => Some(title),
+            crate::company::task_intent::MessageTriage::Answer
+            | crate::company::task_intent::MessageTriage::Chatter => None,
+        })
     {
         // Keep the full message as the note only when the title was shortened
         // from it, so a one-line ask doesn't duplicate itself.
@@ -1699,7 +1713,12 @@ async fn list_approvals(
         return Err(resp);
     }
     let runtime = lookup(&state, &id).map_err(IntoResponse::into_response)?;
-    Ok(Json(runtime.pending_approvals()))
+    // Membership got you the list; role decides whether you may read what is in
+    // it (issue #618).
+    Ok(Json(crate::server::approval_visibility::for_principal(
+        &auth,
+        runtime.pending_approvals(),
+    )))
 }
 
 /// `GET /api/v1/company/approvals` (single-company alias).
@@ -1713,7 +1732,13 @@ async fn list_approvals_single(
     if let Some(resp) = authorize_address(&state, &auth, runtime.id()) {
         return Err(resp);
     }
-    Ok(Json(runtime.pending_approvals()))
+    // Same contents rule as the `{id}` form (issue #618) — the two handlers are
+    // the same read behind two addressing forms, and a redaction applied to one
+    // of them would be a hole rather than a boundary.
+    Ok(Json(crate::server::approval_visibility::for_principal(
+        &auth,
+        runtime.pending_approvals(),
+    )))
 }
 
 /// The operator's resolution of a parked approval.
@@ -3747,6 +3772,117 @@ mod test {
             agent: Some("ceo".into()),
             run_id: None,
         }
+    }
+
+    /// Issue #618: membership gets you the approval, role gets you its
+    /// contents.
+    ///
+    /// **The two-account part is the point.** The harness signs every request
+    /// in as an admin, so a redaction verified only as an admin passes
+    /// identically against no redaction at all — the test would prove nothing
+    /// while looking like coverage. This seeds a second, Member-role account
+    /// and drives the same route with both.
+    #[tokio::test]
+    async fn a_member_sees_the_approval_but_not_its_payload_or_amount() {
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home, "running").await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let effect = crate::ports::types::Effect {
+            kind: "payment.send".into(),
+            group: crate::ports::types::EffectGroup::Spend,
+            amount_usd: Some(2400.0),
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "to": "board@example.test", "memo": "Q3 retainer" }),
+            agent: Some("ceo".into()),
+            run_id: None,
+        };
+        runtime
+            .journal
+            .record_parked(
+                &crate::ports::types::ApprovalId::new("appr-618"),
+                &effect,
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
+            .await
+            .unwrap();
+
+        let app = router(state);
+
+        async fn approvals_as(app: &axum::Router, cookie: String) -> serde_json::Value {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri("/api/v1/company/approvals")
+                        .header("cookie", cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+            serde_json::from_slice(&bytes).unwrap()
+        }
+
+        // The admin decides the sign-off, so the admin sees what it will do.
+        let as_admin = approvals_as(&app, crate::server::test_support::fixed_cookie("acme")).await;
+        let admin_row = &as_admin.as_array().unwrap()[0];
+        assert_eq!(admin_row["amount_usd"].as_f64(), Some(2400.0));
+        assert_eq!(admin_row["payload"]["to"], "board@example.test");
+        assert!(
+            admin_row.get("contents_hidden").is_none(),
+            "an admin is not told anything was hidden: {admin_row}"
+        );
+
+        let as_member =
+            approvals_as(&app, crate::server::test_support::member_cookie("acme")).await;
+        let member_row = &as_member.as_array().unwrap()[0];
+
+        // Still visible: everything that makes stalled work legible. This half
+        // is what #468 depends on — a member must keep seeing that work is
+        // waiting and what kind of call it is.
+        assert_eq!(member_row["id"], "appr-618");
+        assert_eq!(member_row["kind"], "payment.send");
+        assert_eq!(member_row["agent"], "ceo");
+        assert_eq!(member_row["at_millis"].as_u64(), Some(1_000));
+
+        // Withheld: the recipient and the money.
+        assert!(
+            member_row.get("payload").is_none(),
+            "the recipient must not reach a member: {member_row}"
+        );
+        // `null`, not absent: unlike `payload`, `amount_usd` carries no
+        // `skip_serializing_if`, so it stays on the wire as an explicit null.
+        // Both read as "no value" to the console (`a.amount_usd != null`
+        // covers either), and changing the wire shape as a side effect of a
+        // redaction would be a worse trade than asserting the shape that is
+        // actually there.
+        assert!(
+            member_row["amount_usd"].is_null(),
+            "nor the amount: {member_row}"
+        );
+        assert_eq!(
+            member_row["contents_hidden"], true,
+            "and the console must be able to say so rather than render an empty card: {member_row}"
+        );
+
+        // Belt and braces: the recipient string must appear nowhere in the
+        // member's response, however the shape changes later.
+        let raw = serde_json::to_string(&as_member).unwrap();
+        assert!(
+            !raw.contains("board@example.test") && !raw.contains("Q3 retainer"),
+            "payload content leaked to a member: {raw}"
+        );
     }
 
     /// The dotted kind the stalled brain parks once its follow-up turn gets

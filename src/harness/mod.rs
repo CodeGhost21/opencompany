@@ -2423,6 +2423,78 @@ description = "Builds the product."
         );
     }
 
+    /// Issue #686, end to end: the orchestrator adds a teammate whose display
+    /// name slugs onto a **manifest** agent's id, and the teammate still shows
+    /// up in the built roster.
+    ///
+    /// This is the failure the suffix exists to prevent, and it only became
+    /// reachable when ids started coming from names. `add_agent`'s duplicate
+    /// guard compares overlay *names*, so "Engineer" sails past it; an
+    /// unsuffixed `engineer` would then be skipped by
+    /// [`build_roster`](super::build_roster) as already claimed by the manifest
+    /// — saved to the record, never materialised, no error anywhere.
+    #[tokio::test]
+    async fn a_tool_added_teammate_colliding_with_a_manifest_id_still_joins_the_roster() {
+        use openhuman_core::openhuman::tools::Tool;
+
+        use crate::harness::orchestrator::AddAgentTool;
+
+        /// A `CompanyStore` that actually holds the record, unlike
+        /// `RecordingStore` — `add_agent` has to load what it saves.
+        struct SeededStore(StdMutex<CompanyRecord>);
+
+        #[async_trait]
+        impl CompanyStore for SeededStore {
+            async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+                Ok(Some(self.0.lock().unwrap().clone()))
+            }
+            async fn save(&self, record: &CompanyRecord) -> crate::Result<()> {
+                *self.0.lock().unwrap() = record.clone();
+                Ok(())
+            }
+            async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+                Ok(Vec::new())
+            }
+            async fn append_ledger(
+                &self,
+                _id: &CompanyId,
+                _entry: LedgerEntry,
+            ) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let fx = fixture();
+        let company = CompanyId::new("acme");
+        let store = Arc::new(SeededStore(StdMutex::new(record())));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(serde_json::json!({ "name": "Engineer", "role": "Platform" }))
+            .await
+            .expect("execute");
+        assert!(
+            !result.is_error,
+            "the name guard compares overlay names only"
+        );
+        assert!(
+            result.text().contains("engineer_2"),
+            "the orchestrator has to learn the id it can address: {}",
+            result.text()
+        );
+
+        let saved = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(saved.overlay_agents[0].id, "engineer_2");
+
+        let roster = build_roster(&saved, &fx.deps, &[]).expect("roster builds");
+        let ids: Vec<_> = roster.iter().map(|a| a.agent_id.as_str()).collect();
+        assert_eq!(
+            ids,
+            vec!["ceo", "engineer", "engineer_2"],
+            "a suffixed id materialises; an unsuffixed one would vanish here"
+        );
+    }
+
     /// Issue #551: a roster rebuild writes nothing to the workspace.
     ///
     /// This used to be the feature's second provisioning seam — a teammate

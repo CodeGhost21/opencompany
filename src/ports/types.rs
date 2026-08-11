@@ -14,7 +14,7 @@ use std::ops::Range;
 use serde::{Deserialize, Serialize};
 
 use crate::company::CompanyManifest;
-use crate::ports::ids::{generate_id, now_millis};
+use crate::ports::ids::{agent_slug, generate_id, now_millis};
 use crate::ports::workflow_runner::DeliveryReport;
 
 // ---------------------------------------------------------------------------
@@ -2449,6 +2449,20 @@ impl OverlayBlob {
     }
 }
 
+/// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
+/// free the roster leaves them: the always-present operator channel and the two
+/// workspace system roots.
+///
+/// Held as references to the real constants rather than re-typed literals, so a
+/// rename of any of the three moves this list with it instead of quietly
+/// unreserving a name. Compared case-insensitively, which is why `Agents` and
+/// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
+pub const RESERVED_AGENT_IDS: [&str; 3] = [
+    crate::runtime::OPERATOR_CHANNEL,
+    crate::company::workspace_scaffold::AGENTS_ROOT,
+    crate::company::workspace_scaffold::DESKS_ROOT,
+];
+
 /// A durable company record: charter/roster (manifest) plus ledger and
 /// lifecycle state.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -2639,6 +2653,96 @@ impl CompanyRecord {
             || self.overlay_agents.iter().any(|a| a.id == agent_id)
     }
 
+    /// Mints the roster id for a teammate about to be added under
+    /// `display_name`: [`agent_slug`] of the name, suffixed `_2`, `_3`, … until
+    /// it collides with nothing this record already routes on (issue #686).
+    ///
+    /// **The only way a write path should name a new overlay teammate.** Both
+    /// minting sites — the console `POST …/team` route and the orchestrator's
+    /// `add_agent` tool — call it under the shared per-company write lock, so
+    /// the check and the save that follows it cannot interleave.
+    ///
+    /// # Why a suffix rather than a refusal
+    ///
+    /// An unsuffixed id colliding with a **manifest** agent would be silently
+    /// dropped: `build_roster` skips any overlay id a manifest agent already
+    /// claims, so the teammate would persist in the record, never materialise,
+    /// and report no error. Refusing instead would take away a capability that
+    /// exists today — `POST …/team` accepts duplicate display names — and would
+    /// leave the tool's caller with a failed call and no human to recover it.
+    ///
+    /// # What counts as taken
+    ///
+    /// Every namespace a key typed into an Assignee field or a chat address can
+    /// land in, compared case-insensitively:
+    ///
+    /// * manifest and overlay teammate ids ([`Self::resolve_roster_agent_id`]);
+    /// * desk ids **and desk display names** — [`assignee::resolve`] tries desks
+    ///   first and [`Self::resolve_desk_id`] matches a desk name ignoring case,
+    ///   so a teammate id equal to a desk's name would be unaddressable. The
+    ///   comparison is against the name **as written**, not its slug: nothing
+    ///   routes on the slug of a desk name, so a desk called "Content Desk"
+    ///   leaves `content_desk` free while one called "Content" does not;
+    /// * [`RESERVED_AGENT_IDS`] — the operator channel and the two workspace
+    ///   system roots.
+    ///
+    /// [`assignee::resolve`]: crate::runtime::assignee::resolve
+    ///
+    /// # The id is minted once and never follows a rename
+    ///
+    /// `PATCH …/team/{agent_id}` edits a teammate's name, role and description
+    /// and deliberately leaves the id alone. A name-keyed id would orphan
+    /// everything already filed under the old one — the teammate's
+    /// `Agents/<id>/` folder, its `WorkspaceOrigin::Agent` stamps, its budget
+    /// override row, its desk memberships, its inbox — which is the same trap
+    /// name-keyed DM ids sprang on the console's chat journals (issue #364).
+    /// So a slug records what a teammate was called when it was created, and
+    /// nothing more; the display name is the thing that stays current.
+    ///
+    /// # Removing a teammate frees its slug again
+    ///
+    /// `DELETE …/team/{agent_id}` drops the overlay row (and its budget
+    /// override), after which re-adding the same name mints the same bare slug.
+    /// The new teammate then **adopts the old one's `Agents/<slug>/` folder**,
+    /// and that folder's `Agent` origin stamps re-attribute to it. That is the
+    /// intended remedy for a typo'd name — the same human, correcting
+    /// themselves, keeping the work — but it does mean remove-plus-re-add is not
+    /// a way to give a teammate a clean slate. `Agents/<slug>/` is a folder
+    /// named for a seat, not a chain of custody for whoever last sat in it.
+    pub fn mint_agent_id(&self, display_name: &str) -> String {
+        let stem = agent_slug(display_name);
+        if !self.roster_id_taken(&stem) {
+            return stem;
+        }
+        (2usize..)
+            .map(|n| format!("{stem}_{n}"))
+            .find(|candidate| !self.roster_id_taken(candidate))
+            .expect("an unbounded suffix sweep always reaches a free id")
+    }
+
+    /// Whether `candidate` already names something this record routes on, so
+    /// [`Self::mint_agent_id`] must step past it. See that method for why each
+    /// namespace counts.
+    fn roster_id_taken(&self, candidate: &str) -> bool {
+        if RESERVED_AGENT_IDS
+            .iter()
+            .any(|reserved| candidate.eq_ignore_ascii_case(reserved))
+        {
+            return true;
+        }
+        if self.resolve_roster_agent_id(candidate).is_some() {
+            return true;
+        }
+        self.manifest
+            .group_chats
+            .iter()
+            .map(|c| (&c.id, &c.name))
+            .chain(self.overlay_desks.iter().map(|d| (&d.id, &d.name)))
+            .any(|(id, name)| {
+                id.eq_ignore_ascii_case(candidate) || name.eq_ignore_ascii_case(candidate)
+            })
+    }
+
     /// Resolves an operator-typed teammate key to its canonical roster id,
     /// searching manifest agents first and then the overlay teammates.
     ///
@@ -2668,11 +2772,19 @@ impl CompanyRecord {
     /// `name_key` case-insensitively.
     ///
     /// The companion to [`Self::resolve_roster_agent_id`] for the half of the
-    /// roster that has no typable id. `server::ops::team` mints an overlay
-    /// teammate with `id: generate_id()`, so an operator who adds "Shane" never
-    /// sees anything but the name — matching on ids alone made every teammate
-    /// they added unassignable, on a board whose Assignee field is free text
-    /// with no picker. Manifest agents keep their id-only namespace: their ids
+    /// roster that has no typable id. `server::ops::team` minted an overlay
+    /// teammate with `id: generate_id()` before #686, so an operator who added
+    /// "Shane" never saw anything but the name — matching on ids alone made
+    /// every teammate they added unassignable, on a board whose Assignee field
+    /// is free text with no picker.
+    ///
+    /// A teammate added since #686 carries a readable slug and resolves by id,
+    /// but this stays load-bearing: records written before it keep their
+    /// generated ids (nothing migrates them), and
+    /// [`Self::mint_agent_id`] deliberately does not re-mint on a rename, so a
+    /// renamed teammate's current name is reachable only here.
+    ///
+    /// Manifest agents keep their id-only namespace: their ids
     /// (`ceo`, `engineer`) are human-authored and typable, and
     /// [`Self::resolve_roster_agent_id`] is tried first, so a display name can
     /// never shadow a real id.
@@ -3921,6 +4033,139 @@ mod test {
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
         assert!(!record.is_roster_agent("ghost"));
+    }
+
+    /// A record with one manifest agent and no desks, for the minting tests.
+    fn mint_record() -> CompanyRecord {
+        desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"backend_engineer\"\nrole = \"Backend Engineer\"\n",
+            Vec::new(),
+        )
+    }
+
+    fn add_overlay(record: &mut CompanyRecord, id: &str, name: &str) {
+        record.overlay_agents.push(OverlayAgent {
+            id: id.into(),
+            name: name.into(),
+            role: "Worker".into(),
+            description: None,
+        });
+    }
+
+    /// A free slug is minted bare — the whole point of issue #686 is that the
+    /// common case reads as `Agents/dana_designer/`.
+    #[test]
+    fn mint_agent_id_takes_the_bare_slug_when_it_is_free() {
+        let record = mint_record();
+        assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer");
+        assert_eq!(record.mint_agent_id("Designer!!"), "designer");
+        assert_eq!(record.mint_agent_id("24/7 Support"), "teammate");
+    }
+
+    /// The collision that matters: an overlay id equal to a **manifest** id is
+    /// skipped by `build_roster`, so the teammate would save and never
+    /// materialise. Suffixing is what keeps it reachable.
+    #[test]
+    fn mint_agent_id_suffixes_past_a_manifest_agent() {
+        let record = mint_record();
+        assert_eq!(
+            record.mint_agent_id("Backend Engineer"),
+            "backend_engineer_2"
+        );
+    }
+
+    /// Repeated adds of one name walk `_2`, `_3`, … in order, so the ids a
+    /// company ends up with are a function of its roster and not of arrival
+    /// timing.
+    #[test]
+    fn mint_agent_id_walks_suffixes_deterministically() {
+        let mut record = mint_record();
+        let first = record.mint_agent_id("Designer");
+        assert_eq!(first, "designer");
+        add_overlay(&mut record, &first, "Designer");
+
+        let second = record.mint_agent_id("Designer");
+        assert_eq!(second, "designer_2");
+        add_overlay(&mut record, &second, "Designer");
+
+        assert_eq!(record.mint_agent_id("Designer"), "designer_3");
+
+        // A degenerate name is not a special case — it suffixes like any other.
+        add_overlay(&mut record, "teammate", "***");
+        assert_eq!(record.mint_agent_id("🙂"), "teammate_2");
+    }
+
+    /// Case is not a difference: an overlay id typed with capitals still blocks
+    /// the lowercase slug, because `resolve_roster_agent_id` folds case and two
+    /// teammates one capital apart would be one unroutable key.
+    #[test]
+    fn mint_agent_id_treats_a_case_variant_id_as_taken() {
+        let mut record = mint_record();
+        add_overlay(&mut record, "Dana_Designer", "Dana Designer");
+        assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer_2");
+    }
+
+    /// Desks resolve *before* teammates in `assignee::resolve`, by id and by
+    /// case-insensitive display name — so a minted id equal to either would be
+    /// unreachable, and both are stepped past.
+    #[test]
+    fn mint_agent_id_steps_past_desk_ids_and_desk_names() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"growth\"\nname = \"Content\"\nmembers = [\"ceo\"]\n";
+        let mut record = desk_record(manifest, Vec::new());
+
+        // By desk id.
+        assert_eq!(record.mint_agent_id("Growth"), "growth_2");
+        // By desk display name, which `resolve_desk_id` matches ignoring case.
+        assert_eq!(record.mint_agent_id("content"), "content_2");
+
+        // A desk name that is not itself slug-shaped is *not* reserved: nothing
+        // routes on the slug of a desk name, only on the name as written, so
+        // `content_desk` shadows no key that "Content Desk" answers to.
+        record.overlay_desks.push(OverlayDesk {
+            id: "design".into(),
+            name: "Design Studio".into(),
+            description: None,
+            members: Vec::new(),
+        });
+        assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
+        // …while the overlay desk's id is reserved exactly like a manifest one.
+        assert_eq!(record.mint_agent_id("Design"), "design_2");
+    }
+
+    /// The operator channel and the workspace system roots are never handed to
+    /// a teammate, on an otherwise empty roster.
+    #[test]
+    fn mint_agent_id_never_returns_a_reserved_id() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(record.mint_agent_id("Operator"), "operator_2");
+        assert_eq!(record.mint_agent_id("Agents"), "agents_2");
+        assert_eq!(record.mint_agent_id("desks"), "desks_2");
+        assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+    }
+
+    /// Whatever is minted is a legal roster id, suffix included — the same
+    /// grammar the manifest validator holds a hand-authored id to.
+    #[test]
+    fn every_minted_id_satisfies_the_manifest_id_grammar() {
+        let mut record = mint_record();
+        for name in [
+            "Dana Designer",
+            "Backend Engineer",
+            "***",
+            "24/7 Support",
+            "Operator",
+            "設計者",
+        ] {
+            let id = record.mint_agent_id(name);
+            assert!(
+                crate::company::is_snake_case(&id),
+                "minted id {id:?} from {name:?} is not a legal roster id"
+            );
+            add_overlay(&mut record, &id, name);
+        }
     }
 
     /// The persisted overlay blob reads both the current object form and the

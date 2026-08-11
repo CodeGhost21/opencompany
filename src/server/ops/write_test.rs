@@ -2383,6 +2383,68 @@ async fn a_copilot_thread_question_opens_no_board_card() {
     );
 }
 
+/// Issue #267: a question about the board's own state is answered, not carded.
+///
+/// This is the exact message that produced one of the six dead `backlog` cards
+/// on a live company. The route now triages it as `Answer`, so the
+/// deterministic card path stands down — and the reply still comes back OK,
+/// because triage decides what gets *written*, never whether the operator gets
+/// an answer.
+///
+/// The control half is the point: the same route, one sentence later, still
+/// opens a card for a real instruction. A test that only proved the question
+/// wrote nothing would also pass on a route that had stopped carding entirely.
+#[tokio::test]
+async fn a_question_about_the_board_opens_no_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    for ask in [
+        "what is there in the tasks list?",
+        "Tell what is there in the tasks list",
+        "list the tasks",
+        "show me the board",
+    ] {
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/chat",
+            Some(json!({ "message": ask })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "asking `{ask}` must still answer");
+        assert!(body["responses"].is_array(), "no reply for `{ask}`: {body}");
+
+        let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let cards = board.as_array().expect("the board lists cards");
+        assert!(
+            cards.is_empty(),
+            "the question `{ask}` left work on the board: {board}"
+        );
+    }
+
+    // Control: a real instruction on the same route still opens exactly one
+    // card, so this narrows the detector rather than switching it off.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": "build the landing page"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = board.as_array().expect("the board lists cards");
+    assert_eq!(
+        cards.len(),
+        1,
+        "an instruction must still open exactly one card: {board}"
+    );
+}
+
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
     let home_dir = home();
@@ -7081,6 +7143,196 @@ async fn the_text_and_blob_reads_refuse_each_others_nodes() {
         .unwrap();
     let response = router(state.clone()).oneshot(request).await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------------------
+// The blob route never hands a browser a document (issue #667)
+// ---------------------------------------------------------------------------
+
+/// `GET …/workspace/blob/{id}` as a browser navigating to it would.
+async fn blob_response(state: &AppState, id: &str) -> axum::response::Response {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    router(state.clone()).oneshot(request).await.unwrap()
+}
+
+/// The header triple a response must show before it can be called inert:
+/// a type that is not a document, a browser told not to second-guess it, and a
+/// disposition that downloads rather than renders.
+fn assert_not_executable(response: &axum::response::Response, context: &str) {
+    let content_type = response.headers()["content-type"].to_str().unwrap();
+    let disposition = response.headers()["content-disposition"].to_str().unwrap();
+    let nosniff = response
+        .headers()
+        .get("x-content-type-options")
+        .map(|v| v.to_str().unwrap().to_string());
+
+    assert!(
+        disposition.starts_with("attachment;"),
+        "{context}: a browser must download this, not render it — got {disposition:?}"
+    );
+    assert_eq!(
+        nosniff.as_deref(),
+        Some("nosniff"),
+        "{context}: without nosniff the type below is a suggestion"
+    );
+    for executable in [
+        "text/html",
+        "image/svg+xml",
+        "application/xhtml+xml",
+        "text/xml",
+    ] {
+        assert!(
+            !content_type.starts_with(executable),
+            "{context}: served as {content_type:?}, which a browser parses into a \
+             document with a script context"
+        );
+    }
+}
+
+/// The vector in #667, end to end: a payload stored under a document media type
+/// is not servable as a document.
+///
+/// The bytes carry a trailing `0xff` so the upload takes the **binary** branch —
+/// a valid-UTF-8 `text/html` upload is stored as a prose note and never reaches
+/// this route at all. That byte is not a contrivance to reach the branch: a
+/// browser decoding these bytes substitutes U+FFFD for it and runs the script
+/// exactly the same, so this is the real shape of the attack.
+///
+/// The assertion that matters is the one about the *stored* mime: it is still
+/// `text/html` afterwards. The fix is on the read path precisely so that every
+/// payload already sitting in a tree under a caller's chosen mime is covered,
+/// which an upload-side sanitiser would not have been.
+#[tokio::test]
+async fn a_blob_stored_as_html_cannot_be_served_as_a_document() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let payload = b"<script>fetch('/api/v1/company/team')</script>\xff";
+    let (status, node) = upload_file(&state, "payload.png", Some("text/html"), payload, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["mime"], "text/html",
+        "the stored mime is untouched — the read path is what neutralises it"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    let response = blob_response(&state, &id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "application/octet-stream",
+        "a type nobody vouched for is served as opaque bytes"
+    );
+    assert_not_executable(&response, "an html-typed payload");
+
+    // Neutralised, not corrupted: an operator who downloads it still gets the
+    // file they stored.
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), payload.to_vec());
+}
+
+/// SVG is why an `image/*` prefix rule would not have closed this.
+///
+/// It is an image the console previews and a document a browser executes, so the
+/// two halves are answered separately: the type survives (an `<img>` will not
+/// decode SVG without it, and inside an `<img>` the SVG spec's secure static
+/// mode means no script runs), and the disposition becomes `attachment` so the
+/// same bytes at the top of a tab are downloaded instead of rendered.
+#[tokio::test]
+async fn an_svg_keeps_its_type_for_the_console_but_is_never_rendered_as_a_document() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let svg = br#"<svg xmlns="http://www.w3.org/2000/svg"><script>fetch('/api/v1/company/team')</script></svg>"#;
+    let (status, node) = upload_file(&state, "logo.svg", Some("image/svg+xml"), svg, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    let id = node["id"].as_str().unwrap().to_string();
+
+    let response = blob_response(&state, &id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "image/svg+xml",
+        "the console's <img> preview needs this exact type to decode the bytes"
+    );
+    let disposition = response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disposition.starts_with("attachment;"),
+        "a top-level navigation must download an SVG, not render it: {disposition:?}"
+    );
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+}
+
+/// An arbitrary caller-declared type — one nobody has ever vetted — is opaque.
+/// This is the closed-list half of the fix: the default arm is the safe one, so
+/// a media type invented after this was written is downloaded, not rendered.
+#[tokio::test]
+async fn an_unrecognised_stored_type_is_served_as_opaque_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    for (name, declared) in [
+        ("doc.xhtml", "application/xhtml+xml"),
+        ("sheet.xml", "text/xml"),
+        ("archive.zip", "application/zip"),
+    ] {
+        let (status, node) =
+            upload_file(&state, name, Some(declared), &[0x50, 0x4b, 0xff], None).await;
+        assert_eq!(status, StatusCode::OK, "{node}");
+        let id = node["id"].as_str().unwrap().to_string();
+        let response = blob_response(&state, &id).await;
+        assert_eq!(
+            response.headers()["content-type"],
+            "application/octet-stream",
+            "{declared} is not on the inline list"
+        );
+        assert_not_executable(&response, declared);
+    }
+}
+
+/// The behaviour #611 built, pinned so the fix above cannot quietly cost it: an
+/// image still arrives with its own type and `inline`, which is what makes the
+/// console's preview and a direct navigation both show the picture.
+#[tokio::test]
+async fn an_image_still_renders_inline_with_its_own_type() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "hero.png",
+        Some("image/png"),
+        &[0x89, b'P', b'N', b'G', 0xff],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    let id = node["id"].as_str().unwrap().to_string();
+
+    let response = blob_response(&state, &id).await;
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["x-content-type-options"], "nosniff");
+    let disposition = response.headers()["content-disposition"]
+        .to_str()
+        .unwrap()
+        .to_string();
+    assert!(
+        disposition.starts_with("inline;"),
+        "an image must still render in place: {disposition:?}"
+    );
+    assert!(disposition.contains("hero.png"));
 }
 
 /// An upload lands under the folder it names, like any other node.

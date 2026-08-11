@@ -61,6 +61,7 @@ import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { Markdown } from "@/components/markdown";
 import { cn } from "@/lib/utils";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { toast } from "sonner";
 
 /** Matches the parent screen's poll cadence; visibility-gated the same way. */
@@ -161,34 +162,15 @@ export function ArtifactsTab({
     // applied on the previous one must be allowed to apply again here.
     appliedLink.current = null;
     void load(isActive);
-    let timer: number | undefined;
-    const stop = () => {
-      if (timer !== undefined) {
-        window.clearInterval(timer);
-        timer = undefined;
-      }
-    };
-    const start = () => {
-      if (timer === undefined) {
-        timer = window.setInterval(() => {
-          if (!editingRef.current) void load(isActive);
-        }, POLL_MS);
-      }
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        stop();
-      } else {
-        if (!editingRef.current) void load(isActive);
-        start();
-      }
-    };
-    if (document.visibilityState !== "hidden") start();
-    document.addEventListener("visibilitychange", onVisibility);
+    // The edit guard composes into the callback, so it covers the tick and the
+    // return-to-foreground read alike: a reader mid-edit never has the rows
+    // pulled out from under them.
+    const dispose = startVisiblePolling(() => {
+      if (!editingRef.current) void load(isActive);
+    }, POLL_MS);
     return () => {
       cancelled = true;
-      stop();
-      document.removeEventListener("visibilitychange", onVisibility);
+      dispose();
     };
   }, [load]);
 

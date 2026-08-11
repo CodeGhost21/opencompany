@@ -211,7 +211,13 @@ which is fixed at agent-build time and never taken from tool arguments. Agents
 reach the same tree through `workspace_list` / `workspace_search` /
 `workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
 in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
-brief steers toward, not a boundary the routes enforce. Boot scaffolds the
+brief steers toward, not a boundary the routes enforce. `workspace_rename` and
+`workspace_delete` (#671) are the exception: those two *are* bounded to
+`Agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
+exactly as its path would. Neither restamps authorship; a delete leaves any
+artifact version that pointed at the node with a dangling `workspaceNodeId`,
+which is the same state the `DELETE` route above produces and is read-guarded
+before reuse. Boot scaffolds the
 `Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
 time that agent writes into it, and the `Desks/` root is minted whole the first
 time a desk produces something (#645) — so a tree read on a fresh company shows
@@ -222,6 +228,32 @@ into the manifest roster at read time — the version-controlled `company.toml`
 is never rewritten. Overlay teammates are addressable: since issue #71 the
 harness builds a real agent for each one, with the company-wide tool grant, no
 cognition tier, and never the orchestrator.
+
+`POST …/team` and the orchestrator's `add_agent` tool both **derive the roster
+id from the display name** (issue #686): "Dana Designer" becomes
+`dana_designer`, in the same snake_case grammar the manifest validator enforces
+on a hand-authored `[[agent]].id`. They used to mint an opaque
+`{millis}-{counter}` id, which #570/#552/#607 render as a workspace folder and
+in search-hit paths — so half a company's tree read as
+`Agents/019fad5ada20-000000000003/` beside `Agents/backend_engineer/`.
+
+- **Collisions suffix, they do not refuse.** A slug already held by a manifest
+  agent, another teammate, a desk id or name, or a reserved word (`operator`,
+  `Agents`, `Desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
+  always been accepted here, and an unsuffixed collision with a *manifest* id is
+  worse than a refusal: the roster build skips it, so the teammate would persist
+  and never materialise.
+- **Minted once, never re-minted.** `PATCH …/team/{agentId}` renames a teammate
+  and leaves the id alone; a name-keyed id would orphan its workspace folder,
+  budget row, desk memberships and inbox on every correction.
+- **Removal frees the slug**, so re-adding the same name takes the id back and
+  **adopts the old `Agents/<slug>/` folder** — the intended remedy for a typo'd
+  name, and not a way to get a clean slate.
+
+Teammates carrying generated ids are **not migrated**: rewriting them would
+rewrite the `WorkspaceOrigin` stamps issue #326 keeps honest, and every path
+into their folders. They keep working, reachable by display name through
+`crate::runtime::assignee`.
 
 `GET …/team/{agentId}` is the **agent detail** read (issue #264). `GET …/team`
 answers "who is on the roster"; this answers "what is this agent", and before it
@@ -442,10 +474,25 @@ scope; SSE (`/chat` streaming, the `/events` work feed) is not yet wired.
   `409` a graph that moved underneath it earns.
 
   Two more consequences worth knowing before reusing the seam. A chat turn
-  runs the **whole** company cycle, so an actionable message also opens a
-  board card via `company::task_intent` — on every thread *except* a copilot
-  one, where that is suppressed (#416) precisely because the seam is being
-  reused for a conversation that is not a request to the company. And an
+  runs the **whole** company cycle, so every message is first classified by
+  `company::task_intent::triage_message` (#267) into `Track` (an instruction —
+  the route opens a `todo` card), `Answer` (a question or read — no card), or
+  `Chatter` (greetings, and anything ambiguous — no card). `Answer` is also the
+  only class that *gates*: the harness narrows the issue-#453 delegation claim
+  to answering for that turn, so the model's own `spawn_task` / `assign_task` /
+  `review_task` fail at the tool boundary with the do-not-retry refusal.
+  `delegate_to_desk` is deliberately **not** refused — it is how a question the
+  orchestrator cannot answer alone reaches a desk that can — so it runs the
+  desk lead and relays their reply, and only its board card stands down.
+  `query_company` / `run_workflow` / `read_run_output` run inline and are
+  untouched throughout. The turn loses the ability to *write*, never the
+  ability to answer. Ambiguity falls to `Chatter`, which neither cards nor gates: a
+  missed card costs one follow-up message, a spurious card pollutes the board
+  permanently. The gate is harness-only — `HostedMedullaBrain` has no
+  delegation stack to gate (#176) — while the triage itself is compiled into
+  every build and fronts both brains. The card half is suppressed wholesale on
+  a copilot thread (#416), precisely because the seam is being reused for a
+  conversation that is not a request to the company. And an
   unconfigured company answers
   `200` with the echo brain's `"You said: …"` rather than an error, so a caller
   that needs a real answer must check `cognition` from `GET {scope}/inference`

@@ -194,6 +194,27 @@ pub struct ApprovalSummary {
     /// approve-once behaviour by construction.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub broadly_grantable: bool,
+    /// Whether [`payload`](Self::payload) and [`amount_usd`](Self::amount_usd)
+    /// were withheld from *this reader* because of their role (issue #618).
+    ///
+    /// Set at the edge by
+    /// [`approval_visibility`](crate::server::approval_visibility), never by
+    /// the projection — the runtime does not know who is asking, and this is
+    /// deliberately the only place that does.
+    ///
+    /// **The reason this flag exists rather than just blanking the fields:**
+    /// `payload: None` already means "the effect carries no arguments". Without
+    /// a separate signal, a withheld payment and a no-argument tool call are
+    /// the same bytes on the wire, and a console cannot tell "there is nothing
+    /// to show" from "you may not see it". The first renders as an ordinary
+    /// empty card; the second has to say *hidden by your role*, or a Member is
+    /// quietly misled about what they are looking at.
+    ///
+    /// Skipped when `false`, so an admin's response — and every response
+    /// produced before this field existed — serializes byte-identically to
+    /// before, and a console that reads no such field is unaffected.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub contents_hidden: bool,
 }
 
 #[cfg(test)]

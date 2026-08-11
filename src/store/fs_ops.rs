@@ -1123,7 +1123,7 @@ impl WorkspaceStore for FsOps {
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<WorkspaceNode> {
         let node = crate::ports::workspace::stamped_binary(node, bytes)?;
         reject_unsafe_name(&node.name)?;
         let bundle = self.bundle(company);
@@ -1165,7 +1165,10 @@ impl WorkspaceStore for FsOps {
         tokio::fs::write(&physical, bytes)
             .await
             .map_err(|e| io_err(&physical, e))?;
-        self.save_index(company, &index).await
+        self.save_index(company, &index).await?;
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
     }
 
     async fn write_binary(
@@ -1292,6 +1295,70 @@ impl WorkspaceStore for FsOps {
         }
         self.save_index(company, &index).await?;
         Ok(node)
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceNode>> {
+        reject_unsafe_name(name)?;
+        let path = self.bundle(company).workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        let Some(replacement) = index.get(replacement_id).cloned() else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        let expected = index.get(expected_id).cloned();
+        let still_current = expected.as_ref().is_some_and(|node| {
+            node.kind == NodeKind::File
+                && node.name == name
+                && node.parent_id == replacement.parent_id
+        });
+        if !still_current {
+            // The compare-and-swap lost. The staging node is private to this
+            // operation, so consume it while the same index lock is held.
+            let physical = self.physical_path(company, &index, replacement_id)?;
+            if tokio::fs::try_exists(&physical).await.unwrap_or(false) {
+                tokio::fs::remove_file(&physical)
+                    .await
+                    .map_err(|e| io_err(&physical, e))?;
+            }
+            index.remove(replacement_id);
+            self.save_index(company, &index).await?;
+            return Ok(None);
+        }
+
+        let expected = expected.expect("still_current requires an expected node");
+        let old_physical = self.physical_path(company, &index, expected_id)?;
+        let staged_physical = self.physical_path(company, &index, replacement_id)?;
+        let mut promoted = replacement;
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+
+        // `rename` is the filesystem compare-and-swap boundary: on the
+        // supported Unix server platforms it replaces the destination in one
+        // operation, so a payload reader sees either the old bytes or the new
+        // bytes and never an absent final path. If it fails, the index is still
+        // untouched and the old deliverable remains authoritative.
+        tokio::fs::rename(&staged_physical, &old_physical)
+            .await
+            .map_err(|e| io_err(&old_physical, e))?;
+        index.remove(&expected.id);
+        index.insert(promoted.id.clone(), promoted.clone());
+        self.save_index(company, &index).await?;
+        Ok(Some(promoted))
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {

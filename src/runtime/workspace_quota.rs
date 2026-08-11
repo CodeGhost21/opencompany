@@ -299,7 +299,7 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<WorkspaceNode> {
         self.admit(company, &node.name, bytes.len() as u64, None)
             .await?;
         self.inner.create_binary(company, node, bytes).await
@@ -339,6 +339,22 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
         parent: Option<Option<&str>>,
     ) -> Result<WorkspaceNode> {
         self.inner.rename_move(company, id, name, parent).await
+    }
+
+    /// The staged create has already paid the only quota charge this shape
+    /// change can add. Workspace quota counts binary payloads only, and a
+    /// shape-changing swap has exactly one binary side, so forwarding the swap
+    /// cannot transiently double-count two blobs.
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceNode>> {
+        self.inner
+            .swap_files(company, expected_id, replacement_id, name)
+            .await
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {

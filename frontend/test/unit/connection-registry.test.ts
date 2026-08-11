@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   addConnection,
+  adoptEmbeddedHost,
   getConnection,
   listConnections,
   removeConnection,
@@ -213,6 +214,183 @@ describe("credentials", () => {
       credential: { kind: "device", ref: "keychain-handle-1" },
     });
     expect(readProfiles()[0]?.credential).toEqual({ kind: "device", ref: "keychain-handle-1" });
+  });
+});
+
+/**
+ * The host running inside this application (#615).
+ *
+ * The one connection whose address is *expected* to differ from last launch's:
+ * it binds an ephemeral port on purpose, so recognising it the way every other
+ * host is recognised — by address — read each launch as a first meeting and
+ * left the previous one's row behind, dead, durable and identically labelled.
+ *
+ * A relaunch is modelled the way the app performs one: memory cleared,
+ * `localStorage` kept, `restoreConnections` first, then the embedded host
+ * arriving over IPC at whatever port the OS gave it this time.
+ */
+describe("the embedded host", () => {
+  const INSTANCE = "0f9d8c7b6a5e4f3d2c1b0a9988776655";
+
+  function relaunch(): void {
+    resetConnections();
+    restoreConnections();
+  }
+
+  it("is one row however many times the application restarts", () => {
+    const first = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65145",
+      instanceId: INSTANCE,
+    });
+
+    relaunch();
+    const second = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65275",
+      instanceId: INSTANCE,
+    });
+    relaunch();
+    const third = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65364",
+      instanceId: INSTANCE,
+    });
+
+    expect(listConnections()).toHaveLength(1);
+    // The same id throughout, so the tour state, last-read channel and mail
+    // draft scoped to it survive the relaunch rather than being orphaned.
+    expect(second).toBe(first);
+    expect(third).toBe(first);
+    expect(readProfiles()).toHaveLength(1);
+  });
+
+  it("follows the port it is actually listening on", () => {
+    // Keeping one row is only half of it: the row that survives has to address
+    // the live port, not the closed one it was restored with.
+    adoptEmbeddedHost({ baseUrl: "http://127.0.0.1:65145", instanceId: INSTANCE });
+    relaunch();
+    const id = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65275",
+      instanceId: INSTANCE,
+    });
+
+    expect(getConnection(id)?.baseUrl).toBe("http://127.0.0.1:65275");
+    expect(readProfiles()[0]?.baseUrl).toBe("http://127.0.0.1:65275");
+    // Re-probed rather than left showing what the old address concluded.
+    expect(getConnection(id)?.status).toBe("connecting");
+  });
+
+  it("clears the rows an older version already left behind", () => {
+    // The registry is durable, so fixing the accumulation is not enough on its
+    // own — an existing install starts with the pile already there. This is the
+    // state from the issue, verbatim: the bootstrap host plus one dead "This
+    // computer" per previous launch, none of them carrying an identity because
+    // no version that wrote them reported one.
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "5pnbp7zfx7w6",
+          baseUrl: "",
+          label: "This host",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+        {
+          id: "vad0klxipf59",
+          baseUrl: "http://127.0.0.1:65275",
+          label: "This computer",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+        {
+          id: "4g4392soz5vm",
+          baseUrl: "http://127.0.0.1:65364",
+          label: "This computer",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+
+    restoreConnections();
+    const id = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65401",
+      instanceId: INSTANCE,
+    });
+
+    const rows = listConnections();
+    expect(rows).toHaveLength(2);
+    // The bootstrap connection is not this application's host and is not
+    // touched — whatever else is wrong with it belongs to #613.
+    expect(rows.map((c) => c.baseUrl).sort()).toEqual(["", "http://127.0.0.1:65401"]);
+    // One of the orphans is adopted rather than discarded: they were all this
+    // machine's host, so its scoped local state is this host's state.
+    expect(["vad0klxipf59", "4g4392soz5vm"]).toContain(id);
+    // And it now carries the identity, so the next launch matches on that
+    // rather than on the guess that recovered it here.
+    expect(readProfiles().find((p) => p.id === id)?.instanceId).toBe(INSTANCE);
+  });
+
+  it("does not hand a different instance the previous one's row", () => {
+    // A second data root — `OPENCOMPANY_DATA_DIR` pointed elsewhere, say. It is
+    // a different host that happens to run in the same application, and
+    // adopting the row would merge two hosts' scoped local state: exactly the
+    // silent mixing `types.ts` exists to prevent.
+    const first = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65145",
+      instanceId: INSTANCE,
+    });
+    relaunch();
+    const second = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65275",
+      instanceId: "ffffffffffffffffffffffffffffffff",
+    });
+
+    expect(second).not.toBe(first);
+    // Still one row: the host this application no longer serves has no address
+    // left to be reached at, so keeping its row would only re-create the bug.
+    expect(listConnections()).toHaveLength(1);
+  });
+
+  it("leaves a loopback host the operator added by hand alone", () => {
+    // The margin on the recovery above. Somebody running `opencompany serve` in
+    // a terminal and adding it is ordinary, and deleting their connection would
+    // be a worse bug than the one being fixed. They are labelled by authority,
+    // never with the name this client gives its own host.
+    const theirs = addConnection({ baseUrl: "http://127.0.0.1:8080" });
+    expect(getConnection(theirs)?.label).toBe("127.0.0.1:8080");
+
+    adoptEmbeddedHost({ baseUrl: "http://127.0.0.1:65145", instanceId: INSTANCE });
+
+    expect(getConnection(theirs)).toBeDefined();
+    expect(listConnections()).toHaveLength(2);
+  });
+
+  it("does not duplicate under StrictMode's double invocation", () => {
+    const first = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65145",
+      instanceId: INSTANCE,
+    });
+    const second = adoptEmbeddedHost({
+      baseUrl: "http://127.0.0.1:65145",
+      instanceId: INSTANCE,
+    });
+
+    expect(second).toBe(first);
+    expect(listConnections()).toHaveLength(1);
+  });
+
+  it("still collapses to one row on a shell that reports no identity", () => {
+    // A `pnpm dev` console against an older `cargo` build. Without an identity
+    // there is nothing to match on, but the invariant — one host inside this
+    // application — holds regardless, so the row is still reused rather than
+    // multiplied.
+    const first = adoptEmbeddedHost({ baseUrl: "http://127.0.0.1:65145" });
+    relaunch();
+    const second = adoptEmbeddedHost({ baseUrl: "http://127.0.0.1:65275" });
+
+    expect(second).toBe(first);
+    expect(listConnections()).toHaveLength(1);
+    expect(getConnection(second)?.baseUrl).toBe("http://127.0.0.1:65275");
   });
 });
 

@@ -13,6 +13,7 @@ import {
 import { resolveConfig } from "@/config";
 import {
   addConnection,
+  adoptEmbeddedHost,
   clientFor,
   probe,
   restoreConnections,
@@ -190,15 +191,19 @@ function Console() {
    * the desktop still shows every remote host, which is the point of holding
    * several.
    *
-   * A connection like any other. Added after the first paint because the
-   * address arrives over IPC; the probe effect below picks it up from the id
-   * list, so nothing here has to drive it.
+   * Added after the first paint because the address arrives over IPC; the probe
+   * effect below picks it up from the id list, so nothing here has to drive it.
+   *
+   * Registered through `adoptEmbeddedHost` rather than `addConnection`, because
+   * this is the one host whose address is *expected* to have changed since last
+   * launch — recognising it by that address is what left a dead row behind on
+   * every run (#615).
    *
    * Its id is kept because two things need it and neither can find it by
    * sorting: it is what the desktop selects on launch, and — through
    * `resolved` — what tells "not asked yet" apart from "there is no embedded
    * host". Both leave `id` null and they read as opposite things on screen, one
-   * a spinner and the other a failure someone has to act on.
+   * a spinner and the other a failure someone has to act on (#613).
    */
   const [embedded, setEmbedded] = useState<EmbeddedState>(() => ({
     // A browser has nothing to ask, so it is resolved before it starts.
@@ -209,9 +214,13 @@ function Console() {
     let cancelled = false;
     void embeddedHost().then((host) => {
       if (cancelled) return;
+      // `resolved` is set either way: "asked, and there is none" is a distinct
+      // answer from "not asked yet", and only one of them is a failure.
       setEmbedded({
         resolved: true,
-        id: host ? addConnection({ baseUrl: host.baseUrl, label: "This computer" }) : null,
+        id: host
+          ? adoptEmbeddedHost({ baseUrl: host.baseUrl, instanceId: host.instanceId })
+          : null,
       });
     });
     return () => {

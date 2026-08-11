@@ -43,9 +43,9 @@ use crate::AppState;
 use crate::company::dns::DomainStatus;
 use crate::error::OpenCompanyError;
 use crate::ports::inbox::InboxMeta;
+use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{Actor, ActorKind, BudgetOverride, CompanyRecord, OverlayAgent};
-use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::language;
 use crate::server::ops::{DOMAIN_KEY, ScopedCompany, scoped};
@@ -415,7 +415,13 @@ async fn add_member(
 
     let mut record = load_record(&company).await?;
     let agent = OverlayAgent {
-        id: generate_id(),
+        // A readable id derived from the name, unique against the roster this
+        // record already holds (issue #686). Minted here rather than pushed and
+        // renamed later: the id names the teammate's `Agents/<id>/` folder and
+        // stamps every artifact it authors, so it has to be right on the first
+        // save. The surrounding write lock is what makes the uniqueness check
+        // and the save below one atomic step.
+        id: record.mint_agent_id(&body.name),
         name: body.name,
         role: body.role,
         description: body.description,
@@ -504,10 +510,14 @@ async fn remove_member(
             "teammate {agent_id}"
         ))));
     }
-    // Drop the teammate's budget override with it (issue #343). Overlay ids are
-    // generated, so a future teammate will not collide with this one — but a
-    // record that accumulated dead override rows would grow without bound and
-    // make the roster read scan entries for teammates that no longer exist.
+    // Drop the teammate's budget override with it (issue #343). Since #686 the
+    // id is a slug of the display name rather than a generated one, so removing
+    // a teammate *frees its id*: re-adding the same name mints the same slug and
+    // the new teammate adopts the old one's `Agents/<slug>/` folder. Clearing
+    // the override here is therefore load-bearing, not just hygiene — a row left
+    // behind would silently cap whoever next takes the seat. See
+    // `CompanyRecord::mint_agent_id` for why the reuse is the intended remedy
+    // for a typo'd name rather than a hazard to design around.
     record.overlay_budgets.retain(|b| b.agent_id != agent_id);
     company.runtime.store().save(&record).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -1315,6 +1325,176 @@ mod tests {
             record.overlay_budgets.is_empty(),
             "the removed teammate's override went with it: {:?}",
             record.overlay_budgets
+        );
+    }
+
+    /// Issue #686 — a console-added teammate gets a readable snake_case id
+    /// derived from its name, so its workspace folder reads
+    /// `Agents/dana_designer/` rather than `Agents/019fad5ada20-…/`.
+    ///
+    /// A second teammate with the same name suffixes rather than being refused:
+    /// duplicate display names were always accepted here, and taking that away
+    /// would be a capability regression dressed as a bug fix.
+    #[tokio::test]
+    async fn a_console_added_teammate_gets_a_readable_id() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let add = async |name: &str| {
+            let (status, created) = send(
+                &state,
+                "POST",
+                "/api/v1/company/team",
+                Some(json!({"name": name, "role": "Designer"})),
+                Some(&admin_cookie()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{created}");
+            created["id"].as_str().unwrap().to_string()
+        };
+
+        assert_eq!(add("Dana Designer").await, "dana_designer");
+        assert_eq!(add("Dana Designer").await, "dana_designer_2");
+        // A name colliding with a manifest agent's id steps past it — an
+        // unsuffixed `writer` would be dropped by `build_roster` and the
+        // teammate would save without ever materialising.
+        assert_eq!(add("Writer").await, "writer_2");
+        // A name with no legal stem in it takes the shared fallback.
+        assert_eq!(add("24/7").await, "teammate");
+    }
+
+    /// The slug is a seat name, not a chain of custody: removing a teammate
+    /// frees its id, and re-adding the same name takes it back — which is what
+    /// makes remove-plus-re-add the remedy for a typo'd name, since the new
+    /// teammate adopts the old `Agents/<slug>/` folder.
+    ///
+    /// Pinned rather than left implicit because it is the one consequence of
+    /// name-derived ids that a generated id did not have.
+    #[tokio::test]
+    async fn removing_a_teammate_frees_its_slug_for_reuse() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana Designer", "role": "Designer"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(created["id"], "dana_designer");
+
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            "/api/v1/company/team/dana_designer",
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, again) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana Designer", "role": "Designer"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(
+            again["id"], "dana_designer",
+            "the freed slug comes back rather than suffixing past a ghost: {again}"
+        );
+    }
+
+    /// The id is minted once. `PATCH …/team/{id}` renames the teammate and
+    /// leaves the id alone — a name-keyed id would orphan the teammate's
+    /// workspace folder, its budget row and its desk memberships on every
+    /// correction (the trap name-keyed DM ids sprang in issue #364).
+    #[tokio::test]
+    async fn renaming_a_teammate_does_not_remint_its_id() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Dana Designer", "role": "Designer"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(created["id"], "dana_designer");
+
+        let (status, edited) = send(
+            &state,
+            "PATCH",
+            "/api/v1/company/team/dana_designer",
+            Some(json!({"name": "Dana Diaz"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        assert_eq!(edited["name"], "Dana Diaz");
+        assert_eq!(
+            edited["id"], "dana_designer",
+            "the id records what the teammate was called at creation: {edited}"
+        );
+
+        // And the per-teammate routes still answer on the original slug.
+        let (status, _) = put_budget(&state, "dana_designer", json!({"budgetUsdDaily": 3.0})).await;
+        assert_eq!(status, StatusCode::OK);
+        let row = team_row(&state, "dana_designer").await;
+        assert_eq!(row["budgetUsdDaily"], 3.0, "{row}");
+        assert_eq!(row["name"], "Dana Diaz", "{row}");
+    }
+
+    /// Every teammate route keyed on `{agent_id}` keeps working when that id is
+    /// a slug — the inbox toggle alongside the budget pair, since the slug now
+    /// travels in a URL path where a generated id used to.
+    #[tokio::test]
+    async fn slug_ids_work_across_the_per_teammate_routes() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (_, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Ana Maria (Growth)", "role": "Growth"})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        let id = created["id"].as_str().unwrap().to_string();
+        assert_eq!(id, "ana_maria_growth");
+
+        let (status, _) = send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/team/{id}/inbox"),
+            Some(json!({"enabled": true})),
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(team_row(&state, &id).await["inboxEnabled"], true);
+
+        let (status, _) = put_budget(&state, &id, json!({"budgetUsdDaily": 1.5})).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(
+            &state,
+            "DELETE",
+            &format!("/api/v1/company/team/{id}/budget"),
+            None,
+            Some(&admin_cookie()),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(
+            team_row(&state, &id).await.get("budgetUsdDaily").is_none(),
+            "the reset came back through the slug-keyed route"
         );
     }
 

@@ -263,20 +263,23 @@ prompt = "Weekly review and operator digest"
     The Usage view surfaces a `Web searches` KPI plus a search status row
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
-  - **`workspace`** (issues #237, #551) grants the company's shared note tree —
+  - **`workspace`** (issues #237, #551, #671) grants the company's shared note tree —
     the `Standards/` / `Playbooks/` / `Product/` documents seeded from
     `companies/<name>/workspace/**`, plus whatever the operator and the agents
     have written since. It is **split**, unlike every other namespace: *reads*
     (`workspace_list`, `workspace_search`, `workspace_read`) follow the
     ordinary rule, so a
     catch-all `*` confers them; *mutations* (`workspace_write`,
-    `workspace_create`) need an **explicit** `workspace` or `workspace.write`
+    `workspace_create`, `workspace_rename`, `workspace_delete`) need an
+    **explicit** `workspace` or `workspace.write`
     entry in `[tools].allow`, because they change a tree every other agent then
     treats as the company's source of truth. `workspace.read` is therefore a
-    genuinely read-only grant. Create and write ride the one flag on purpose:
+    genuinely read-only grant. All four ride the one flag on purpose:
     overwriting an existing standard is strictly more destructive than adding a
-    note beside it, so a grant permitting the first has already permitted the
-    second. `workspace_search` (issue #607) is a read and rides the read side of
+    note beside it, and strictly more destructive than removing or moving
+    something inside the agent's own folder, so a grant permitting the first has
+    already permitted the rest. Issue #671 deliberately added no fifth grant
+    name. `workspace_search` (issue #607) is a read and rides the read side of
     that split — **not** the metered `search` namespace, despite the name.
     `search` is the paid external-credential grant that carries `web_search`;
     reading the company's own notes must not require a billed credential, and
@@ -293,7 +296,20 @@ prompt = "Weekly review and operator digest"
     provisioned at boot. Since issue #552 this call is one of two paths that
     bring it into existence; publishing a deliverable
     (`artifact_mirror::materialize`) is the other, and both go through the same
-    `ensure_agent_folder` seam. Renaming and deleting stay operator-only.
+    `ensure_agent_folder` seam.
+
+    `workspace_rename` and `workspace_delete` (issue #671) are the tidying half.
+    Both act on **one node at a time** and both reach only
+    `Agents/<agent-id>/` — the agent's own folder, never the folder itself,
+    never a teammate's, never shared guidance. `workspace_delete` carries the
+    same required `expected_updated_at` token as `workspace_write` and refuses a
+    folder that still holds anything, so a subtree is removed as N deliberate,
+    individually-parked calls rather than one. `workspace_rename` carries no
+    token, because it destroys nothing: body, id and both authorship stamps
+    survive it. Read the confinement as a division of labour rather than as a
+    security boundary — the same grant already confers *unconfined* overwrite,
+    which reaches further than own-folder lifecycle does. Renaming or deleting
+    anything elsewhere in the tree stays operator-only.
 
     Agent writes are **unconfined**: an agent may create or edit anywhere in its
     company's tree. Confining creation while leaving overwrite free would
