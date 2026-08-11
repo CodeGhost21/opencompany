@@ -345,17 +345,25 @@ impl Tool for WorkspaceDeleteTool {
         // delete is one approval card naming one path that takes an unbounded
         // amount of work with it.
         //
-        // Counted over rendered paths rather than over parent ids so a folder
-        // whose path is shared with another folder (possible — no backend
-        // enforces unique sibling names) is refused rather than half-emptied.
+        // Counted over parent ids, not over rendered paths. A path-prefix count
+        // reads `by_path`, which deliberately omits every node the path rules
+        // exclude — a dangling or cyclic ancestor chain, or a name carrying a
+        // separator, which the sqlite and mongodb backends both accept at
+        // creation. A folder holding only such children therefore looks empty
+        // by every path-shaped measure while the port's recursive delete would
+        // still take them: unnamed on the card, unannounced, and precisely the
+        // nodes this layer made unreachable so no tool could touch them.
+        //
+        // `child_count` is built before that filter, so it sees a child whether
+        // or not the child has a renderable path. It is also exact per node id
+        // rather than per path — two folders may share a path, but never an id,
+        // so this is strictly sharper than the prefix count it replaces.
         if entry.node.kind == NodeKind::Folder {
-            let prefix = format!("{}/", entry.path);
-            let held: usize = index
-                .by_path
-                .iter()
-                .filter(|(path, _)| path.starts_with(&prefix))
-                .map(|(_, entries)| entries.len())
-                .sum();
+            let held = index
+                .child_count
+                .get(&entry.node.id)
+                .copied()
+                .unwrap_or_default();
             if held > 0 {
                 return Ok(ToolResult::error(format!(
                     "Refused: the folder `{shown}` still holds {held} node(s), and nothing was \

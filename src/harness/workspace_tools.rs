@@ -457,6 +457,23 @@ struct PathIndex {
     /// but the sqlite and mongodb backends do not, so the tool layer stays
     /// closed against them regardless of which backend is wired.
     unaddressable: usize,
+    /// Parent id → how many nodes name it as their parent, counted over
+    /// **every** node the store returned — including the ones excluded from
+    /// `by_path` and `by_id` above.
+    ///
+    /// This exists because "is this folder empty" cannot be answered from the
+    /// path maps. An unaddressable child is absent from both, so a folder
+    /// holding only such children looks empty by every path-shaped measure
+    /// while the port's recursive `delete` would still take them. Counting
+    /// parent ids is structural: it sees a child whether or not that child has
+    /// a renderable path, which is exactly the property the emptiness gate
+    /// needs and the only one that closes the gap.
+    ///
+    /// Direct children only, deliberately — a folder with no direct child has
+    /// no descendants either, so this is sufficient to refuse, and it is exact
+    /// per node id rather than per rendered path (two folders may share a
+    /// path; they never share an id).
+    child_count: HashMap<String, usize>,
 }
 
 impl PathIndex {
@@ -465,6 +482,14 @@ impl PathIndex {
             nodes.iter().map(|n| (n.id.as_str(), n)).collect();
 
         let mut index = PathIndex::default();
+        // Counted before the addressability filter below, so a child that is
+        // about to be dropped from both maps is still counted against its
+        // parent. See `child_count`.
+        for node in &nodes {
+            if let Some(parent) = node.parent_id.as_deref() {
+                *index.child_count.entry(parent.to_string()).or_insert(0) += 1;
+            }
+        }
         for node in &nodes {
             match render_path(node, &by_id_raw) {
                 Some(path) => {
@@ -1982,6 +2007,57 @@ mod tests {
         assert_eq!(index.by_id["b"].path, "Standards/Engineering standards.md");
         assert_eq!(index.by_id["c"].path, "README.md");
         assert_eq!(index.unaddressable, 0);
+    }
+
+    /// A child excluded from the path maps must still be counted against its
+    /// parent, because "is this folder empty" decides whether a folder may be
+    /// handed to a port whose `delete` is recursive.
+    ///
+    /// This asserts both measures at once, so the regression is explicit: the
+    /// path-prefix count that `workspace_delete` used to run sees **nothing**
+    /// under the folder, while `child_count` sees the child. A gate reading the
+    /// first would call this folder empty and delete an unbounded subtree that
+    /// was never counted, announced, or named on the approval card — the exact
+    /// outcome the module docs say recursion is refused to prevent.
+    ///
+    /// The shapes here are creatable through the sqlite and mongodb backends;
+    /// only `fs` rejects them at creation (`reject_unsafe_name`), which is why
+    /// the tool layer has to stay closed against them on its own.
+    #[test]
+    fn an_unaddressable_child_is_still_counted_against_its_parent() {
+        let nodes = vec![
+            folder("f", "archive", None),
+            // Name carries a separator: no renderable path, so absent from both
+            // maps by design.
+            file("hidden", "quarterly/report.md", Some("f")),
+        ];
+        let index = PathIndex::build(nodes);
+
+        assert_eq!(index.unaddressable, 1, "the child must be excluded by path");
+        assert!(
+            !index.by_id.contains_key("hidden"),
+            "an unaddressable node must not be reachable by id either"
+        );
+
+        // What the old gate measured: rendered paths beneath the folder.
+        let prefix = format!("{}/", index.by_id["f"].path);
+        let by_path_count: usize = index
+            .by_path
+            .iter()
+            .filter(|(path, _)| path.starts_with(&prefix))
+            .map(|(_, entries)| entries.len())
+            .sum();
+        assert_eq!(
+            by_path_count, 0,
+            "precondition: the path-shaped measure cannot see this child — that is the bug"
+        );
+
+        // What the gate measures now.
+        assert_eq!(
+            index.child_count.get("f").copied().unwrap_or_default(),
+            1,
+            "the structural measure must see a child the path rules exclude"
+        );
     }
 
     #[test]
