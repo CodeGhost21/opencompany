@@ -5209,6 +5209,218 @@ name = "Morning"
         );
     }
 
+    /// Like [`record_with_assistant`], but the company `[tools].allow` grants the
+    /// `web` namespace so a `web_fetch` `tool_call` clears the author-time grant
+    /// gate under the `openhuman` build (issue #661).
+    fn record_granting_web(company: &CompanyId) -> CompanyRecord {
+        let mut record = record_with_assistant(company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[tools]\nallow = [\"web\"]\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
+        )
+        .expect("valid manifest");
+        record
+    }
+
+    /// Issue #661 (H1): a `tool_call` node authored with `config.slug` persists
+    /// the slug into the saved graph — the tool advertises `tool_call` and can
+    /// now actually author a working one. Round-trip proof: the rendered TOML on
+    /// the record carries `slug = "web_fetch"`.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_tool_call_config_slug() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "fetcher",
+                "name": "Fetcher",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "https://example.com" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            record.overlay_workflows[0]
+                .toml
+                .contains("slug = \"web_fetch\""),
+            "the persisted graph carries the tool slug: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #661 (H1): an `output` node's `destination` flows through into the
+    /// saved graph — the persisted TOML carries the routed address.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_output_destination() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "reporter",
+                "name": "Reporter",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "done",
+                        "kind": "output",
+                        "name": "Report",
+                        "destination": { "kind": "email", "target": "ada@example.com" }
+                    }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        let saved = &record.overlay_workflows[0].toml;
+        assert!(
+            saved.contains("target = \"ada@example.com\""),
+            "the persisted graph routes to the destination address: {saved}"
+        );
+    }
+
+    /// Issue #661 (H1): a `tool_call` with no `slug` is still rejected — the
+    /// inherited author-time gate, now reachable with a useful message instead of
+    /// the tool being unable to author a `tool_call` at all.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_tool_call_without_slug() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "bad",
+                "name": "Bad",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    { "id": "grab", "kind": "tool_call", "name": "Grab" },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("slug"),
+            "the refusal names the missing slug: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): the exact GitHub/Composio failure mode — a `tool_call`
+    /// naming an agent-turn tool family (`composio_execute`) can never run on a
+    /// workflow `tool_call` node, so it is refused at save. Gated on `openhuman`
+    /// because the namespace resolution (`namespace_of`) lives behind it.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_agent_turn_tool_call() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "gh",
+                "name": "GitHub",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "call",
+                        "kind": "tool_call",
+                        "name": "Call",
+                        "config": { "slug": "composio_execute" }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "call" },
+                    { "from": "call", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("agent-turn"),
+            "the refusal explains it is an agent-turn family, not a workflow tool: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): a JSON `null` inside a node's `config` can't be stored —
+    /// TOML has no null — so the fallible `TryFrom` conversion refuses it as an
+    /// agent-actionable error, never a panic or a silently-dropped key.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_null_config_value() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "nullish",
+                "name": "Nullish",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": null } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("TOML has no null"),
+            "the refusal explains why the config can't be stored: {result:?}"
+        );
+    }
+
     // ---- read_run_output (issue #418) ----
 
     /// Builds a `RunWorkflowTool` over the demo graph in `dir`, a stub runner
