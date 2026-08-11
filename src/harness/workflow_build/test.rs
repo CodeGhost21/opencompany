@@ -210,6 +210,25 @@ fn the_host_assigns_a_safe_unique_id() {
     assert_eq!(safe_workflow_id("!!!", "!!!", &existing), "workflow");
 }
 
+/// The host dedups the name like the id, case-insensitively (matching the create
+/// path's uniqueness check), so a clash settles here instead of at apply.
+#[test]
+fn the_host_dedups_a_clashing_name() {
+    let existing = vec!["Weekly Digest".to_string()];
+    // A fresh name is returned untouched.
+    assert_eq!(
+        safe_workflow_name("Monthly Report", &existing),
+        "Monthly Report"
+    );
+    // A clash — case-insensitively — gets a suffix that clears the check.
+    assert_eq!(safe_workflow_name("weekly digest", &existing), "weekly digest 2");
+    // The next suffix skips a taken one.
+    let existing = vec!["Digest".to_string(), "Digest 2".to_string()];
+    assert_eq!(safe_workflow_name("Digest", &existing), "Digest 3");
+    // An empty name is left for the create path to refuse on its own terms.
+    assert_eq!(safe_workflow_name("   ", &existing), "   ");
+}
+
 /// The stored `ops` round-trips to the exact `RawWorkflow` the create path will
 /// see — the host-authority conversion, with the model's config JSON becoming
 /// node config.

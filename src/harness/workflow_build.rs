@@ -335,6 +335,11 @@ pub async fn run_workflow_build_pass(
             // The host assigns the id — a safe, unique stem — so the model cannot
             // pick a colliding or unsafe one and doom the proposal at apply.
             spec.id = safe_workflow_id(&spec.name, &card.title, &evidence.existing_ids);
+            // The host also dedups the name it slugged the id from. The create
+            // path enforces name uniqueness at apply, so a clash the model didn't
+            // avoid would bounce an otherwise-good graph back to the operator; the
+            // host already holds the existing names, so it settles the clash here.
+            spec.name = safe_workflow_name(&spec.name, &evidence.existing_names);
             // The model does not get a vote on approval gating — the host drops
             // the field so a builder-authored node inherits the platform default
             // (#460) rather than whatever the model happened to emit. Approval is
@@ -701,6 +706,33 @@ fn safe_workflow_id(name: &str, fallback: &str, existing: &HashSet<String>) -> S
         }
     }
     format!("{base}-{}", now_millis())
+}
+
+/// Dedups the model's chosen display name against the company's existing names
+/// (issue #580) — the same suffix treatment the host gives the id, so a clash the
+/// model failed to avoid settles here instead of at apply. Comparison is
+/// case-insensitive on the trimmed name, matching `create_company_workflow`'s
+/// uniqueness check, so the suffixed name it returns actually clears that check.
+/// An empty name is left as-is — the create path refuses it on its own terms.
+fn safe_workflow_name(name: &str, existing: &[String]) -> String {
+    let base = name.trim();
+    if base.is_empty() {
+        return name.to_string();
+    }
+    let taken: HashSet<String> = existing
+        .iter()
+        .map(|n| n.trim().to_ascii_lowercase())
+        .collect();
+    if !taken.contains(&base.to_ascii_lowercase()) {
+        return name.to_string();
+    }
+    for n in 2..1_000 {
+        let candidate = format!("{base} {n}");
+        if !taken.contains(&candidate.to_ascii_lowercase()) {
+            return candidate;
+        }
+    }
+    format!("{base} {}", now_millis())
 }
 
 // ---------------------------------------------------------------------------
