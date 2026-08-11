@@ -17,8 +17,17 @@ Effect kinds that MAY require sign-off, grouped by what they risk:
 | **Identity** | handle registration/renewal, key rotation, delegated signer mint/expand | always approval |
 
 `readonly` mode gates *every* effect; `full` mode auto-allows everything
-except `[policy].always_approve` entries. Modes mirror OpenHuman's security
-tiers so an OpenHuman-backed `ApprovalGate` maps 1:1.
+except `[policy].always_approve` entries. `auto` sits between `supervised` and
+`full`: the agent's own sandbox writes and its outward reads run unattended,
+and anything that leaves the company or spends on submit still parks — see
+[the tier line](#the-auto-tier) below.
+
+Three of the four names are OpenHuman's own security tiers. `auto` is not, so
+the mapping is no longer 1:1 and `PolicyMode::security_tier()` — the accessor
+that asserted it was — has been deleted rather than made to lie. Where the two
+vocabularies still have to meet, `harness::toolbelt::autonomy_for` borrows
+`Supervised` for `auto`; the argument is on that function and matters, because
+a workflow `tool_call` node has no `ApprovalPolicy` above it.
 
 ## Approval lifecycle
 
@@ -213,7 +222,8 @@ So the two questions are now separate answers from one declaration
 (`src/policy/consequence.rs`), one entry per tool:
 
 - **may it run unattended?** — `readonly` denies anything that mutates or
-  reaches outside; `supervised` parks it. This is what the approval card is for.
+  reaches outside; `supervised` parks it; `auto` parks only the part of it that
+  leaves the company. This is what the approval card is for.
 - **may an operator hand it over for a stretch of time?** — refused for anything
   that can execute arbitrary code (`shell`), reach an arbitrary address
   (`http_request`, `curl`, `web_fetch`, `git_operations`), act through a
@@ -226,6 +236,52 @@ So the two questions are now separate answers from one declaration
 What stays grantable is the low-consequence middle the feature exists for:
 writes confined to the agent's own sandboxed workspace (`file_write`, `edit`,
 `apply_patch`, `csv_export`, `memory_store`), and **Composio reads**.
+
+### The `auto` tier
+
+That low-consequence middle is also the whole of the `auto` tier (issue #560).
+An operator had two settings and needed a third: `supervised` parks every write
+including the agent's own scratch files, so companies drown in cards; `full`
+parks nothing but the always-ask list, so it stops asking before a shell
+command or a git push too. Companies ran one and suffered, or ran the other and
+lost the gate that mattered.
+
+`auto`'s contract, in the operator's words: **the agent works without
+interrupting me, and stops before anything that leaves the building or spends
+money.** The line is one predicate,
+`Consequence::parks_under_auto` — a call parks under `auto` when it would park
+under `supervised` **and** it is not `Standing::Grantable`.
+
+It reads the existing declaration rather than adding a list, because the split
+was already there and argued tool by tool. That reuse does widen what
+`Grantable` means — from "an operator may hand this to one teammate until a
+deadline" to "this runs unattended for everyone while the company sits in
+`auto`" — which is sound because `Standing` is decided by what a tool can reach
+rather than by what it is called, and because the widening is exactly what the
+operator chooses when they select the tier. It is written down so that a later
+edit loosening `Grantable` knows it is loosening two things.
+
+Two boundaries `auto` deliberately does not draw:
+
+- **`Reach::Money` does not park.** `web_search` is billed but changes nothing,
+  and it already runs unattended under `supervised` for a reason that binds
+  harder here — openhuman resolves a `RequireApproval` inline and never
+  re-dispatches, so a parked search is a search that never happens and an agent
+  with no search invents citations. `auto` must not be stricter than the tier it
+  replaces. The per-agent daily cap holds spend, and it sits above the tier
+  dispatch. Generation that spends on *submit* (`media_generate_image`,
+  `media_generate_video`) is a `Consequence` and parks.
+- **`always_approve` is not consulted by the tier at all.** It is checked above
+  the dispatch and wins over every tier, `full` included.
+
+The tier composes with the Composio read/send reclassification rather than
+depending on it: a Composio read is `Grantable` today while still carrying
+`Reach::Consequence`, and reclassifying its *reach* leaves its standing alone,
+so it runs unattended under `auto` either way.
+
+`auto` is **not** the default. Issue #560 argues it should become one, but
+`default_policy_mode()` returning it would change behaviour for every existing
+company with no `[policy]` block on its next load, so that is its own decision.
 
 `composio_execute` is the reason arguments are part of the question. Every
 Composio action arrives under that one tool name, so classifying the name
@@ -298,7 +354,7 @@ A tool call is decided in this order:
    and it re-checks the live arguments, so a grant minted on a Composio read
    cannot admit a Composio send.
 4. `[policy].always_approve` → park.
-5. mode dispatch (`readonly` / `supervised` / `full`).
+5. mode dispatch (`readonly` / `supervised` / `auto` / `full`).
 
 The grant sits **above** `always_approve` on purpose. A tool on that list still
 parks the first time, which is what the list is for; but once the operator has
