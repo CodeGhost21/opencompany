@@ -100,6 +100,23 @@ Every variable carries an explicit scope and a **WEB code syntax** naming the
 real CSS variable — `color/status/running` reports as `var(--status-running)`
 — so Dev Mode round-trips to this codebase rather than to an invented name.
 
+### Regenerating it
+
+The library is a **build output**. [`figma-plugin/`](../../figma-plugin/) holds
+a Figma development plugin that writes the whole thing — variables, styles,
+pages, components — from the same token values. Import it once via Figma
+desktop → Plugins → Development → Import plugin from manifest, then run it
+whenever a token moves.
+
+It exists because the hosted MCP server is capped at **6 tool calls per month**
+on a Starter plan with a View seat. A dev plugin runs the same Plugin API with
+no rate limit and no seat gate, which is what makes the library maintainable
+rather than a one-time hand-off that drifts.
+
+Re-running is safe: everything is matched by exact name and updated in place.
+`node figma-plugin/test.js` executes the generator against a mock Plugin API
+and asserts, among other things, that a second run adds nothing.
+
 ### Plan constraints worth knowing
 
 The file was built on a Figma **Starter** plan, which forced three departures
@@ -113,9 +130,9 @@ Professional:
 2. **Three pages maximum.** The convention is one page per component; here the
    file is Cover / Foundations / Components, with sections carrying the
    separation.
-3. **MCP call limit.** The build stopped after Button and Status Badge.
-   Remaining primitives — Input, Card, Tabs, Alert, Avatar, Badge — are
-   specified in [`components.md`](components.md) and not yet drawn.
+3. **MCP call limit — 6 per month** on a View seat, which is what stopped the
+   original build after Button and Status Badge. The remaining primitives are
+   built by the plugin above instead, which is not subject to it.
 
 ### Keeping it in sync
 
@@ -136,7 +153,7 @@ Catalogued rather than hidden. Both lists are complete as of this document.
 | Hardcoded hex colours | 26 | [`color.md`](color.md#hardcoded-colour-debt) |
 | No vector logo asset | — | [`../brand/README.md`](../brand/README.md#6-logo--marks) |
 | Geist Mono not installed | — | [`typography.md`](typography.md#the-mono-face) |
-| Figma library covers 2 of 8 primitives | 6 | [The Figma library](#the-figma-library) |
+| Figma tokens transcribed by hand | — | [`figma-plugin/README.md`](../../figma-plugin/README.md#keeping-tokens-in-sync) |
 
 None of these break the build; all of them are places where a future change
 will not propagate. They are safe to fix incrementally, file by file.

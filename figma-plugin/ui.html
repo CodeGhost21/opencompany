@@ -1,0 +1,233 @@
+<!--
+  Plugin UI.
+
+  Styled with the design system's own tokens, hardcoded as hex here because
+  this iframe is outside the Figma document and cannot read variables. It is
+  the one place in the repo where raw hex is correct — and it is also why the
+  panel is deliberately plain: it must not become a second, drifting copy of
+  the system.
+-->
+<style>
+  :root {
+    --bg: #fcfcfd;
+    --card: #ffffff;
+    --text: #16161d;
+    --muted: #6e6e80;
+    --border: #e6e6ec;
+    --brand: #635bff;
+    --brand-ink: #ffffff;
+    --ok: #0a7d3e;
+    --fail: #c62a2f;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0c0c0f;
+      --card: #131318;
+      --text: #f4f4f7;
+      --muted: #9797a8;
+      --border: rgba(255, 255, 255, 0.09);
+      --brand: #857eff;
+      --brand-ink: #0c0c0f;
+      --ok: #35c77f;
+      --fail: #ff6369;
+    }
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    padding: 16px;
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Geist", -apple-system, BlinkMacSystemFont, "Inter", sans-serif;
+    font-size: 12px;
+    line-height: 1.5;
+  }
+
+  h1 {
+    margin: 0;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  .eyebrow {
+    margin: 0 0 2px;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--brand);
+  }
+
+  p.lede {
+    margin: 6px 0 16px;
+    color: var(--muted);
+  }
+
+  fieldset {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+  }
+  legend {
+    padding: 0 4px;
+    font-size: 10px;
+    font-weight: 500;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  label.row {
+    display: flex;
+    gap: 8px;
+    align-items: flex-start;
+    padding: 5px 0;
+    cursor: pointer;
+  }
+  label.row input { margin: 3px 0 0; accent-color: var(--brand); }
+  label.row .what { font-weight: 500; }
+  label.row .why { display: block; color: var(--muted); font-weight: 400; }
+
+  .actions { display: flex; gap: 8px; margin-bottom: 12px; }
+
+  button {
+    flex: 1;
+    height: 32px;
+    border: 1px solid transparent;
+    border-radius: 8px;
+    background: var(--brand);
+    color: var(--brand-ink);
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+  }
+  button.secondary {
+    flex: 0 0 auto;
+    padding: 0 12px;
+    background: transparent;
+    border-color: var(--border);
+    color: var(--text);
+  }
+  button:disabled { opacity: 0.5; cursor: default; }
+
+  #log {
+    height: 190px;
+    overflow-y: auto;
+    padding: 10px 12px;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    background: var(--card);
+    font-family: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    font-size: 10px;
+    line-height: 1.7;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+  #log .ok { color: var(--ok); }
+  #log .err { color: var(--fail); }
+  #log:empty::before { content: "Nothing run yet."; opacity: 0.6; }
+</style>
+
+<p class="eyebrow">OpenCompany</p>
+<h1>Design system generator</h1>
+<p class="lede">
+  Writes the tokens from <code>frontend/src/index.css</code> into this file.
+  Safe to re-run — everything is matched by name and updated in place.
+</p>
+
+<fieldset>
+  <legend>What to build</legend>
+  <label class="row">
+    <input type="radio" name="what" value="all" checked />
+    <span class="what">Everything
+      <span class="why">Variables, styles, pages and components.</span>
+    </span>
+  </label>
+  <label class="row">
+    <input type="radio" name="what" value="tokens" />
+    <span class="what">Tokens only
+      <span class="why">Variables and styles. Leaves components untouched.</span>
+    </span>
+  </label>
+</fieldset>
+
+<fieldset>
+  <legend>Options</legend>
+  <label class="row">
+    <input type="checkbox" id="rebuild" />
+    <span class="what">Rebuild components
+      <span class="why">Replaces components that already exist. This detaches
+        any instances of them — leave off unless you mean it.</span>
+    </span>
+  </label>
+</fieldset>
+
+<div class="actions">
+  <button id="run">Build</button>
+  <button id="close" class="secondary">Close</button>
+</div>
+
+<div id="log"></div>
+
+<script>
+  var logEl = document.getElementById('log');
+  var runBtn = document.getElementById('run');
+
+  function append(line, cls) {
+    var div = document.createElement('div');
+    if (cls) div.className = cls;
+    div.textContent = line;
+    logEl.appendChild(div);
+    logEl.scrollTop = logEl.scrollHeight;
+  }
+
+  runBtn.onclick = function () {
+    logEl.innerHTML = '';
+    runBtn.disabled = true;
+    runBtn.textContent = 'Building…';
+    var what = document.querySelector('input[name="what"]:checked').value;
+    parent.postMessage({
+      pluginMessage: {
+        type: 'run',
+        what: what,
+        rebuild: document.getElementById('rebuild').checked,
+      },
+    }, '*');
+  };
+
+  document.getElementById('close').onclick = function () {
+    parent.postMessage({ pluginMessage: { type: 'cancel' } }, '*');
+  };
+
+  onmessage = function (event) {
+    var msg = event.data.pluginMessage;
+    if (!msg) return;
+
+    if (msg.type === 'log') {
+      append(msg.line);
+    } else if (msg.type === 'done') {
+      var s = msg.summary;
+      append('');
+      append('✓ ' + s.variables + ' variables written', 'ok');
+      if (s.components && s.components.length) {
+        append('✓ built: ' + s.components.join(', '), 'ok');
+      }
+      if (s.skipped && s.skipped.length) {
+        append('· skipped (already exist): ' + s.skipped.join(', '));
+      }
+      runBtn.disabled = false;
+      runBtn.textContent = 'Build again';
+    } else if (msg.type === 'error') {
+      append('');
+      append('✗ ' + msg.message, 'err');
+      runBtn.disabled = false;
+      runBtn.textContent = 'Retry';
+    }
+  };
+</script>
