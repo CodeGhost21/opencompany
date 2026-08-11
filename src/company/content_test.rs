@@ -286,6 +286,22 @@ fn every_bundled_workflow_is_runnable_against_its_roster() {
                 .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
             let workflow =
                 parse_workflow(&text).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+
+            // `parse_workflow` is lenient on the #661 author-time rules (issue
+            // #682) so pre-#661 tenant graphs still load. That leniency must NOT
+            // apply to what WE ship: a seed a human could no longer author from
+            // the console (a field-less condition, a branch not labeled yes/no, a
+            // slug-less tool_call, an http_request missing method/url) has to fail
+            // CI here. Run the STRICT pass over every shipped seed.
+            let raw = super::raw_workflow_from_toml(&text)
+                .unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+            let strict_problems = super::workflow_file::validate(&raw, true);
+            assert!(
+                strict_problems.is_empty(),
+                "{}: shipped seed fails strict author-time validation (issue #661/#682): {strict_problems:?}",
+                file.display()
+            );
+
             let graph = translate(&workflow);
 
             // Beyond parse+translate, every seed must COMPILE onto the tinyflows
