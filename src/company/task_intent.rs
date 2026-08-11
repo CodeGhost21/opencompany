@@ -281,7 +281,17 @@ const READ_VERBS: &[&str] = &[
 ];
 
 /// Multi-word read requests (checked as a prefix + word boundary).
-const READ_PHRASES: &[&str] = &["give me", "walk me through", "let me know", "remind me"];
+///
+/// `give me` used to be here and was removed on review of issue #267: every
+/// other entry means *tell me* — `walk me through`, `let me know`, `remind me`
+/// — while `give me` overwhelmingly means *produce me*. It was the one lead in
+/// this list that fired [`MessageTriage::Answer`] on "give me a landing page",
+/// which withdraws the board tools from a request to build something. Without
+/// it "give me the headcount" falls to [`MessageTriage::Chatter`], which is a
+/// deliberate and cheap trade: `Chatter` opens no card and gates nothing, so a
+/// read that lands there costs the operator nothing, whereas the gated request
+/// cost them the work.
+const READ_PHRASES: &[&str] = &["walk me through", "let me know", "remind me"];
 
 /// Max length of a generated task title.
 const TITLE_MAX: usize = 80;
@@ -333,7 +343,9 @@ impl MessageTriage {
 ///    phrased instruction an operator ever types.
 /// 4. **A question or read request** → `Answer`: an interrogative lead word, a
 ///    [`READ_VERBS`] / [`READ_PHRASES`] lead, or a trailing `?` with no action
-///    verb anywhere.
+///    verb anywhere. Both lead-word branches are vetoed when a *later* clause
+///    is an imperative ([`later_clause_is_imperative`]) — `Answer` is the one
+///    class with teeth, so its entry conditions are the ones held tightest.
 /// 5. **A leading imperative** → `Track`.
 /// 6. **Anything else** → `Chatter`, the safe middle.
 pub fn triage_message(text: &str) -> MessageTriage {
@@ -398,8 +410,27 @@ fn strip_lead_ins(lower: &str) -> &str {
 /// Whether the lowercased message asks for an answer rather than for work
 /// (issue #267). Only reached once a request-framed instruction has been ruled
 /// out, so a `?` here is a real question mark and not politeness.
+///
+/// # The asymmetry that sets how tight this is
+///
+/// [`MessageTriage::Answer`] is the only class with teeth: it suppresses the
+/// direct-work card and narrows the model's board tools, so a false `Answer`
+/// costs the operator the work itself, while a false [`MessageTriage::Chatter`]
+/// costs nothing at all. The trailing-`?` branch has always carried that
+/// asymmetry — its `contains_action` guard is there because "fix the login
+/// bug?" is an operator second-guessing their own instruction, and an
+/// instruction is still an instruction. The lead-word branches did not, and
+/// entered `Answer` on a single word with no look at the rest of the sentence
+/// (issue #267 review). [`later_clause_is_imperative`] is that same principle
+/// applied to them, scoped to conjoined clauses so a single-clause question is
+/// untouched.
 fn is_question(lower: &str) -> bool {
-    if READ_PHRASES.iter().any(|p| starts_with_word(lower, p)) {
+    // A lead word speaks for its own clause, not for the whole message
+    // (issue #267 review). Checked before either lead-word branch because both
+    // of them read exactly one word and would otherwise answer for a conjoined
+    // imperative they never looked at.
+    let conjoined_imperative = later_clause_is_imperative(lower);
+    if !conjoined_imperative && READ_PHRASES.iter().any(|p| starts_with_word(lower, p)) {
         return true;
     }
     let first = lower
@@ -407,13 +438,58 @@ fn is_question(lower: &str) -> bool {
         .next()
         .unwrap_or("")
         .trim_end_matches([',', ':', ';', '.', '!', '?']);
-    if INTERROGATIVE_LEADS.contains(&first) || READ_VERBS.contains(&first) {
+    if !conjoined_imperative
+        && (INTERROGATIVE_LEADS.contains(&first) || READ_VERBS.contains(&first))
+    {
         return true;
     }
     // A trailing `?` with no action verb anywhere. The action-verb guard is
     // what keeps "fix the login bug?" out of here — an operator second-guessing
     // their own instruction is still an instruction.
     lower.trim_end().ends_with('?') && !contains_action(lower)
+}
+
+/// The clauses of a lowercased message, split on the joins an operator actually
+/// stacks two asks with: ` and `, a semicolon, and a sentence boundary.
+///
+/// Empty clauses are dropped so a trailing `?` or a doubled separator does not
+/// manufacture one — "what's our revenue?" is a single clause, not two.
+fn clauses(lower: &str) -> impl Iterator<Item = &str> {
+    lower
+        .split([';', '.', '!', '?'])
+        .flat_map(|sentence| sentence.split(" and "))
+        .map(str::trim)
+        .filter(|clause| !clause.is_empty())
+}
+
+/// Whether a clause *after the first* is an imperative — the veto that stops a
+/// leading question word speaking for a conjoined instruction (issue #267
+/// review).
+///
+/// "Explain the auth flow and then fix the login bug" is a read AND work, and
+/// [`MessageTriage::Answer`] is the expensive way to be wrong about it: it
+/// withdraws the board tools from the half of the sentence that needs them.
+/// Each later clause is passed through [`strip_lead_ins`] first, so the
+/// connective an operator writes the second ask with ("and **then** fix …")
+/// does not hide the verb underneath it.
+///
+/// Deliberately only the LATER clauses. Re-judging the first would collapse
+/// into a blanket `!contains_action(...)` veto over the whole message, and
+/// [`ACTION_VERBS`] is full of words that are commonly nouns — `review`,
+/// `design`, `audit`, `plan`, `update` — so that would degrade genuine
+/// questions like "what's the status of the design review?" to
+/// [`MessageTriage::Chatter`] and gut the layer.
+///
+/// The residual is the mirror of that: a later clause whose first word is one
+/// of those noun-ish verbs ("show me the design and review queue") vetoes when
+/// it should not, and the message falls to `Chatter` rather than `Answer`.
+/// `Chatter` cards nothing and gates nothing, so the cost is a lost gate rather
+/// than a spurious card — the cheap direction. A keyword classifier cannot do
+/// better than trade here; issue #678 is where it stops having to.
+fn later_clause_is_imperative(lower: &str) -> bool {
+    clauses(lower)
+        .skip(1)
+        .any(|clause| starts_with_action(strip_lead_ins(clause)))
 }
 
 /// The message's first word (or a leading multi-word phrase) is an action verb.
@@ -600,7 +676,6 @@ mod tests {
             "Tell what is there in the tasks list",
             "explain how the newsletter works",
             "describe the current backlog",
-            "give me the headcount",
             "walk me through the funnel",
             "can you list the tasks?",
             "where do we stand on the launch?",
@@ -612,6 +687,71 @@ mod tests {
             );
             assert!(detect_task_intent(msg).is_none(), "no card for: {msg}");
         }
+    }
+
+    /// The class the original suite never probed: for every lead-word pattern
+    /// it pinned, it picked the *read*-flavoured instance ("give me the
+    /// headcount", "walk me through the funnel", "describe the current
+    /// backlog") — so the work-flavoured instance of the same pattern went
+    /// unmeasured, and every one of these was [`MessageTriage::Answer`], which
+    /// withdraws the board tools from a request to build something (issue #267
+    /// review, finding 1).
+    ///
+    /// The assertion is `!= Answer` rather than `== Track` on purpose. What
+    /// costs the operator is the gate; whether one of these lands in `Track` or
+    /// in the `Chatter` middle is the classifier's own tie-break and not what
+    /// this pins.
+    #[test]
+    fn a_work_ask_behind_a_read_lead_is_not_gated() {
+        for msg in [
+            // `give me` no longer leads READ_PHRASES.
+            "give me a landing page",
+            // …and a lead word no longer speaks for a conjoined imperative.
+            "explain the auth flow and then fix the login bug",
+            "compare our pricing to competitors and write up a doc",
+            "walk me through the funnel and build a dashboard for it",
+            "tell me the headcount; then draft the hiring plan",
+            "show me the board. create a card for the launch",
+        ] {
+            assert_ne!(
+                triage_message(msg),
+                MessageTriage::Answer,
+                "a request to produce something must not be gated: {msg}"
+            );
+        }
+    }
+
+    /// The other side of the same trade, and the reason the veto is scoped to
+    /// *later* clauses rather than applied as a blanket `!contains_action`:
+    /// [`ACTION_VERBS`] is full of words that are commonly nouns, so a blanket
+    /// veto would degrade these to `Chatter` and gut the layer.
+    #[test]
+    fn a_noun_that_doubles_as_an_action_verb_stays_a_question() {
+        for msg in [
+            "what's the status of the design review?",
+            "who is running the security audit?",
+            "when is the next product review and the board update?",
+            "what's our revenue and how did it change?",
+            "is the campaign live and is the newsletter out?",
+        ] {
+            assert_eq!(
+                triage_message(msg),
+                MessageTriage::Answer,
+                "should stay an answer: {msg}"
+            );
+        }
+    }
+
+    /// Dropping `give me` from [`READ_PHRASES`] moves the read-flavoured
+    /// instance to `Chatter`, which is the whole cost of the change: no card,
+    /// no gate, so the operator loses nothing.
+    #[test]
+    fn a_read_flavoured_give_me_falls_to_the_safe_middle() {
+        assert_eq!(
+            triage_message("give me the headcount"),
+            MessageTriage::Chatter
+        );
+        assert!(detect_task_intent("give me the headcount").is_none());
     }
 
     /// A request frame is read before any question test, so a politely phrased
