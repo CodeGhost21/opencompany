@@ -291,6 +291,8 @@ dependency-inverted behind a trait; when the relevant seam is absent the write
 route `404`s with `{"code":"not_wired"}`.
 
 ```text
+GET    …/credential                         whether the company has its own key + which tier it presents
+PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
 PUT    …/domain                             set the custom domain
 POST   …/domain/verify                       server-side DNS check
 PUT    …/smtp                               store SMTP credentials (secret store)
@@ -299,6 +301,11 @@ POST   …/connections/{provider}/start        begin OAuth (returns authorize UR
 POST   …/connections/{provider}/disconnect   drop stored OAuth tokens               [feature: oauth]
 GET    /api/v1/oauth/callback                OAuth redirect target (unscoped; state carries the company)  [feature: oauth]
 ```
+
+`…/credential` is the company's **one** TinyHumans key, presented by every
+surface wired to it (**Composio today**) — see
+[`credentials.md`](credentials.md) for the resolution order, the rotation
+guarantee, and which surfaces are deliberately outside it.
 
 ### The OAuth callback always redirects
 

@@ -10,21 +10,43 @@
 //! and that resolution happens **server-side** here — never from agent input and
 //! never from manifest free-text.
 //!
-//! Two sources, in strict precedence:
+//! Three sources, in strict precedence:
 //!
-//! 1. **The company's own token**, stored in its [`SecretStore`] under
+//! 1. **The company's own Composio token**, stored in its [`SecretStore`] under
 //!    [`TOKEN_KEY`] by the console. A company that brings its own Composio
-//!    identity keeps it, always.
-//! 2. **This instance's platform identity** — the
+//!    identity keeps it, always. This is the self-hosting escape hatch, not a
+//!    deployment mode.
+//! 2. **The company's own TinyHumans credential** —
+//!    [`company_key`](crate::company::company_key), the one key its admin set on
+//!    this tenant. The backend derives the Composio entity from whatever bearer
+//!    it is handed, and a TinyHumans key is a bearer it recognises, so no
+//!    separate Composio token and no per-tenant provider app is needed to
+//!    connect a provider (issue #586).
+//! 3. **This instance's platform identity** — the
 //!    [`TinyhumansTokenSource`](crate::company::credentials::TinyhumansTokenSource)
 //!    the runtime authenticates with everywhere else. On the hosted platform that
 //!    is a projected, audience-bound token the cluster rotates in place, so it is
 //!    read **per call**, never captured when the roster is built.
 //!
-//! With neither, resolution yields `None` and no tools are wired (fail closed) —
-//! an absent credential must mean "no tools", never a borrowed identity. Two
-//! companies pasting the *same* token would share one entity; that cannot be
-//! prevented client-side and is documented as a deployment caveat.
+//! Tiers 2 and 3 are not resolved here: they are
+//! [`company_key::resolve`](crate::company::company_key::resolve), the one seam
+//! a brokered surface resolves a company identity through. That is what makes
+//! rotating the company key reach every surface wired to it rather than
+//! whichever remembered to re-read — Composio today, with inference and
+//! embeddings still on the environment until #585.
+//!
+//! With none of the three, resolution yields `None` and no tools are wired (fail
+//! closed) — an absent credential must mean "no tools", never a borrowed
+//! identity. Two companies pasting the *same* token would share one entity; that
+//! cannot be prevented client-side and is documented as a deployment caveat.
+//!
+//! ## One connection, every agent
+//!
+//! Nothing here is scoped to the member who connected a provider. The credential
+//! is resolved from the *company's* store, every agent in the company resolves
+//! the same one, and the backend derives one entity from it — so a provider
+//! connected once is usable by every agent in the company, which is the
+//! behaviour issue #586 asks for.
 //!
 //! ## Rotation must not churn the roster
 //!
@@ -56,13 +78,14 @@ use std::sync::Arc;
 
 use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
-use crate::ports::types::{CompanyId, SecretValue};
+use crate::ports::types::CompanyId;
 
 // The credential key + backend routing live in the always-compiled
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
 pub use crate::company::composio::{
     COMPOSIO_BACKEND_URL_ENV, TINYHUMANS_API_URL_ENV, TOKEN_KEY, backend_url_or_default,
+    resolve_credential,
 };
 
 /// A per-tenant Composio configuration: the backend URL, how the outbound bearer
@@ -107,21 +130,27 @@ impl TenantComposio {
     /// Resolve a per-tenant Composio config, or `None` (fail closed) when no
     /// credential can be obtained at all.
     ///
-    /// Precedence: the company's **own** token under [`TOKEN_KEY`] in the secret
-    /// store wins; otherwise this instance's platform identity (`token_source`)
-    /// is used. A company that pasted its own Composio token therefore keeps it
-    /// even on the hosted platform, and a company that pasted nothing borrows no
-    /// one else's identity — it presents the identity of the instance it runs in,
-    /// which the backend resolves to that instance's owner.
+    /// Precedence: the company's **own Composio** token under [`TOKEN_KEY`] wins
+    /// — a company that pasted one keeps it even on the hosted platform. Failing
+    /// that, the shared brokered-credential seam
+    /// [`company_key::resolve`](crate::company::company_key::resolve) answers:
+    /// the company's own TinyHumans key, else this instance's platform identity.
+    /// A company that pasted nothing borrows no one else's identity — it presents
+    /// its own key if it has one, otherwise the identity of the instance it runs
+    /// in, which the backend resolves to that instance's owner.
     ///
     /// The URL resolves from [`COMPOSIO_BACKEND_URL_ENV`], then the tenant API
     /// base [`TINYHUMANS_API_URL_ENV`], then [`DEFAULT_BACKEND_URL`] — see
     /// [`backend_url_or_default`]. `toolkits` is the manifest allowlist, threaded
     /// through unchanged.
     ///
-    /// A secret-store read error degrades to the token source (and, failing that,
-    /// to `None`) rather than bubbling — a transient store hiccup must not brick
-    /// the roster build.
+    /// A secret-store read error yields `None` — **fail closed, no tools this
+    /// cycle** — rather than falling through to the instance identity. This is
+    /// the roster path, so it must not bubble and brick a build; but an *unknown*
+    /// credential must no more mean a borrowed identity than an absent one does.
+    /// A company whose store hiccups loses its Composio tools for a cycle and
+    /// gets them back on the next; it never quietly acts as somebody else. See
+    /// [`company_key::resolve`](crate::company::company_key::resolve).
     pub async fn resolve(
         company: &CompanyId,
         secrets: &dyn SecretStore,
@@ -130,21 +159,32 @@ impl TenantComposio {
         api_url_env: Option<String>,
         token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
-        let stored = match secrets.get(company, TOKEN_KEY).await {
-            Ok(Some(SecretValue(token))) => Credential::from_value(token),
-            _ => Credential::None,
+        let credential = match crate::company::composio::resolve_credential(
+            company,
+            secrets,
+            token_source,
+        )
+        .await
+        {
+            Ok(credential) => credential,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company,
+                    error = %err,
+                    "[composio] could not read this company's credential; withholding tools \
+                     for this cycle rather than presenting another identity"
+                );
+                return None;
+            }
         };
-        let credential = match (stored, token_source) {
-            // The company's own token always wins.
-            (stored @ Credential::Value(_), _) => stored,
-            (_, Some(source)) => Credential::from_source(source),
-            (_, None) => return None,
-        };
-        Some(Self::new(
-            backend_url_or_default(backend_url_env, api_url_env),
-            credential,
-            toolkits,
-        ))
+        match credential {
+            Credential::None => None,
+            credential => Some(Self::new(
+                backend_url_or_default(backend_url_env, api_url_env),
+                credential,
+                toolkits,
+            )),
+        }
     }
 
     /// The credential this config presents. Status and fingerprinting only —
@@ -170,8 +210,17 @@ impl TenantComposio {
     ///
     /// The credential contributes its **identity**, not its bytes: a projected
     /// platform token rotates every few minutes, and hashing the value would
-    /// rebuild the whole roster on that schedule. A pasted per-company token does
-    /// contribute its value, since changing it is a real identity change.
+    /// rebuild the whole roster on that schedule. A pasted per-company token —
+    /// and the company's own TinyHumans key — does contribute its value, since
+    /// an admin changing either is a real identity change and must reach the
+    /// agents on the next cycle.
+    ///
+    /// **Internal only — never log, serialize, or journal this.** Because it is
+    /// value-derived over a live credential, anyone who can read it can confirm
+    /// a guessed key against it: cheap to check, expensive to discover has been
+    /// leaking. It is compared for equality inside [`HarnessPool`] and goes
+    /// nowhere else. If a rebuild needs explaining, say that the identity
+    /// changed — not what it hashes to.
     pub fn fingerprint(config: &Option<TenantComposio>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -1048,6 +1097,11 @@ mod live {
 mod tests {
     use super::*;
 
+    // Used by the resolver tests below; the module body itself resolves its
+    // credential through `company::composio::resolve_credential`.
+    use crate::company::company_key;
+    use crate::ports::types::SecretValue;
+
     // The three helper tests below follow their subjects behind the `composio`
     // feature: `toolkit_allowed` / `slug_toolkit` do not exist in an
     // `openhuman`-without-`composio` build.
@@ -1113,7 +1167,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_closed() {
         use crate::ports::SecretStore;
-        use crate::ports::types::{CompanyId, SecretValue};
+        use crate::ports::types::CompanyId;
         use crate::store::FsSecretStore;
 
         let dir = tempfile::Builder::new()
@@ -1210,6 +1264,180 @@ mod tests {
         assert_eq!(staged.backend_url, "https://staging-api.tinyhumans.ai");
 
         unsafe { std::env::remove_var("TINYHUMANS_API_KEY") };
+    }
+
+    /// Issue #586: the company's own TinyHumans key sits between its pasted
+    /// Composio token and the instance's identity, and it is enough on its own —
+    /// a company with a key set connects providers with no Composio token and no
+    /// per-tenant provider app.
+    #[tokio::test]
+    async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instance() {
+        use crate::company::credentials::CredentialSource;
+        use crate::ports::SecretStore;
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-companykey-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        let source = || Arc::new(TinyhumansTokenSource::static_key("platform-identity"));
+
+        company_key::store_key(&company, &secrets, "th_company_key")
+            .await
+            .unwrap();
+
+        // With no instance identity at all, the company key alone credentials
+        // Composio — the case this issue exists to fix, since a pod with no
+        // projected token previously had to fall back to a pasted token.
+        let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
+            .await
+            .expect("the company key resolves without any instance identity");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+        assert_eq!(resolved.credential().source(), CredentialSource::Company);
+
+        // And it outranks the instance's identity: the company acts as itself,
+        // not as the pod it happens to run in.
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+
+        // A pasted Composio token still outranks it — the BYO hatch survives.
+        secrets
+            .set(&company, TOKEN_KEY, SecretValue("byo-composio".to_string()))
+            .await
+            .unwrap();
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("byo-composio"));
+        assert_eq!(resolved.credential().source(), CredentialSource::Static);
+
+        // Clearing the BYO token falls back to the company key, not to the
+        // instance — clearing one tier must not silently re-borrow another.
+        secrets
+            .set(&company, TOKEN_KEY, SecretValue(String::new()))
+            .await
+            .unwrap();
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+
+        // Clearing the company key too falls all the way back to the instance.
+        company_key::store_key(&company, &secrets, "")
+            .await
+            .unwrap();
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(
+            token_of(&resolved).await.as_deref(),
+            Some("platform-identity")
+        );
+    }
+
+    /// The roster path's half of the store-error contract: it must **fail
+    /// closed** — no tools this cycle — rather than fall through to the
+    /// instance identity or bubble and brick the build.
+    ///
+    /// Fewer tools for a cycle is recoverable and visible. Silently presenting
+    /// a different identity is neither: it would attribute whatever the agents
+    /// did in that window to the wrong account.
+    #[tokio::test]
+    async fn an_unreadable_store_withholds_tools_rather_than_borrowing_an_identity() {
+        use crate::ports::types::CompanyId;
+
+        struct BrokenSecrets;
+
+        #[async_trait::async_trait]
+        impl SecretStore for BrokenSecrets {
+            async fn get(
+                &self,
+                _c: &CompanyId,
+                _key: &str,
+            ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store("boom".into()))
+            }
+            async fn set(
+                &self,
+                _c: &CompanyId,
+                _key: &str,
+                _v: crate::ports::types::SecretValue,
+            ) -> crate::Result<()> {
+                Err(crate::error::OpenCompanyError::Store("boom".into()))
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let resolved = TenantComposio::resolve(
+            &company,
+            &BrokenSecrets,
+            Vec::new(),
+            None,
+            None,
+            // An instance identity IS available — and must still not be used,
+            // because we cannot tell whether this company has a key of its own.
+            Some(Arc::new(TinyhumansTokenSource::static_key(
+                "platform-identity",
+            ))),
+        )
+        .await;
+        assert!(
+            resolved.is_none(),
+            "an unreadable store must withhold the tools, not present the instance's identity"
+        );
+    }
+
+    /// The rotation guarantee (issue #586 acceptance): rotating the company key
+    /// moves the roster fingerprint, so agents cannot be left on the previous
+    /// credential after a console rotation.
+    #[tokio::test]
+    async fn rotating_the_company_key_moves_the_composio_fingerprint() {
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-rotate-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+
+        let resolve = async || {
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None).await
+        };
+
+        company_key::store_key(&company, &secrets, "key-a")
+            .await
+            .unwrap();
+        let before = TenantComposio::fingerprint(&resolve().await);
+
+        company_key::store_key(&company, &secrets, "key-b")
+            .await
+            .unwrap();
+        let after = TenantComposio::fingerprint(&resolve().await);
+        assert_ne!(
+            before, after,
+            "a rotated company key must rebuild the roster, or agents keep the old credential"
+        );
+
+        // And clearing it is a change too — the roster must drop the tools.
+        company_key::store_key(&company, &secrets, "")
+            .await
+            .unwrap();
+        assert_eq!(
+            TenantComposio::fingerprint(&resolve().await),
+            TenantComposio::fingerprint(&None),
+            "a cleared credential resolves to nothing, so no tools are wired"
+        );
     }
 
     /// The bearer a config would present right now.

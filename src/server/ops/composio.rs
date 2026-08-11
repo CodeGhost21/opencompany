@@ -66,9 +66,10 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::composio::{
-    CatalogEntry, backend_url_or_default, store_token, token_configured,
-};
+// `token_configured` is gone from this list deliberately: the status route no
+// longer re-derives the credential tier from booleans, it asks the resolver
+// (`resolve_credential`) — see `credential_source_for` below.
+use crate::company::composio::{CatalogEntry, backend_url_or_default, store_token};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
@@ -143,6 +144,18 @@ async fn open_mode_toolkits(runtime: &CompanyRuntime) -> OpenModeToolkits {
     OpenModeToolkits::from_outcome(outcome)
 }
 
+/// Drop this company's cached catalog.
+///
+/// Exposed because the catalog is a property of the **credential**, not of the
+/// Composio token alone: changing the company's TinyHumans key
+/// ([`ops::company_key`](super::company_key)) can change which account the
+/// backend resolves and therefore which catalog it serves. Both writes evict
+/// through here rather than each reaching into the cache with its own key
+/// derivation.
+pub(crate) fn evict_catalog_cache(runtime: &CompanyRuntime) {
+    composio_toolkits::cache().evict(&catalog_cache_key(runtime));
+}
+
 /// This company's catalog cache key. The backend URL is resolved the same way
 /// the status DTO resolves it, so a company repointed at a different backend
 /// does not read the old backend's catalog.
@@ -165,8 +178,22 @@ fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
 async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, String> {
     // No credential of any tier means there is nothing to dial the backend
     // with. Say that, rather than spending the timeout to discover it.
-    let config = resolve_tenant(runtime).await.map_err(|_| {
-        "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+    //
+    // But say only that when it is what happened. `resolve_tenant` answers
+    // `Conflict` for "nothing configured" and propagates anything else — a
+    // secret-store read failure among them. Collapsing every error into "no
+    // credential yet" would tell an operator whose store hiccupped that they
+    // never set a key, which is the confident-wrong-answer this credential work
+    // exists to remove (see `company_key::resolve`).
+    let config = resolve_tenant(runtime).await.map_err(|err| {
+        if matches!(err.0, crate::error::OpenCompanyError::Conflict(_)) {
+            "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+        } else {
+            format!(
+                "this company's Composio credential could not be resolved: {}",
+                err.0
+            )
+        }
     })?;
     let fetch = crate::harness::composio::list_catalog_toolkits(&config);
     match tokio::time::timeout(composio_toolkits::FETCH_TIMEOUT, fetch).await {
@@ -326,22 +353,30 @@ struct ConnectionDto {
     connected: bool,
 }
 
-/// Which tier a company's Composio credential comes from, mirroring the harness
-/// resolver's precedence: the company's **own** stored token wins, else this
-/// instance's platform identity, else nothing.
+/// Which tier a company's Composio credential comes from.
 ///
-/// Takes the environment as a seam so the matrix is testable without mutating the
-/// process environment.
-fn credential_source_for(
-    stored: bool,
-    env: &dyn crate::app::config::EnvSource,
-) -> CredentialSource {
-    if stored {
-        return CredentialSource::Static;
-    }
-    TinyhumansTokenSource::from_env(env)
-        .map(|source| source.credential_source())
-        .unwrap_or(CredentialSource::None)
+/// Asks the resolver itself rather than restating its precedence. The console
+/// must never be able to name a tier the agents are not on, and a second copy of
+/// the rule is a second place to forget to update — which is how a status route
+/// ends up confidently reporting a credential that no longer resolves.
+///
+/// Takes the instance identity already resolved, rather than an `&dyn
+/// EnvSource`: a trait object with no `Send + Sync` bound held across the await
+/// below makes the whole handler future non-`Send`, which axum rejects. Callers
+/// resolve it from whichever environment they mean, so the matrix stays testable
+/// without mutating the process environment.
+async fn credential_source_for(
+    runtime: &CompanyRuntime,
+    token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
+) -> Result<CredentialSource, ApiError> {
+    Ok(crate::company::composio::resolve_credential(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        token_source,
+    )
+    .await
+    .map_err(ApiError)?
+    .source())
 }
 
 /// Resolves the Composio status DTO for a company.
@@ -354,11 +389,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         ),
         None => (false, Vec::new()),
     };
-    // Mirrors the harness resolver: this company's own token wins, else the
-    // instance's platform identity, else nothing.
-    let stored = token_configured(runtime.id(), runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
     let env = crate::app::config::ProcessEnv;
     let (env_url, api_url) = {
         use crate::app::config::EnvSource;
@@ -367,7 +397,11 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
             env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
         )
     };
-    let credential_source = credential_source_for(stored, &env);
+    let credential_source = credential_source_for(
+        runtime,
+        TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
+    )
+    .await?;
     let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
@@ -410,7 +444,7 @@ async fn set_token(
     // cached one rather than serving the previous account's answer for up to
     // `CATALOG_TTL` — the response below re-reads the status, so the operator
     // sees the new list immediately.
-    composio_toolkits::cache().evict(&catalog_cache_key(runtime));
+    evict_catalog_cache(runtime);
     // After the store, so the journal records a completed change. An empty
     // value is a clear, not a set — the two are worth telling apart in an
     // audit trail, since one grants access and the other withdraws it.
@@ -515,22 +549,32 @@ pub(crate) async fn resolve_tenant(
     let env = crate::app::config::ProcessEnv;
     let backend_env = env.get(crate::company::composio::COMPOSIO_BACKEND_URL_ENV);
     let api_env = env.get(crate::company::composio::TINYHUMANS_API_URL_ENV);
-    crate::harness::composio::TenantComposio::resolve(
+    // Resolved here rather than through `TenantComposio::resolve` so a store
+    // read failure stays distinguishable from "nothing configured". This is the
+    // path that *establishes* a connection, and a connection lives on the
+    // backend keyed by the account the bearer resolves to — so guessing here
+    // would attribute a company's Gmail to whichever identity happened to
+    // resolve during the outage. The roster path can afford to shrug and
+    // withhold tools; this one must say what went wrong and connect nothing.
+    let credential = crate::company::composio::resolve_credential(
         runtime.id(),
         runtime.secrets().as_ref(),
-        toolkits,
-        backend_env,
-        api_env,
         crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
     )
     .await
-    .ok_or_else(|| {
-        ApiError(crate::error::OpenCompanyError::Conflict(
-            "no Composio credential is available for this company — this instance has no platform \
-             identity, so paste the company's Composio token first"
+    .map_err(ApiError)?;
+    if !credential.configured() {
+        return Err(ApiError(crate::error::OpenCompanyError::Conflict(
+            "no Composio credential is available for this company — set the company's TinyHumans \
+             credential, or paste its own Composio token"
                 .to_string(),
-        ))
-    })
+        )));
+    }
+    Ok(crate::harness::composio::TenantComposio::new(
+        backend_url_or_default(backend_env, api_env),
+        credential,
+        toolkits,
+    ))
 }
 
 #[cfg(feature = "composio")]
@@ -1052,10 +1096,18 @@ mod tests {
 
     /// The hosted shape, driven through the env seam (no process mutation): a
     /// company that pasted nothing reads `attested` from the instance identity,
-    /// its own token still outranks that, and neither yields `none`.
-    #[test]
-    fn credential_source_matrix_follows_the_resolver_precedence() {
+    /// its own TinyHumans key outranks that, its own Composio token outranks
+    /// both, and with none of the three the answer is `none`.
+    ///
+    /// Drives the **real** resolver through a real secret store rather than a
+    /// restatement of its precedence. A pure function that merely mirrored the
+    /// rule would keep passing after the resolver lost a tier — which is exactly
+    /// what the negative control for issue #586 caught.
+    #[tokio::test]
+    async fn credential_source_matrix_follows_the_resolver_precedence() {
         use crate::app::config::MapEnv;
+        use crate::company::company_key;
+        use crate::company::composio::store_token;
 
         let dir = tempfile::Builder::new()
             .prefix("oc-dto-")
@@ -1068,28 +1120,95 @@ mod tests {
             path.display().to_string(),
         )]);
 
+        /// The instance identity a given environment resolves to.
+        fn source_of(
+            env: &dyn crate::app::config::EnvSource,
+        ) -> Option<std::sync::Arc<super::TinyhumansTokenSource>> {
+            super::TinyhumansTokenSource::from_env(env).map(std::sync::Arc::new)
+        }
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "matrix", GRANTED).await;
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("matrix"))
+            .expect("registered");
+        let secrets = runtime.secrets();
+        let id = runtime.id().clone();
+
         // Nothing stored + a projected instance identity → attested.
         assert_eq!(
-            credential_source_for(false, &projected),
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
             CredentialSource::Attested
         );
-        // The company's own token outranks the instance identity.
+        // Nothing stored at all → nothing obtainable, so no tools.
         assert_eq!(
-            credential_source_for(true, &projected),
-            CredentialSource::Static
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::None
         );
-        // A static instance key is the static tier too.
+        // A static instance key is the static tier.
         assert_eq!(
             credential_source_for(
-                false,
-                &MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th_static")])
-            ),
+                &runtime,
+                source_of(&MapEnv::new([(
+                    crate::company::credentials::API_KEY_ENV,
+                    "th_static"
+                )]))
+            )
+            .await
+            .unwrap(),
             CredentialSource::Static
         );
-        // Neither → nothing obtainable, so no tools.
+
+        // The company's own TinyHumans key outranks the instance identity — a
+        // company with a key set connects providers as *itself*, not as the pod
+        // it happens to run in (issue #586)…
+        company_key::store_key(&id, secrets.as_ref(), "th_company")
+            .await
+            .unwrap();
         assert_eq!(
-            credential_source_for(false, &MapEnv::default()),
-            CredentialSource::None
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
+            CredentialSource::Company
+        );
+        // …and is the whole credential when the instance carries none, which is
+        // the case this issue exists to fix.
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::Company
+        );
+
+        // The company's own Composio token outranks everything.
+        store_token(&id, secrets.as_ref(), "byo-composio")
+            .await
+            .unwrap();
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&projected))
+                .await
+                .unwrap(),
+            CredentialSource::Static
+        );
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::Static
+        );
+
+        // Clearing it falls back exactly one tier, not all the way to nothing.
+        store_token(&id, secrets.as_ref(), "").await.unwrap();
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default()))
+                .await
+                .unwrap(),
+            CredentialSource::Company
         );
 
         std::fs::remove_dir_all(&dir).ok();

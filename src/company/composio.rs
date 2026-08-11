@@ -10,9 +10,13 @@
 //! closed), never a borrowed identity. Only the backend URL may be overridden
 //! from the environment.
 
+use std::sync::Arc;
+
 use serde::Serialize;
 
 use crate::Result;
+use crate::company::company_key;
+use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
@@ -67,6 +71,47 @@ pub async fn store_token(
     secrets
         .set(company, TOKEN_KEY, SecretValue(token.trim().to_string()))
         .await
+}
+
+/// The credential this company's Composio calls present, or [`Credential::None`]
+/// when none can be obtained at all.
+///
+/// The **one** derivation of that answer, and the reason it lives here rather
+/// than in the feature-gated harness: both callers need it in every build.
+/// [`TenantComposio::resolve`](crate::harness::composio::TenantComposio::resolve)
+/// builds the agent-facing config from it, and the console status route
+/// ([`ops::composio`](crate::server::ops::composio)) reports its
+/// [`source`](Credential::source) — so the tier the console shows an operator
+/// cannot disagree with the identity the agents actually present. Two functions
+/// that merely *mirrored* each other's precedence would drift the first time a
+/// tier was added to one of them, which is exactly the failure issue #586 exists
+/// to remove.
+///
+/// Precedence: the company's own Composio token ([`TOKEN_KEY`], the BYO escape
+/// hatch) wins; otherwise the shared brokered-credential seam
+/// [`company_key::resolve`] answers — the company's own TinyHumans key, else this
+/// instance's platform identity, else nothing.
+///
+/// A store read error **propagates** rather than degrading to the next tier —
+/// see [`company_key::resolve`] for why an unreadable store must not silently
+/// change which account a call is attributed to.
+pub async fn resolve_credential(
+    company: &CompanyId,
+    secrets: &dyn SecretStore,
+    token_source: Option<Arc<TinyhumansTokenSource>>,
+) -> Result<Credential> {
+    let byo = match secrets.get(company, TOKEN_KEY).await? {
+        Some(SecretValue(token)) => Credential::from_value(token),
+        None => Credential::None,
+    };
+    Ok(match byo {
+        // The company's own Composio token always wins.
+        byo @ Credential::Value(_) => byo,
+        // Everything else is the shared seam's answer, so a rotated company key
+        // reaches Composio the same cycle it reaches every other brokered
+        // surface.
+        _ => company_key::resolve(company, secrets, token_source).await?,
+    })
 }
 
 /// Whether a non-empty per-tenant token is stored — never the token itself.

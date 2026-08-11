@@ -42,6 +42,10 @@ Supporting docs:
 - [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — HTTP routes and auth
+- [credentials.md](credentials.md) — the company's own TinyHumans key: the one
+  seam a brokered surface resolves through (Composio today), why rotating it
+  reaches every surface wired to it, and which surfaces are deliberately outside
+  it
 - [config.md](config.md) — configuration and the one-key story
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
