@@ -207,7 +207,22 @@ async fn run_workflow_inner(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
-    let graph = super::translate::translate(workflow);
+    let mut graph = super::translate::translate(workflow);
+    // Issue #460: the company's `ApprovalPolicy` decides which `tool_call`
+    // nodes stop for an operator, and says so by marking them with the engine's
+    // own `requires_approval` flag — so a gated tool call inherits #395's whole
+    // pause → park → resume path instead of needing a second one. BEFORE
+    // `compile`, because the flag is read off the compiled node config.
+    //
+    // Skipped for a dry run: every effect is stubbed, so there is nothing to
+    // approve, and pausing would stop the dry run walking the rest of the graph
+    // — the one thing it exists to do. See `super::gate` for why the gate is
+    // not in the invoker, and for the deviations this takes deliberately.
+    let gated = if ctx.dry_run {
+        Vec::new()
+    } else {
+        super::gate::apply_tool_call_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+    };
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     // Issue #371: the caller's run id, not a freshly minted one. Correlating the
     // run's progress events with the `WorkflowRunFinished` the caller journals
@@ -585,9 +600,12 @@ async fn run_workflow_inner(
         record,
         &workflow.id,
         &run_id,
-        &trigger_input,
-        &outcome.pending_approvals,
-        &deliveries,
+        PausedGates {
+            trigger_input: &trigger_input,
+            pending: &outcome.pending_approvals,
+            deliveries: &deliveries,
+            gated: &gated,
+        },
     )
     .await;
 
@@ -598,6 +616,25 @@ async fn run_workflow_inner(
         cancelled: false,
         nodes,
     })
+}
+
+/// What a settled run left for the operator to decide.
+///
+/// Grouped rather than passed as four more parameters because they only make
+/// sense together: the gates the engine paused on, the input a continuation has
+/// to be started with, what this run already delivered (so approving does not
+/// re-send it), and which of those gates the company's policy raised rather
+/// than an author (issue #460), so the card can name the call.
+struct PausedGates<'a> {
+    /// The trigger payload the paused run was started with.
+    trigger_input: &'a Value,
+    /// The node ids the engine reported on `pending_approvals`.
+    pending: &'a [String],
+    /// What this run actually routed (issue #438).
+    deliveries: &'a [crate::ports::DeliveryReport],
+    /// The policy-raised gates, so a card can say which tool and why. An
+    /// authored gate has no entry here and its card stays as #395 shipped it.
+    gated: &'a [super::gate::GatedToolCall],
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -640,10 +677,14 @@ async fn park_pending_gates(
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
-    trigger_input: &Value,
-    pending: &[String],
-    deliveries: &[crate::ports::DeliveryReport],
+    paused: PausedGates<'_>,
 ) {
+    let PausedGates {
+        trigger_input,
+        pending,
+        deliveries,
+        gated,
+    } = paused;
     if pending.is_empty() {
         return;
     }
@@ -663,12 +704,20 @@ async fn park_pending_gates(
     };
 
     for node_id in pending {
+        // Issue #460: when the policy is what stopped this node, the card says
+        // which tool and why. An authored gate carries neither — nobody asked a
+        // question on its behalf — so it stays exactly as #395 shipped it.
+        let tool = gated
+            .iter()
+            .find(|gate| gate.node_id == *node_id)
+            .map(|gate| (gate.slug.as_str(), gate.reason.as_str()));
         let effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
+            tool,
         );
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(
