@@ -598,6 +598,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn console_key_beats_env_for_the_managed_provider() {
+        // Issue #585: the company's own key is the admin's to set. A key stored
+        // through the console must win over the deploy-time env credential even
+        // on the `managed` provider — otherwise the only way to pay for a tenant
+        // is an environment variable the admin cannot reach.
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let env = EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            api_key: "platform-key".into(),
+        };
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "managed".into(),
+                base_url: None,
+                models: BTreeMap::new(),
+            },
+        )
+        .await
+        .unwrap();
+        store_key(&company, &secrets, "company-key").await.unwrap();
+
+        let decl = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("runtime managed resolves");
+        assert_eq!(decl.source, InferenceSource::Runtime);
+        assert_eq!(decl.provider, "managed");
+        assert_eq!(decl.api_key(), "company-key");
+        assert!(decl.key_configured());
+        // The endpoint still inherits the platform's, so setting only a key does
+        // not silently move the tenant off the managed brain.
+        assert_eq!(decl.base_url, "https://env.example/openai/v1");
+
+        // Clearing it falls back to the env credential rather than 401ing.
+        clear_key(&company, &secrets).await.unwrap();
+        let decl = resolve_effective(&company, &Inference::default(), Some(&env), &secrets)
+            .await
+            .unwrap()
+            .expect("runtime managed still resolves");
+        assert_eq!(decl.api_key(), "platform-key");
+    }
+
+    #[tokio::test]
     async fn no_source_resolves_to_none() {
         let company = CompanyId::new("acme");
         let secrets = MemSecrets::default();
