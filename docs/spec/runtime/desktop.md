@@ -40,6 +40,38 @@ Anything reading or writing that state must depend on **both** — a callback th
 closes over the scope but depends only on the company will write under the host
 the operator just switched away from.
 
+### There is no host at the desktop's own origin
+
+`resolveConfig()` falls back to an empty base url, which means *same origin*.
+That is how every browser deployment finds its host — `opencompany serve` mounts
+the console at the origin serving the assets — and it is meaningless in a
+webview, whose origin is `tauri://localhost`. `isAddressableBaseUrl()` is the
+one place that says so, and both the bootstrap add in `App.tsx` and
+`restoreConnections()` ask it.
+
+The failure it prevents is not a network one. `join` is textual, so an empty
+base yields a *relative* url and `reqwest` refuses it at `send` — the request
+never reaches a socket, and the console reports "couldn't reach a company host
+at this origin" about a host that was never addressed. `ProxyRegistry::upsert`
+now rejects such a base url at registration for the same reason: it is the last
+moment at which the caller is still on the stack.
+
+Two consequences follow, and both are load-bearing
+([#613](https://github.com/tinyhumansai/opencompany/issues/613)):
+
+- **The desktop can hold zero connections.** The embedded host arrives over IPC
+  and may never arrive at all. The rail therefore stays on screen at a count of
+  zero — it holds the only "add a host" there is — and the console renders the
+  absence rather than an empty pane.
+- **Launch selection is stated, not sorted.** Restored hosts are added before
+  the embedded one, so list order records when a host was learned about, not
+  which one a person means. `App` selects the embedded host when nothing has
+  been chosen.
+
+Only the same-origin *default* is refused. A desktop pointed at a real host
+through `?api=` or an injected `OPENCOMPANY_CONFIG` still gets its bootstrap
+connection.
+
 ## The transport seam
 
 `Transport` has two implementations, chosen at runtime by `isDesktopRuntime()`
