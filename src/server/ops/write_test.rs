@@ -2383,6 +2383,68 @@ async fn a_copilot_thread_question_opens_no_board_card() {
     );
 }
 
+/// Issue #267: a question about the board's own state is answered, not carded.
+///
+/// This is the exact message that produced one of the six dead `backlog` cards
+/// on a live company. The route now triages it as `Answer`, so the
+/// deterministic card path stands down — and the reply still comes back OK,
+/// because triage decides what gets *written*, never whether the operator gets
+/// an answer.
+///
+/// The control half is the point: the same route, one sentence later, still
+/// opens a card for a real instruction. A test that only proved the question
+/// wrote nothing would also pass on a route that had stopped carding entirely.
+#[tokio::test]
+async fn a_question_about_the_board_opens_no_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    for ask in [
+        "what is there in the tasks list?",
+        "Tell what is there in the tasks list",
+        "list the tasks",
+        "show me the board",
+    ] {
+        let (status, body) = send(
+            &state,
+            "POST",
+            "/api/v1/company/chat",
+            Some(json!({ "message": ask })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "asking `{ask}` must still answer");
+        assert!(body["responses"].is_array(), "no reply for `{ask}`: {body}");
+
+        let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let cards = board.as_array().expect("the board lists cards");
+        assert!(
+            cards.is_empty(),
+            "the question `{ask}` left work on the board: {board}"
+        );
+    }
+
+    // Control: a real instruction on the same route still opens exactly one
+    // card, so this narrows the detector rather than switching it off.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": "build the landing page"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = board.as_array().expect("the board lists cards");
+    assert_eq!(
+        cards.len(),
+        1,
+        "an instruction must still open exactly one card: {board}"
+    );
+}
+
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
     let home_dir = home();
