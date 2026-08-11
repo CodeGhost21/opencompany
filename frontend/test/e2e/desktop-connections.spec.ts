@@ -122,6 +122,15 @@ async function asDesktop(page: Page, config: BridgeConfig) {
   }, config);
 }
 
+/**
+ * A port nothing listens on, so a remembered remote host is reliably down.
+ *
+ * Being unreachable is what gives the ordering test its teeth: if the console
+ * opened on this row rather than on the embedded host, the assertion that the
+ * board is on screen could not pass.
+ */
+const DEAD_REMOTE = "http://127.0.0.1:9";
+
 /** Seeds the dead row a desktop built before this fix wrote on its first run. */
 async function seedSameOriginProfile(page: Page) {
   await page.addInitScript(() => {
@@ -170,6 +179,56 @@ test("a desktop opens on its embedded host, not on its own origin", async ({
     JSON.parse(window.localStorage.getItem("oc.connections.v1") ?? "[]"),
   );
   expect(stored.map((p: { baseUrl: string }) => p.baseUrl)).not.toContain("");
+});
+
+test("a remembered host does not take the launch just by being older", async ({
+  page,
+  baseURL,
+}) => {
+  // The case the fix's *selection* half exists for, and the one a single-host
+  // test cannot reach. A host added in some previous session is restored at
+  // first paint; the embedded host is appended later, because its port only
+  // arrives over IPC. So list order records when each was learned about — and
+  // taking the first entry would open the desktop on last Tuesday's remote host
+  // instead of on the machine in front of the person. That is #613's shape
+  // again, with the dead bootstrap swapped for a stale favourite.
+  await asDesktop(page, { embedded: new URL(baseURL ?? "http://127.0.0.1:8123").origin });
+  await page.addInitScript((remote: string) => {
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-remembered-remote",
+          baseUrl: remote,
+          label: "Remembered remote",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+  }, DEAD_REMOTE);
+  await page.goto("/#/tasks");
+
+  // Both hosts are registered, so the rail is drawn and there is a choice.
+  await expect(page.locator('[data-testid^="connection-row-"]')).toHaveCount(2, {
+    timeout: 30_000,
+  });
+  // The console on screen is a working one — which it could not be if the
+  // unreachable remote had been selected for sorting first.
+  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+  await expect(page.getByTestId("connection-error")).toHaveCount(0);
+
+  // Said directly, rather than inferred from what rendered: the remembered host
+  // is present and not current, and whatever is current is live.
+  await expect(page.getByTestId("connection-row-conn-remembered-remote")).toHaveAttribute(
+    "aria-current",
+    "false",
+  );
+  await expect(
+    page.locator('[data-testid^="connection-row-"][aria-current="true"]'),
+  ).toHaveAttribute("data-status", "live");
 });
 
 test("a desktop whose host did not start says so, and can still add one", async ({ page }) => {
