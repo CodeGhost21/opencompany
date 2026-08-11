@@ -52,14 +52,40 @@ interface Props {
   sub: string | null;
   /** Open an agent, or return to the roster with `null`. */
   onOpenAgent: (agentId: string | null) => void;
+  /**
+   * Bumped when first-run setup staffs the company, so this view re-reads a
+   * roster that now has people on it (`docs/spec/runtime/company-setup.md`).
+   */
+  refreshKey?: number;
+  /**
+   * Reopen first-run setup. Rendered as an in-place prompt while the company has
+   * nobody on it, so skipping the dialog is not a dead end.
+   */
+  onRunSetup?: () => void;
 }
 
 type Load = "loading" | "ready";
 
 /** The company's agents — showcased and operator-definable. */
-export function TeamView({ client, company, sub, onOpenAgent }: Props) {
+export function TeamView({
+  client,
+  company,
+  sub,
+  onOpenAgent,
+  refreshKey,
+  onRunSetup,
+}: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [fromHost, setFromHost] = useState(false);
+  /**
+   * The host answered the roster read **and** answered with nobody
+   * (`docs/spec/runtime/company-setup.md`).
+   *
+   * Distinct from `!fromHost`, which also covers a host with no `…/team` surface
+   * at all. Only the first case is a company waiting to be set up; offering
+   * setup on the second would open a dialog whose first call 404s.
+   */
+  const [hostEmpty, setHostEmpty] = useState(false);
   const [members, setMembers] = useState<TeamMember[]>([]);
   const [addOpen, setAddOpen] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
@@ -134,14 +160,24 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
       if (roster.length) {
         setMembers(roster.map(fromDto));
         setFromHost(true);
+        setHostEmpty(false);
       } else {
-        setMembers(starterTeam());
+        // NOT `starterTeam()`. The host answered, and answered with nobody — so
+        // fabricating twelve agents here would put "Ops Lead", "Front Desk" and
+        // ten more on screen that do not exist on the host, directly under a
+        // prompt saying the company has no team. An honest empty state plus the
+        // setup offer is the whole point of the flow
+        // (`docs/spec/runtime/company-setup.md`).
+        setMembers([]);
         setFromHost(false);
+        setHostEmpty(true);
       }
     } catch {
-      // No roster surface on this host yet — start from an editable team.
+      // No roster surface on this host yet — start from an editable team. NOT
+      // `hostEmpty`: we never learned who is on this company.
       setMembers(starterTeam());
       setFromHost(false);
+      setHostEmpty(false);
     } finally {
       setLoad("ready");
     }
@@ -151,7 +187,9 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
     setLoad("loading");
     void boot();
     void loadViewer();
-  }, [boot, loadViewer]);
+    // `refreshKey` re-runs the read after setup staffs the company; without it
+    // the operator lands on the roster they had before their team was built.
+  }, [boot, loadViewer, refreshKey]);
 
   /**
    * Re-read the roster on the way back from the agent sub-page (issue #264).
@@ -304,6 +342,30 @@ export function TeamView({ client, company, sub, onOpenAgent }: Props) {
             <UserPlus className="size-4" /> Add member
           </Button>
         </div>
+
+        {/*
+          The other half of "blocking but skippable": while nobody is on this
+          company, keep a visible way back into setup. Skipping the dialog leaves
+          an operator on an empty page, and burying the offer would make that a
+          dead end. Gated on `fromHost` too, so the pre-connection fabricated
+          starter roster — which is not a real team — cannot hide the prompt.
+        */}
+        {load === "ready" && onRunSetup && hostEmpty && (
+          <div
+            className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-dashed px-4 py-3"
+            data-testid="setup-prompt"
+          >
+            <div className="space-y-0.5">
+              <p className="text-sm font-medium">This company has no team yet</p>
+              <p className="text-sm text-muted-foreground">
+                Answer three questions and we'll build you a starting team.
+              </p>
+            </div>
+            <Button variant="secondary" onClick={onRunSetup} data-testid="setup-prompt-run">
+              <Sparkles className="size-4" /> Set up my company
+            </Button>
+          </div>
+        )}
 
         {load === "loading" ? (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">

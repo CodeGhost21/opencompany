@@ -41,6 +41,7 @@ import {
   SidebarCollapseToggle,
   SidebarControls,
 } from "@/components/sidebar-controls";
+import { SetupController } from "@/setup/SetupController";
 import { TourController } from "@/tour/TourController";
 import { useCompany } from "@/hooks/use-company";
 import { type AgentReplyEvent, type CompanyStreamEvent, useEvents } from "@/hooks/use-events";
@@ -234,6 +235,26 @@ export function AppShell({
   // Most call sites only ever change the top-level view.
   const setView = useCallback((next: View, nextSub?: string) => navigate(next, nextSub), [navigate]);
   const [feedbackOpen, setFeedbackOpen] = useState(false);
+  /**
+   * Whether the product tour should hold — first-run setup is on screen, or the
+   * company still has nobody on it (`docs/spec/runtime/company-setup.md`).
+   *
+   * Setup runs first, and the tour waits until there is a team to walk through.
+   * Holding on emptiness rather than only on the dialog is what stops a skipped
+   * setup from handing the operator a tour of empty pages instead.
+   */
+  // Starts held: until `SetupController` has read the roster we do not know
+  // whether setup is about to open, and an unheld tour would flash its welcome
+  // over it.
+  const [setupOpen, setSetupOpen] = useState(true);
+  /** Set by the Team page's prompt to reopen setup after a skip. */
+  const [setupForced, setSetupForced] = useState(false);
+  /**
+   * Bumped when setup finishes, so the Team page re-reads a roster that now has
+   * people on it. A counter rather than a boolean: a second run must re-trigger
+   * the read, and a flag that was already `true` would not.
+   */
+  const [teamBuilt, setTeamBuilt] = useState(0);
   // The shell owns every channel's transcript, not `ChatView` — the shell
   // mounts and unmounts `ChatView` per route, so component-local state there
   // would be discarded on every trip away from Chat and back.
@@ -1054,6 +1075,11 @@ export function AppShell({
               // unknown one against the host rather than guessing here.
               sub={sub}
               onOpenAgent={(agentId) => navigate("team", agentId ?? undefined)}
+              // Setup just staffed the company, so the roster read is stale.
+              refreshKey={teamBuilt}
+              // Skipping setup must not be a dead end: an unstaffed company keeps
+              // a visible way back in.
+              onRunSetup={() => setSetupForced(true)}
             />
           )}
           {view === "memory" && <MemoryView client={client} company={company} />}
@@ -1145,7 +1171,16 @@ export function AppShell({
         onOpenChange={setFeedbackOpen}
       />
 
-      <TourController company={company} setView={setView} />
+      <SetupController
+        client={client}
+        company={company}
+        force={setupForced}
+        onForceHandled={() => setSetupForced(false)}
+        onOpenChange={setSetupOpen}
+        onCompleted={() => setTeamBuilt((n) => n + 1)}
+      />
+
+      <TourController company={company} setView={setView} hold={setupOpen} />
     </SidebarProvider>
   );
 }

@@ -62,11 +62,23 @@ cannot fail that way, which is exactly why it goes first.
 
 ### What Phase 1 ships
 
+**Built.** All of the following is implemented and covered by tests:
+
 - All three questions (yes, including the automation one — see below).
-- The build-out screen, showing agents being created.
+- The build-out screen, showing agents created one at a time.
 - A real roster on the team page, each agent with a name, a role and a clear
   mandate.
 - The answers stored, so Phase 2 never has to ask again.
+
+One design change during the build, recorded because the earlier version is the
+more obvious one: **the model designs the team rather than rewriting a curated
+one.** The first cut had it polish a matched template's wording and swap at most
+two roles, which meant someone who said "I sell homeware and run a YouTube
+channel" got the e-commerce team with better sentences — the interesting half of
+their answer could not reach the line-up. The curated rosters remain as the
+phrasing reference in the prompt and as the fallback for every failure path, and
+the host still enforces the shape (4–6 agents, no duplicate roles, mandate
+length) after the fact rather than trusting the prompt for it.
 
 ### What Phase 1 deliberately does not ship
 
@@ -262,6 +274,26 @@ change later.
 
 The gap: someone who completes setup and then deletes every agent gets offered
 setup again. Acceptable, and probably correct.
+
+### What defining first-run this way actually costs
+
+Only obvious once it ran. **Every company under `companies/` declares a roster**,
+so none of them can ever reach the flow — there is no way to demo or test setup
+against the shipped examples. `companies/e2e_setup` exists for exactly that
+reason: a company that ships with nobody on it, which the end-to-end lane runs
+against.
+
+Two related problems surfaced in the same run, both fixed:
+
+- The Team page fabricated a twelve-agent starter roster whenever the host
+  answered with nobody, so "this company has no team yet" rendered directly above
+  twelve agents that did not exist on the host. A genuinely empty company now
+  shows an honest empty state.
+- The product tour is held not only while the dialog is open but for as long as
+  the company is unstaffed. Otherwise skipping setup popped the tour's welcome
+  straight over an empty console — the first impression this document exists to
+  replace. The hold is a render-time gate, not a state one: the tour's own effect
+  consumes a one-shot resume marker and must not be made to re-run.
 
 ## Open questions
 
