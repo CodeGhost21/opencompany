@@ -244,7 +244,8 @@ function ReplyFacepile({ replies }: { replies: ChatMessage[] }) {
           key={r.id}
           name={r.from === "you" ? "You" : (r.channel ?? "Company")}
           tone={r.channel}
-          className="size-4 rounded-[3px] text-[7px] ring-1 ring-background"
+          markOnly
+          className="size-4 rounded-[3px] ring-1 ring-background"
         />
       ))}
     </span>

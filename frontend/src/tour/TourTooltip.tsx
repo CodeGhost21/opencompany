@@ -30,10 +30,10 @@ export function TourTooltip({
         <span className="inline-flex items-center rounded-full bg-primary/10 px-2 py-0.5 text-2xs font-medium tracking-wide text-primary tabular-nums">
           Step {index + 1} of {size}
         </span>
-        <h3 className="mt-2.5 font-heading text-[15px] leading-tight font-semibold">
+        <h3 className="mt-2.5 font-heading text-base leading-tight font-semibold">
           {step.title as ReactNode}
         </h3>
-        <p className="mt-1.5 text-[13px] leading-relaxed text-muted-foreground">
+        <p className="mt-1.5 text-sm leading-relaxed text-muted-foreground">
           {step.content as ReactNode}
         </p>
       </div>

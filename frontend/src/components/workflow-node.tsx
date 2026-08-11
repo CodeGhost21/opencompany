@@ -51,7 +51,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
         {runState && (
           <span
             className={cn(
-              "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
+              "shrink-0 rounded px-1.5 py-0.5 text-3xs font-medium uppercase tracking-wide",
               RUN_STATE_BADGE[runState],
             )}
             // "running" is now reported by the engine (issue #382), not a

@@ -19,15 +19,15 @@ export function WikiLink({ label, mcp, onClick }: { label: string; mcp?: boolean
       <span className="text-os-dim">[[</span>
       {label}
       <span className="text-os-dim">]]</span>
-      {mcp && <span className="rounded-sm-t border border-[var(--accent-line)] px-1 text-[8px] uppercase tracking-wide text-os-accent">mcp</span>}
+      {mcp && <span className="rounded-sm-t border border-[var(--accent-line)] px-1 text-3xs uppercase tracking-wide text-os-accent">mcp</span>}
     </>
   );
   return onClick ? (
-    <button onClick={onClick} className="inline-flex items-center gap-1 font-mono text-[10.5px] text-os-accent transition-opacity hover:opacity-70">
+    <button onClick={onClick} className="inline-flex items-center gap-1 font-mono text-2xs text-os-accent transition-opacity hover:opacity-70">
       {inner}
     </button>
   ) : (
-    <span className="inline-flex items-center gap-1 font-mono text-[10.5px] text-os-accent">{inner}</span>
+    <span className="inline-flex items-center gap-1 font-mono text-2xs text-os-accent">{inner}</span>
   );
 }
 
@@ -44,8 +44,8 @@ function PanelHeader({
         </button>
       )}
       <div className="min-w-0 flex-1">
-        <div className="truncate text-[12.5px] font-bold" style={color ? { color } : undefined}>{title}</div>
-        {sub && <div className="truncate font-mono text-[9.5px] text-os-dim">{sub}</div>}
+        <div className="truncate text-xs font-bold" style={color ? { color } : undefined}>{title}</div>
+        {sub && <div className="truncate font-mono text-3xs text-os-dim">{sub}</div>}
       </div>
       {onClose && (
         <button onClick={onClose} aria-label="Close" className="shrink-0 text-os-dim transition-colors hover:text-os-text">
@@ -58,7 +58,7 @@ function PanelHeader({
 
 function SectionLabel({ icon: Icon, children }: { icon: LucideIcon; children: React.ReactNode }) {
   return (
-    <div className="mb-1.5 flex items-center gap-1.5 font-mono text-[9px] uppercase tracking-[0.16em] text-os-dim">
+    <div className="mb-1.5 flex items-center gap-1.5 font-mono text-3xs uppercase tracking-[0.16em] text-os-dim">
       <Icon className="h-3 w-3" /> {children}
     </div>
   );
@@ -80,10 +80,10 @@ function Row({
     >
       <span className="h-2 w-2 shrink-0 rounded-full" style={{ background: color }} />
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-[11.5px] font-semibold">{title}</span>
-        {sub && <span className="block truncate font-mono text-[9.5px] text-os-dim">{sub}</span>}
+        <span className="block truncate text-2xs font-semibold">{title}</span>
+        {sub && <span className="block truncate font-mono text-3xs text-os-dim">{sub}</span>}
       </span>
-      {badge && <span className="shrink-0 font-mono text-[9px] uppercase tracking-wide text-os-dim">{badge}</span>}
+      {badge && <span className="shrink-0 font-mono text-3xs uppercase tracking-wide text-os-dim">{badge}</span>}
       {onClick && <ChevronRight className="h-3.5 w-3.5 shrink-0 text-os-dim opacity-0 transition-opacity group-hover:opacity-100" />}
     </button>
   );
@@ -109,7 +109,7 @@ export function DeptOverviewCard({
         {head ? (
           <Row color={dept.color} title={head.name} sub={head.role} badge="lead" onClick={() => onPerson(dept.deptId)} />
         ) : (
-          <p className="rounded-md-t border border-dashed border-os-border px-3 py-2 font-mono text-[10.5px] text-os-dim">
+          <p className="rounded-md-t border border-dashed border-os-border px-3 py-2 font-mono text-2xs text-os-dim">
             No human lead yet — this team runs on agents.
           </p>
         )}
@@ -129,7 +129,7 @@ export function DeptOverviewCard({
             {tools.map((t) => (
               <WikiLink key={t.id} label={t.name} mcp={t.mcp} onClick={() => onTool(t.id)} />
             ))}
-            {tools.length === 0 && <span className="font-mono text-[10.5px] text-os-dim">no tools wired</span>}
+            {tools.length === 0 && <span className="font-mono text-2xs text-os-dim">no tools wired</span>}
           </div>
         </div>
       </div>
@@ -176,7 +176,7 @@ export function AgentHarnessCard({
         <SectionLabel icon={ListChecks}>instructions{task ? '' : ' · no SOP assigned'}</SectionLabel>
         {task ? (
           <button onClick={onTask} disabled={!onTask} className={`mb-1 text-left ${onTask ? 'hover:opacity-80' : ''}`}>
-            <span className="font-mono text-[10.5px] text-os-accent">[[{task.title}]]</span>
+            <span className="font-mono text-2xs text-os-accent">[[{task.title}]]</span>
           </button>
         ) : null}
         <ol className="mb-4 flex flex-col gap-1.5">
@@ -189,7 +189,7 @@ export function AgentHarnessCard({
         </ol>
 
         <SectionLabel icon={Server}>harness</SectionLabel>
-        <div className="mb-4 flex flex-col gap-1 font-mono text-[10.5px] text-os-muted">
+        <div className="mb-4 flex flex-col gap-1 font-mono text-2xs text-os-muted">
           <span>
             <span className="text-os-dim">tier</span> {agent.tier} · <span className="text-os-dim">runs on</span>{' '}
             {agent.instance} · {agent.model}
@@ -227,7 +227,7 @@ export function AgentHarnessCard({
           {tools.map((t) => (
             <WikiLink key={t.slug} label={t.name} mcp={t.mcp} onClick={onTool ? () => onTool(t.slug) : undefined} />
           ))}
-          {tools.length === 0 && <span className="font-mono text-[10.5px] text-os-dim">no tools wired</span>}
+          {tools.length === 0 && <span className="font-mono text-2xs text-os-dim">no tools wired</span>}
         </div>
 
         <SectionLabel icon={FileText}>last run</SectionLabel>
@@ -239,11 +239,11 @@ export function AgentHarnessCard({
             />
             <p className="text-2xs leading-relaxed text-os-muted">
               {lastRun.summary}
-              {runLabel && <span className="font-mono text-[9.5px] text-os-dim"> · {runLabel}</span>}
+              {runLabel && <span className="font-mono text-3xs text-os-dim"> · {runLabel}</span>}
             </p>
           </div>
         ) : (
-          <p className="font-mono text-[10.5px] text-os-dim">never run — trigger it from /agents</p>
+          <p className="font-mono text-2xs text-os-dim">never run — trigger it from /agents</p>
         )}
       </div>
     </div>
@@ -269,7 +269,7 @@ export function ToolDetailCard({
         </div>
         <SectionLabel icon={User}>used by ({wiki.usedBy.length})</SectionLabel>
         {wiki.usedBy.length === 0 ? (
-          <p className="font-mono text-[10.5px] text-os-dim">no agents in view</p>
+          <p className="font-mono text-2xs text-os-dim">no agents in view</p>
         ) : (
           <div className="flex flex-col gap-1">
             {wiki.usedBy.map((n) => (
@@ -298,19 +298,19 @@ export function MemoryNoteCard({
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
         <div className="mb-3 flex items-center gap-2">
           <span
-            className="rounded-sm-t border px-1.5 py-0.5 font-mono text-[9px] uppercase tracking-wide"
+            className="rounded-sm-t border px-1.5 py-0.5 font-mono text-3xs uppercase tracking-wide"
             style={{ borderColor: color, color }}
           >
             {note.folder}
           </span>
-          <span className="font-mono text-[9.5px] text-os-dim">
+          <span className="font-mono text-3xs text-os-dim">
             {note.wordCount} words · {note.chunks} chunk{note.chunks === 1 ? '' : 's'}
           </span>
         </div>
         {note.excerpt ? (
           <p className="mb-3 text-2xs leading-relaxed text-os-muted">{note.excerpt}</p>
         ) : (
-          <p className="mb-3 font-mono text-[10.5px] text-os-dim">no excerpt</p>
+          <p className="mb-3 font-mono text-2xs text-os-dim">no excerpt</p>
         )}
         <SectionLabel icon={FileText}>source</SectionLabel>
         <WikiLink label={`${note.id}.md`} />
@@ -345,7 +345,7 @@ export function SopTaskDetailCard({
         <div className="mb-4">
           <Row color={assigneeColor} title={assigneeName} sub={assigneeKindLabel} badge="1:1" onClick={onAssignee} />
           {runtime && (
-            <p className="mt-1 font-mono text-[9.5px] text-os-dim">
+            <p className="mt-1 font-mono text-3xs text-os-dim">
               runs on <span className="text-os-muted">{runtime}</span>
             </p>
           )}
@@ -366,7 +366,7 @@ export function SopTaskDetailCard({
           {tools.map((t) => (
             <WikiLink key={t.slug} label={t.name} mcp={t.mcp} onClick={onTool ? () => onTool(t.slug) : undefined} />
           ))}
-          {tools.length === 0 && <span className="font-mono text-[10.5px] text-os-dim">no tools wired</span>}
+          {tools.length === 0 && <span className="font-mono text-2xs text-os-dim">no tools wired</span>}
         </div>
       </div>
     </div>
@@ -399,7 +399,7 @@ export function GraphHumanDetailCard({
           {task ? (
             <Row color={color} title={task.title} sub={task.summary} badge="sop" onClick={onTask} />
           ) : (
-            <p className="font-mono text-[10.5px] text-os-dim">no task assigned</p>
+            <p className="font-mono text-2xs text-os-dim">no task assigned</p>
           )}
         </div>
         <SectionLabel icon={Wrench}>works with ({tools.length})</SectionLabel>

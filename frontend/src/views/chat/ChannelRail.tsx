@@ -179,7 +179,7 @@ function ChannelRow({
 function ChannelIcon({ channel }: { channel: Channel }) {
   if (channel.kind === "dm") {
     return channel.member ? (
-      <Avatar name={channel.name} tone={channel.tone} className="size-5 text-[9px]" />
+      <Avatar name={channel.name} tone={channel.tone} className="size-5 text-3xs" />
     ) : (
       <CircleDot className="size-4 shrink-0" aria-hidden />
     );

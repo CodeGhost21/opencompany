@@ -86,12 +86,12 @@ export function KnowledgeGraphFullscreen({
           <div className="absolute left-5 top-5 z-20 flex items-center gap-2.5 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2.5 py-1.5 backdrop-blur">
             <div className="flex flex-col">
               <span
-                className="max-w-[150px] truncate text-[12.5px] font-bold leading-tight transition-colors duration-300"
+                className="max-w-[150px] truncate text-xs font-bold leading-tight transition-colors duration-300"
                 style={currentDept ? { color: currentDept.color } : undefined}
               >
                 {currentDept?.name ?? 'Pick a pillar'}
               </span>
-              <span className="font-mono text-[8.5px] uppercase tracking-[0.14em] text-os-dim">
+              <span className="font-mono text-3xs uppercase tracking-[0.14em] text-os-dim">
                 {idx >= 0 ? `${idx + 1} / ${deptList.length}` : `${deptList.length} pillars`}
               </span>
             </div>

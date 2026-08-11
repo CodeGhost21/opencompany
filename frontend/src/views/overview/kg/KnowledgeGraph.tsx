@@ -1493,7 +1493,7 @@ export function KnowledgeGraph({
           { label: 'SOP task', color: CAT.task.color, Icon: CAT.task.Icon },
         ] as const
       ).map(({ label, color, Icon }) => (
-        <span key={label} className="flex items-center gap-1.5 font-mono text-[9.5px] text-os-muted">
+        <span key={label} className="flex items-center gap-1.5 font-mono text-3xs text-os-muted">
           <Icon className="h-3 w-3" style={{ color }} strokeWidth={2} />
           {label}
         </span>
@@ -1503,7 +1503,7 @@ export function KnowledgeGraph({
           reading the wheel is already looking to learn how to read it. The
           full sentence lives in the title — the strip is crowded enough
           without seven kind-labels wrapping around a whole caveat. */}
-      <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-[9.5px] text-os-dim" title={DERIVED_NOTICE}>
+      <span className="flex items-center gap-1 border-l border-os-border pl-3 font-mono text-3xs text-os-dim" title={DERIVED_NOTICE}>
         <Info className="h-3 w-3 shrink-0" strokeWidth={2} />
         derived data
       </span>
@@ -1528,7 +1528,7 @@ export function KnowledgeGraph({
       aria-label="Search the vault"
       title="Press / to search the vault"
       spellCheck={false}
-      className="w-40 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2 py-1.5 font-mono text-[10.5px] text-os-text placeholder:text-os-dim backdrop-blur outline-none transition-colors focus:border-os-accent"
+      className="w-40 rounded-sm-t border border-os-border-strong bg-os-bg/85 px-2 py-1.5 font-mono text-2xs text-os-text placeholder:text-os-dim backdrop-blur outline-none transition-colors focus:border-os-accent"
     />
   ) : null;
 
