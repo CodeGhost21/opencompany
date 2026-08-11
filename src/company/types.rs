@@ -71,8 +71,8 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 7] = [
-    "shell", "code", "web", "subagent", "media", "composio", "search",
+pub const GATEABLE_NAMESPACES: [&str; 8] = [
+    "shell", "code", "web", "subagent", "media", "composio", "search", "repo",
 ];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
@@ -122,6 +122,27 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
     grants
         .iter()
         .any(|grant| grant == "search" || grant.starts_with("search."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the bound-repository `repo`
+/// namespace (issue #245, agent half).
+///
+/// Like [`grants_media_explicit`], [`grants_composio_explicit`] and
+/// [`grants_search_explicit`], the catch-all `*` does **not** confer it, and the
+/// reason is sharper here than for any of them: `repo_checkout` materializes a
+/// third party's source — and, through `repo_pr`, a third party's patch — inside
+/// an agent's sandbox, where the same agent may also hold `shell`. That is a
+/// company deciding to let its agents read real code under an operator-installed
+/// credential, and a decision of that size is made by name rather than inherited
+/// from a wildcard set for file and shell tools.
+///
+/// Matches the bare `repo` grant or any `repo.*` sub-grant. Lives here (always
+/// compiled) so both the feature-gated harness wiring (`build::build_agent`) and
+/// the always-compiled console capability route key off one source of truth.
+pub fn grants_repo_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "repo" || grant.starts_with("repo."))
 }
 
 /// Whether a tool-grant list **explicitly** grants writes to the company
@@ -793,6 +814,32 @@ mod test {
         assert!(!grants_composio_explicit(&[]));
         // A substring match must not count as the composio namespace.
         assert!(!grants_composio_explicit(&["composiotools".into()]));
+    }
+
+    /// Bound repositories (issue #245, agent half) are granted ONLY by an
+    /// explicit `repo` / `repo.*` grant — never by the catch-all `*`. A
+    /// `repo_checkout` puts a third party's source inside a sandbox an agent may
+    /// also hold `shell` over, so a wildcard set for file and shell tools must
+    /// not carry it in.
+    #[test]
+    fn repo_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_repo_explicit(&["repo".into()]));
+        assert!(grants_repo_explicit(&["repo.checkout".into()]));
+        assert!(grants_repo_explicit(&["web.*".into(), "repo".into()]));
+        // The catch-all `*` must NOT grant repo.
+        assert!(!grants_repo_explicit(&["*".into()]));
+        assert!(!grants_repo_explicit(&["web.*".into()]));
+        assert!(!grants_repo_explicit(&[]));
+        // A substring match must not count as the repo namespace.
+        assert!(!grants_repo_explicit(&["reporting".into()]));
+        assert!(!grants_repo_explicit(&["repository".into()]));
+    }
+
+    /// `repo` is a budgetable namespace, so a `[plan].token_budgets` key of
+    /// that name is accepted rather than rejected as unknown.
+    #[test]
+    fn repo_is_a_gateable_namespace() {
+        assert!(GATEABLE_NAMESPACES.contains(&"repo"));
     }
 
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an
