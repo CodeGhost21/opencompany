@@ -165,6 +165,100 @@ export function migrationBannerText(files: number, folders: number): string {
 /** What the editor's status line is currently reporting. */
 type SaveState = "idle" | "saving" | "saved" | "error";
 
+/**
+ * Text the operator wrote into a note that no longer exists, held out of the
+ * editor so it can be handed back (issue #552 review).
+ *
+ * The `name` is the vanished note's, kept only so the banner can say *which*
+ * note this came out of — an operator with three tabs of notes open all week
+ * cannot identify a loose paragraph otherwise.
+ */
+interface Rescued {
+  name: string;
+  content: string;
+}
+
+/** What a live write means for the open note, once the refreshed tree is in. */
+export type OpenNotePlan =
+  /** Nothing to do: the note is untouched, or the operator is mid-edit. */
+  | { kind: "leave" }
+  /** Re-read the open note's body — it changed underneath a reader. */
+  | { kind: "reload" }
+  /**
+   * The open note no longer exists. `rescue` carries the operator's unsaved
+   * text, or `null` when the buffer matched what the host already had.
+   */
+  | { kind: "vanished"; rescue: string | null };
+
+/**
+ * Decide what a `workspace_changed` frame means for the note in the pane.
+ *
+ * Split out of the effect because "is the open note still there?" is the whole
+ * bug and it is not a question the *frame* can answer. `WorkspaceAnnouncer`
+ * emits exactly one `removed` frame naming the node the operator deleted — the
+ * **folder** — and never one per descendant, so a note three folders down
+ * disappears without any frame ever saying its id. The effect used to compare
+ * `event.nodeId` against `openId`, decide the frame was about somebody else,
+ * and return: the note left the tree, the pane stayed open on it, and the
+ * debounced autosave behind it went on to 404 against a node that was gone.
+ *
+ * So disappearance is read off the **refreshed tree**, which knows about every
+ * descendant, and the frame is consulted only for the case the tree cannot
+ * settle — a refetch that failed (`tree === null`) while the frame itself said
+ * the open note was removed. When both are silent the note is treated as alive,
+ * which is the safe direction: a pane wrongly closed loses the operator's
+ * place, and there is no reading of the evidence here that says to close it.
+ */
+export function planOpenNote({
+  openId,
+  event,
+  tree,
+  mode,
+  draft,
+  saved,
+}: {
+  /** The note in the pane, or `null` when none is open. */
+  openId: string | null;
+  /** The frame that just arrived. */
+  event: WorkspaceEvent;
+  /** The tree as refetched *after* the frame, or `null` if that read failed. */
+  tree: FsNode[] | null;
+  /** Which tab the pane is on. */
+  mode: "read" | "edit";
+  /** The editor's buffer, or `null` when the operator is not editing. */
+  draft: string | null;
+  /** The body the host last acknowledged, as the pane holds it. */
+  saved: string | null | undefined;
+}): OpenNotePlan {
+  if (!openId) return { kind: "leave" };
+  const goneFromTree = tree !== null && !tree.some((n) => n.id === openId);
+  const removedOutright = event.change === "removed" && event.nodeId === openId;
+  if (goneFromTree || removedOutright) {
+    return { kind: "vanished", rescue: unsavedDraft(draft, saved) };
+  }
+  // Not the open note's frame — the tree refresh above is the whole reaction.
+  if (event.nodeId !== openId) return { kind: "leave" };
+  // Never clobber an in-progress edit: in edit mode the operator has a dirty
+  // buffer and an autosave in flight, and replacing the body underneath them
+  // would discard typing no refetch can get back. They see the change when they
+  // switch back to Read, which refetches anyway.
+  return mode === "read" ? { kind: "reload" } : { kind: "leave" };
+}
+
+/**
+ * The words that would be lost if the open note went away right now, or `null`
+ * when the buffer says nothing the host does not already have.
+ *
+ * Compares against the acknowledged body rather than trusting the mere presence
+ * of a draft: switching to Edit seeds the buffer from a fresh read, so a note
+ * merely *opened* for editing and then deleted elsewhere has nothing to rescue
+ * and should close quietly instead of pushing a banner at the operator.
+ */
+function unsavedDraft(draft: string | null, saved: string | null | undefined): string | null {
+  if (draft === null) return null;
+  return draft === (saved ?? "") ? null : draft;
+}
+
 /** Formats an epoch-millis instant for the open note's header. */
 function formatUpdated(ms: number): string {
   if (!ms) return "—";
@@ -221,6 +315,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   const [mode, setMode] = useState<"read" | "edit">("read");
   const [draft, setDraft] = useState<string | null>(null);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  // Text salvaged from a note that was deleted while the operator was writing
+  // in it. Deliberately outside the editor's own state: `draft` belongs to
+  // whatever note is open, and this text belongs to one that no longer is.
+  const [rescued, setRescued] = useState<Rescued | null>(null);
 
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [prompt, setPrompt] = useState<PromptState | null>(null);
@@ -247,14 +345,20 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
 
   /* ---- tree ---- */
 
+  // Resolves to the tree it just installed, or `null` when this read answered
+  // nothing authoritative — it failed, or a newer read has already superseded
+  // it. Callers that only want the side effect ignore it; the live-writes
+  // effect needs the nodes themselves, because "did the open note survive this
+  // write?" is a question only the refreshed list can answer and reading it
+  // back out of `nodes` would race React's own state update.
   const loadTree = useCallback(
-    async (opts?: { silent?: boolean }) => {
+    async (opts?: { silent?: boolean }): Promise<FsNode[] | null> => {
       const mine = ++treeGen.current;
       if (opts?.silent) setRefreshing(true);
       else setLoading(true);
       try {
         const tree = await fetchTree(client, company);
-        if (mine !== treeGen.current) return;
+        if (mine !== treeGen.current) return null;
         setNodes(tree);
         setError(null);
         if (!expandedSeeded.current) {
@@ -267,9 +371,11 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
             ),
           );
         }
+        return tree;
       } catch (e) {
-        if (mine !== treeGen.current) return;
+        if (mine !== treeGen.current) return null;
         setError(message(e, "could not load the workspace"));
+        return null;
       } finally {
         if (mine === treeGen.current) {
           setLoading(false);
@@ -288,6 +394,9 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     setOpenFile(null);
     setDraft(null);
     setSaveState("idle");
+    // Another company's note is another namespace, and rescued text offering to
+    // be saved into the wrong workspace is worse than no offer at all.
+    setRescued(null);
     setExpanded(new Set());
     void loadTree();
     return () => {
@@ -429,26 +538,92 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   //     autosave in flight; replacing the body underneath them would discard
   //     typing that no refetch can get back. They see the change when they
   //     switch back to Read, which already refetches.
-  //  3. **A deleted open note closes the pane** rather than being refetched —
-  //     re-reading it would only 404 and leave an error where a note was.
+  //  3. **A vanished open note closes the pane** rather than being refetched —
+  //     re-reading it would only 404 and leave an error where a note was. Which
+  //     notes vanished is settled against the refreshed tree, not against the
+  //     frame's id; [`planOpenNote`] carries the reasoning.
   useEffect(() => {
     if (!event) return;
-    void loadTree({ silent: true });
-    if (!openId || event.nodeId !== openId) return;
-    if (event.change === "removed") {
-      setOpenId(null);
-      setOpenFile(null);
-      setDraft(null);
-      setFileError(null);
-      setSaveState("idle");
-      return;
-    }
-    if (mode === "read") void loadFile(openId);
+    const frame = event;
+    void (async () => {
+      const tree = await loadTree({ silent: true });
+      const plan = planOpenNote({
+        openId,
+        event: frame,
+        tree,
+        mode,
+        draft,
+        saved: openFile?.content,
+      });
+      if (plan.kind === "leave") return;
+      if (plan.kind === "reload") {
+        if (openId) void loadFile(openId);
+        return;
+      }
+      closeVanished(plan.rescue);
+    })();
     // `event.tick` is the dependency that makes a repeat write on the same node
     // re-run this; `mode` and `openId` are read, not watched, so switching to
     // Read does not replay the last frame.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [event?.tick]);
+
+  /**
+   * The open note stopped existing while the pane held it.
+   *
+   * Cancelling the debounced save comes first and is not a tidiness step: the
+   * timer is still armed on a node the host no longer has, so leaving it would
+   * fire one guaranteed-404 write for a note that is already gone.
+   *
+   * Dropping the operator's words is the one thing this must not do. Everything
+   * else in this view can be re-read from the host; unsaved typing cannot, and
+   * the old handler cleared `draft` on its way out. So the text moves into a
+   * banner that offers it back rather than leaving with the note it was written
+   * in. A buffer with nothing unsaved in it closes silently, as it always did —
+   * a banner for text the host already has is noise.
+   */
+  function closeVanished(rescue: string | null) {
+    if (timer.current) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+    // Preferred over the plan's answer because it is a ref and therefore
+    // current: the operator can keep typing during the tree refetch above, and
+    // those keystrokes reach `pending` while the plan was computed from the
+    // `draft` of the render the frame arrived in.
+    const job = pending.current;
+    pending.current = null;
+    const keep = job?.content ?? rescue;
+    if (keep !== null) {
+      const gone = nodeById(nodes, openId);
+      setRescued({ name: gone ? titleOf(gone) : "Untitled", content: keep });
+    }
+    setOpenId(null);
+    setOpenFile(null);
+    setDraft(null);
+    setFileError(null);
+    setSaveState("idle");
+  }
+
+  /** Land rescued text in the workspace as a note of its own. */
+  async function saveRescued() {
+    if (!rescued) return;
+    // Cleared only on success: a failed create toasts and leaves the banner
+    // standing, because dismissing it would destroy the last copy of the text.
+    if (await createAndOpen(`${rescued.name} (recovered)`, rescued.content)) setRescued(null);
+  }
+
+  async function copyRescued() {
+    if (!rescued) return;
+    try {
+      await navigator.clipboard.writeText(rescued.content);
+      toast.success("Copied your unsaved text.");
+    } catch {
+      // No clipboard permission, or an insecure origin. The text is rendered in
+      // the banner either way, so say so rather than leaving a dead button.
+      toast.error("Couldn't copy — select the text above and copy it yourself.");
+    }
+  }
 
   /* ---- deep link into one note (#552) ---- */
 
@@ -569,7 +744,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
 
   /* ---- mutations (apply-on-ack) ---- */
 
-  async function createAndOpen(name: string, content?: string) {
+  // Answers whether the note actually landed, which only the rescue banner
+  // reads: it is holding the last copy of some text and must not clear itself
+  // on a create that failed.
+  async function createAndOpen(name: string, content?: string): Promise<boolean> {
     try {
       const created = await createNode(client, company, {
         name: ensureMdExt(name.trim() || "Untitled"),
@@ -595,8 +773,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       setDraft(content ?? "");
       setSaveState("idle");
       setMode("edit");
+      return true;
     } catch (e) {
       toast.error(message(e, "could not create the note"));
+      return false;
     }
   }
 
@@ -786,6 +966,40 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
               <Button size="sm" variant="ghost" disabled={importing} onClick={discardLegacy}>
                 Discard
               </Button>
+            </AlertDescription>
+          </Alert>
+        )}
+        {/* Words rescued from a note that was deleted out from under the
+            editor. Rendered above whatever is in the pane rather than inside
+            it, because the note this text came from is gone and there is no
+            longer a pane it belongs to — and it stays until the operator does
+            something with it, since dismissing it on the next click is how the
+            last copy of a paragraph gets thrown away. */}
+        {rescued && (
+          <Alert className="m-3 mb-0 w-auto" data-testid="workspace-rescued-banner">
+            <AlertDescription className="flex flex-col items-stretch gap-2">
+              <span>
+                “{rescued.name}” was deleted while you were writing in it. Your unsaved text is
+                below — save it as a new note, or copy it out.
+              </span>
+              <Textarea
+                readOnly
+                value={rescued.content}
+                aria-label="Your unsaved text"
+                data-testid="workspace-rescued-text"
+                className="max-h-48 resize-none font-mono text-xs"
+              />
+              <span className="flex flex-wrap gap-2">
+                <Button size="sm" onClick={() => void saveRescued()}>
+                  Save as new note
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => void copyRescued()}>
+                  Copy
+                </Button>
+                <Button size="sm" variant="ghost" onClick={() => setRescued(null)}>
+                  Discard
+                </Button>
+              </span>
             </AlertDescription>
           </Alert>
         )}
