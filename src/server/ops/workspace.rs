@@ -431,9 +431,22 @@ async fn search(
 ///
 /// `ETag` is the payload's sha256 — the digest the store computed from the
 /// bytes it holds, so a conditional request is answered by the thing itself
-/// rather than by a timestamp that a rename would move. `Content-Disposition`
-/// is `inline`: the console renders images in place, and a browser opening the
-/// URL directly should show the file rather than be forced to download it.
+/// rather than by a timestamp that a rename would move.
+///
+/// # A stored `mime` is a caller's claim, so it does not decide the disposition
+///
+/// `node.mime` comes from the upload's declared `Content-Type` (or from
+/// `mime_guess` on a published deliverable's filename), which means it is
+/// influenced by whoever produced the file rather than derived from the bytes.
+/// Serving that value back with `Content-Disposition: inline` handed an
+/// uploader the ability to run script on the console's own origin, with the
+/// operator's `SameSite=Lax` session cookie attached — a top-level navigation
+/// sends it (issue #667).
+///
+/// So the mime no longer selects the disposition; [`serving_for`] does, from a
+/// closed list. Nothing about *storage* changed, which is the point: a payload
+/// already sitting in the tree under a mime some caller chose is neutralised the
+/// next time it is served, rather than only on uploads that happen after this.
 async fn read_blob(
     company: ScopedCompany,
     Path(NodePath { node_id }): Path<NodePath>,
@@ -448,19 +461,22 @@ async fn read_blob(
             "workspace blob {node_id}"
         ))));
     };
-    let mime = node
-        .mime
-        .unwrap_or_else(|| "application/octet-stream".to_string());
+    let serving = serving_for(node.mime.as_deref());
     let mut response = Response::builder()
         .status(StatusCode::OK)
-        .header(header::CONTENT_TYPE, mime)
+        .header(header::CONTENT_TYPE, serving.content_type)
+        // Without this, a browser is free to disregard the type above and sniff
+        // the bytes — which would make forcing `application/octet-stream` a
+        // suggestion rather than a decision.
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
         // Quoted per RFC 9110, and escaped defensively: a node name never
         // reaches this header, but a digest that somehow did would break the
         // response rather than the parse.
         .header(
             header::CONTENT_DISPOSITION,
             format!(
-                "inline; filename=\"{}\"",
+                "{}; filename=\"{}\"",
+                serving.disposition,
                 node.name.replace('"', "").replace(['\r', '\n'], "")
             ),
         );
@@ -475,6 +491,83 @@ async fn read_blob(
             "blob response failed: {e}"
         )))
     })
+}
+
+/// The media types a browser may render as a **document** on this origin.
+///
+/// Every entry is a format a browser decodes into pixels or into a viewer of its
+/// own, not one it parses into a DOM with a script context. `image/*` as a
+/// prefix rule would be the obvious way to write this and would be wrong:
+/// `image/svg+xml` is an XML *document* format whose `<script>` executes, so it
+/// is deliberately absent here and handled below instead.
+///
+/// `application/pdf` is included because a browser renders a PDF in a viewer
+/// that has no reach into the embedding origin's DOM or cookies, and because
+/// "open the URL, see the file" is the whole reason the route serves anything
+/// inline. Dropping it would be the more conservative choice — it would cost
+/// only direct navigation, since the console has never previewed a PDF — and is
+/// a one-line change if the tradeoff is ever judged differently.
+const INLINE_RENDERABLE: &[&str] = &[
+    "image/apng",
+    "image/avif",
+    "image/bmp",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/tiff",
+    "image/vnd.microsoft.icon",
+    "image/webp",
+    "image/x-icon",
+    "application/pdf",
+];
+
+/// Types the console may preview but no browser may open as a document.
+///
+/// SVG is both at once. In an `<img>` element it renders in the SVG spec's
+/// *secure static mode* — no script, no external references — which is why the
+/// console's image preview of one is safe, and why the type has to survive this
+/// far to reach it: an `<img>` will not decode SVG bytes without
+/// `image/svg+xml`. At the top of a tab the same bytes are a full document on
+/// this origin. Keeping the type and forcing `attachment` separates the two,
+/// where a single allow-list would have had to sacrifice one for the other.
+const PREVIEW_ONLY: &[&str] = &["image/svg+xml"];
+
+/// How [`read_blob`] will serve one stored payload.
+struct BlobServing {
+    content_type: String,
+    disposition: &'static str,
+}
+
+/// Decides a payload's response type and disposition from its stored mime.
+///
+/// Three outcomes, and the default is the safe one: a type nobody vouched for
+/// is served as opaque bytes the browser is told to download. That is what makes
+/// this a closed list rather than a blocklist — a media type invented after this
+/// was written lands in the last arm, not in the first.
+fn serving_for(stored: Option<&str>) -> BlobServing {
+    // The essence only: `image/png; charset=binary` is `image/png`, and a
+    // comparison against the raw value would miss it and downgrade a legitimate
+    // image to a download.
+    let essence = stored
+        .map(|m| m.split(';').next().unwrap_or(m).trim().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if INLINE_RENDERABLE.contains(&essence.as_str()) {
+        BlobServing {
+            content_type: essence,
+            disposition: "inline",
+        }
+    } else if PREVIEW_ONLY.contains(&essence.as_str()) {
+        BlobServing {
+            content_type: essence,
+            disposition: "attachment",
+        }
+    } else {
+        BlobServing {
+            content_type: "application/octet-stream".to_string(),
+            disposition: "attachment",
+        }
+    }
 }
 
 /// Names a multipart failure for what it actually was (issue #647).
@@ -834,5 +927,76 @@ async fn delete_node(
         Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
             "workspace node {node_id}"
         ))))
+    }
+}
+
+#[cfg(test)]
+mod serving_test {
+    use super::serving_for;
+
+    /// The classification table, stated once so the arms cannot drift apart.
+    #[test]
+    fn a_stored_mime_maps_to_exactly_one_serving() {
+        let cases: &[(Option<&str>, &str, &str)] = &[
+            // Renderable: the type survives and the browser shows it.
+            (Some("image/png"), "image/png", "inline"),
+            (Some("image/jpeg"), "image/jpeg", "inline"),
+            (Some("image/gif"), "image/gif", "inline"),
+            (Some("image/webp"), "image/webp", "inline"),
+            (Some("application/pdf"), "application/pdf", "inline"),
+            // Previewable but never a document.
+            (Some("image/svg+xml"), "image/svg+xml", "attachment"),
+            // Everything else is opaque bytes, whatever the caller called it.
+            (Some("text/html"), "application/octet-stream", "attachment"),
+            (
+                Some("application/xhtml+xml"),
+                "application/octet-stream",
+                "attachment",
+            ),
+            (Some("text/plain"), "application/octet-stream", "attachment"),
+            (
+                Some("application/zip"),
+                "application/octet-stream",
+                "attachment",
+            ),
+            (None, "application/octet-stream", "attachment"),
+        ];
+        for (stored, content_type, disposition) in cases {
+            let serving = serving_for(*stored);
+            assert_eq!(
+                (serving.content_type.as_str(), serving.disposition),
+                (*content_type, *disposition),
+                "stored mime {stored:?}"
+            );
+        }
+    }
+
+    /// A mime reaches this function from more than one writer, and only the
+    /// upload route normalises before storing — `capture_body` stores whatever
+    /// `mime_guess` produced, and a payload written straight through the port
+    /// stores whatever its caller passed. So the essence is matched here too,
+    /// or a parameterised or upper-cased `image/png` would be downgraded to a
+    /// download and the console's preview would break for it.
+    #[test]
+    fn the_essence_is_matched_not_the_raw_header_value() {
+        for stored in [
+            "image/png; charset=binary",
+            "  image/png  ",
+            "IMAGE/PNG",
+            "Image/Png ;q=1",
+        ] {
+            let serving = serving_for(Some(stored));
+            assert_eq!(serving.content_type, "image/png", "stored mime {stored:?}");
+            assert_eq!(serving.disposition, "inline", "stored mime {stored:?}");
+        }
+    }
+
+    /// The list is closed, not a blocklist: a type nobody has considered is
+    /// downloaded rather than rendered.
+    #[test]
+    fn an_unknown_type_falls_to_the_safe_arm() {
+        let serving = serving_for(Some("application/x-invented-2031"));
+        assert_eq!(serving.content_type, "application/octet-stream");
+        assert_eq!(serving.disposition, "attachment");
     }
 }

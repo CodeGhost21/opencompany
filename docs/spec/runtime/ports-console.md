@@ -229,6 +229,34 @@ including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:
 decode as UTF-8 is stored as a note instead, so an uploaded `.md` keeps its
 editor and backlinks.
 
+**A stored `mime` does not decide how the blob route serves it (#667).** That
+value is the uploader's declared `Content-Type`, or `mime_guess` on a published
+deliverable's filename — a claim, not a property of the bytes — and the route is
+same-origin with the console's `SameSite=Lax` session cookie, which a top-level
+navigation sends. So `read_blob` classifies against a **closed list** instead:
+
+| stored mime | served as | disposition |
+| --- | --- | --- |
+| raster image (`png`, `jpeg`, `gif`, `webp`, `avif`, `bmp`, `tiff`, `apng`, icon) or `application/pdf` | unchanged | `inline` |
+| `image/svg+xml` | unchanged | `attachment` |
+| anything else, including absent | `application/octet-stream` | `attachment` |
+
+Every response also carries `X-Content-Type-Options: nosniff`, without which the
+forced type is a suggestion. SVG is split out rather than folded into either
+neighbour because it is an image *and* a document: an `<img>` will not decode it
+without `image/svg+xml`, and inside an `<img>` the SVG spec's secure static mode
+runs no script — but the same bytes at the top of a tab are a scripted document
+on this origin. Keeping the type and forcing `attachment` serves both.
+
+This lives on the **read** path deliberately. Sanitising on upload would leave
+every payload already stored under a caller-chosen mime exploitable; classifying
+at serve time covers those too. The console is unaffected either way — it fetches
+blobs through `getBlob` and wraps them in an object URL, and `fetch` ignores
+`Content-Disposition` entirely.
+
+A repo-wide Content-Security-Policy is **not** part of this and is still absent;
+its lack is not specific to this route and closing this one does not close that.
+
 **Authorship (#326).** Every `WorkspaceNode` carries `created_by` and
 `updated_by`, both a `WorkspaceOrigin` ∈ `seed | operator | agent{id}`. `write`
 takes the author and stamps `updated_by`; `create` receives a fully-formed node
