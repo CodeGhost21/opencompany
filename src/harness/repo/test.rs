@@ -897,9 +897,16 @@ async fn repo_pr_says_the_forge_is_not_wired_rather_than_inventing_an_empty_diff
         .await
         .unwrap();
     assert!(result.is_error, "{result:?}");
+    let text = result.text();
+    // The operator tier's `Unimplemented`, passed through rather than dressed
+    // up. An agent told the capability is missing can say so; one told "no
+    // changes" reports a wrong conclusion confidently — which is the whole
+    // reason the manager refuses to answer with an empty diff.
+    assert!(text.contains("forge client"), "{text}");
+    assert!(text.contains("github"), "{text}");
     assert!(
-        !result.text().is_empty(),
-        "an unwired forge must say so, not answer empty"
+        text.contains("#7"),
+        "the refusal must name what was asked: {text}"
     );
 }
 
