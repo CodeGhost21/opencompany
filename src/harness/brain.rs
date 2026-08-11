@@ -5620,7 +5620,7 @@ members = ["eng1", "eng2"]
             None,
         )
         .with_requests(requests.clone());
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = crate::policy::test_support::composio_send_args();
         let request = ToolPolicyRequest::new(
             "composio_execute",
             args.clone(),
@@ -5856,7 +5856,14 @@ members = ["eng1", "eng2"]
         let log: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
         let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        // Issue #470: a real catalogued send, with the action's own parameters
+        // under `arguments` where the tool's schema puts them — so the
+        // re-dispatch path this test covers carries a call the classifier can
+        // actually read.
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
         requests
             .grants()
             .grant(crate::runtime::grants::GrantedCall {

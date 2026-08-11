@@ -950,6 +950,15 @@ mod tests {
     use super::*;
     use oh::agent::tool_policy::{ToolCallContext, ToolPolicyRequest};
 
+    // Issue #470: the `composio_execute` fixtures are built here, from the same
+    // key the classifier reads, so a call in a test reaches the same catalogue
+    // lookup a call in production does.
+    use crate::policy::test_support::{
+        COMPOSIO_OTHER_SEND_SLUG, COMPOSIO_READ_SLUG, COMPOSIO_SEND_SLUG, composio_args,
+        composio_read_args, composio_send_args, composio_unclassified_args,
+        composio_unclassified_args_numbered,
+    };
+
     fn policy(mode: &str, always: &[&str], auto_under: Option<f64>) -> ApprovalPolicy {
         let p = Policy {
             mode: mode.to_string(),
@@ -1397,7 +1406,7 @@ mod tests {
     #[tokio::test]
     async fn require_approval_records_the_request_to_park() {
         let (p, queue) = queued_policy("supervised", &[]);
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         assert!(matches!(
             p.check(&request("composio_execute", args.clone())).await,
             ToolPolicyDecision::RequireApproval { .. }
@@ -1413,6 +1422,65 @@ mod tests {
             queued[0].reason.contains("supervised"),
             "the operator-facing reason rides along: {}",
             queued[0].reason
+        );
+    }
+
+    /// Issue #470, at the layer that projects a blocked call onto the effect
+    /// the operator's card is built from.
+    ///
+    /// The fixtures above used to name their action under a key nothing reads,
+    /// so every Composio test in this module classified through the
+    /// unknown-is-a-send fallback and none of them ever reached the catalogue.
+    /// Read and send came out identical, and a regression in the split would
+    /// have failed nothing here. This asserts they come out different, and
+    /// asserts the classification rather than the parking decision — so it
+    /// stays honest across issue #559, which changes whether a read parks but
+    /// not what it is.
+    #[tokio::test]
+    async fn a_composio_read_and_a_composio_send_are_classified_differently() {
+        let read = composio_read_args();
+        let send = composio_send_args();
+
+        assert_eq!(
+            classify_group("composio_execute", &read),
+            EffectGroup::Other,
+            "`{COMPOSIO_READ_SLUG}` is tagged `Read` in the vendored catalogue; \
+             if this fails the lookup is not being reached"
+        );
+        assert!(
+            grantable("composio_execute", &read),
+            "a read scoped to one connected account is what a standing grant \
+             can honestly describe"
+        );
+
+        assert_eq!(
+            classify_group("composio_execute", &send),
+            EffectGroup::Send,
+            "`{COMPOSIO_SEND_SLUG}` is tagged `Write`"
+        );
+        assert!(!grantable("composio_execute", &send));
+
+        // The cautious fallback still has its own coverage, and still says
+        // send — but now because the catalogue was asked and had no answer,
+        // not because the classifier never saw an action at all.
+        let unknown = composio_unclassified_args();
+        assert_eq!(
+            classify_group("composio_execute", &unknown),
+            EffectGroup::Send
+        );
+        assert!(!grantable("composio_execute", &unknown));
+
+        // And the split survives the round trip through the park queue: the
+        // group asserted above is the one the operator's card is built from.
+        let (p, queue) = queued_policy("supervised", &[]);
+        let _ = p.check(&request("composio_execute", send.clone())).await;
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].effect.group, EffectGroup::Send);
+        assert_eq!(
+            queued[0].effect.payload, send,
+            "the card shows the arguments the agent actually sent, action key \
+             included"
         );
     }
 
@@ -1467,23 +1535,32 @@ mod tests {
     #[tokio::test]
     async fn a_retried_call_is_recorded_once() {
         let (p, queue) = queued_policy("supervised", &[]);
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         for _ in 0..3 {
             let _ = p.check(&request("composio_execute", args.clone())).await;
         }
         assert_eq!(queue.queued(), 1, "the same call parks once");
 
-        // A different call to the same tool is a distinct request.
+        // A different call to the same tool is a distinct request. Another
+        // catalogued send, so the second call is classified rather than merely
+        // unrecognised.
         let _ = p
             .check(&request(
                 "composio_execute",
-                serde_json::json!({ "tool_slug": "SLACK_POST" }),
+                composio_args(COMPOSIO_OTHER_SEND_SLUG),
             ))
             .await;
         assert_eq!(queue.queued(), 2);
     }
 
     /// The drain is capped, so a runaway turn can't flood the operator's queue.
+    ///
+    /// The slugs here are deliberately uncatalogued (issue #470): this test
+    /// wants many calls the queue treats as distinct and is indifferent to what
+    /// any of them classify as, so naming real actions would only invite a
+    /// reader to think the classification mattered. They do still land under
+    /// the real action key, so each one reaches the catalogue lookup and misses
+    /// it — the honest fallback, rather than a call carrying no action at all.
     #[tokio::test]
     async fn the_drain_is_capped_and_empties_the_queue() {
         let (p, queue) = queued_policy("supervised", &[]);
@@ -1491,7 +1568,7 @@ mod tests {
             let _ = p
                 .check(&request(
                     "composio_execute",
-                    serde_json::json!({ "tool_slug": format!("TOOL_{i}") }),
+                    composio_unclassified_args_numbered(i),
                 ))
                 .await;
         }
@@ -1538,7 +1615,7 @@ mod tests {
     #[tokio::test]
     async fn a_granted_call_is_allowed_once_and_then_parks_again() {
         let (p, grants) = granting_policy("supervised", &[], "finance");
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         grants.grant(granted("finance", "composio_execute", args.clone()));
 
         assert_eq!(
@@ -1593,7 +1670,7 @@ mod tests {
     #[tokio::test]
     async fn a_grant_does_not_travel_to_another_agent() {
         let (marketing, grants) = granting_policy("supervised", &[], "marketing");
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         // The grant belongs to `finance`.
         grants.grant(granted("finance", "composio_execute", args.clone()));
 
@@ -1727,7 +1804,7 @@ mod tests {
     fn grants_survive_a_queue_clear() {
         let queue = ApprovalRequestQueue::default();
         let grants = queue.grants();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = composio_send_args();
         grants.grant(crate::runtime::grants::GrantedCall {
             approval_id: crate::ports::types::ApprovalId::new("appr-1"),
             agent: "finance".into(),

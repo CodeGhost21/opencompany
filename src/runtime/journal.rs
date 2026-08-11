@@ -1988,7 +1988,7 @@ mod test {
             approval_id: ApprovalId::new(id),
             agent: "finance".into(),
             tool: "composio_execute".into(),
-            args: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            args: crate::policy::test_support::composio_send_args(),
             at_millis,
             origin_thread: None,
         }
@@ -2021,7 +2021,7 @@ mod test {
         assert_eq!(replayed[0].tool, "composio_execute");
         assert_eq!(
             replayed[0].args,
-            serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            crate::policy::test_support::composio_send_args(),
             "the exact arguments the operator approved survive the restart"
         );
     }

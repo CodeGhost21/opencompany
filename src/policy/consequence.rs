@@ -148,7 +148,13 @@ pub const COMPOSIO_EXECUTE: &str = "composio_execute";
 
 /// The argument key `composio_execute` carries the action slug under, on the
 /// wire and in both this crate's tool and openhuman's.
-const COMPOSIO_ACTION_KEY: &str = "tool";
+///
+/// `pub(crate)` so the test fixtures in
+/// [`crate::policy::test_support`] build their arguments from the same constant
+/// this classifier reads. Issue #470: fixtures across five modules hard-coded a
+/// key of their own, the two drifted apart, and every one of those tests
+/// silently stopped reaching the catalogue lookup it claimed to cover.
+pub(crate) const COMPOSIO_ACTION_KEY: &str = "tool";
 
 /// Every tool this crate can wire onto an agent, and what it can reach.
 ///

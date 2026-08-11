@@ -2760,7 +2760,12 @@ mod test {
     #[tokio::test]
     async fn approving_a_harness_tool_call_mints_a_grant_instead_of_executing() {
         let home_dir = tmp_home();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        // Issue #470: a catalogued send, keyed the way `composio_execute`'s
+        // schema keys it, with the action's parameters under `arguments`.
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
         let (rt, id) = park_one(
             home_dir.path().to_path_buf(),
             harness_effect("finance", "composio_execute", args.clone()),
@@ -3204,7 +3209,7 @@ mod test {
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            payload: crate::policy::test_support::composio_send_args(),
             agent: None,
             run_id: None,
         };
