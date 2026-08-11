@@ -31,6 +31,9 @@ use crate::ports::{
     SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore,
     WorkspaceStore,
 };
+// Separate line (#241) so this addition is a pure append, not a reflow of the
+// grouped import that sibling store-seam branches (#274, #596) also edit.
+use crate::ports::ScheduleFireStore;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -124,6 +127,8 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// Durable cross-replica scheduler fire claims (#241).
+    pub schedule_fires: Arc<dyn ScheduleFireStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
@@ -769,6 +774,13 @@ impl CompanyRuntime {
     /// with its status, step trace and cost.
     pub fn runs(&self) -> &Arc<dyn RunStore> {
         &self.ops.runs
+    }
+
+    /// This company's durable scheduler fire claims (#241): one row per
+    /// `(schedule, minute)` the schedulers use to dedup fires across replicas and
+    /// restarts.
+    pub fn schedule_fires(&self) -> &Arc<dyn ScheduleFireStore> {
+        &self.ops.schedule_fires
     }
 
     /// This company's usage meter (written by the cost hook, read by WS5).

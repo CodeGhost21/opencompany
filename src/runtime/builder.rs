@@ -44,6 +44,9 @@ use crate::ports::{
     FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore, SessionStore,
     SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
 };
+// Separate line (#241) so this addition is a pure append, not a reflow of the
+// grouped import that sibling store-seam branches (#274, #596) also edit.
+use crate::ports::ScheduleFireStore;
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
@@ -223,6 +226,7 @@ pub struct RuntimeBuilder {
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
+    schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -313,6 +317,7 @@ impl RuntimeBuilder {
             facts: None,
             artifacts: None,
             runs: None,
+            schedule_fires: None,
             usage: None,
             skills: None,
             users: None,
@@ -420,6 +425,7 @@ impl RuntimeBuilder {
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
         self.runs = Some(handles.runs.clone());
+        self.schedule_fires = Some(handles.schedule_fires.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -489,6 +495,12 @@ impl RuntimeBuilder {
     /// Swaps the task-run store (default: fs-backed).
     pub fn with_runs(mut self, runs: Arc<dyn RunStore>) -> Self {
         self.runs = Some(runs);
+        self
+    }
+
+    /// Swaps the scheduler fire-claim store (default: fs-backed).
+    pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
+        self.schedule_fires = Some(schedule_fires);
         self
     }
 
@@ -817,6 +829,7 @@ impl RuntimeBuilder {
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
