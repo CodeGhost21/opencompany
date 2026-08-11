@@ -39,6 +39,15 @@ interface Props {
 
 type Load = "loading" | "ready" | "unavailable";
 
+/**
+ * How long the Composio status probe may take before the grid stops waiting on
+ * it. Mirrors the host's own `COMPOSIO_PROBE_TIMEOUT` on the connections read
+ * path (`src/server/ops/connections_read.rs`) — the same argument applies on
+ * this side of the wire: the answer it contributes is which route a tile takes,
+ * and a page that paints honestly beats a page that never paints.
+ */
+const COMPOSIO_PROBE_TIMEOUT_MS = 5_000;
+
 /** Wire the third-party accounts your company can act through. */
 export function ConnectionsView({ client, company }: Props) {
   // Which (connection, company) this subtree's browser-local state belongs to.
@@ -98,8 +107,21 @@ export function ConnectionsView({ client, company }: Props) {
     setReachSettled(false);
     void (async () => {
       try {
-        const status = await getComposioStatus(client, company);
+        // Bounded: the shared client has no abort or timeout, and the grid now
+        // waits on this call before painting — so a host that accepts the
+        // connection and never answers would hold the page on skeletons
+        // forever. Losing the race is not an error, it is "no Composio route
+        // we can confirm", which is what a null `reach` already means.
+        const status = await Promise.race([
+          getComposioStatus(client, company),
+          new Promise<null>((resolve) => window.setTimeout(() => resolve(null), COMPOSIO_PROBE_TIMEOUT_MS)),
+        ]);
         if (!live) return;
+        if (!status) {
+          setReach(null);
+          setAttested(false);
+          return;
+        }
         setReach({
           inBuild: status.inBuild,
           granted: status.granted,
@@ -180,7 +202,15 @@ export function ConnectionsView({ client, company }: Props) {
       return;
     }
     const { connectUrl } = await startComposioAuthorize(client, company, toolkit);
-    window.open(connectUrl, "_blank", "noopener,noreferrer");
+    // A blocked popup returns null. Without this the operator is told to finish
+    // in a tab that was never opened, and the tile then spins for the full two
+    // minutes before the poll gives up on a sign-in that never started.
+    const tab = window.open(connectUrl, "_blank", "noopener,noreferrer");
+    if (!tab) {
+      setBusy((b) => (b === p.id ? null : b));
+      toast.error(`Couldn't open the ${p.name} sign-in tab. Allow popups and try again.`);
+      return;
+    }
     toast.message(`Complete ${p.name} sign-in in the new tab.`);
     const deadline = Date.now() + 120_000;
     const poll = async () => {

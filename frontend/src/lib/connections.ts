@@ -200,18 +200,36 @@ export function toolkitSlug(value: string): string {
 /**
  * The host's status row for a tile, matched across both spellings.
  *
- * Tries the tile's own id first (a manifest row is keyed that way), then falls
- * back to comparing normalized keys so a reconciled Composio row keyed
- * `googlecalendar` still finds the `google-calendar` tile.
+ * The tile's own id is tried first — a manifest row is keyed that way — then
+ * normalized keys, so a reconciled Composio row keyed `googlecalendar` still
+ * finds the `google-calendar` tile.
+ *
+ * **A connected row wins over a disconnected one.** The host can emit *two* rows
+ * for one provider when its id and its Composio slug do not normalize to the
+ * same key: `toolkit_slug("x")` is `x`, not `twitter`, so a manifest declaring
+ * `provider = "x"` produces a disconnected `x` row while Composio's connected
+ * `twitter` state arrives as a separate appended row. Taking the first match
+ * would report that tile disconnected while the account is in fact connected —
+ * the same "two surfaces disagreeing" failure #316 set out to end. Connected
+ * beats not-connected for the same reason the host unions `native ||
+ * composio_connected` within a single row; this extends that union across the
+ * alias it cannot currently see.
+ *
+ * Direct-id precedence still decides when nothing is connected, so a manifest
+ * row remains the authority on a provider the host answered for.
  */
-export function connectionStateFor<T extends { provider: string }>(
+export function connectionStateFor<T extends { provider: string; connected?: boolean }>(
   provider: ConnectionProvider,
   states: Record<string, T>,
 ): T | undefined {
-  const direct = states[provider.id];
-  if (direct) return direct;
   const wanted = new Set([toolkitSlug(provider.id), toolkitSlug(provider.toolkit)]);
-  return Object.values(states).find((state) => wanted.has(toolkitSlug(state.provider)));
+  const direct = states[provider.id];
+  const matches: T[] = [];
+  if (direct) matches.push(direct);
+  for (const state of Object.values(states)) {
+    if (state !== direct && wanted.has(toolkitSlug(state.provider))) matches.push(state);
+  }
+  return matches.find((state) => state.connected) ?? matches[0];
 }
 
 /** What this host offers for Composio, as far as routing a tile is concerned. */
@@ -220,7 +238,18 @@ export interface ComposioReach {
   inBuild: boolean;
   /** Whether the company explicitly grants `composio`. */
   granted: boolean;
-  /** Whether a credential of any tier resolves; `none` means nothing to authorize against. */
+  /**
+   * Whether a credential of **any** tier resolves; `none` means there is
+   * nothing to authorize against.
+   *
+   * Deliberately a boolean rather than the tier itself. Which credential the
+   * host reaches Composio with is the host's business, and the set of tiers
+   * grows — #586 adds `company` (the company's own TinyHumans key) alongside
+   * `attested` and `static`. Routing on "is there one at all" means a new tier
+   * is additive here by construction: a tenant that can only reach Composio
+   * through its company key gets the same working Connect as an attested pod,
+   * with no edit to this rule.
+   */
   hasCredential: boolean;
   /** Open mode — the backend's own allowlist governs, so any slug it permits is reachable. */
   openMode: boolean;
@@ -287,6 +316,18 @@ export type ConnectRoute =
  * a tenant that declares none, every tile had `state === undefined`, the
  * `attested` guard never fired (there was no row to read it from), and all
  * eleven fell through to a Connect that 400'd.
+ *
+ * ## Only two tier names appear here, on purpose
+ *
+ * `static` and `attested` are named because each answers a question about the
+ * *local* host: `static` means a native handshake can complete here, `attested`
+ * means no local one ever can. Every other tier — including `company` from
+ * #586 — is a statement about which credential the host presents to Composio,
+ * which this function reads through {@link ComposioReach.hasCredential} rather
+ * than by name. So the combination "the company credential is set but the
+ * provider is not in `states`" needs no case of its own: `state` is
+ * `undefined`, `hasCredential` is true, and the tile gets a working Composio
+ * Connect — which is exactly the outcome #599 is about.
  */
 export function connectRoute(
   provider: ConnectionProvider,

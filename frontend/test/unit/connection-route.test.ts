@@ -70,6 +70,36 @@ describe("connectionStateFor", () => {
   it("is undefined when no namespace mentions the provider", () => {
     expect(connectionStateFor(tile("stripe"), {})).toBeUndefined();
   });
+
+  it("prefers the manifest row when two rows describe the same tile and none is connected", () => {
+    // Direct-id precedence. Both rows match the `x` tile; with nothing
+    // connected the manifest's own row is the authority.
+    const manifest = { provider: "x", connected: false, account: "from-manifest" };
+    const composio = { provider: "twitter", connected: false, account: "from-composio" };
+    expect(connectionStateFor(tile("x"), { x: manifest, twitter: composio })).toBe(manifest);
+  });
+
+  it("prefers a connected row over a disconnected one for the same tile", () => {
+    // `toolkit_slug("x")` is `x`, not `twitter`, so the host cannot union these
+    // two itself: a manifest `provider = "x"` yields a disconnected `x` row
+    // while Composio's connected `twitter` state arrives as a separate appended
+    // row. Taking the first match would report the tile disconnected while the
+    // account is in fact connected.
+    const manifest = { provider: "x", connected: false };
+    const composio = { provider: "twitter", connected: true };
+    expect(connectionStateFor(tile("x"), { x: manifest, twitter: composio })).toBe(composio);
+  });
+
+  it("applies the same union to a hyphenated id and its Composio slug", () => {
+    const manifest = { provider: "google-calendar", connected: false };
+    const composio = { provider: "googlecalendar", connected: true };
+    expect(
+      connectionStateFor(tile("google-calendar"), {
+        "google-calendar": manifest,
+        googlecalendar: composio,
+      }),
+    ).toBe(composio);
+  });
 });
 
 describe("composioCanAuthorize", () => {
@@ -143,6 +173,30 @@ describe("connectRoute", () => {
   it("falls back to managed when the platform runs connections and Composio does not", () => {
     expect(connectRoute(tile("notion"), { credentialSource: "attested" }, null)).toEqual({
       kind: "managed",
+    });
+  });
+
+  it("routes on whether a Composio credential exists, not on which tier it is", () => {
+    // Issue #586 adds a `company` tier (the company's own TinyHumans key)
+    // alongside `attested` and `static`. `connectRoute` names only the two
+    // tiers that describe the LOCAL host, so a new Composio tier is additive
+    // by construction and needs no case here.
+    //
+    // This pins the specific combination neither #599 nor #586 covers alone:
+    // the company credential is set, and the provider is not in `states`.
+    const companyTier: ComposioReach = { ...OPEN, hasCredential: true };
+    expect(connectRoute(tile("stripe"), undefined, companyTier)).toEqual({
+      kind: "composio",
+      toolkit: "stripe",
+    });
+    // And a connection row reporting the new tier is not mistaken for the
+    // native hatch — only `static` means a local handshake can complete.
+    expect(connectRoute(tile("stripe"), { credentialSource: "company" }, companyTier)).toEqual({
+      kind: "composio",
+      toolkit: "stripe",
+    });
+    expect(connectRoute(tile("stripe"), { credentialSource: "company" }, null)).toEqual({
+      kind: "unavailable",
     });
   });
 
