@@ -200,6 +200,28 @@ export interface WorkflowRunResult {
    * awaited, and its frames would repaint the canvas.
    */
   runId?: string;
+  /**
+   * Per-node progress for this run, in the order the nodes finished (issue
+   * #542) — the same structural rows {@link WorkflowRunOutcome.nodes} carries.
+   * Present on every synchronous run from a host that supports it; for a dry
+   * run it is the ONLY record of what ran, since a test run journals nothing.
+   * Optional on the type (not the wire) so a response from an older host still
+   * parses.
+   */
+  nodes?: WorkflowRunNode[];
+  /**
+   * `true` when the host ran this as a **dry run / test run** (issue #542): the
+   * real graph walked over stubbed effects, so nothing was sent, no tokens were
+   * spent, and nothing was journaled or parked.
+   *
+   * **The presence discriminator, and always `true` when set.** An older host
+   * ignores the `dryRun` request flag and runs FOR REAL, answering with a body
+   * that has no `dryRun` key — so a console that asked for a test run must read
+   * this back (see {@link isDryRun}) rather than trust what it asked for, and
+   * warn loudly when it is absent. Optional/absent must read as "was NOT a dry
+   * run", i.e. the run was real.
+   */
+  dryRun?: boolean;
 }
 
 /**
@@ -237,6 +259,24 @@ export type WorkflowRunResponse = WorkflowRunResult | WorkflowRunAccepted;
  */
 export function isDetached(response: WorkflowRunResponse): response is WorkflowRunAccepted {
   return (response as WorkflowRunAccepted).detached === true;
+}
+
+/**
+ * Whether the host actually ran this as a **dry run** (issue #542).
+ *
+ * **Discriminates on the response, never on what we asked for** — the same
+ * compatibility story as {@link isDetached}. A host predating test mode ignores
+ * the `dryRun` request flag and runs FOR REAL, and its settled body carries no
+ * `dryRun` key. So a console that asked for a test run and reasoned "I asked to
+ * dry-run, therefore nothing happened" would be wrong on exactly the hosts where
+ * a real run just fired every effect. Read `dryRun` back instead, and when it is
+ * absent from a run you asked to be dry, warn loudly: the run was real.
+ *
+ * Only meaningful on a settled result (a detached response carries no output and
+ * no `dryRun`); guarded so it is safe to call on either shape.
+ */
+export function isDryRun(response: WorkflowRunResponse): boolean {
+  return (response as WorkflowRunResult).dryRun === true;
 }
 
 /** One node's outcome inside a run (issue #371). */
@@ -342,17 +382,29 @@ export function getWorkflow(
  * **Always check {@link isDetached} on the result**, whatever you asked for: a
  * host predating #383 ignores the flag and answers with the settled run, and
  * that answer is fine to use.
+ *
+ * **`dryRun` (issue #542)** asks the host to run a **test run**: the real graph
+ * over stubbed effects, so nothing is sent and no tokens are spent. It is
+ * synchronous by nature — the whole point is to read the settled `output` and
+ * per-node `nodes` back — so it composes with the default (no `detach`). Just
+ * like `detach`, an older host ignores the flag and runs FOR REAL, so the caller
+ * MUST confirm with {@link isDryRun} rather than assume, and warn when a run it
+ * asked to be dry comes back without the marker.
  */
 export function runWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   input?: unknown,
-  options?: { detach?: boolean },
+  options?: { detach?: boolean; dryRun?: boolean },
 ): Promise<WorkflowRunResponse> {
   return client.post<WorkflowRunResponse>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/run`,
-    { input: input ?? {}, ...(options?.detach ? { detach: true } : {}) },
+    {
+      input: input ?? {},
+      ...(options?.detach ? { detach: true } : {}),
+      ...(options?.dryRun ? { dry_run: true } : {}),
+    },
   );
 }
 

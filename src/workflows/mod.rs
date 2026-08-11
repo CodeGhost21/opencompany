@@ -23,7 +23,7 @@ pub mod runner;
 pub mod translate;
 
 pub use caps::{HarnessAgentRunner, build_capabilities};
-pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs};
+pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs, deliver_outputs_dry};
 pub use runner::{HarnessWorkflowRunner, run_workflow};
 pub use translate::translate;
 

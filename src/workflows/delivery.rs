@@ -385,6 +385,76 @@ pub async fn deliver_outputs(
     reports
 }
 
+/// The dry-run counterpart of [`deliver_outputs`] (issue #542): runs only the
+/// **routing** half and stops before any dispatch.
+///
+/// For every reached `output` node that carries a destination it pushes one
+/// `Skipped` / [`DeliveryReason::DryRun`] row naming where the report *would*
+/// have gone. Nothing leaves the process: no transport, no cold-recipient park,
+/// no journal write. A node the run never reached contributes no row, exactly as
+/// in the live path — so the rows are an honest map of the reached output
+/// destinations, which is what a test run exists to prove.
+///
+/// Takes no [`WorkflowDeliveryDeps`] and needs none: a dry run wires no delivery
+/// ports (and no journal write is owed), so this is a pure function of the graph
+/// and the run's output. It never journals a [`WorkflowReportDelivered`], so the
+/// #529 ledger is left untouched — by two mechanisms, since a `Skipped` row
+/// would not be journaled even on the live path.
+pub fn deliver_outputs_dry(
+    record: &CompanyRecord,
+    workflow: &WorkflowFile,
+    output: &Value,
+) -> Vec<DeliveryReport> {
+    let mut reports = Vec::new();
+    for node in &workflow.nodes {
+        if node.kind != WorkflowNodeKind::Output {
+            continue;
+        }
+        let Some(destination) = &node.destination else {
+            continue;
+        };
+        // The routing half: an output node the run never reached is not a
+        // delivery that was skipped, it is one that was never owed — no row, the
+        // same rule the live path takes.
+        if !node_was_reached(output, &node.id) {
+            tracing::debug!(
+                company = %record.id,
+                workflow = %workflow.id,
+                node = %node.id,
+                "workflow dry delivery: output node not reached; nothing to route"
+            );
+            continue;
+        }
+        let where_to = match destination
+            .target
+            .as_deref()
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            Some(target) => format!("{} {}", destination.kind, target),
+            None => destination.kind.clone(),
+        };
+        tracing::debug!(
+            company = %record.id,
+            workflow = %workflow.id,
+            node = %node.id,
+            kind = %destination.kind,
+            "workflow dry delivery: report routed but NOT sent (test run)"
+        );
+        reports.push(DeliveryReport {
+            node: node.id.clone(),
+            kind: destination.kind.clone(),
+            target: destination.target.clone(),
+            status: DeliveryStatus::Skipped,
+            detail: format!(
+                "this was a test run — nothing was sent; the report would have gone to {where_to}"
+            ),
+            reason: DeliveryReason::DryRun,
+        });
+    }
+    reports
+}
+
 /// Appends one [`CompanyEvent::WorkflowReportDelivered`] for a delivery row that
 /// left the process (issue #529).
 ///
@@ -2738,5 +2808,38 @@ to = "done"
         );
         // And the report really did reach the transport.
         assert_eq!(h.channel.sent().len(), 1);
+    }
+
+    /// Issue #542: the dry router runs the routing half only. A reached output
+    /// node yields one `Skipped`/`DryRun` row naming where the report WOULD have
+    /// gone — no deps, no transport, no journal.
+    #[test]
+    fn deliver_outputs_dry_routes_a_reached_node_without_sending() {
+        let workflow = graph("email", Some("ada@example.com"));
+        let reports = deliver_outputs_dry(&record(&["email"]), &workflow, &reached_output());
+        assert_eq!(reports.len(), 1, "{reports:?}");
+        assert_eq!(reports[0].node, "done");
+        assert_eq!(reports[0].status, DeliveryStatus::Skipped);
+        assert_eq!(reports[0].reason, DeliveryReason::DryRun);
+        assert_eq!(reports[0].target.as_deref(), Some("ada@example.com"));
+        assert!(
+            reports[0].detail.contains("email ada@example.com"),
+            "the row should name where it would have gone: {}",
+            reports[0].detail
+        );
+    }
+
+    /// An output node the dry run never reached contributes no row at all —
+    /// exactly the "absent means not reached" rule the live path takes.
+    #[test]
+    fn deliver_outputs_dry_skips_an_unreached_node() {
+        let workflow = graph("owner", None);
+        // Output where `done` was NOT reached.
+        let output = serde_json::json!({ "nodes": { "start": { "items": [] } } });
+        let reports = deliver_outputs_dry(&record(&["email"]), &workflow, &output);
+        assert!(
+            reports.is_empty(),
+            "an unreached node routes nothing: {reports:?}"
+        );
     }
 }

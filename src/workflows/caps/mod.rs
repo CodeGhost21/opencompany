@@ -46,6 +46,7 @@
 //! [`the_memory_capability_is_left_unwired_on_purpose`](tests) pins that so the
 //! answer has to be given rather than defaulted into.
 
+mod dry_run;
 mod http;
 mod resolver;
 mod state;
@@ -56,7 +57,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tinyflows::caps::{
-    AgentRunner, Capabilities, CodeLanguage, CodeRunner, LlmProvider, StateStore, WorkflowResolver,
+    AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, StateStore,
+    ToolInvoker, WorkflowResolver,
 };
 use tinyflows::error::{EngineError, Result as TfResult};
 
@@ -69,6 +71,17 @@ use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
 pub(crate) use self::tools::WORKFLOW_TOOL_NAMESPACES;
 use self::tools::WorkflowToolInvoker;
+
+/// The four effectful capability slots [`build_capabilities`] chooses by mode:
+/// `tool_call`, `http_request`, `state`, and the optional `agent` runner. The
+/// dry and live branches each build one of these; the read-only `resolver` and
+/// the always-stub `llm`/`code`/`memory` slots are assembled outside it.
+type EffectSlots = (
+    Arc<dyn ToolInvoker>,
+    Arc<dyn HttpClient>,
+    Arc<dyn StateStore>,
+    Option<Arc<dyn AgentRunner>>,
+);
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
 ///
@@ -87,6 +100,18 @@ use self::tools::WorkflowToolInvoker;
 /// `run_request` is the operator's topic for this run (issue #154), threaded to
 /// the agent capability so every agent node's turn message carries what was
 /// actually asked, not just the node's authored instruction.
+///
+/// `dry_run` (issue #542) selects the **mode**, one assembly point so the two
+/// bundles cannot drift. When `true`, every *effectful* slot is a stub from
+/// [`dry_run`]: the agent echoes with no inference, `tool_call` keeps its
+/// fail-closed grant check but executes nothing, `http_request` sends nothing,
+/// and `state` is [`NoopState`] rather than the durable
+/// [`CompanyStateStore`](state::CompanyStateStore). The read-only `resolver`
+/// stays real in both modes, so a `sub_workflow` child runs under this same
+/// bundle and a dry run propagates into it. The per-run workspace, exec-security
+/// policy and search backend are not built at all for a dry run — nothing needs
+/// them. Because every effect is stubbed, a future node kind cannot reach a real
+/// effect through a dry bundle: the engine only calls what is on the bundle.
 pub async fn build_capabilities(
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
@@ -94,70 +119,18 @@ pub async fn build_capabilities(
     workflow_id: &str,
     run_id: &str,
     run_request: Option<String>,
+    dry_run: bool,
 ) -> Capabilities {
     let company = record.id.clone();
     let mode = PolicyMode::parse(&record.manifest.policy.mode);
-    let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
-    if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
-        tracing::warn!(
-            company = %company,
-            workspace = %workflow_ws.display(),
-            %err,
-            "workflow: could not create the per-run workspace"
-        );
-    }
-
-    // ONE exec-security policy shared by the tool_call toolbelt and the
-    // http_request client, sandboxed to the workflow workspace with the
-    // company's autonomy tier — exactly the shape a roster agent's exec tools get.
-    let exec_security = Arc::new(toolbelt::exec_security(&workflow_ws, mode));
-    let web_allowed_domains = record.manifest.tools.web_allowed_domains.clone();
     let grants = record.manifest.tools.allow.clone();
-
-    // The metered `search` family is threaded through the invoker the same way
-    // `build_agent` wires it onto a roster agent — explicit `search` grant +
-    // managed backend, fail-closed. Read `deps.search` / `deps.meter` here,
-    // before `deps` moves into `HarnessAgentRunner` below. The agent label names
-    // the run so a search sample is attributed to the workflow, not a chat turn.
-    let search_metering = crate::harness::search::SearchMetering {
-        company: company.clone(),
-        agent: format!("workflow:{workflow_id}"),
-        meter: deps.meter.clone(),
-    };
-    let tools = WorkflowToolInvoker::new(
-        exec_security.clone(),
-        &workflow_ws,
-        web_allowed_domains.clone(),
-        grants,
-        &deps.capabilities,
-        deps.search.as_ref(),
-        search_metering,
-    );
-    let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
-
-    // Durable run state over the per-company secret store, namespaced by
-    // workflow id. `None` (default/tests) keeps the inert no-op with a warning —
-    // no node OpenCompany emits reads state in P1, so this never blocks a run.
-    let state: Arc<dyn StateStore> = match &deps.secrets {
-        Some(secrets) => Arc::new(CompanyStateStore::new(
-            secrets.clone(),
-            company.clone(),
-            workflow_id.to_string(),
-        )),
-        None => {
-            tracing::warn!(
-                company = %company,
-                workflow = workflow_id,
-                "workflow: no secret store wired; run state is a no-op (deliberate — no P1 node uses it)"
-            );
-            Arc::new(NoopState)
-        }
-    };
 
     // sub_workflow-by-id resolves children from the union of the company's seed
     // `workflows/` directory and the record's runtime-authored bodies — so a
     // platform tenant with no source dir still resolves the workflows it
-    // created (issue #168). Read before `deps` moves into the agent runner.
+    // created (issue #168). Read before `deps` may move into the agent runner.
+    // REAL in both modes: it is a read, and a dry sub_workflow child runs under
+    // this same (dry) bundle, so dry propagates rather than stopping here.
     let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
         deps.workflow_source_dir.clone(),
         deps.store.clone(),
@@ -165,23 +138,104 @@ pub async fn build_capabilities(
         workflow_id.to_string(),
     ));
 
+    // The four effectful slots, chosen by mode at this one point.
+    let (tools, http, state, agent): EffectSlots = if dry_run {
+        // DRY: stub every effect. No workspace mkdir, no exec-security, no pool
+        // routing, no secret store. The grant check is KEPT (pure) so an
+        // ungranted `tool_call` refuses identically; state is the inert no-op so
+        // a dry run cannot persist either.
+        tracing::debug!(
+            company = %company,
+            workflow = workflow_id,
+            "workflow: building DRY capability bundle — no real effects will run"
+        );
+        (
+            Arc::new(dry_run::DryRunTools::new(grants)),
+            Arc::new(dry_run::DryRunHttp),
+            Arc::new(NoopState),
+            Some(Arc::new(dry_run::DryRunAgent)),
+        )
+    } else {
+        let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
+        if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
+            tracing::warn!(
+                company = %company,
+                workspace = %workflow_ws.display(),
+                %err,
+                "workflow: could not create the per-run workspace"
+            );
+        }
+
+        // ONE exec-security policy shared by the tool_call toolbelt and the
+        // http_request client, sandboxed to the workflow workspace with the
+        // company's autonomy tier — exactly the shape a roster agent's exec
+        // tools get.
+        let exec_security = Arc::new(toolbelt::exec_security(&workflow_ws, mode));
+        let web_allowed_domains = record.manifest.tools.web_allowed_domains.clone();
+
+        // The metered `search` family is threaded through the invoker the same
+        // way `build_agent` wires it onto a roster agent — explicit `search`
+        // grant + managed backend, fail-closed. Read `deps.search` / `deps.meter`
+        // here, before `deps` moves into `HarnessAgentRunner` below. The agent
+        // label names the run so a search sample is attributed to the workflow,
+        // not a chat turn.
+        let search_metering = crate::harness::search::SearchMetering {
+            company: company.clone(),
+            agent: format!("workflow:{workflow_id}"),
+            meter: deps.meter.clone(),
+        };
+        let tools = WorkflowToolInvoker::new(
+            exec_security.clone(),
+            &workflow_ws,
+            web_allowed_domains.clone(),
+            grants,
+            &deps.capabilities,
+            deps.search.as_ref(),
+            search_metering,
+        );
+        let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
+
+        // Durable run state over the per-company secret store, namespaced by
+        // workflow id. `None` (default/tests) keeps the inert no-op with a
+        // warning — no node OpenCompany emits reads state in P1, so this never
+        // blocks a run.
+        let state: Arc<dyn StateStore> = match &deps.secrets {
+            Some(secrets) => Arc::new(CompanyStateStore::new(
+                secrets.clone(),
+                company.clone(),
+                workflow_id.to_string(),
+            )),
+            None => {
+                tracing::warn!(
+                    company = %company,
+                    workflow = workflow_id,
+                    "workflow: no secret store wired; run state is a no-op (deliberate — no P1 node uses it)"
+                );
+                Arc::new(NoopState)
+            }
+        };
+
+        // `deps` moves in last — the borrows above (`deps.capabilities`,
+        // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`)
+        // are all done by here.
+        let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
+            pool,
+            deps,
+            company.clone(),
+            run_id.to_string(),
+            run_request,
+        ));
+        (Arc::new(tools), Arc::new(http), state, Some(agent))
+    };
+
     Capabilities {
         llm: Arc::new(UnwiredLlm),
-        tools: Arc::new(tools),
-        http: Arc::new(http),
+        tools,
+        http,
         code: Arc::new(UnwiredCode),
         state,
         resolver,
-        // `deps` moves in last — the borrows above (`deps.capabilities`,
-        // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
-        // `deps.workflow_source_dir`) are all done by here.
-        agent: Some(Arc::new(HarnessAgentRunner::new(
-            pool,
-            deps,
-            company,
-            run_id.to_string(),
-            run_request,
-        ))),
+        agent,
         // New in tinyflows 0.6, which arrived with the #499 pin bump. Left
         // unwired deliberately rather than pointed at the company's context
         // store: a `memory` node would then read and WRITE agent memory on
@@ -696,6 +750,7 @@ mod tests {
             "wf",
             "run:1",
             None,
+            false,
         )
         .await;
 
@@ -710,6 +765,65 @@ mod tests {
         assert!(
             caps.agent.is_some(),
             "agent capability should still be wired"
+        );
+    }
+
+    /// Issue #542 — T9: a dry bundle wires the effect STUBS (agent / tools / http
+    /// all echo with the `dry_run` marker) and the inert `NoopState`, while the
+    /// read-only resolver stays real. Pinned behaviourally through the marker, so
+    /// a future refactor that quietly wired a real effect into a dry bundle fails
+    /// here.
+    #[tokio::test]
+    async fn a_dry_bundle_wires_stubs_and_noop_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        let caps = build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            "wf",
+            "run:1",
+            None,
+            true, // dry
+        )
+        .await;
+
+        // http: the stub echoes without sending, carrying the marker.
+        let http_out = caps
+            .http
+            .request(json!({ "url": "http://127.0.0.1:9/" }), None)
+            .await
+            .expect("dry http never fails");
+        assert_eq!(
+            http_out["dry_run"],
+            json!(true),
+            "http slot should be the dry stub"
+        );
+
+        // agent: the stub echoes with no pool routing.
+        let agent = caps.agent.as_ref().expect("agent stub is wired");
+        let agent_out = agent
+            .run_agent("ceo", json!({ "prompt": "hi" }), None)
+            .await
+            .expect("dry agent never fails");
+        assert_eq!(
+            agent_out["dry_run"],
+            json!(true),
+            "agent slot should be the dry stub"
+        );
+
+        // state: NoopState — a load reads None and a store is dropped.
+        assert_eq!(caps.state.load("k").await.expect("noop load"), None);
+        caps.state.store("k", json!(1)).await.expect("noop store");
+        assert_eq!(
+            caps.state.load("k").await.expect("noop load"),
+            None,
+            "dry state must be the inert NoopState, never durable"
         );
     }
 }

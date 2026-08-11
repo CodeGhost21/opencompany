@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::company::WorkflowFile;
-use crate::ports::types::CompanyId;
+use crate::ports::types::{CompanyId, WorkflowNodeStatus};
 
 /// The outcome of running one workflow to completion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +56,39 @@ pub struct WorkflowRun {
     /// payload still loads, as `false`.
     #[serde(default)]
     pub cancelled: bool,
+    /// Per-node progress for this run, in the order the nodes finished (issue
+    /// #542 — the same three scalars a `WorkflowNodeFinished` journal row
+    /// carries, and no more: a node's own output and error text are
+    /// deliberately absent, so they cannot ride this into the run response).
+    ///
+    /// Collected for **every** run, not only a dry one — the runner's progress
+    /// observer feeds it on all paths, so an ordinary synchronous run's
+    /// response can carry the same per-node timeline the history panel already
+    /// shows. It is the *whole* durable record of a dry run, which journals
+    /// nothing: the settled response body is all a test run leaves behind.
+    ///
+    /// `#[serde(default)]` so a `WorkflowRun` deserialized from a payload
+    /// written before this field existed still loads, as an empty list.
+    #[serde(default)]
+    pub nodes: Vec<WorkflowRunNodeRow>,
+}
+
+/// One node's structural outcome inside a run (issue #542).
+///
+/// The port-side twin of the HTTP layer's `WorkflowRunNode` and of a
+/// `WorkflowNodeFinished` journal row: id, status, elapsed millis, and nothing
+/// that could leak a node's payload. It rides [`WorkflowRun::nodes`] out of the
+/// runner so the run response can report a per-node timeline without a second
+/// read of the journal — which matters most for a dry run, whose timeline is
+/// journaled nowhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunNodeRow {
+    /// The node that finished.
+    pub node_id: String,
+    /// Whether it succeeded or errored.
+    pub status: WorkflowNodeStatus,
+    /// Wall-clock duration of the node's execution, in milliseconds.
+    pub elapsed_ms: u64,
 }
 
 /// What became of one attempt to deliver an `output` node's report.
@@ -174,6 +207,12 @@ pub enum DeliveryReason {
     /// The destination kind is not one this runtime knows how to deliver to
     /// (unreachable through `parse_workflow`, which rejects unknown kinds).
     UnknownDestinationKind,
+    /// This was a **dry run** (issue #542): the report was routed as far as its
+    /// destination but deliberately not dispatched, so an operator can see
+    /// *where* a report would have gone without anything actually leaving the
+    /// process. Carries no transport text — nothing was attempted — so it is
+    /// safe to log.
+    DryRun,
     /// No reason was recorded. Only reachable by deserializing a
     /// `WorkflowRunFinished` event written before this field existed.
     #[default]
@@ -223,6 +262,10 @@ impl std::fmt::Display for DeliveryReason {
             Self::ChannelRefused => "the channel refused the message",
             Self::UnknownDestinationKind => {
                 "the destination kind is not one this runtime can deliver to"
+            }
+            Self::DryRun => {
+                "this was a test run, so the report was not sent — its destination is shown so you \
+                 can see where it would have gone"
             }
             Self::Unspecified => "no reason was recorded for this delivery",
         })
@@ -318,6 +361,24 @@ pub struct WorkflowRunContext {
     /// nobody else holds — nothing can ever fire it, which is exactly right for
     /// a test or an entry point that opted out of registration.
     pub cancel: RunCancel,
+    /// Whether this run is a **dry run** (issue #542): walk the real graph with
+    /// real branch selection, but over stubbed effectful capabilities so no
+    /// agent inference, no tool/http execution, and no delivery, journaling or
+    /// gate-parking actually happen.
+    ///
+    /// It rides the context rather than being a `run` argument for the same
+    /// reason `scheduled` does: the host-side layers that skip effects around
+    /// the engine (`WorkflowSpawn` skips `record_run_finished`; the runner skips
+    /// the started/finished journal writes) read it here, not from a separate
+    /// parameter that would have to be threaded through both the runner and the
+    /// spawn task in lockstep.
+    ///
+    /// [`new`](Self::new) and
+    /// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) both
+    /// default it `false`; only the run route sets it, and every other entry
+    /// point (cron, resume) leaves it off — a scheduled or resumed run is always
+    /// for real.
+    pub dry_run: bool,
 }
 
 /// A one-way stop signal for one workflow run (issue #383).
@@ -445,6 +506,10 @@ impl WorkflowRunContext {
             run_id: crate::ports::ids::generate_id(),
             scheduled,
             cancel: RunCancel::new(),
+            // A run built through this constructor is for real unless the caller
+            // flips it after the fact — which is exactly what `WorkflowSpawn`
+            // does with the dry flag the run route hands it (issue #542).
+            dry_run: false,
         }
     }
 }

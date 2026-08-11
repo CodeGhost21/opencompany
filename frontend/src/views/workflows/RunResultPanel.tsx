@@ -8,7 +8,7 @@ import { useMemo } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-import type { WorkflowGraph, WorkflowRunResult } from "@/api/workflows";
+import type { WorkflowGraph, WorkflowRunNode, WorkflowRunResult } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
@@ -56,12 +56,25 @@ export function RunResultPanel({
   const undeliveredCount = deliveries.filter(
     (d) => d.status !== "sent" && d.status !== "pending",
   ).length;
+  // Issue #542: a test run. The header says so plainly, and the delivery rows
+  // (already `skipped`) read as "would have gone to …" rather than as failures.
+  const isDry = result.dryRun === true;
+  const nodeTimeline = result.nodes ?? [];
 
   return (
     <div className="border-t bg-card/60" data-testid="workflow-run-result">
       <div className="flex items-center justify-between px-4 py-2">
         <div className="flex items-center gap-2">
           <span className="text-sm font-medium">Run result</span>
+          {isDry && (
+            <Badge
+              variant="outline"
+              className="border-violet-500/40 bg-violet-500/10"
+              data-testid="workflow-run-dry-badge"
+            >
+              Test run — nothing was sent, no tokens spent
+            </Badge>
+          )}
           {pendingDeliveryCount > 0 && (
             <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10">
               {pendingDeliveryCount} report{pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
@@ -97,8 +110,16 @@ export function RunResultPanel({
 
         {deliveries.length > 0 && <DeliveryRows deliveries={deliveries} />}
 
+        {/* Issue #542: the per-node timeline, carried on every synchronous run's
+            body. It is most load-bearing for a dry run, which journals nothing —
+            this is the only place a test run's step-by-step trail appears, since
+            the canvas paints no optimistic frontier for it. */}
+        {nodeTimeline.length > 0 && (
+          <NodeTimeline nodes={nodeTimeline} graph={graph} />
+        )}
+
         {nodeResults && nodeResults.length > 0 ? (
-          <div className="mb-2 space-y-2">
+          <div className="mb-2 space-y-2" data-testid="workflow-run-node-results">
             {nodeResults.map((n) => (
               <NodeResultCard key={n.id} node={n} />
             ))}
@@ -156,6 +177,44 @@ function NodeResultCard({ node }: { node: NodeResult }) {
       {node.messages.length === 0 && (
         <p className="text-sm text-muted-foreground">—</p>
       )}
+    </div>
+  );
+}
+
+/** The per-node timeline of a run (issue #542): one row per node that finished,
+ * in finish order, showing whether it succeeded and how long it took. Node ids
+ * are mapped to their display name from the loaded graph when available. This is
+ * a test run's ONLY step-by-step trail, and a real run carries the same rows. */
+function NodeTimeline({
+  nodes,
+  graph,
+}: {
+  nodes: WorkflowRunNode[];
+  graph: WorkflowGraph | null;
+}) {
+  const nameById = new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []);
+  return (
+    <div
+      className="mb-3 space-y-1.5 rounded-lg border bg-background/40 p-2"
+      data-testid="workflow-run-node-timeline"
+    >
+      <span className="text-xs font-medium">Steps</span>
+      {nodes.map((n, i) => (
+        <div key={`${n.nodeId}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
+          <Badge
+            variant="outline"
+            className={`h-4 px-1.5 text-[10px] font-normal ${
+              n.status === "error"
+                ? "border-red-500/40 bg-red-500/10"
+                : "border-emerald-500/40 bg-emerald-500/10"
+            }`}
+          >
+            {n.status}
+          </Badge>
+          <span className="text-[11px]">{nameById.get(n.nodeId) ?? n.nodeId}</span>
+          <span className="text-[11px] text-muted-foreground">{n.elapsedMs} ms</span>
+        </div>
+      ))}
     </div>
   );
 }

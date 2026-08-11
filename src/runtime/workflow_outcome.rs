@@ -368,6 +368,7 @@ mod test {
             pending_approvals: pending,
             deliveries,
             cancelled: false,
+            nodes: Vec::new(),
         }
     }
 

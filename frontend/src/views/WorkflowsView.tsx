@@ -11,6 +11,7 @@ import "@xyflow/react/dist/style.css";
 import { useTheme } from "next-themes";
 import {
   Bot,
+  FlaskConical,
   History,
   LayoutGrid,
   Loader2,
@@ -31,6 +32,7 @@ import {
   deleteWorkflow,
   getWorkflow,
   isDetached,
+  isDryRun,
   listWorkflowRuns,
   listWorkflows,
   runWorkflow,
@@ -713,7 +715,7 @@ export function WorkflowsView({
     return byId;
   }, [indexRuns]);
 
-  const run = useCallback(async () => {
+  const run = useCallback(async (dryRun = false) => {
     if (!selectedId) return;
     setStarting(true);
     // Clear the last refusal and the own-run-start watch before this attempt, so
@@ -724,8 +726,14 @@ export function WorkflowsView({
     // immediately, so the canvas responds to the click rather than waiting on
     // the first frame. The `workflow_run_started` frame re-sets the same thing
     // a moment later, which is idempotent.
+    //
+    // Issue #542: a dry run paints NO optimistic frontier. It journals nothing
+    // and emits no SSE frames, so there is no live fold to hand the canvas back
+    // to — an optimistic frontier would pulse "running" on every node forever.
+    // Its node-by-node answer arrives in the settled body's `nodes`, rendered in
+    // the result panel, not on the canvas.
     setOverlayRun(null);
-    setOptimistic(graph ? initialRunState(graph) : null);
+    setOptimistic(dryRun ? null : graph ? initialRunState(graph) : null);
     // Trimmed once here so the echoed request and the payload the host receives
     // can never disagree.
     const asked = request.trim();
@@ -744,6 +752,7 @@ export function WorkflowsView({
         company,
         selectedId,
         asked ? { request: asked } : {},
+        dryRun ? { dryRun: true } : undefined,
       );
       setRanWith(asked);
       // The `isDetached` branch is kept verbatim as a compatibility seam: a host
@@ -756,10 +765,24 @@ export function WorkflowsView({
       } else {
         setResult(res);
         setAwaitingRunId(res.runId ?? null);
-        toast.success("Workflow ran.");
+        if (dryRun && !isDryRun(res)) {
+          // Issue #542: we asked for a test run and the host ran it FOR REAL —
+          // it predates test mode and silently ignored the flag. Discriminate on
+          // the SHAPE (`isDryRun`), never on what we asked for, and say so
+          // LOUDLY: real effects just fired — tokens spent, reports possibly
+          // sent — which is the opposite of what the operator intended.
+          toast.error("This host ran the workflow for real — it doesn't support test runs.", {
+            description:
+              "Your test run executed real effects (agent turns, tools, and any report delivery). Update the host to get true no-effect test runs.",
+          });
+        } else {
+          toast.success(dryRun ? "Test run complete — nothing was sent." : "Workflow ran.");
+        }
       }
-      // The run is journaled host-side (#228); pull the history forward so the
-      // chip and the panel reflect it immediately.
+      // A dry run journals NOTHING (#542), so there is no history row to pull
+      // forward for it — but a real run is journaled host-side (#228), so refresh
+      // regardless: on a host that ignored the flag this is exactly the real run
+      // whose row the operator needs to see.
       setRunsTick((n) => n + 1);
     } catch (e) {
       // Issue #528 / #514: triage on the STRUCTURED shape, not the message.
@@ -1271,6 +1294,21 @@ export function WorkflowsView({
               <Play className="mr-1.5 size-4" />
             )}
             Run
+          </Button>
+          {/* Issue #542: a dry run — the real graph over stubbed effects, so
+              nothing is sent and no tokens are spent. Shares the exact `run()`
+              dispatch (and its #528 error triage) as the Run button, passing the
+              dry flag; the result panel says what it was. */}
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void run(true)}
+            disabled={!selectedId || running || loadingGraph}
+            data-testid="workflow-test-run"
+            title="Test run: walk the real workflow over stubbed effects to prove its routing and output shape. Nothing is sent, and no tokens are spent."
+          >
+            <FlaskConical className="mr-1.5 size-4" />
+            Test run
           </Button>
           {/* Issue #383. Present only while a run this view started is actually
               in flight — which is knowable at all because the host now hands

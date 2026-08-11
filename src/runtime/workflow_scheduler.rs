@@ -407,7 +407,8 @@ impl WorkflowScheduler {
                     // run, and the delivery-log sweep below needs the outcome.
                     // Both remain the scheduler's job; what is shared is only
                     // how a run is started and recorded.
-                    let (_run_id, handle) = spawn.spawn(workflow, input, true);
+                    // Issue #542: a scheduled run is always for real — `false`.
+                    let (_run_id, handle) = spawn.spawn(workflow, input, true, false);
                     match handle.await {
                         Ok(Ok(run)) => {
                             // A manual run hands `deliveries` back in the HTTP
@@ -899,6 +900,7 @@ mod test {
                             pending_approvals: Vec::new(),
                             deliveries: Vec::new(),
                             cancelled: true,
+                            nodes: Vec::new(),
                         });
                     }
                 }
@@ -909,6 +911,7 @@ mod test {
                 pending_approvals: Vec::new(),
                 deliveries: self.deliveries.clone(),
                 cancelled: false,
+                nodes: Vec::new(),
             })
         }
     }
@@ -1706,8 +1709,12 @@ to = "done"
             .cloned()
             .expect("the same runner the scheduler used");
         let workflow = parse_workflow(&body("digest", Some("* * * * *"))).expect("parses");
-        let (_run_id, handle) =
-            crate::runtime::WorkflowSpawn::new(&runtime, runner).spawn(workflow, json!({}), false);
+        let (_run_id, handle) = crate::runtime::WorkflowSpawn::new(&runtime, runner).spawn(
+            workflow,
+            json!({}),
+            false,
+            false,
+        );
         handle.await.expect("the run task completes").expect("runs");
         let outcomes = wait_for_outcomes(&registry, company, 2).await;
 

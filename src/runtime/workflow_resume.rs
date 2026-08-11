@@ -398,7 +398,9 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
     // its own outcome and deregisters itself; awaiting it here would hold the
     // approvals request open for the length of a whole workflow run, which is
     // the drop-safety failure issue #380 already paid for once.
-    let (run_id, _handle) = WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false);
+    // Issue #542: resuming an approved gate is always a real run — `false`.
+    let (run_id, _handle) =
+        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false);
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,
@@ -927,6 +929,7 @@ mod decide_tests {
                 pending_approvals: Vec::new(),
                 deliveries: Vec::new(),
                 cancelled: false,
+                nodes: Vec::new(),
             })
         }
     }
