@@ -64,7 +64,13 @@
     --gray-200: oklch(0.9267 0.0081 286.24); /* #E6E6EC */
     --gray-300: oklch(0.8882 0.0136 286.12); /* #D9D9E3 */
     --gray-400: oklch(0.6461 0.0266 285.63); /* #8C8C9E */
-    --gray-500: oklch(0.5446 0.0278 285.44); /* #6E6E80 */
+    /* #6A6A7B, not the #6E6E80 this started as. Muted text sits on three
+       different grounds — the canvas, the muted fill, and the brand-tinted
+       accent — and the accent is the darkest of them. At the old value it
+       measured 4.48:1 there: under 4.5, found by auditing the running app
+       rather than by reading the token. One step down clears all three
+       (4.76 / 4.83 / 5.17) and costs nothing anywhere else. */
+    --gray-500: oklch(0.5304 0.0264 285.46); /* #6A6A7B */
     --gray-600: oklch(0.682 0.0248 285.72); /* #9797A8 — dark-mode muted text */
     --gray-800: oklch(0.2601 0.0168 285.18); /* #23232C */
     --gray-850: oklch(0.2386 0.0152 285.19); /* #1E1E26 */
@@ -249,6 +255,12 @@
     --brand-discord: #5865f2;
     --brand-discord-hover: #4752c4;
     --brand-discord-on-dark: #7f8ffa;
+    /* Discord's own darker blurple, for the blurple *as text* on a light
+       ground. The 500 is a fill colour: white on it measures 4.70:1, but the
+       label set in it on the light sidebar measures 4.20:1 — under the 4.5
+       a 14px label needs. This is still Discord's palette, which is the
+       constraint that matters; it is only a different step of it. */
+    --brand-discord-on-light: #4752c4;
 }
 
 .dark {

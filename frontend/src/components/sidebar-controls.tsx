@@ -42,7 +42,7 @@ const TONE_TEXT: Record<string, string> = {
 // is what stops it being "fixed" into the palette later. See `--brand-discord`
 // in index.css.
 const DISCORD_BLURPLE =
-  "text-(--brand-discord) dark:text-(--brand-discord-on-dark)";
+  "text-(--brand-discord-on-light) dark:text-(--brand-discord-on-dark)";
 
 /**
  * A sidebar row at rest: dimmed until you reach for it.
@@ -165,12 +165,23 @@ export function SidebarControls({
       )}
 
       <SidebarMenuItem>
+        {/* Deliberately NOT `RESTING_ROW`.
+
+            The resting dim is `opacity-60`, which is safe for a row of
+            near-white text — 16.87:1 becomes 6.60:1 — and destroys a
+            mid-tone hue: the blurple measures 6.36:1 at full strength and
+            3.04:1 dimmed, under the 4.5:1 a 14px label needs. Recovering
+            that inside the dim would mean lightening the blurple by five
+            steps, at which point it is a pale lavender and no longer reads
+            as Discord's colour at all.
+
+            So this row is not dimmed. Its hue already sets it apart from the
+            nav above, without help from the property doing the damage. */}
         <SidebarMenuButton
           tooltip="Join our Discord"
           className={cn(
             DISCORD_BLURPLE,
-            "hover:text-(--brand-discord) dark:hover:text-(--brand-discord-on-dark)",
-            RESTING_ROW,
+            "hover:text-(--brand-discord-on-light) dark:hover:text-(--brand-discord-on-dark)",
           )}
           render={<a href={DISCORD_INVITE_URL} target="_blank" rel="noreferrer" />}
         >
