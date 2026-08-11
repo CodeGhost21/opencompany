@@ -290,6 +290,12 @@ pub struct CompanyRuntime {
     /// and the boot reaper settles any run left mid-build.
     #[cfg(feature = "openhuman")]
     pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
+    /// The company's first-run setup polish pass, attached the same way as the
+    /// planner and the workflow builder. `None` is not a degraded state here:
+    /// the setup route then returns the curated template unpolished, which is a
+    /// real roster — see `docs/spec/runtime/company-setup.md`.
+    #[cfg(feature = "openhuman")]
+    pub(crate) roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>>,
     /// MCP installs and live connections for this runtime. The wrapper owns a
     /// company-home-scoped OpenHuman config while the live registry remains
     /// shared in-process with harness agents.
@@ -356,6 +362,8 @@ impl CompanyRuntime {
             planner: None,
             #[cfg(feature = "openhuman")]
             builder: None,
+            #[cfg(feature = "openhuman")]
+            roster_builder: None,
             #[cfg(feature = "mcp")]
             mcp: None,
         }
@@ -430,6 +438,24 @@ impl CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub fn builder(&self) -> Option<&Arc<crate::harness::workflow_build::WorkflowBuilder>> {
         self.builder.as_ref()
+    }
+
+    /// Attaches the company's first-run setup pass after construction, mirroring
+    /// [`set_builder`](Self::set_builder).
+    #[cfg(feature = "openhuman")]
+    pub fn set_roster_builder(
+        &mut self,
+        roster_builder: Arc<crate::harness::roster_build::RosterBuilder>,
+    ) {
+        self.roster_builder = Some(roster_builder);
+    }
+
+    /// The company's first-run setup pass, if one is wired. `None` means setup
+    /// answers a proposal from the curated template alone — a supported path,
+    /// not a broken one.
+    #[cfg(feature = "openhuman")]
+    pub fn roster_builder(&self) -> Option<&Arc<crate::harness::roster_build::RosterBuilder>> {
+        self.roster_builder.as_ref()
     }
 
     /// Attaches the embedded MCP runtime used by REST and harness agents.

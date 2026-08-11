@@ -1298,6 +1298,11 @@ impl RuntimeBuilder {
         // way via `CompanyRuntime::set_builder` below.
         #[cfg(feature = "openhuman")]
         let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
+        // First-run company setup's polish pass, built from the SAME deps as the
+        // planner and the workflow builder and installed the same way via
+        // `CompanyRuntime::set_roster_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut roster_builder: Option<Arc<crate::harness::roster_build::RosterBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1720,6 +1725,12 @@ impl RuntimeBuilder {
                             builder = Some(Arc::new(
                                 crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
+                            // Same deps again, for the same reason: setup must
+                            // polish a roster on whichever credential the rest
+                            // of the company is thinking on.
+                            roster_builder = Some(Arc::new(
+                                crate::harness::roster_build::RosterBuilder::from_deps(&deps),
+                            ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
                                 // choke point mints into and the boot reaper
@@ -1967,6 +1978,14 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(builder) = builder {
             runtime.set_builder(builder);
+        }
+        // Same rebuild treatment again. A setup pass interrupted by a rebuild
+        // needs no recovery at all: it holds no lock, mints no run and writes
+        // nothing, so the console simply re-asks and the operator loses nothing
+        // but the seconds they had waited.
+        #[cfg(feature = "openhuman")]
+        if let Some(roster_builder) = roster_builder {
+            runtime.set_roster_builder(roster_builder);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —

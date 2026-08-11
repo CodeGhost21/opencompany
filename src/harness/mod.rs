@@ -91,6 +91,11 @@ pub mod publish;
 /// records a decline, and can never fail the run it follows. Test-only.
 #[cfg(test)]
 mod publish_turn_test;
+/// First-run company setup's polish pass: one tool-less model call that rewrites
+/// a curated starting roster in the operator's own words. Narrower than the
+/// other two passes on purpose — the template picks the team, and every failure
+/// path ships that template unchanged. See [`roster_build`].
+pub mod roster_build;
 pub mod run_trace;
 pub mod run_turn;
 pub mod search;
