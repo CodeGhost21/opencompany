@@ -6466,3 +6466,257 @@ async fn a_card_can_be_created_as_a_workflow_deliverable() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(flipped["deliverable"], "workflow");
 }
+
+// ---------------------------------------------------------------------------
+// Binary workspace nodes over HTTP (issue #553)
+// ---------------------------------------------------------------------------
+
+/// Sends a `multipart/form-data` upload with one file part and an optional
+/// `parentId`, hand-rolling the body so the test exercises the real
+/// `Multipart` extractor rather than a stub.
+async fn upload_file(
+    state: &AppState,
+    filename: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+    parent_id: Option<&str>,
+) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----opencompany553boundary";
+    let mut body: Vec<u8> = Vec::new();
+    if let Some(parent) = parent_id {
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"parentId\"\r\n\r\n{parent}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    if let Some(ct) = content_type {
+        body.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/workspace/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if out.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&out).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// The headline of #553 over HTTP: a PNG uploads, appears in the tree with its
+/// metadata, and streams back byte-exactly — the round trip that used to be
+/// impossible because the create route only took a JSON body.
+#[tokio::test]
+async fn an_uploaded_image_round_trips_through_the_blob_route() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Not valid UTF-8, so nothing on this path can be quietly routing it
+    // through a `String`.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00,
+    ];
+    let (status, node) = upload_file(&state, "hero.png", Some("image/png"), &png, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["name"], "hero.png");
+    assert_eq!(node["mime"], "image/png");
+    assert_eq!(node["size"], png.len() as u64);
+    let sha = node["sha256"]
+        .as_str()
+        .expect("a digest is returned")
+        .to_string();
+    assert_eq!(sha.len(), 64, "the store's digest, not the caller's");
+    assert!(
+        node["content"].is_null(),
+        "a payload is never inlined into the node body"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // It is in the tree, with its metadata, so the console can decide how to
+    // render it without opening it.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id.as_str())
+        .expect("the uploaded node is in the tree");
+    assert_eq!(listed["mime"], "image/png");
+    assert_eq!(listed["size"], png.len() as u64);
+
+    // The payload streams back exactly, with the headers a browser needs.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["etag"], format!("\"{sha}\""));
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("hero.png")
+    );
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
+}
+
+/// A Markdown upload stays a **note**, not a payload. Storing it as bytes would
+/// silently cost it the editor, the diff-free text read, backlinks and search —
+/// so the decision is asserted rather than left to whichever branch ran.
+#[tokio::test]
+async fn a_markdown_upload_is_stored_as_a_note_not_as_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "brief.md",
+        Some("text/markdown"),
+        b"# Launch\n\nLinks to [[voice]].",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert!(
+        node["mime"].is_null(),
+        "a note carries no mime — that field is what marks a node binary"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // …and it reads back through the *text* route, with backlinks.
+    let (status, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(file["content"].as_str().unwrap().contains("# Launch"));
+}
+
+/// A file *typed* as text whose bytes are not UTF-8 becomes a payload. The
+/// decision is made on the bytes, so a mislabelled upload cannot be mangled
+/// into a note.
+#[tokio::test]
+async fn a_mislabelled_text_upload_is_stored_as_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "notes.txt",
+        Some("text/plain"),
+        &[0xff, 0xfe, 0x01],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["mime"], "text/plain",
+        "it keeps the declared type, but is stored as a payload"
+    );
+    assert_eq!(node["size"], 3);
+}
+
+/// The two read routes are not interchangeable, and asking the wrong one says
+/// which is right instead of answering with an empty body.
+#[tokio::test]
+async fn the_text_and_blob_reads_refuse_each_others_nodes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, image) = upload_file(&state, "chart.png", Some("image/png"), &[0x89, 0xff], None).await;
+    let image_id = image["id"].as_str().unwrap().to_string();
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "voice.md", "kind": "file", "content": "# Voice"})),
+    )
+    .await;
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // Text read of a payload: refused, and it names the route that works.
+    let (status, body) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{image_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("workspace/blob/"),
+        "the refusal must point at the route that serves it: {body}"
+    );
+
+    // Blob read of a note: a plain 404, exactly as for an id that names
+    // nothing — the two are deliberately indistinguishable.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{note_id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// An upload lands under the folder it names, like any other node.
+#[tokio::test]
+async fn an_upload_can_target_a_parent_folder() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Shots", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+
+    let (status, node) = upload_file(
+        &state,
+        "a.png",
+        Some("image/png"),
+        &[0x89, 0x50],
+        Some(&folder_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["parentId"], folder_id.as_str());
+}
