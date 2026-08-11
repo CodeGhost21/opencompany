@@ -1131,25 +1131,39 @@ async fn run_chat(
     } else {
         None
     };
-    // Deterministic task card: an actionable operator request ("build the
-    // landing page", "can you set up the newsletter") opens a `todo` card so
-    // "do X" always leaves a visible work item on the dashboard — independent of
-    // whether the orchestrator model also calls `spawn_task` (it may open
-    // sub-tasks on top). Pure questions, greetings, and acknowledgements don't
-    // fire, so the board fills with work, not small talk. Best-effort: a card
-    // write failure must never sink the chat reply.
+    // Deterministic task card, opened only for a message the triage calls
+    // `Track`: an actionable operator request ("build the landing page", "can
+    // you set up the newsletter") opens a `todo` card so "do X" always leaves a
+    // visible work item on the dashboard — independent of whether the
+    // orchestrator model also calls `spawn_task` (it may open sub-tasks on top).
+    // Best-effort: a card write failure must never sink the chat reply.
+    //
+    // Issue #267 turned the boolean this used to read into a positive three-way
+    // classification. `Answer` (a question about state, a read request) and
+    // `Chatter` (greetings, acknowledgements, anything ambiguous) both open
+    // nothing here — but they are NOT the same answer, and the difference
+    // matters one layer down: `Answer` additionally takes the model's own
+    // board-writing tools away for the turn, in
+    // `DelegationRunner::handle_operator_message`, because a question was the
+    // other door dead cards came through. This site is Layer A of that pair: it
+    // is compiled into every build and fronts both cognition brains, whereas the
+    // gate is on the harness path only.
     //
     // NOT on a workflow copilot thread (issue #416). A copilot question is
     // phrased at the workflow — "add a node that emails the report", "why does
-    // this fail on Mondays" — and the intent detector reads the first of those
-    // as a request to the company, which would put a card on the board from a
+    // this fail on Mondays" — and the triage reads the first of those as a
+    // request to the company, which would put a card on the board from a
     // conversation the operator was having *about a graph*. The confinement in
     // the harness stops the turn from acting; this stops the route from acting
     // on its behalf, and it holds in every build because it is here rather than
     // behind the `openhuman` feature.
     if let Some(title) = (!confined)
-        .then(|| crate::company::task_intent::detect_task_intent(&message.text))
-        .flatten()
+        .then(|| crate::company::task_intent::triage_message(&message.text))
+        .and_then(|triage| match triage {
+            crate::company::task_intent::MessageTriage::Track(title) => Some(title),
+            crate::company::task_intent::MessageTriage::Answer
+            | crate::company::task_intent::MessageTriage::Chatter => None,
+        })
     {
         // Keep the full message as the note only when the title was shortened
         // from it, so a one-line ask doesn't duplicate itself.

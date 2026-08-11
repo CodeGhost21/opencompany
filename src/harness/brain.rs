@@ -296,7 +296,7 @@ impl HarnessBrain {
             .delegation_runner(&run_turn)
             .drain_and_execute(
                 grant.origin_thread.as_deref(),
-                false,
+                delegation::MessageContext::default(),
                 delegation::HandOffs::Run,
             )
             .await
@@ -2090,7 +2090,7 @@ impl HarnessBrain {
     ) -> Result<delegation::DelegationOutcome> {
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
         self.delegation_runner(&run_turn)
-            .run_delegation(delegation, chat_id, false)
+            .run_delegation(delegation, chat_id, delegation::MessageContext::default())
             .await
     }
 
