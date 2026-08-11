@@ -597,9 +597,14 @@ pub enum NoDrainReason {
 impl NoDrainReason {
     /// The value the `reason` log field carries, so the two causes can be
     /// counted apart in production.
+    ///
+    /// `drain_unwired` rather than the `no_drain_wired` this shipped with: the
+    /// old value parsed just as readily as "a no-drain **was** wired", the
+    /// opposite of what it records, and this label is the field the whole
+    /// countability argument rests on (issue #267 review).
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::Unwired => "no_drain_wired",
+            Self::Unwired => "drain_unwired",
             Self::Triage => "triaged_as_question",
         }
     }
