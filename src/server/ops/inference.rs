@@ -27,9 +27,10 @@ use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
+use crate::app::config::EnvSource;
 use crate::company::Inference;
 use crate::company::inference::{
-    self, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
+    self, EnvDefault, InferenceSource, RuntimeInference, clear_runtime_config, resolve_effective,
     save_runtime_config, store_key, validate_runtime,
 };
 use crate::company::runtime::CompanyRuntime;
@@ -79,7 +80,11 @@ struct InferenceStatusDto {
     provider: String,
     /// The stable telemetry slug (`managed` / `openrouter` / `byok` / `ollama`).
     slug: String,
-    /// Resolved OpenAI-compatible base URL.
+    /// Resolved OpenAI-compatible base URL — the endpoint requests actually
+    /// travel to, including the platform default this deployment was pointed at
+    /// with `OPENCOMPANY_INFERENCE_URL`. A `managed` provider inherits that
+    /// endpoint, so resolving this without the platform default printed the
+    /// built-in production constant on every staging tenant (issue #597).
     base_url: String,
     /// Abstract-tier → concrete model id.
     models: BTreeMap<String, String>,
@@ -253,14 +258,85 @@ pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
     RunnerGap::NotWired
 }
 
-/// Resolves the effective status DTO. The ops layer resolves *tenant* config
-/// only (no env default), so a company with nothing configured reports the
-/// managed default rather than a synthesized env decl.
+/// This deployment's platform-injected managed default — the same
+/// `(base_url, credential)` pair the harness routes on
+/// ([`harness_inference_from_env`](crate::harness::provider::harness_inference_from_env)),
+/// read from the environment and never from a tenant secret.
+///
+/// `None` off the `openhuman` feature, and `None` when no managed credential
+/// resolves — which is exactly when the harness resolves no env default either.
+/// Deriving it from that one function rather than reading
+/// `OPENCOMPANY_INFERENCE_URL` directly is what keeps display and routing
+/// honest in both directions: a bare URL with no credential routes nowhere, so
+/// the card must not advertise it as the endpoint in use.
+fn platform_default(env: &dyn EnvSource) -> Option<EnvDefault> {
+    #[cfg(feature = "openhuman")]
+    {
+        crate::harness::provider::harness_inference_from_env(env).map(|(config, _)| EnvDefault {
+            base_url: config.base_url,
+            credential: config.credential,
+        })
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        let _ = env;
+        None
+    }
+}
+
+/// Resolves the effective status DTO against the real process environment.
 async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto, ApiError> {
+    effective_status_with(
+        runtime,
+        platform_default(&crate::app::config::ProcessEnv).as_ref(),
+    )
+    .await
+}
+
+/// [`effective_status`] against an explicit platform default, so the resolution
+/// is testable without touching the process environment.
+///
+/// Two resolves, deliberately, because the card answers two different questions
+/// (issue #597):
+///
+/// - **What did the tenant configure?** — resolved with no env default, and the
+///   only thing `source`, `keyConfigured` and `restartRequired` may see. A
+///   platform endpoint is not tenant config: reporting it as `source: "default"`
+///   would move the badge, reporting the platform token as `keyConfigured` would
+///   tell an operator a key they never set is stored (and that blanking the
+///   field "keeps" it), and feeding it to [`restart_pending`] would strand a
+///   company behind a restart that changes nothing. That is the intent the old
+///   `None` argument was protecting, and it survives here intact.
+/// - **Where do requests actually go?** — resolved *with* the platform default,
+///   and used for `baseUrl` alone. `managed` inherits the platform endpoint, so
+///   without it every non-production tenant rendered the built-in production
+///   constant: both the `None` arm below and any tenant whose own config names
+///   `managed` without its own `base_url`.
+async fn effective_status_with(
+    runtime: &CompanyRuntime,
+    platform: Option<&EnvDefault>,
+) -> Result<InferenceStatusDto, ApiError> {
     let manifest = manifest_inference(runtime).await?;
-    let decl = resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
+    let secrets = runtime.secrets().as_ref();
+    let decl = resolve_effective(runtime.id(), &manifest, None, secrets)
         .await
         .map_err(ApiError)?;
+    let base_url = match platform {
+        // Re-resolve with the platform default in place rather than
+        // reconstructing `resolve_endpoint`'s precedence here — the tenant's own
+        // `base_url` still outranks it, and only the `managed` kind inherits it.
+        Some(platform) => resolve_effective(runtime.id(), &manifest, Some(platform), secrets)
+            .await
+            .map_err(ApiError)?
+            .map_or_else(|| inference::MANAGED_BASE_URL.to_string(), |d| d.base_url),
+        // No platform endpoint on this deployment: nothing to inherit, so the
+        // tenant resolve already holds the whole answer and the second read is
+        // skipped.
+        None => decl.as_ref().map_or_else(
+            || inference::MANAGED_BASE_URL.to_string(),
+            |d| d.base_url.clone(),
+        ),
+    };
     // What the company actually booted onto, not what the config implies.
     let cognition = runtime.cognition();
     let restart_required = restart_pending(runtime, decl.is_some());
@@ -268,7 +344,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
             slug: d.telemetry_slug().to_string(),
-            base_url: d.base_url.clone(),
+            base_url,
             models: d.models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
@@ -279,7 +355,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
         None => InferenceStatusDto {
             provider: "managed".to_string(),
             slug: "managed".to_string(),
-            base_url: inference::MANAGED_BASE_URL.to_string(),
+            base_url,
             models: BTreeMap::new(),
             source: "managed".to_string(),
             key_configured: false,
@@ -471,6 +547,8 @@ mod tests {
     use serde_json::{Value, json};
     use tower::ServiceExt;
 
+    use super::*;
+
     use crate::company::CompanyManifest;
     use crate::ports::types::{CompanyId, CompanyRecord};
     use crate::runtime::RuntimeBuilder;
@@ -491,14 +569,13 @@ mod tests {
         toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap()
     }
 
-    async fn state_with_company(home: &std::path::Path) -> AppState {
+    /// Commits `manifest` as `id`'s record — what `manifest_inference` reads.
+    async fn save_record(home: &std::path::Path, id: &CompanyId, manifest: &CompanyManifest) {
         use crate::ports::CompanyStore;
-        let store = FsCompanyStore::new(home.to_path_buf());
-        let id = CompanyId::new("acme");
-        store
+        FsCompanyStore::new(home.to_path_buf())
             .save(&CompanyRecord {
                 id: id.clone(),
-                manifest: manifest(),
+                manifest: manifest.clone(),
                 ledger: Vec::new(),
                 lifecycle: "running".to_string(),
                 overlay_agents: Vec::new(),
@@ -512,6 +589,11 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+
+    async fn state_with_company(home: &std::path::Path) -> AppState {
+        let id = CompanyId::new("acme");
+        save_record(home, &id, &manifest()).await;
         let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
             .with_id(id.clone())
             .build()
@@ -550,6 +632,153 @@ mod tests {
             serde_json::from_slice(&bytes).unwrap_or(Value::Null)
         };
         (status, value, raw)
+    }
+
+    // ---------------------------------------------------------------------
+    // Issue #597 — the card must report the endpoint requests actually reach,
+    // not the built-in production constant.
+    // ---------------------------------------------------------------------
+
+    /// Where a staging deployment is pointed with `OPENCOMPANY_INFERENCE_URL`.
+    const STAGING_URL: &str = "https://staging-api.tinyhumans.ai/openai/v1";
+
+    /// The platform default a staging tenant is injected with.
+    fn staging_platform() -> EnvDefault {
+        EnvDefault {
+            base_url: STAGING_URL.to_string(),
+            credential: crate::company::credentials::Credential::from_value(
+                "platform-token".to_string(),
+            ),
+        }
+    }
+
+    /// A built runtime whose committed manifest is `manifest_toml`.
+    async fn runtime_with(home: &std::path::Path, manifest_toml: &str) -> CompanyRuntime {
+        let manifest: CompanyManifest = toml::from_str(manifest_toml).unwrap();
+        let id = CompanyId::new("acme");
+        save_record(home, &id, &manifest).await;
+        RuntimeBuilder::new(home.to_path_buf(), manifest)
+            .with_id(id)
+            .build()
+            .await
+            .unwrap()
+    }
+
+    const NO_INFERENCE: &str = "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n";
+
+    #[tokio::test]
+    async fn unconfigured_company_reports_the_platform_url_not_the_built_in_default() {
+        let home_dir = home();
+        let runtime = runtime_with(home_dir.path(), NO_INFERENCE).await;
+
+        // No platform endpoint on this deployment — the built-in constant is
+        // still the only honest answer, and this arm must not regress.
+        let dto = effective_status_with(&runtime, None).await.unwrap();
+        assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
+
+        // Pointed at staging, the card follows — and *only* the URL moves.
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.provider, "managed");
+        assert_eq!(
+            dto.source, "managed",
+            "a platform endpoint is not tenant config"
+        );
+        assert!(
+            !dto.key_configured,
+            "the platform token is not a stored tenant key"
+        );
+        assert!(
+            !dto.restart_required,
+            "a platform endpoint strands no tenant config behind a restart"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_managed_manifest_also_inherits_the_platform_url() {
+        // The half of #597 the report did not cover: `resolve_endpoint` falls
+        // back to the built-in constant for *any* `managed` config that names no
+        // base URL of its own, so a tenant with `[inference] provider =
+        // "managed"` printed the production URL too — under a `manifest` badge
+        // rather than the `managed` one the report reproduced.
+        let home_dir = home();
+        let runtime = runtime_with(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [inference]\nprovider = \"managed\"\n",
+        )
+        .await;
+
+        let dto = effective_status_with(&runtime, None).await.unwrap();
+        assert_eq!(dto.base_url, inference::MANAGED_BASE_URL);
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, STAGING_URL);
+        assert_eq!(dto.source, "manifest");
+        assert!(
+            !dto.key_configured,
+            "the platform token must not read as a tenant key on a managed manifest"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_explicit_tenant_base_url_outranks_the_platform_default() {
+        let home_dir = home();
+        let runtime = runtime_with(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [inference]\nprovider = \"managed\"\nbase_url = \"https://byo.example/v1\"\n",
+        )
+        .await;
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, "https://byo.example/v1");
+    }
+
+    #[tokio::test]
+    async fn a_non_managed_provider_ignores_the_platform_default() {
+        // Only `managed` inherits the platform endpoint; every other kind uses
+        // its own resolved URL verbatim.
+        let home_dir = home();
+        let runtime = runtime_with(
+            home_dir.path(),
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [inference]\nprovider = \"openrouter\"\n",
+        )
+        .await;
+
+        let dto = effective_status_with(&runtime, Some(&staging_platform()))
+            .await
+            .unwrap();
+        assert_eq!(dto.base_url, inference::OPENROUTER_BASE_URL);
+        assert_eq!(dto.source, "manifest");
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[test]
+    fn platform_default_follows_the_injected_inference_url() {
+        use crate::app::config::MapEnv;
+
+        let env = MapEnv::new([
+            ("TINYHUMANS_API_KEY", "platform-key"),
+            ("OPENCOMPANY_INFERENCE_URL", STAGING_URL),
+        ]);
+        assert_eq!(
+            platform_default(&env).map(|d| d.base_url),
+            Some(STAGING_URL.to_string())
+        );
+
+        // A URL with no credential resolves to nothing — the same answer the
+        // harness gives, so the card never advertises an endpoint that would
+        // route nowhere.
+        let bare = MapEnv::new([("OPENCOMPANY_INFERENCE_URL", STAGING_URL)]);
+        assert!(platform_default(&bare).is_none());
     }
 
     #[tokio::test]
