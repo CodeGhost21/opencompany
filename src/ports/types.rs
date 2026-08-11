@@ -4432,6 +4432,114 @@ mod test {
         }
     }
 
+    // ---- `[policy]` override (issue #562) --------------------------------
+
+    const POLICY_MANIFEST: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+         [policy]\nmode = \"supervised\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+
+    fn policy_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
+        PolicyOverride {
+            mode: mode.map(str::to_string),
+            always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// With no override stored, `effective_policy` is the manifest verbatim —
+    /// the pre-#562 behaviour, and the net that says adding this field changed
+    /// nothing for a company that never uses it.
+    #[test]
+    fn effective_policy_falls_back_to_the_manifest() {
+        let record = desk_record(POLICY_MANIFEST, Vec::new());
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "supervised");
+        assert_eq!(
+            effective.always_approve,
+            vec!["payment.send", "filing.submit"]
+        );
+    }
+
+    /// A stored override beats the manifest. This is the "no redeploy" property
+    /// at its source: nothing here consults `company.toml` once a row exists.
+    #[test]
+    fn a_stored_policy_override_beats_the_manifest() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("full"), None));
+        assert_eq!(record.effective_policy().mode, "full");
+    }
+
+    /// The two fields are independent: moving the tier must not silently reset
+    /// the always-ask list to the manifest's, nor the reverse.
+    ///
+    /// This is the merge that makes the console usable — the tier control and
+    /// the always-ask editor are separate widgets, and each `PUT` names only
+    /// what it changed. If either field reset the other, using one control would
+    /// quietly undo the other, and the always-ask list is the operator's real
+    /// lever: it wins over every tier including `full`.
+    #[test]
+    fn overriding_one_policy_field_leaves_the_other_alone() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+
+        record.overlay_policy = Some(policy_entry(Some("full"), None));
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "full");
+        assert_eq!(
+            effective.always_approve,
+            vec!["payment.send", "filing.submit"],
+            "moving the tier must not discard the manifest's always-ask list"
+        );
+
+        record.overlay_policy = Some(policy_entry(None, Some(vec!["external.publish"])));
+        let effective = record.effective_policy();
+        assert_eq!(
+            effective.mode, "supervised",
+            "editing the always-ask list must not move the tier"
+        );
+        assert_eq!(effective.always_approve, vec!["external.publish"]);
+    }
+
+    /// An emptied always-ask list is a real state, not a fallback.
+    ///
+    /// `Some(vec![])` is an operator deliberately clearing the list; `None` is
+    /// "not overridden". If these collapsed, an operator clearing the list would
+    /// instead get the manifest's three defaults back — silently re-imposing the
+    /// gates they had just removed, and with no way to express what they meant.
+    #[test]
+    fn an_emptied_always_approve_list_is_not_a_fallback() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+
+        record.overlay_policy = Some(policy_entry(None, Some(vec![])));
+        assert!(
+            record.effective_policy().always_approve.is_empty(),
+            "an explicitly emptied always-ask list must survive as empty"
+        );
+
+        record.overlay_policy = Some(policy_entry(None, None));
+        assert_eq!(
+            record.effective_policy().always_approve,
+            vec!["payment.send", "filing.submit"],
+            "an absent field must fall through to the manifest"
+        );
+    }
+
+    /// `auto_approve_under_usd` is not overridable and keeps reading the
+    /// manifest, so the merge cannot silently drop a threshold it does not carry.
+    #[test]
+    fn the_spend_threshold_is_untouched_by_a_policy_override() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+             [policy]\nmode = \"supervised\"\nauto_approve_under_usd = 2.5\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("full"), Some(vec![])));
+        assert_eq!(record.effective_policy().auto_approve_under_usd, Some(2.5));
+    }
+
     /// Issue #343: with no override stored, `effective_budget` is the manifest
     /// value verbatim — the pre-#343 behaviour, and the regression net that says
     /// adding this field changed nothing for a company that never uses it.

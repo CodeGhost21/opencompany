@@ -2166,6 +2166,106 @@ mod tests {
         ChunkAddr, ChunkHit, ChunkMeta, CompanySummary, ContextChunk, LedgerEntry,
     };
 
+    fn fp_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
+        use crate::ports::types::{Actor, ActorKind};
+        PolicyOverride {
+            mode: mode.map(str::to_string),
+            always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// The fingerprint moves when the tier moves (issue #562).
+    ///
+    /// This is the assertion that keeps the feature from being a no-op.
+    /// `ApprovalPolicy` is built once per roster build, and `ensure` reuses the
+    /// cached roster unless a fingerprint changed — so if this returned a
+    /// constant, a console tier change would persist, return `204`, render as
+    /// applied, and be **silently ignored until the process restarted**. Every
+    /// other test in this change would still pass.
+    #[test]
+    fn the_policy_fingerprint_moves_when_the_tier_does() {
+        let none = policy_fingerprint(None);
+        let supervised = policy_fingerprint(Some(&fp_entry(Some("supervised"), None)));
+        let full = policy_fingerprint(Some(&fp_entry(Some("full"), None)));
+
+        assert_ne!(
+            supervised, full,
+            "a tier change must move the fingerprint or the roster is never rebuilt"
+        );
+        assert_ne!(
+            none, supervised,
+            "setting an override must move the fingerprint even when it names the \
+             tier the manifest already had — the manifest can change under a rebuild"
+        );
+    }
+
+    /// An always-ask edit moves it too, including clearing the list.
+    ///
+    /// `always_approve` wins over every tier including `full`, so an edit that
+    /// did not rebuild would leave the gate enforcing a list the operator had
+    /// already changed — the failure mode is stricter *or* looser than what the
+    /// console shows, depending on the edit.
+    #[test]
+    fn the_policy_fingerprint_moves_when_the_always_ask_list_does() {
+        let absent = policy_fingerprint(Some(&fp_entry(Some("auto"), None)));
+        let empty = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec![]))));
+        let one = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["payment.send"]))));
+        let two = policy_fingerprint(Some(&fp_entry(
+            Some("auto"),
+            Some(vec!["payment.send", "filing.submit"]),
+        )));
+
+        assert_ne!(
+            absent, empty,
+            "clearing the list is not the same as not overriding it"
+        );
+        assert_ne!(empty, one);
+        assert_ne!(one, two);
+
+        // Order is part of the value: the list is the operator's own, not an
+        // accumulation of independent rows, so a reorder is a real edit.
+        let reordered = policy_fingerprint(Some(&fp_entry(
+            Some("auto"),
+            Some(vec!["filing.submit", "payment.send"]),
+        )));
+        assert_ne!(two, reordered);
+
+        // Length is folded in, so concatenation cannot collide.
+        let split = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["a", "b"]))));
+        let joined = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["ab"]))));
+        assert_ne!(split, joined);
+    }
+
+    /// Attribution is deliberately NOT hashed.
+    ///
+    /// Re-setting the same tier writes a fresh `set_by`/`at_millis`. If those
+    /// moved the fingerprint, every such save would rebuild the roster and drop
+    /// live agent sessions for a change no agent can observe — the same reason
+    /// `budget_fingerprint` omits them.
+    #[test]
+    fn re_setting_the_same_tier_does_not_rebuild_the_roster() {
+        use crate::ports::types::{Actor, ActorKind};
+        let first = fp_entry(Some("auto"), Some(vec!["payment.send"]));
+        let second = PolicyOverride {
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "a-different-admin".to_string(),
+            },
+            at_millis: 1_900_000_000_000,
+            ..first.clone()
+        };
+        assert_eq!(
+            policy_fingerprint(Some(&first)),
+            policy_fingerprint(Some(&second)),
+            "attribution must not move the fingerprint"
+        );
+    }
+
     /// In-memory `ContextStore` so `OcMemory` has somewhere to land.
     #[derive(Default)]
     struct MockContext {
