@@ -1,6 +1,7 @@
 //! The workspace tree read: `Company.workspaceTree` / `workspaceFile` over the
 //! [`WorkspaceStore`] port, with `[[wikilink]]` backlinks computed at read.
 
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 
 use async_graphql::{ID, SimpleObject};
@@ -8,6 +9,9 @@ use async_graphql::{ID, SimpleObject};
 use super::iso8601;
 use crate::company::runtime::CompanyRuntime;
 use crate::company::workspace_links::file_with_backlinks;
+use crate::company::workspace_search::{
+    DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace,
+};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
 
 /// Who authored a workspace node. Mirrors [`WorkspaceOrigin`] (issue #326).
@@ -102,6 +106,37 @@ pub struct WorkspaceFileGql {
     pub backlinks: Vec<FsNodeGql>,
 }
 
+/// One workspace search hit (issue #607).
+///
+/// The node is nested rather than flattened: `FsNode` is already the projection
+/// every other workspace read hands back, and re-declaring its seven fields here
+/// would be a second copy to keep in step. What search adds is the two things
+/// only a search knows — where the node sits, and why it came back.
+#[derive(SimpleObject)]
+#[graphql(name = "WorkspaceSearchHit")]
+pub struct WorkspaceSearchHitGql {
+    /// The matching node.
+    pub node: FsNodeGql,
+    /// Its logical path, e.g. `Standards/Engineering.md`.
+    pub path: String,
+    /// `name` or `content`.
+    pub matched: String,
+    /// Text around the first body match; null for a name match, a folder and a
+    /// binary node.
+    pub excerpt: Option<String>,
+}
+
+/// A page of workspace search hits, plus how many matched in total.
+#[derive(SimpleObject)]
+#[graphql(name = "WorkspaceSearchResults")]
+pub struct WorkspaceSearchResultsGql {
+    /// The hits: name matches first, then content matches, freshest first
+    /// within each group.
+    pub hits: Vec<WorkspaceSearchHitGql>,
+    /// Matches before the limit was applied.
+    pub total: i32,
+}
+
 /// Resolves `Company.workspaceTree`.
 pub(crate) async fn resolve_tree(
     runtime: &Arc<CompanyRuntime>,
@@ -135,4 +170,61 @@ pub(crate) async fn resolve_file(
         updated_by: node.updated_by.into(),
         backlinks: backlinks.into_iter().map(FsNodeGql::from).collect(),
     }))
+}
+
+/// Resolves `Company.workspaceSearch(query, prefix, limit)`.
+///
+/// The scan is
+/// [`search_workspace`](crate::company::workspace_search::search_workspace),
+/// shared with the REST `GET …/workspace/search` route the console calls and
+/// with the agent `workspace_search` tool — the same reason
+/// [`resolve_file`] shares its backlink scan. Three surfaces that each answered
+/// "which notes mention X" their own way would drift, and a caller looking at
+/// one of them would have no way to notice.
+pub(crate) async fn resolve_search(
+    runtime: &Arc<CompanyRuntime>,
+    query: &str,
+    prefix: Option<&str>,
+    limit: Option<i32>,
+) -> async_graphql::Result<WorkspaceSearchResultsGql> {
+    // A negative or zero `limit` is refused rather than coerced. Coercing it to
+    // the default ignores an argument the caller meant, and coercing it to
+    // "everything" is the unbounded read this surface exists to avoid.
+    let limit = match limit {
+        None => NonZeroUsize::new(DEFAULT_SEARCH_LIMIT).expect("the default limit is non-zero"),
+        Some(n) => usize::try_from(n)
+            .ok()
+            .and_then(NonZeroUsize::new)
+            .ok_or_else(|| {
+                async_graphql::Error::new(format!(
+                    "`limit` must be between 1 and {MAX_SEARCH_RESULTS}; omit it for the default \
+                     of {DEFAULT_SEARCH_LIMIT}"
+                ))
+            })?,
+    };
+
+    let outcome = search_workspace(
+        runtime.workspace().as_ref(),
+        runtime.id(),
+        query,
+        prefix,
+        limit,
+    )
+    .await?;
+    Ok(WorkspaceSearchResultsGql {
+        // Saturating rather than `as`: a wrap would report a negative count for
+        // a workspace nobody will ever have, and saturating is the answer that
+        // stays monotonic.
+        total: i32::try_from(outcome.total).unwrap_or(i32::MAX),
+        hits: outcome
+            .hits
+            .into_iter()
+            .map(|hit| WorkspaceSearchHitGql {
+                node: FsNodeGql::from(hit.node),
+                path: hit.path,
+                matched: hit.matched.as_str().to_string(),
+                excerpt: hit.excerpt,
+            })
+            .collect(),
+    })
 }

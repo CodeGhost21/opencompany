@@ -41,6 +41,7 @@ import {
   StickyNote,
   Trash2,
   UserCog,
+  Workflow,
   Wrench,
 } from "lucide-react";
 
@@ -115,6 +116,7 @@ import { ArtifactsTab } from "./ArtifactsTab";
 import { TaskPlanBrief, tallyPrerequisites } from "./TaskPlanBrief";
 import { AssigneeSelect } from "./AssigneeSelect";
 import { TaskEditDialog } from "./TaskEditDialog";
+import { TaskWorkflowProposalPanel } from "./TaskWorkflowProposalPanel";
 
 /** How often to re-poll the detail while the screen is open (visibility-gated). */
 const POLL_MS = 4000;
@@ -494,6 +496,20 @@ export function TaskDetailView({
 
             <AwaitingApprovalRow approvals={detail.approvals} now={now} />
 
+            {/* Issue #580: the built workflow awaiting approval, shown only while
+                the card sits In Review with a proposal. Apply creates the
+                workflow and moves the card to Done (#339 link); reject returns
+                it to To-do. */}
+            {detail.task.column === "in_review" && detail.task.workflowProposal && (
+              <TaskWorkflowProposalPanel
+                client={client}
+                company={company}
+                task={detail.task}
+                onSaved={onSaved}
+                onReload={load}
+              />
+            )}
+
             <Tabs value={tab} onValueChange={(next) => setTab(String(next))}>
               <TabsList>
                 <TabsTrigger value="timeline">Timeline</TabsTrigger>
@@ -646,6 +662,17 @@ function DetailHeader({
             {columnLabel(task.column)}
           </Badge>
         </span>
+        {/* Issue #580: this card builds a reusable workflow rather than doing
+            the work once. Stated on the detail header the same as the board
+            card's chip, so the deliverable reads the same from either surface. */}
+        {task.deliverable === "workflow" && (
+          <span className="inline-flex items-center gap-1.5">
+            <Badge variant="outline" className="gap-1 font-normal">
+              <Workflow className="size-3" aria-hidden />
+              Workflow
+            </Badge>
+          </span>
+        )}
         {task.assignee && (
           <span className="inline-flex items-center gap-1.5">
             <span

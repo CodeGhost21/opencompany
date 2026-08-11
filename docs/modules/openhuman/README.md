@@ -35,11 +35,25 @@ for the full integration contract.
 `HarnessPool`: each operator message runs one openhuman agent turn and returns
 the agent's reply, in place of the offline `EchoBrain`'s `"You said: …"`. A
 company routes through it when the `RuntimeBuilder` has both a harness pool
-(`with_harness`) and a hosted-inference config (`with_harness_inference`) and
-no explicit brain — brain precedence is `with_brain` > harness > hosted/echo.
-The `opencompany` binary's `attach_harness` resolves that config from the
-environment (below), so `serve` boots on the harness brain automatically when a
-credential is present.
+(`with_harness`) and any inference source that resolves at build time, and no
+explicit brain — brain precedence is `with_brain` > harness > hosted/echo. The
+`opencompany` binary's `attach_harness` resolves the managed default from the
+environment (below).
+
+Which brain a company runs is chosen once, when its runtime is built. A company
+that resolved **no** inference source at boot is on the offline echo brain and
+stays there for as long as that runtime lives, no matter what the console saves
+afterwards — a company runtime is built once and cached in the
+`CompanyRegistry`. That transition is reported honestly as `restartRequired`
+(issue #266) and cleared by rebuilding the runtime in place (issue #290, see
+[`docs/spec/runtime/rebuild.md`](../../spec/runtime/rebuild.md)) rather than by
+a process restart.
+
+Everything *after* that first transition is live: once a company is on the
+harness path, `TenantProvider` re-resolves the effective config — console
+runtime override > manifest `[inference]` > managed env default — on every turn,
+so a provider switch or key rotation reaches agents on the next turn with no
+rebuild at all.
 
 ## Approval parking
 
@@ -82,6 +96,13 @@ default model, most specific first:
 
 The two key names keep a per-tenant override distinct from the platform-wide
 credential the hosting manager injects.
+
+This is the **lowest**-precedence source. A company's own key, set write-only
+through the console (`PUT …/inference` with `key`, stored under the
+`inference/key` secret), wins over both env names — including on the `managed`
+provider, where only the credential changes and the platform endpoint is kept.
+Clearing it (`PUT …/inference` with `key: ""`, the console's **Remove key**)
+falls back to the env credential rather than 401ing.
 
 ## Cost metering
 

@@ -1,5 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Check, Loader2, ShieldCheck, X } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { toast } from "sonner";
 
 import type { OpenCompanyClient } from "@/api/client";
@@ -21,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { approvalSummary, timeAgo, toolAction } from "@/lib/language";
+import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
 
 /**
  * Below this, a lost connection cannot have outlived the fast part of a resolve.
@@ -526,6 +529,12 @@ function ApprovalCard({
           }
         />
 
+        {/* Issue #596: for a workflow pre-publish gate, show the VERBATIM content
+            the run is about to publish — the draft awaiting sign-off — above the
+            raw payload. Additive display only; the decide/grant path below is
+            untouched (epic #558). */}
+        <WorkflowContentReview approval={a} />
+
         <ApprovalPayload approval={a} />
 
         <ApprovalScopeControl
@@ -549,6 +558,83 @@ function ApprovalCard({
         />
       </CardContent>
     </Card>
+  );
+}
+
+/** The effect kind a paused workflow gate parks as — mirrors
+ * `WORKFLOW_APPROVE_KIND` in `src/runtime/workflow_resume.rs`. */
+const WORKFLOW_APPROVE_KIND = "workflow.approve";
+/** The payload key carrying the upstream nodes' content — mirrors
+ * `PAYLOAD_CONTENT` in `src/runtime/workflow_resume.rs`. */
+const PAYLOAD_CONTENT_KEY = "content";
+
+/**
+ * The "Content awaiting review" block (issue #596): for a workflow pre-publish
+ * gate, the verbatim output of the nodes feeding the gate — the actual draft the
+ * run is about to publish — so an operator signs off on the CONTENT, not a blind
+ * approval card.
+ *
+ * Renders nothing for any non-workflow card, or a workflow card with no content
+ * payload (an older host, or a gate with no upstream output). Read-only display
+ * built from the same `run-output` parse the run inspector uses, so a draft reads
+ * identically here and there.
+ */
+function WorkflowContentReview({ approval }: { approval: ApprovalSummary }) {
+  const sections = useMemo(() => {
+    if (approval.kind !== WORKFLOW_APPROVE_KIND) return [];
+    if (!isRecord(approval.payload)) return [];
+    const content = approval.payload[PAYLOAD_CONTENT_KEY];
+    if (!isRecord(content)) return [];
+    return Object.entries(content).map(([nodeId, value]) => ({
+      nodeId,
+      value,
+      messages: parseNodeMessages(value),
+    }));
+  }, [approval]);
+
+  if (sections.length === 0) return null;
+
+  return (
+    <div
+      /* Blocked, not running. This arrived in the sky/running colour, which
+         says "the machine is working on it" about the one state that means
+         the opposite: it is parked until a person reads it. Same correction
+         as `runTone`'s "awaiting approval" arm. */
+      className="space-y-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2"
+      data-testid="workflow-content-review"
+    >
+      <p className="text-3xs font-medium uppercase tracking-wide text-status-blocked-text">
+        Content awaiting review
+      </p>
+      {sections.map((section) => (
+        <div key={section.nodeId} className="space-y-1">
+          <p className="text-3xs uppercase tracking-wide text-muted-foreground">
+            {section.nodeId}
+          </p>
+          {section.messages.length > 0 ? (
+            section.messages.map((m, i) => (
+              <div key={i} className={i > 0 ? "border-t pt-1" : undefined}>
+                {m.text ? (
+                  <div className="prose prose-sm max-w-none dark:prose-invert">
+                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+                  </div>
+                ) : (
+                  <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+                    {m.agentRef ?? "—"}
+                  </p>
+                )}
+              </div>
+            ))
+          ) : (
+            // No parseable message text — show the raw value so the operator still
+            // sees exactly what is about to publish rather than nothing.
+            <pre className="overflow-auto whitespace-pre-wrap rounded border bg-muted/40 p-2 font-mono text-2xs leading-snug">
+              {JSON.stringify(section.value, null, 2)}
+            </pre>
+          )}
+        </div>
+      ))}
+    </div>
   );
 }
 

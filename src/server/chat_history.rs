@@ -23,35 +23,76 @@ use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 /// across the two ids depending on which one happened to write it (issue #65).
 pub const MAIN_THREAD_ID: &str = "main";
 
+/// Does this stored chat id mean the General desk?
+///
+/// **Four spellings, one desk.** The console addresses its default thread as
+/// `"main"`, the chat route stores an unaddressed message as `None`, older
+/// events carry `""`, and the desk's own id/name is `"General"`. [`owns`] has
+/// admitted all four since issue #65, which is what stops a transcript from
+/// splitting across whichever id happened to write each message.
+///
+/// Exposed because that equivalence is **not** local to history rendering.
+/// `CompanyRuntime::resolvable_parent` compares a remembered thread root's chat
+/// id against the channel being answered into, and comparing the raw strings
+/// there made a root stored as `None` fail to match the `"General"` it is
+/// rendered under — so a threaded approval rooted in an unaddressed message
+/// silently resumed in the channel, which is the exact symptom issue #435 set
+/// out to remove. Two places deciding "same conversation?" by different rules
+/// is the drift; one function is the fix. See [`same_conversation`].
+pub fn is_general_chat(chat: Option<&str>) -> bool {
+    match chat {
+        None => true,
+        Some(chat) => {
+            chat.is_empty()
+                || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)
+                || chat.eq_ignore_ascii_case(GENERAL_DESK)
+        }
+    }
+}
+
+/// Do two stored chat ids name the same conversation (issue #435)?
+///
+/// Every spelling of the General desk is one conversation — see
+/// [`is_general_chat`] — and everything else compares verbatim, because a desk
+/// id is an opaque identifier and two desks differing only in case are two
+/// desks. Deliberately **not** a general-purpose case-insensitive compare: the
+/// folding is a fact about one desk's history, not a licence to loosen the
+/// others.
+pub fn same_conversation(a: Option<&str>, b: Option<&str>) -> bool {
+    if is_general_chat(a) || is_general_chat(b) {
+        return is_general_chat(a) && is_general_chat(b);
+    }
+    a == b
+}
+
 /// Whether a stored event belongs to the desk identified by `desk_id` /
 /// `desk_name`.
 ///
-/// Both `AgentReply`s and `OperatorMessage`s match on the desk id or name
-/// verbatim, plus — only for the General/operator desk — the console's `"main"`
-/// thread id and an empty chat id, so no historical message is orphaned by the
-/// id it happened to be journaled under (issue #65). An operator message routes
-/// by its stored `chat` id symmetrically with an agent reply's `chat_id`; only
-/// a legacy operator message with no stored chat id (empty/`None`) falls back
-/// to belonging to the General desk.
+/// Both `AgentReply`s and `OperatorMessage`s route by their stored chat id,
+/// matched against the desk's id and its name through [`same_conversation`] — so
+/// a named desk still compares verbatim and the General desk answers to every
+/// spelling of itself, and no historical message is orphaned by the id it
+/// happened to be journaled under (issue #65).
+///
+/// **Folded on both sides, not just the event's** (issue #435). The General
+/// check used to key on the *desk being asked for* being spelled `"General"`,
+/// which the console never does: its default thread is `"main"`, so
+/// `?desk=main` resolves to `("main", "main")` — no group chat is named `main` —
+/// and every event journaled under `"General"` was excluded from the one
+/// transcript that should hold them. An unaddressed chat post is exactly that
+/// pair: the operator message stores `chat: None` and its answer is journaled
+/// with `chat_id: "General"`, so the console's main line dropped both halves of
+/// its own conversation. The asymmetry also put this function at odds with
+/// `resolvable_parent`, which now folds through the same rule: a continuation
+/// could be parented to a root the main line refuses to render, and the console
+/// drops a reply whose parent it cannot find rather than showing it flat.
 pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
-    let is_general_desk =
-        desk_id.eq_ignore_ascii_case(GENERAL_DESK) || desk_name.eq_ignore_ascii_case(GENERAL_DESK);
-    match event {
-        CompanyEvent::AgentReply { chat_id, .. } => {
-            chat_id == desk_id
-                || chat_id == desk_name
-                || (is_general_desk
-                    && (chat_id.is_empty() || chat_id.eq_ignore_ascii_case(MAIN_THREAD_ID)))
-        }
-        CompanyEvent::OperatorMessage { chat, .. } => {
-            let chat = chat.as_deref().unwrap_or_default();
-            chat == desk_id
-                || chat == desk_name
-                || (is_general_desk
-                    && (chat.is_empty() || chat.eq_ignore_ascii_case(MAIN_THREAD_ID)))
-        }
-        _ => false,
-    }
+    let stored = match event {
+        CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.as_str()),
+        CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
+        _ => return false,
+    };
+    same_conversation(stored, Some(desk_id)) || same_conversation(stored, Some(desk_name))
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -379,6 +420,16 @@ mod test {
         }
     }
 
+    /// `None` is the shape the chat route stores for an unaddressed post.
+    fn operator_message(chat: Option<&str>) -> CompanyEvent {
+        CompanyEvent::OperatorMessage {
+            parent: None,
+            text: "hi".to_string(),
+            by: None,
+            chat: chat.map(str::to_string),
+        }
+    }
+
     #[test]
     fn general_desk_owns_agent_replies_under_general_and_main() {
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &agent_reply(GENERAL_DESK)));
@@ -389,6 +440,51 @@ mod test {
         ));
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &agent_reply("")));
         assert!(!owns(GENERAL_DESK, GENERAL_DESK, &agent_reply("strategy")));
+    }
+
+    /// The console asks for its default line as `?desk=main`, which resolves to
+    /// `("main", "main")` — no group chat is named `main` — so the desk side has
+    /// to fold too (issue #435).
+    ///
+    /// The pair that made this reachable: an unaddressed chat post journals the
+    /// operator message with `chat: None` and its answer with
+    /// `chat_id: "General"`, so before this both halves of that conversation were
+    /// missing from the one transcript that should hold them.
+    #[test]
+    fn the_main_line_owns_what_was_journaled_under_general() {
+        for stored in [GENERAL_DESK, MAIN_THREAD_ID, ""] {
+            assert!(
+                owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &agent_reply(stored)),
+                "a reply stored as `{stored}` belongs to the main line",
+            );
+            assert!(
+                owns(
+                    MAIN_THREAD_ID,
+                    MAIN_THREAD_ID,
+                    &operator_message(Some(stored))
+                ),
+                "an operator message stored as `{stored}` belongs to the main line",
+            );
+        }
+        // The unaddressed post itself — the case that produces the pair above.
+        assert!(owns(
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &operator_message(None)
+        ));
+
+        // …and the fold stops at the General family: a named desk's traffic
+        // does not join the main line, in either direction.
+        assert!(!owns(
+            MAIN_THREAD_ID,
+            MAIN_THREAD_ID,
+            &agent_reply("strategy")
+        ));
+        assert!(!owns(
+            "strategy",
+            "Strategy desk",
+            &operator_message(Some(GENERAL_DESK))
+        ));
     }
 
     #[test]

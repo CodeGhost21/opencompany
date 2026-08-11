@@ -41,9 +41,18 @@ pub const INFERENCE_TIERS: &[&str] = &["chat-v1", "reasoning-v1", "agentic-v1", 
 /// Tool providers selectable in `[tools].provider`.
 pub const TOOL_PROVIDERS: &[&str] = &["openhuman", "builtin"];
 
-/// Approval policy modes selectable in `[policy].mode`, mirroring OpenHuman's
-/// security tiers.
-pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "full"];
+/// Approval policy modes selectable in `[policy].mode`, in increasing order of
+/// autonomy.
+///
+/// `readonly` / `supervised` / `full` take their names from OpenHuman's own
+/// security tiers; `auto` (issue #560) is opencompany's, and sits between
+/// "ask before every change" and "ask before almost nothing".
+///
+/// This list is the manifest validator's, so it is the gate that decides whether
+/// a mode is *reachable* at all — `PolicyMode::parse` never sees a string this
+/// rejects. The two are kept in step by `every_policy_mode_parses_to_its_own_
+/// variant` in `harness::policy`.
+pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 
 /// Channels the runtime knows how to enable under `[channels.*]`.
 pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
@@ -363,13 +372,42 @@ fn default_true() -> bool {
     true
 }
 
+/// The default ceiling on concurrent in-flight workflow runs per company
+/// (issue #401), applied when `[workflows].max_in_flight_runs` is omitted.
+///
+/// Deliberately well above 1: a running workflow's agent node can itself call
+/// the `run_workflow` tool, so the parent run holds a slot while a child begins.
+/// A ceiling of 1 would refuse that legitimate nesting on the first hop, which
+/// is why the field's validation floor is 1 but its default is generous.
+pub const DEFAULT_MAX_IN_FLIGHT_RUNS: usize = 8;
+
+fn default_max_in_flight_runs() -> usize {
+    DEFAULT_MAX_IN_FLIGHT_RUNS
+}
+
 /// `[workflows]` — references to the workflow graphs to enable. The graphs live
 /// as separate files under the company's `workflows/` directory.
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workflows {
     /// Workflow ids to enable, each a `workflows/<id>.toml` graph file.
     #[serde(default)]
     pub enabled: Vec<String>,
+    /// The most workflow runs this company may have executing at once
+    /// (issue #401). Every run — manual, scheduled, gate-resume, or one an
+    /// orchestrator agent starts — is admitted through the same choke point and
+    /// counts against this ceiling; a run over it is refused, never queued.
+    /// Defaults to [`DEFAULT_MAX_IN_FLIGHT_RUNS`]; validation requires `>= 1`.
+    #[serde(default = "default_max_in_flight_runs")]
+    pub max_in_flight_runs: usize,
+}
+
+impl Default for Workflows {
+    fn default() -> Self {
+        Self {
+            enabled: Vec::new(),
+            max_in_flight_runs: DEFAULT_MAX_IN_FLIGHT_RUNS,
+        }
+    }
 }
 
 /// `[users]` — the company's human collaborators.
@@ -565,7 +603,12 @@ fn default_tool_provider() -> String {
 /// `[policy]` — the default `ApprovalGate` configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Policy {
-    /// `readonly` | `supervised` (default) | `full`.
+    /// `readonly` | `supervised` (default) | `auto` | `full`.
+    ///
+    /// The default stays `supervised` deliberately: issue #560 argues `auto`
+    /// should become it, but flipping it changes behaviour for every existing
+    /// company with no `[policy]` block on its next load, so that is its own
+    /// decision rather than a rider on adding the tier.
     #[serde(default = "default_policy_mode")]
     pub mode: String,
     /// Effect kinds that always park for approval regardless of amount.

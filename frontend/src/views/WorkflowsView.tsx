@@ -39,8 +39,10 @@ import {
   setWorkflowEnabled,
   type WorkflowGraph,
   type WorkflowRunOutcome,
+  type WorkflowRunOutputRecord,
   type WorkflowRunResult,
   type WorkflowSummary,
+  workflowRunOutput,
 } from "@/api/workflows";
 import type { CompanyStreamEvent } from "@/hooks/use-events";
 import type { OpenCompanyClient } from "@/api/client";
@@ -89,6 +91,7 @@ import { CopilotPanel } from "@/views/workflows/CopilotPanel";
 import { classifyRunError } from "@/views/workflows/run-error";
 import { RunResultPanel } from "@/views/workflows/RunResultPanel";
 import { NodeDetailPanel } from "@/views/workflows/NodeDetailPanel";
+import { type NodeOutputView, nodeOutputFor } from "@/views/workflows/run-output";
 
 const NODE_TYPES = { oc: WorkflowNode };
 
@@ -272,6 +275,17 @@ export function WorkflowsView({
   // This is what makes a scheduled run's failure point visible after the fact,
   // which is the half of the issue a live canvas alone cannot answer.
   const [overlayRun, setOverlayRun] = useState<WorkflowRunOutcome | null>(null);
+  // Issue #596: the durable per-node output of the overlaid past run, fetched
+  // lazily once when a past run is opened (the history list is structural — no
+  // output — so the inspector reads what each node produced from here). `record:
+  // null` after a settled fetch means the run has no captured output (a 404 —
+  // predates capture / dry / hard-aborted), which the inspector renders as an
+  // explicit empty state.
+  const [overlayOutput, setOverlayOutput] = useState<{
+    runId: string;
+    loading: boolean;
+    record: WorkflowRunOutputRecord | null;
+  } | null>(null);
   // The run this view just POSTed, held until its history row arrives.
   //
   // The fallback for a console with no live stream: if `/events` 404s or the
@@ -1179,6 +1193,57 @@ export function WorkflowsView({
     [graph, selectedNodeId],
   );
 
+  // Issue #596: lazily fetch a past run's per-node output ONCE when it is
+  // overlaid, so clicking any of its nodes can show what that node produced. A
+  // 404 (predates capture / dry / hard-aborted / older host) settles to `record:
+  // null`, which the inspector renders as an empty state rather than an error.
+  const overlayRunId = overlayRun?.runId ?? null;
+  useEffect(() => {
+    if (!overlayRunId) {
+      setOverlayOutput(null);
+      return;
+    }
+    let cancelled = false;
+    setOverlayOutput({ runId: overlayRunId, loading: true, record: null });
+    workflowRunOutput(client, company, overlayRunId)
+      .then((record) => {
+        if (!cancelled) setOverlayOutput({ runId: overlayRunId, loading: false, record });
+      })
+      .catch(() => {
+        // 404 (no captured output) or an older host without the route — either
+        // way there is nothing to show, which the inspector states plainly.
+        if (!cancelled) setOverlayOutput({ runId: overlayRunId, loading: false, record: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [overlayRunId, client, company]);
+
+  // The clicked node's output on the run being inspected (issue #596): a past
+  // run's node reads from the lazily-fetched durable snapshot; a live run's node
+  // reads from the in-memory result — the same Output section renders both.
+  // `undefined` when no run is being inspected, so the inspector shows only the
+  // node's static config, exactly as before.
+  const selectedNodeOutput = useMemo<NodeOutputView | undefined>(() => {
+    if (!selectedNode) return undefined;
+    if (overlayRun) {
+      if (!overlayRun.runId) return { state: "unavailable" };
+      if (!overlayOutput || overlayOutput.runId !== overlayRun.runId || overlayOutput.loading) {
+        return { state: "loading" };
+      }
+      if (!overlayOutput.record) return { state: "unavailable" };
+      const value = nodeOutputFor(overlayOutput.record.nodes, selectedNode.id);
+      if (value === undefined) return { state: "unavailable" };
+      return { state: "present", value, truncated: overlayOutput.record.truncated };
+    }
+    if (result) {
+      const value = nodeOutputFor(result.output, selectedNode.id);
+      if (value === undefined) return { state: "unavailable" };
+      return { state: "present", value, truncated: false };
+    }
+    return undefined;
+  }, [selectedNode, overlayRun, overlayOutput, result]);
+
   const onNodeClick = useCallback((_: unknown, node: Node) => {
     setSelectedNodeId(node.id);
   }, []);
@@ -1675,7 +1740,11 @@ export function WorkflowsView({
               />
             ) : (
               selectedNode && (
-                <NodeDetailPanel node={selectedNode} onClose={() => setSelectedNodeId(null)} />
+                <NodeDetailPanel
+                  node={selectedNode}
+                  output={selectedNodeOutput}
+                  onClose={() => setSelectedNodeId(null)}
+                />
               )
             )}
           </>

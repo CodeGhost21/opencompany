@@ -35,7 +35,7 @@ use crate::ports::runs::{RunOutcome, RunStatus};
 use crate::ports::tasks::{COLUMN_TODO, TaskRecord};
 use crate::ports::types::{
     Actor, ApprovalId, CompanyEvent, CompanyId, CompanyRecord, ContextOp, ContextOpResult,
-    CycleRequest, Effect, EffectDisposition, EffectGroup, LedgerEntry, OutboundMessage,
+    CycleRequest, Effect, EffectDisposition, EffectGroup, EventSeq, LedgerEntry, OutboundMessage,
     PolicyDecision, TokenUsage, ToolCall, ToolResult, Verdict,
 };
 use crate::ports::{generate_id, now_millis};
@@ -45,7 +45,7 @@ use crate::runtime::delegation_tools::{
     unknown_desk_message,
 };
 use crate::runtime::grants::{GrantId, GrantScope, GrantedCall, StandingGrant};
-use crate::runtime::journal::{ExecutedEffect, TaskLink};
+use crate::runtime::journal::{ApprovalConversation, ExecutedEffect, TaskLink};
 use crate::runtime::types::CycleReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 
@@ -123,6 +123,30 @@ impl ResolveReceipt {
 }
 
 /// Drives cycles for one [`CompanyRuntime`].
+/// A short, stable label for what a cycle is running (issue #390).
+///
+/// Read off the driving events rather than passed in, so every entry point gets
+/// one without threading a string through. It exists so an operator looking at
+/// an open bracket can tell a stuck approval continuation — the case #390 is
+/// about — from a stuck chat turn, without joining the bracket to anything.
+///
+/// Deliberately coarse and deliberately not the event's payload: this lands in a
+/// durable record, and a label is not the place for message text or tool
+/// arguments.
+fn cycle_trigger(events: &[CompanyEvent]) -> String {
+    let Some(first) = events.first() else {
+        return "empty".to_string();
+    };
+    match first {
+        CompanyEvent::ApprovalResolved { .. } => "approval-continuation",
+        CompanyEvent::OperatorMessage { .. } => "operator-message",
+        CompanyEvent::TaskDispatched { .. } => "task-dispatch",
+        CompanyEvent::AgentReply { .. } => "agent-reply",
+        _ => "other",
+    }
+    .to_string()
+}
+
 pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
 }
@@ -134,12 +158,78 @@ impl<'a> CycleRunner<'a> {
     }
 
     /// Runs one cycle over `events`, holding the per-company serial lock.
+    ///
+    /// # The bracket opens before the lock (issue #390)
+    ///
+    /// `cycle_id` is minted **here**, not inside [`run_locked`](Self::run_locked)
+    /// where it used to be, and the journal's `started` record is written before
+    /// `serial.lock()` is awaited. The lock is held for a whole cycle, so a
+    /// continuation queued behind a busy company waits on it for an unbounded
+    /// time — and a host that dies in that wait is precisely the "I approved and
+    /// nothing happened" failure this bracket exists to make visible. Opening it
+    /// after the lock would report that case as though the cycle had never been
+    /// asked for.
+    ///
+    /// Moving the mint is safe because nothing between `run_locked`'s first
+    /// statement and the old mint site read it: the input-append loop, the
+    /// `begin_run` call and the history/context/roster loads are all keyed on
+    /// the company and the event, never on the cycle.
+    /// `a_cycles_id_is_minted_before_the_serial_lock` pins the placement, since
+    /// the failure mode here is a correctly-typed id written in the wrong place
+    /// rather than anything the compiler can see.
+    ///
+    /// Paths that owe no cycle open no bracket: `already_resolved_report` and
+    /// `still_waiting_report` return without reaching this function. That is
+    /// deliberate — a banked decision is *correctly* not running, and giving it
+    /// a bracket would leave an open cycle that never closes and never should.
     pub async fn run(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
-        let _guard = self.rt.serial.lock().await;
-        self.run_locked(events).await
+        let cycle_id = crate::ports::generate_id();
+        let trigger = cycle_trigger(&events);
+
+        // Best-effort, and it must stay that way: record-keeping does not get to
+        // refuse a cycle. A failed open simply means this cycle is unbracketed,
+        // which is the pre-#390 behaviour rather than a new failure.
+        if let Err(err) = self
+            .rt
+            .journal
+            .record_cycle_started(&cycle_id, &trigger)
+            .await
+        {
+            tracing::warn!(
+                company = %self.rt.id,
+                cycle = %cycle_id,
+                %err,
+                "could not journal a cycle start; this cycle runs unbracketed"
+            );
+        }
+
+        let guard = self.rt.serial.lock().await;
+        let outcome = self.run_locked(events, cycle_id.clone()).await;
+        // Closed while the lock is still held, so the bracket cannot outlive the
+        // critical section it describes.
+        let error = outcome.as_ref().err().map(|err| err.to_string());
+        if let Err(err) = self
+            .rt
+            .journal
+            .record_cycle_finished(&cycle_id, error)
+            .await
+        {
+            tracing::warn!(
+                company = %self.rt.id,
+                cycle = %cycle_id,
+                %err,
+                "could not journal a cycle finish; the boot sweep will settle it"
+            );
+        }
+        drop(guard);
+        outcome
     }
 
-    async fn run_locked(&self, mut events: Vec<CompanyEvent>) -> Result<CycleReport> {
+    async fn run_locked(
+        &self,
+        mut events: Vec<CompanyEvent>,
+        cycle_id: String,
+    ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
         // 2. Persist input — durable before any thinking.
@@ -209,7 +299,10 @@ impl<'a> CycleRunner<'a> {
             self.inject_handed_task_awareness(record, &mut events).await;
         }
 
-        let cycle_id = crate::ports::generate_id();
+        // Issue #390: `cycle_id` is now minted by `run` before the serial lock,
+        // so the journal's bracket can cover the wait on that lock. Nothing
+        // above this point ever read it — see the note on `run`.
+        //
         // Issue #364: the report carries the input seqs too, so the chat route
         // can tell the console the durable id of the message it just sent. The
         // brain needs the same list, and it is the append loop above — the one
@@ -239,8 +332,12 @@ impl<'a> CycleRunner<'a> {
             // `ApprovalResolved` ids in its own batch.
             cycle_task_id(&request.events, |id| self.rt.journal.approval_task(id)),
             // Issue #379: and which conversation, on the same terms — read off
-            // the same trigger events, from the same retained origins.
-            cycle_thread_id(&request.events, |id| self.rt.journal.approval_thread(id)),
+            // the same trigger events, from the same retained origins. Issue
+            // #435 widened this to the channel *and* the thread within it, in
+            // one pass, so the pair always describes a single message.
+            cycle_conversation(&request.events, |id| {
+                self.rt.journal.approval_conversation(id)
+            }),
         );
         let result = self.rt.brain.run_cycle(request, &host).await;
         // Issue #242: the terminality backstop. Whatever the brain did — settled
@@ -736,6 +833,11 @@ working on):\n{}\n]",
         by: Actor,
         expires_at_millis: u64,
     ) -> Result<()> {
+        let conversation = self
+            .rt
+            .journal
+            .approval_conversation(id)
+            .unwrap_or_default();
         let grant = StandingGrant {
             id: GrantId::generate(),
             agent,
@@ -748,8 +850,10 @@ working on):\n{}\n]",
             expires_at_millis,
             // Issue #379: where the operator asked, so the re-dispatched turn's
             // reply lands back in that conversation. Read off the retained
-            // origin, exactly as `mint_grant` does.
-            origin_thread: self.rt.journal.approval_thread(id).flatten(),
+            // origin, exactly as `mint_grant` does. Issue #435 added the thread
+            // within it; both come from one read so they cannot disagree.
+            origin_thread: conversation.thread,
+            origin_parent: conversation.parent,
             // Issue #457: which slice of the tool the card was actually about.
             // Read off the **parked effect's own payload** — the arguments the
             // operator was shown — rather than re-derived from anything live, so
@@ -773,6 +877,11 @@ working on):\n{}\n]",
     /// Journals then arms a single-use grant for `(agent, effect.kind,
     /// effect.payload)`.
     async fn mint_grant(&self, id: &ApprovalId, agent: String, effect: Effect) -> Result<()> {
+        let conversation = self
+            .rt
+            .journal
+            .approval_conversation(id)
+            .unwrap_or_default();
         let grant = GrantedCall {
             approval_id: id.clone(),
             agent,
@@ -785,8 +894,10 @@ working on):\n{}\n]",
             // Issue #379: where the operator asked, carried onto the grant so
             // the re-dispatched turn's reply lands back in that conversation.
             // Read off the retained origin, not this call's caller — an approval
-            // is resolved from a surface that knows only an id.
-            origin_thread: self.rt.journal.approval_thread(id).flatten(),
+            // is resolved from a surface that knows only an id. Issue #435 added
+            // the thread within it; one read, so the pair cannot disagree.
+            origin_thread: conversation.thread,
+            origin_parent: conversation.parent,
         };
         self.rt.journal.record_granted(&grant).await?;
         self.rt.grants.grant(grant);
@@ -1356,28 +1467,68 @@ fn cycle_task_id(
 /// of: names a thread, rivals a thread, or is a record of something that
 /// already happened. A new *inbound trigger* silently defaulting to "harmless"
 /// is exactly how a request leaks into the wrong conversation.
-fn cycle_thread_id(
+///
+/// # The thread within the channel (issue #435)
+///
+/// Both keys are resolved here, in one pass, so a cycle can never be stamped
+/// with one approval's channel and another's thread.
+///
+/// They are **not** resolved on the same terms, and that asymmetry is the whole
+/// point. The channel rule above is untouched: a batch whose messages name
+/// different channels is ambiguous and yields nothing, exactly as before. The
+/// thread key is strictly weaker — when the batch agrees on a channel but
+/// disagrees on the thread inside it, the channel survives and only the thread
+/// is dropped.
+///
+/// Resolving the pair as one unit would have been wrong: two messages in one
+/// channel, in two different threads, would have gone from "the channel" to
+/// "nothing" and moved an approval that lands correctly today off the
+/// conversation altogether. A finer key must never cost a coarser answer that
+/// was already right. Dropping to `None` here means "the channel is the
+/// answer", which is precisely the pre-#435 behaviour.
+fn cycle_conversation(
     events: &[CompanyEvent],
-    approval_thread: impl Fn(&ApprovalId) -> Option<Option<String>>,
-) -> Option<String> {
-    let mut found: Option<String> = None;
+    approval_conversation: impl Fn(&ApprovalId) -> Option<ApprovalConversation>,
+) -> ApprovalConversation {
+    // `(channel, thread-root-within-it)`. The channel is what rivals; the root
+    // rides along and is demoted to `None` on disagreement — see above.
+    let mut found: Option<(String, Option<EventSeq>)> = None;
     for event in events {
         let candidate = match event {
             // The one event that names a thread outright. An unaddressed message
             // (`chat: None`) went to the orchestrator with no conversation of its
             // own — a rival, not a neutral pass-through, for the same reason a
             // non-card turn rivals a card above.
-            // `?` rather than a match: an unaddressed message short-circuits the
-            // whole scan to `None`, which is the rival behaviour described above.
-            CompanyEvent::OperatorMessage { chat, .. } => Some(chat.as_ref()?.clone()),
+            // An unaddressed message short-circuits the whole scan, which is the
+            // rival behaviour described above. (A `let … else` rather than `?`
+            // only because this function no longer returns an `Option`; the
+            // control flow is unchanged.)
+            //
+            // Issue #435: `parent` is the thread root the message hangs off,
+            // read from the same event that names the channel — the two can
+            // therefore never come from different messages.
+            CompanyEvent::OperatorMessage { chat, parent, .. } => {
+                let Some(chat) = chat else {
+                    return ApprovalConversation::default();
+                };
+                Some((chat.clone(), *parent))
+            }
             CompanyEvent::ApprovalResolved { approval_id, .. } => {
-                match approval_thread(approval_id) {
+                match approval_conversation(approval_id) {
                     // Resolved an approval raised in a conversation: this cycle
-                    // continues that conversation's work.
-                    Some(Some(thread)) => Some(thread),
+                    // continues that conversation's work — and inherits the
+                    // thread inside it, so a *second* sign-off re-parks in the
+                    // thread the first was asked in rather than only its
+                    // channel (issue #435, extending #379's inheritance).
+                    Some(ApprovalConversation {
+                        thread: Some(thread),
+                        parent,
+                    }) => Some((thread, parent)),
                     // Known to have come from no conversation — a rival turn,
                     // so the batch is ambiguous.
-                    Some(None) => return None,
+                    Some(ApprovalConversation { thread: None, .. }) => {
+                        return ApprovalConversation::default();
+                    }
                     // No origin recorded at all: nothing is claimed either way,
                     // so it neither stamps nor blocks.
                     None => continue,
@@ -1391,7 +1542,7 @@ fn cycle_thread_id(
             | CompanyEvent::ScheduleFired { .. }
             | CompanyEvent::A2aTaskReceived { .. }
             | CompanyEvent::PaymentReceived { .. }
-            | CompanyEvent::FeedbackFiled { .. } => return None,
+            | CompanyEvent::FeedbackFiled { .. } => return ApprovalConversation::default(),
             // Records of something that already happened, not stimuli for new
             // work: they name no thread and compete with none.
             CompanyEvent::LifecycleChanged { .. }
@@ -1443,13 +1594,45 @@ fn cycle_thread_id(
             | CompanyEvent::DeskTaskCompleted { .. } => continue,
         };
         let Some(candidate) = candidate else { continue };
-        match &found {
-            Some(existing) if existing != &candidate => return None,
+        match &mut found {
+            // Different channels: the batch is ambiguous and nothing is
+            // stamped. Unchanged from #379 — the channel is still the key that
+            // rivals.
+            Some((thread, _)) if *thread != candidate.0 => {
+                return ApprovalConversation::default();
+            }
+            // Issue #435: same channel, different thread inside it. The channel
+            // is still unambiguous and still correct, so it survives; only the
+            // finer key is dropped. Escalating this to a full rival would move
+            // an approval that lands correctly today off its conversation
+            // entirely — see the asymmetry note in the doc above.
+            Some((thread, parent)) if *parent != candidate.1 => {
+                // Say so, because from the outside this is indistinguishable
+                // from the bug #435 fixed: the operator sees a threaded request
+                // answered in the channel and has no way to tell "we dropped the
+                // thread on purpose, the batch named two" from "the thread was
+                // lost again". Debug rather than warn — the outcome is correct
+                // and is the pre-#435 behaviour, so it is an explanation on
+                // demand, not an incident.
+                tracing::debug!(
+                    channel = %thread,
+                    dropped_parent = ?*parent,
+                    rival_parent = ?candidate.1,
+                    "[approval] two threads in this batch, resuming in the channel; \
+                     the channel is unambiguous so only the thread root is dropped (#435)"
+                );
+                *parent = None;
+            }
             Some(_) => {}
             None => found = Some(candidate),
         }
     }
     found
+        .map(|(thread, parent)| ApprovalConversation {
+            thread: Some(thread),
+            parent,
+        })
+        .unwrap_or_default()
 }
 
 /// The host the brain calls back into mid-cycle. Bridges tool, context, and
@@ -1476,10 +1659,21 @@ struct CycleHostImpl<'a> {
     /// Approvals page.
     ///
     /// Computed once, from the cycle's own trigger events, by
-    /// [`cycle_thread_id`]. `None` for a cycle with no conversation behind it (a
-    /// dispatched card, a scheduler tick, a workflow delivery) and for an
+    /// [`cycle_conversation`]. `None` for a cycle with no conversation behind it
+    /// (a dispatched card, a scheduler tick, a workflow delivery) and for an
     /// ambiguous batch — both of which leave the approval where it is today.
     thread_id: Option<String>,
+    /// The thread *inside* [`thread_id`](Self::thread_id) this cycle is
+    /// answering (issue #435) — stamped onto every approval the cycle parks so
+    /// the continuation can be threaded back under the same root, instead of
+    /// landing flat in the channel and losing the conversation its own
+    /// conclusion belongs to.
+    ///
+    /// Computed in the same pass as `thread_id`, so the two always describe one
+    /// message. `None` whenever `thread_id` is, and additionally when the batch
+    /// agrees on a channel but not on a thread within it — which degrades to
+    /// exactly the pre-#435 behaviour of answering in the channel.
+    thread_parent: Option<EventSeq>,
 }
 
 impl<'a> CycleHostImpl<'a> {
@@ -1488,7 +1682,7 @@ impl<'a> CycleHostImpl<'a> {
         cycle_id: String,
         rt: &'a CompanyRuntime,
         task_id: Option<String>,
-        thread_id: Option<String>,
+        conversation: ApprovalConversation,
     ) -> Self {
         Self {
             company,
@@ -1498,7 +1692,8 @@ impl<'a> CycleHostImpl<'a> {
             executed: StdMutex::new(Vec::new()),
             parked: StdMutex::new(Vec::new()),
             task_id,
-            thread_id,
+            thread_id: conversation.thread,
+            thread_parent: conversation.parent,
         }
     }
 
@@ -1554,7 +1749,14 @@ impl<'a> CycleHostImpl<'a> {
                 &effect,
                 now_millis(),
                 TaskLink::from_task_id(self.task_id.as_deref()),
-                self.thread_id.clone(),
+                // Which channel, and — issue #435 — where inside it, so the
+                // continuation can be threaded back under the same root rather
+                // than landing flat in the channel. Built as one value so the
+                // pair cannot be written down describing two different places.
+                ApprovalConversation {
+                    thread: self.thread_id.clone(),
+                    parent: self.thread_parent,
+                },
                 // Issue #469: which turn is blocked on this. Recorded here
                 // because this is the one write path into the approval queue, so
                 // the count the continuation queue keeps below cannot describe a
@@ -2770,7 +2972,12 @@ mod test {
     #[tokio::test]
     async fn approving_a_harness_tool_call_mints_a_grant_instead_of_executing() {
         let home_dir = tmp_home();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        // Issue #470: a catalogued send, keyed the way `composio_execute`'s
+        // schema keys it, with the action's parameters under `arguments`.
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
         let (rt, id) = park_one(
             home_dir.path().to_path_buf(),
             harness_effect("finance", "composio_execute", args.clone()),
@@ -3077,6 +3284,7 @@ mod test {
             args: serde_json::json!({ "to": "a@b.test" }),
             at_millis: 0,
             origin_thread: None,
+            origin_parent: None,
         });
         // A fresh one, to prove the sweep is selective rather than a flush.
         rt.grants.grant(GrantedCall {
@@ -3086,6 +3294,7 @@ mod test {
             args: serde_json::json!({}),
             at_millis: now_millis(),
             origin_thread: None,
+            origin_parent: None,
         });
 
         let expired = rt.sweep_expired_grants().await.unwrap();
@@ -3214,7 +3423,7 @@ mod test {
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            payload: crate::policy::test_support::composio_send_args(),
             agent: None,
             run_id: None,
         };
@@ -3706,6 +3915,94 @@ mod test {
         assert_eq!(peak.load(Ordering::SeqCst), 1);
     }
 
+    // --- The cycle bracket (issue #390) --------------------------------------
+
+    /// **The placement test.** The bracket opens *before* the serial lock, and
+    /// this is the only thing that says so.
+    ///
+    /// Condition of the fix rather than a nice-to-have: `cycle_id` used to be
+    /// minted inside `run_locked`, and moving it is the riskiest part of #390.
+    /// The failure mode is a correctly-typed id written in the wrong place —
+    /// invisible to the compiler and invisible to every other test, because a
+    /// bracket that opens after the lock still opens, still closes, and still
+    /// reads correctly once the cycle is over.
+    ///
+    /// So this holds the lock and asserts the cycle is *already* visible as open
+    /// while it is still queued behind it. Move the mint or the `started` write
+    /// back inside `run_locked` and this fails; nothing else does.
+    #[tokio::test]
+    async fn a_cycles_bracket_opens_before_the_serial_lock() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        assert!(rt.journal.open_cycles().is_empty(), "nothing has run yet");
+
+        // Hold the lock, so any cycle we start is stuck on the near side of it —
+        // the window a post-lock bracket cannot see.
+        let guard = rt.serial.lock().await;
+
+        let spawned = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.run_cycle(Vec::new()).await })
+        };
+
+        // Wait for the bracket, not for the cycle — the cycle cannot proceed.
+        let mut open = Vec::new();
+        for _ in 0..200 {
+            open = rt.journal.open_cycles();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            open.len(),
+            1,
+            "a cycle blocked on the serial lock must already be bracketed; if this \
+             is empty the `started` write moved back inside the lock and #390's \
+             whole case — a continuation that dies waiting — is invisible again"
+        );
+        assert_eq!(open[0].trigger, "empty", "no events drove this one");
+
+        // …and it closes once the lock is released.
+        drop(guard);
+        spawned.await.unwrap().unwrap();
+        assert!(
+            rt.journal.open_cycles().is_empty(),
+            "the bracket closes when the cycle ends"
+        );
+    }
+
+    /// The trigger label distinguishes the case #390 is about from an ordinary
+    /// chat turn, which is the whole reason an operator can read the surface.
+    #[test]
+    fn the_trigger_label_names_what_drove_the_cycle() {
+        assert_eq!(cycle_trigger(&[]), "empty");
+        assert_eq!(
+            cycle_trigger(&[CompanyEvent::ApprovalResolved {
+                approval_id: ApprovalId::new("appr-1"),
+                verdict: Verdict::Approve,
+                by: operator(),
+            }]),
+            "approval-continuation"
+        );
+        assert_eq!(
+            cycle_trigger(&[CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "hello".into(),
+                by: None,
+                chat: None,
+            }]),
+            "operator-message"
+        );
+    }
+
     #[tokio::test]
     async fn distinct_companies_run_concurrently() {
         let home_dir = tmp_home();
@@ -3846,7 +4143,7 @@ mod test {
                 &effect,
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -3920,7 +4217,7 @@ mod test {
                 &effect,
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -3972,7 +4269,14 @@ mod test {
                 .unwrap();
             let id = rt.approvals.park(rt.id(), effect.clone()).await.unwrap();
             rt.journal
-                .record_parked(&id, &effect, now_millis(), TaskLink::Unlinked, None, None)
+                .record_parked(
+                    &id,
+                    &effect,
+                    now_millis(),
+                    TaskLink::Unlinked,
+                    ApprovalConversation::default(),
+                    None,
+                )
                 .await
                 .unwrap();
             id
@@ -4091,7 +4395,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-nomail".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-nomail".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "to": "x@ext.com", "subject": "s", "body": "b" }))
@@ -4114,7 +4424,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-bad".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-bad".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "subject": "s", "body": "b" }))
@@ -4137,7 +4453,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-park".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-park".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
@@ -4167,7 +4489,7 @@ mod test {
             "cyc-task".into(),
             &rt,
             Some("t-42".to_string()),
-            None,
+            ApprovalConversation::default(),
         );
 
         // A cold recipient parks — the same path a card's turn takes.
@@ -4215,7 +4537,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-chat".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-chat".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
@@ -4251,7 +4579,10 @@ mod test {
             "cyc-thread".into(),
             &rt,
             None,
-            Some("desk-finance".to_string()),
+            ApprovalConversation {
+                thread: Some("desk-finance".to_string()),
+                parent: None,
+            },
         );
 
         host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
@@ -4304,7 +4635,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-none".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-none".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         host.send_email(serde_json::json!({ "to": "new@ext.com", "subject": "s", "body": "b" }))
             .await
@@ -4554,10 +4891,16 @@ mod test {
         // a desk channel, `appr-dm` in a direct message, `appr-none` had no
         // conversation behind it (or is a pre-#379 line — the same answer, on
         // purpose), and anything else has no origin at all.
-        let approval_thread = |id: &ApprovalId| match id.as_ref() {
-            "appr-desk" => Some(Some("desk-finance".to_string())),
-            "appr-dm" => Some(Some("agent-cfo".to_string())),
-            "appr-none" => Some(None),
+        let conv = |thread: Option<&str>, parent: Option<u64>| ApprovalConversation {
+            thread: thread.map(str::to_string),
+            parent: parent.map(EventSeq::new),
+        };
+        let approval_conversation = move |id: &ApprovalId| match id.as_ref() {
+            "appr-desk" => Some(conv(Some("desk-finance"), None)),
+            "appr-dm" => Some(conv(Some("agent-cfo"), None)),
+            "appr-none" => Some(conv(None, None)),
+            // Issue #435: raised inside a thread of the desk channel.
+            "appr-desk-threaded" => Some(conv(Some("desk-finance"), Some(7))),
             _ => None,
         };
         let addressed = |chat: &str| CompanyEvent::OperatorMessage {
@@ -4587,65 +4930,76 @@ mod test {
 
         // An addressed message names the thread outright.
         assert_eq!(
-            cycle_thread_id(&[addressed("desk-finance")], approval_thread),
+            cycle_conversation(&[addressed("desk-finance")], approval_conversation).thread,
             Some("desk-finance".into()),
         );
         // The whole point, stated as an assertion: the desk channel and a DM to
         // that desk's lead are different stamps, even though the same agent
         // answers both.
         assert_eq!(
-            cycle_thread_id(&[addressed("agent-cfo")], approval_thread),
+            cycle_conversation(&[addressed("agent-cfo")], approval_conversation).thread,
             Some("agent-cfo".into()),
         );
         // A follow-up cycle inherits the thread from the approval it resolves, so
         // a turn needing a second sign-off re-parks in the same channel.
         assert_eq!(
-            cycle_thread_id(&[resolved("appr-desk")], approval_thread),
+            cycle_conversation(&[resolved("appr-desk")], approval_conversation).thread,
             Some("desk-finance".into()),
         );
         assert_eq!(
-            cycle_thread_id(&[resolved("appr-dm")], approval_thread),
+            cycle_conversation(&[resolved("appr-dm")], approval_conversation).thread,
             Some("agent-cfo".into()),
         );
         // An approval with no origin at all claims nothing — and does not block.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[resolved("appr-unknown"), addressed("desk-finance")],
-                approval_thread
-            ),
+                approval_conversation
+            )
+            .thread,
             Some("desk-finance".into()),
         );
         // An unaddressed message went to the orchestrator with no conversation of
         // its own. It is a rival, not a pass-through.
-        assert_eq!(cycle_thread_id(&[unaddressed()], approval_thread), None);
         assert_eq!(
-            cycle_thread_id(&[addressed("desk-finance"), unaddressed()], approval_thread),
+            cycle_conversation(&[unaddressed()], approval_conversation).thread,
+            None
+        );
+        assert_eq!(
+            cycle_conversation(
+                &[addressed("desk-finance"), unaddressed()],
+                approval_conversation
+            )
+            .thread,
             None,
             "an unaddressed turn batched with an addressed one must not borrow its channel",
         );
         // Two different threads in one batch: refuse rather than raise one
         // conversation's request inside the other.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[addressed("desk-finance"), addressed("agent-cfo")],
-                approval_thread,
-            ),
+                approval_conversation,
+            )
+            .thread,
             None,
         );
         // The same thread twice is not ambiguous.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[addressed("desk-finance"), resolved("appr-desk")],
-                approval_thread,
-            ),
+                approval_conversation,
+            )
+            .thread,
             Some("desk-finance".into()),
         );
         // A resolution known to have come from no conversation is a rival too.
         assert_eq!(
-            cycle_thread_id(
+            cycle_conversation(
                 &[addressed("desk-finance"), resolved("appr-none")],
-                approval_thread,
-            ),
+                approval_conversation,
+            )
+            .thread,
             None,
         );
         // Inbound triggers that are their own work disqualify the batch, exactly
@@ -4673,7 +5027,11 @@ mod test {
             },
         ] {
             assert_eq!(
-                cycle_thread_id(&[addressed("desk-finance"), rival.clone()], approval_thread),
+                cycle_conversation(
+                    &[addressed("desk-finance"), rival.clone()],
+                    approval_conversation
+                )
+                .thread,
                 None,
                 "{rival:?} is its own work and must not inherit the channel",
             );
@@ -4712,22 +5070,169 @@ mod test {
             workflow_node_started(),
         ] {
             assert_eq!(
-                cycle_thread_id(
+                cycle_conversation(
                     &[addressed("desk-finance"), record.clone()],
-                    approval_thread
-                ),
+                    approval_conversation
+                )
+                .thread,
                 Some("desk-finance".into()),
                 "{record:?} is a record, not a trigger, and must not disqualify the batch",
             );
         }
         // And alone neither claims a conversation of its own.
         assert_eq!(
-            cycle_thread_id(&[workspace_changed()], approval_thread),
+            cycle_conversation(&[workspace_changed()], approval_conversation).thread,
             None,
         );
         assert_eq!(
-            cycle_thread_id(&[workflow_node_started()], approval_thread),
+            cycle_conversation(&[workflow_node_started()], approval_conversation).thread,
             None,
+        );
+    }
+
+    /// Issue #435: the thread *within* the channel, and the asymmetry between
+    /// the two keys.
+    ///
+    /// The channel rule is #379's and is asserted above. This pins the part
+    /// that is easy to get wrong in the obvious way: resolving `(channel,
+    /// thread)` as a single unit would make two messages in one channel but
+    /// two different threads ambiguous, dropping an approval that lands
+    /// correctly today off its conversation entirely. A finer key must never
+    /// cost a coarser answer that was already right.
+    #[test]
+    fn cycle_conversation_carries_the_thread_root_and_degrades_it_before_the_channel() {
+        use crate::ports::types::{Actor, ActorKind, ApprovalId, Verdict};
+
+        let conv = |thread: Option<&str>, parent: Option<u64>| ApprovalConversation {
+            thread: thread.map(str::to_string),
+            parent: parent.map(EventSeq::new),
+        };
+        let approval_conversation = move |id: &ApprovalId| match id.as_ref() {
+            // Raised inside thread 7 of the desk channel.
+            "appr-threaded" => Some(conv(Some("desk-finance"), Some(7))),
+            // Raised straight in the same channel, outside any thread.
+            "appr-flat" => Some(conv(Some("desk-finance"), None)),
+            _ => None,
+        };
+        let in_thread = |chat: &str, parent: Option<u64>| CompanyEvent::OperatorMessage {
+            parent: parent.map(EventSeq::new),
+            text: "pay the invoice".into(),
+            by: None,
+            chat: Some(chat.to_string()),
+        };
+        let resolved = |id: &str| CompanyEvent::ApprovalResolved {
+            approval_id: ApprovalId::new(id),
+            verdict: Verdict::Approve,
+            by: Actor {
+                kind: ActorKind::Operator,
+                id: "owner".into(),
+            },
+        };
+
+        // A message asked inside a thread names both keys.
+        assert_eq!(
+            cycle_conversation(&[in_thread("desk-finance", Some(7))], approval_conversation),
+            conv(Some("desk-finance"), Some(7)),
+        );
+        // A message asked straight in the channel names only the channel —
+        // the pre-#435 behaviour, which must not change.
+        assert_eq!(
+            cycle_conversation(&[in_thread("desk-finance", None)], approval_conversation),
+            conv(Some("desk-finance"), None),
+        );
+        // A follow-up cycle inherits the thread as well as the channel, so a
+        // second sign-off re-parks under the same root rather than flat.
+        assert_eq!(
+            cycle_conversation(&[resolved("appr-threaded")], approval_conversation),
+            conv(Some("desk-finance"), Some(7)),
+        );
+        assert_eq!(
+            cycle_conversation(&[resolved("appr-flat")], approval_conversation),
+            conv(Some("desk-finance"), None),
+        );
+        // The same thread twice is not ambiguous.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    resolved("appr-threaded")
+                ],
+                approval_conversation,
+            ),
+            conv(Some("desk-finance"), Some(7)),
+        );
+
+        // THE ASYMMETRY. One channel, two threads: the channel survives and
+        // only the thread is dropped. Answering in the channel is exactly what
+        // this batch did before #435, so the fallback is the old behaviour
+        // rather than a new failure.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    in_thread("desk-finance", Some(9)),
+                ],
+                approval_conversation,
+            ),
+            conv(Some("desk-finance"), None),
+            "a thread disagreement must cost the thread, never the channel",
+        );
+        // Threaded batched with flat is the same disagreement, both orders.
+        for batch in [
+            [
+                in_thread("desk-finance", Some(7)),
+                in_thread("desk-finance", None),
+            ],
+            [
+                in_thread("desk-finance", None),
+                in_thread("desk-finance", Some(7)),
+            ],
+        ] {
+            assert_eq!(
+                cycle_conversation(&batch, approval_conversation),
+                conv(Some("desk-finance"), None),
+            );
+        }
+        // Inheriting a thread that disagrees with the batch's own is the same
+        // rule, one hop further out.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(9)),
+                    resolved("appr-threaded"),
+                ],
+                approval_conversation,
+            ),
+            conv(Some("desk-finance"), None),
+        );
+
+        // A channel disagreement still costs everything — #379's rule, intact.
+        // The thread must not survive its own channel.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    in_thread("agent-cfo", Some(7)),
+                ],
+                approval_conversation,
+            ),
+            ApprovalConversation::default(),
+            "a parent without a channel is a sequence number with nothing to \
+             resolve it against",
+        );
+        // And a rival trigger clears both keys, not just the channel.
+        assert_eq!(
+            cycle_conversation(
+                &[
+                    in_thread("desk-finance", Some(7)),
+                    CompanyEvent::TaskDispatched {
+                        task_id: "t-1".into(),
+                        run_id: None,
+                    },
+                ],
+                approval_conversation,
+            ),
+            ApprovalConversation::default(),
         );
     }
 
@@ -4761,7 +5266,13 @@ mod test {
             )
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-send".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-send".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .send_email(serde_json::json!({ "to": "known@ext.com", "subject": "s", "body": "b" }))
@@ -4825,7 +5336,13 @@ mod test {
         }
         file(501, "known@ext.com").await;
 
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc-deep".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc-deep".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
         let res = host
             .send_email(serde_json::json!({ "to": "known@ext.com", "subject": "s", "body": "b" }))
             .await
@@ -4911,7 +5428,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         let res = host
             .spawn_task(serde_json::json!({ "title": "  Ship it ", "assignee": " eng " }))
@@ -4945,7 +5468,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         // Known desk (by name) → card assigned to the resolved desk id, lead noted.
         let ok = host
@@ -4981,7 +5510,13 @@ mod test {
             .build()
             .await
             .unwrap();
-        let host = CycleHostImpl::new(rt.id().clone(), "cyc".into(), &rt, None, None);
+        let host = CycleHostImpl::new(
+            rt.id().clone(),
+            "cyc".into(),
+            &rt,
+            None,
+            ApprovalConversation::default(),
+        );
 
         // Reached through the CycleHost trait exactly as the hosted brain does.
         let res = host

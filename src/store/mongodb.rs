@@ -131,6 +131,21 @@ impl MongoStore {
             senders: Arc::new(StdMutex::new(HashMap::new())),
         };
         store.ensure_indexes().await?;
+        // Reclaim workspace payloads whose node document never landed (issue
+        // #553). Best-effort by design: the cost of skipping it is disk that is
+        // already unreachable, and the cost of failing boot over it would be a
+        // company that will not start. See `sweep_orphan_blobs`.
+        match store.sweep_orphan_blobs().await {
+            Ok(0) => {}
+            Ok(removed) => tracing::info!(
+                removed,
+                "reclaimed orphaned workspace blobs left by an interrupted write"
+            ),
+            Err(err) => tracing::warn!(
+                error = %err,
+                "could not sweep orphaned workspace blobs; they remain until the next boot"
+            ),
+        }
         Ok(store)
     }
 
@@ -230,6 +245,18 @@ impl MongoStore {
             .create_index(unique(
                 doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1},
             ))
+            .await
+            .map_err(mongo_err)?;
+        // Issue #596: one durable per-node output snapshot per run. The unique
+        // `(company_id, run_id)` index makes the upsert last-write-wins per run;
+        // the recency index backs the newest-N prune. Created outside the fixed
+        // array above so adding it does not disturb that array's length.
+        self.collection("run_outputs")
+            .create_index(unique(doc! {"company_id": 1, "run_id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection("run_outputs")
+            .create_index(nonunique(doc! {"company_id": 1, "at_ms": -1}))
             .await
             .map_err(mongo_err)?;
         Ok(())
@@ -1580,6 +1607,77 @@ impl crate::ports::workflow_revisions::WorkflowRevisionStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRunOutputStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::run_output::WorkflowRunOutputStore for MongoStore {
+    async fn put_run_output(
+        &self,
+        company: &CompanyId,
+        record: &crate::ports::run_output::WorkflowRunOutputRecord,
+    ) -> Result<()> {
+        use crate::ports::run_output::MAX_RUN_OUTPUTS_PER_COMPANY;
+        let coll = self.collection("run_outputs");
+        // Upsert: last-write-wins per `(company, run_id)`, so a re-run overwrites
+        // rather than stacking. The unique index is what makes the filter a key.
+        coll.update_one(
+            doc! {"company_id": company.as_ref(), "run_id": &record.run_id},
+            doc! {"$set": {
+                "company_id": company.as_ref(),
+                "run_id": &record.run_id,
+                "workflow_id": &record.workflow_id,
+                "at_ms": record.at_millis as i64,
+                "output_json": serde_json::to_string(record)?,
+            }},
+        )
+        .with_options(UpdateOptions::builder().upsert(true).build())
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap: collect this company's run ids newest-first and delete
+        // everything past `MAX`. Two statements, like the revision prune — Mongo
+        // has no "delete all but the newest N" operator; the recency index keeps
+        // the read cheap.
+        let mut cursor = coll
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"at_ms": -1, "run_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            ids.push(get_str(&doc, "run_id")?);
+        }
+        if ids.len() > MAX_RUN_OUTPUTS_PER_COMPANY {
+            let stale: Vec<&String> = ids.iter().skip(MAX_RUN_OUTPUTS_PER_COMPANY).collect();
+            coll.delete_many(doc! {
+                "company_id": company.as_ref(),
+                "run_id": {"$in": stale},
+            })
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn get_run_output(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Option<crate::ports::run_output::WorkflowRunOutputRecord>> {
+        let found = self
+            .collection("run_outputs")
+            .find_one(doc! {"company_id": company.as_ref(), "run_id": run_id})
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(serde_json::from_str(&get_str(&doc, "output_json")?)?)),
+            None => Ok(None),
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -1929,7 +2027,156 @@ impl crate::ports::skills_state::SkillStateStore for MongoStore {
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
+/// The GridFS bucket every workspace payload lives in.
+///
+/// One bucket for the whole database rather than one per company: GridFS
+/// buckets are a pair of collections, and a per-company bucket would mint two
+/// collections per tenant in the shared-database mode this backend exists to
+/// serve. Isolation is where it is everywhere else in this file — a
+/// `company_id` on every document and a filter on every query — see
+/// [`MongoStore::blob_filter`].
+const BLOB_BUCKET: &str = "workspace_blobs";
+
 impl MongoStore {
+    /// The workspace payload bucket.
+    fn blobs(&self) -> mongodb::gridfs::GridFsBucket {
+        self.db.gridfs_bucket(
+            mongodb::options::GridFsBucketOptions::builder()
+                .bucket_name(BLOB_BUCKET.to_string())
+                .build(),
+        )
+    }
+
+    /// The tenancy-scoped filter naming exactly one node's payload.
+    ///
+    /// **Both keys, every time.** A filter on `node_id` alone would be a
+    /// cross-tenant read the moment two companies in one database minted the
+    /// same node id — and node ids come from a shared generator, so that is a
+    /// collision away rather than an attack away. Every read, every delete and
+    /// the boot sweep go through this function so there is no call site that
+    /// could have forgotten the company half.
+    fn blob_filter(company: &CompanyId, node_id: &str) -> Document {
+        doc! {
+            "metadata.company_id": company.as_ref(),
+            "metadata.node_id": node_id,
+        }
+    }
+
+    /// Uploads `bytes` as this node's payload and returns nothing.
+    ///
+    /// The blob is written **before** the node document that names it, on both
+    /// the create and the replace path. See
+    /// [`create_binary`](crate::ports::workspace::WorkspaceStore::create_binary)
+    /// on this type for why that direction.
+    async fn put_blob(
+        &self,
+        company: &CompanyId,
+        node_id: &str,
+        filename: &str,
+        bytes: &[u8],
+    ) -> Result<()> {
+        use futures::io::AsyncWriteExt;
+        let mut upload = self
+            .blobs()
+            .open_upload_stream(filename)
+            .metadata(doc! {
+                "company_id": company.as_ref(),
+                "node_id": node_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        upload
+            .write_all(bytes)
+            .await
+            .map_err(|e| mongo_err(format!("writing a workspace blob failed: {e}")))?;
+        // `close` is what commits the final chunk and the files-collection
+        // document. Without it the upload is a partial write that no reader can
+        // see — so its failure is the write's failure.
+        upload
+            .close()
+            .await
+            .map_err(|e| mongo_err(format!("closing a workspace blob failed: {e}")))?;
+        Ok(())
+    }
+
+    /// Removes every payload registered to `node_id`, except optionally the one
+    /// just written.
+    ///
+    /// `keep` exists for the replace path: the new blob is uploaded before the
+    /// node document is updated, so at that moment the filter matches both
+    /// generations and the older one is the one to drop.
+    async fn drop_blobs(
+        &self,
+        company: &CompanyId,
+        node_id: &str,
+        keep: Option<&mongodb::bson::Bson>,
+    ) -> Result<()> {
+        let bucket = self.blobs();
+        let mut cursor = bucket
+            .find(Self::blob_filter(company, node_id))
+            .await
+            .map_err(mongo_err)?;
+        while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
+            if keep == Some(&file.id) {
+                continue;
+            }
+            bucket.delete(file.id).await.map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    /// Deletes blobs whose node document is gone (issue #553).
+    ///
+    /// The crash window this closes is the one the write ordering deliberately
+    /// leaves open: a payload uploaded, then the process dies before the node
+    /// document lands. That leaves a blob nothing references — invisible to
+    /// every reader, but occupying the tenant's quota forever. The opposite
+    /// ordering would have left a node whose download 404s, which is worse, so
+    /// this sweep is the price of choosing the survivable direction.
+    ///
+    /// Runs at construction, where it is cheap (one scan of the files
+    /// collection against one projection of the node ids) and where a partial
+    /// failure is safe: a sweep that cannot complete is logged and the store is
+    /// returned anyway, because refusing to open a company's storage over
+    /// reclaimable disk would trade an invisible cost for a total outage.
+    async fn sweep_orphan_blobs(&self) -> Result<u64> {
+        let live: std::collections::HashSet<(String, String)> = {
+            let mut cursor = self
+                .collection("workspace_nodes")
+                .find(doc! {})
+                .await
+                .map_err(mongo_err)?;
+            let mut out = std::collections::HashSet::new();
+            while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+                if let (Ok(company), Ok(node)) = (doc.get_str("company_id"), doc.get_str("node_id"))
+                {
+                    out.insert((company.to_string(), node.to_string()));
+                }
+            }
+            out
+        };
+        let bucket = self.blobs();
+        let mut cursor = bucket.find(doc! {}).await.map_err(mongo_err)?;
+        let mut removed = 0;
+        while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
+            let key = file.metadata.as_ref().and_then(|m| {
+                Some((
+                    m.get_str("company_id").ok()?.to_string(),
+                    m.get_str("node_id").ok()?.to_string(),
+                ))
+            });
+            // A blob with no usable metadata cannot be matched to a node and is
+            // therefore an orphan by definition — it predates this scheme or was
+            // written by something that is not this store.
+            let orphan = key.map(|k| !live.contains(&k)).unwrap_or(true);
+            if orphan {
+                bucket.delete(file.id).await.map_err(mongo_err)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
     /// Loads every workspace node for a company into an id-keyed map.
     async fn workspace_nodes(
         &self,
@@ -1970,10 +2217,18 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             .await
             .map_err(mongo_err)?;
         match doc {
-            Some(doc) => Ok(Some((
-                serde_json::from_str(&get_str(&doc, "node_json")?)?,
-                get_str(&doc, "content")?,
-            ))),
+            Some(doc) => {
+                let node: crate::ports::workspace::WorkspaceNode =
+                    serde_json::from_str(&get_str(&doc, "node_json")?)?;
+                // A binary node reads as an empty body, like a folder — the port
+                // contract that keeps every prose-shaped caller correct.
+                let content = if node.is_binary() {
+                    String::new()
+                } else {
+                    get_str(&doc, "content")?
+                };
+                Ok(Some((node, content)))
+            }
             None => Ok(None),
         }
     }
@@ -2001,6 +2256,11 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         if node.kind != NodeKind::File {
             return Err(OpenCompanyError::InvalidRequest(
                 "cannot write content to a folder".to_string(),
+            ));
+        }
+        if let Some(mime) = node.mime.clone() {
+            return Err(OpenCompanyError::InvalidRequest(
+                crate::ports::workspace::binary_write_refusal(&node.name, &mime),
             ));
         }
         node.updated_at_millis = now_millis();
@@ -2063,6 +2323,176 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         Ok(())
     }
 
+    /// GridFS — the only backend where the payload cannot ride in the record.
+    ///
+    /// A BSON document caps at 16 MB, and the artifacts this issue exists for
+    /// are generated images and video that routinely exceed it, so the bytes go
+    /// into a bucket and the node document keeps only the metadata.
+    ///
+    /// # Blob first, document second
+    ///
+    /// The two writes cannot be made atomic without a transaction this backend
+    /// does not require of its deployment, so the ordering is chosen by which
+    /// failure is survivable. A crash between them leaves a blob with no node:
+    /// invisible to every reader, costing disk until
+    /// [`sweep_orphan_blobs`](MongoStore::sweep_orphan_blobs) runs at the next
+    /// boot. The reverse would leave a node the tree shows and the download
+    /// 404s on — a file the operator can see and cannot fetch, with nothing to
+    /// repair it. Deletion runs the mirror image (document first, blob second)
+    /// for the same reason.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &crate::ports::workspace::WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<()> {
+        use crate::ports::workspace::NodeKind;
+        let node = crate::ports::workspace::stamped_binary(node, bytes)?;
+        let nodes = self.workspace_nodes(company).await?;
+        if nodes.contains_key(&node.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "workspace node {} already exists",
+                node.id
+            )));
+        }
+        if let Some(parent) = &node.parent_id {
+            match nodes.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        self.put_blob(company, &node.id, &node.name, bytes).await?;
+        self.collection("workspace_nodes")
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": &node.id,
+                "node_json": serde_json::to_string(&node)?,
+                "content": "",
+                "updated_ms": node.updated_at_millis as i64,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
+        let doc = self
+            .collection("workspace_nodes")
+            .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+            .await
+            .map_err(mongo_err)?;
+        let Some(doc) = doc else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {id}"
+            )));
+        };
+        let mut node: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&get_str(&doc, "node_json")?)?;
+        crate::ports::workspace::rebind_binary(&mut node, bytes, mime, author)?;
+        // New blob, then the document, then the old blob — the same "a reader
+        // never sees a node without its bytes" ordering as the create path. The
+        // worst crash outcome is a superseded blob left behind for the boot
+        // sweep.
+        let superseded: Vec<mongodb::bson::Bson> = {
+            let mut cursor = self
+                .blobs()
+                .find(Self::blob_filter(company, id))
+                .await
+                .map_err(mongo_err)?;
+            let mut ids = Vec::new();
+            while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
+                ids.push(file.id);
+            }
+            ids
+        };
+        self.put_blob(company, id, &node.name, bytes).await?;
+        self.collection("workspace_nodes")
+            .update_one(
+                doc! {"company_id": company.as_ref(), "node_id": id},
+                doc! {"$set": {
+                    "node_json": serde_json::to_string(&node)?,
+                    "content": "",
+                    "updated_ms": node.updated_at_millis as i64,
+                }},
+            )
+            .await
+            .map_err(mongo_err)?;
+        let bucket = self.blobs();
+        for old in superseded {
+            bucket.delete(old).await.map_err(mongo_err)?;
+        }
+        Ok(node)
+    }
+
+    /// Streams straight out of GridFS — a video is never resident, which is the
+    /// reason this backend needed a bucket rather than a bigger field.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<
+        Option<(
+            crate::ports::workspace::WorkspaceNode,
+            crate::ports::workspace::BlobStream,
+        )>,
+    > {
+        let Some(doc) = self
+            .collection("workspace_nodes")
+            .find_one(doc! {"company_id": company.as_ref(), "node_id": id})
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(None);
+        };
+        let node: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&get_str(&doc, "node_json")?)?;
+        if !node.is_binary() {
+            return Ok(None);
+        }
+        let bucket = self.blobs();
+        // Located by the tenancy-scoped metadata filter rather than by an id
+        // carried on the node document: the bucket is shared across companies,
+        // so the company half of the filter is the isolation boundary and must
+        // be applied by the query that finds the file, not checked afterwards.
+        let Some(file) = bucket
+            .find_one(Self::blob_filter(company, id))
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Ok(None);
+        };
+        let stream = bucket
+            .open_download_stream(file.id)
+            .await
+            .map_err(mongo_err)?;
+        use tokio_util::compat::FuturesAsyncReadCompatExt;
+        let reader = tokio_util::io::ReaderStream::new(stream.compat());
+        Ok(Some((
+            node,
+            Box::pin(futures::StreamExt::map(reader, |chunk| {
+                chunk.map_err(|e| {
+                    OpenCompanyError::Store(format!("reading a workspace blob failed: {e}"))
+                })
+            })),
+        )))
+    }
+
     async fn rename_move(
         &self,
         company: &CompanyId,
@@ -2119,10 +2549,16 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         let mut to_remove = mongo_workspace_descendants(&nodes, id);
         to_remove.insert(id.to_string());
         let ids: Vec<&String> = to_remove.iter().collect();
+        // Documents first, blobs second — the mirror of the write ordering. A
+        // crash between them leaves a payload with no node, which the boot
+        // sweep reclaims; the reverse would leave a node whose download 404s.
         self.collection("workspace_nodes")
-            .delete_many(doc! {"company_id": company.as_ref(), "node_id": {"$in": ids}})
+            .delete_many(doc! {"company_id": company.as_ref(), "node_id": {"$in": &ids}})
             .await
             .map_err(mongo_err)?;
+        for node_id in &to_remove {
+            self.drop_blobs(company, node_id, None).await?;
+        }
         Ok(true)
     }
 
@@ -2291,6 +2727,96 @@ mod test {
 
     async fn drop_db(store: &MongoStore) {
         let _ = store.db.drop().await;
+    }
+
+    /// The boot sweep reclaims a payload whose node document never landed.
+    ///
+    /// This is the crash the write ordering deliberately allows: blob first,
+    /// document second, so an interrupted `create_binary` leaves bytes nothing
+    /// references. Seeded here directly — uploading to the bucket without ever
+    /// inserting the node — because that is precisely the state a crash between
+    /// the two writes produces, and it is not reachable through the port.
+    ///
+    /// The node-backed blob beside it is the half that must be left alone: a
+    /// sweep that reclaimed live payloads would be far worse than the leak it
+    /// fixes.
+    #[tokio::test]
+    async fn the_boot_sweep_reclaims_orphaned_blobs_and_spares_live_ones() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("sweep-co");
+
+        // A live binary node, written through the port.
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "keep".to_string(),
+            name: "keep.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &node, b"live-bytes")
+            .await
+            .unwrap();
+
+        // …and a dangling one: the bytes of an interrupted create.
+        s.put_blob(&company, "vanished", "ghost.png", b"orphan-bytes")
+            .await
+            .unwrap();
+        // A blob with no metadata at all — a shape this store never writes, and
+        // therefore unmatchable to any node, so it is an orphan by definition.
+        {
+            use futures::io::AsyncWriteExt;
+            let mut up = s
+                .blobs()
+                .open_upload_stream("nometa.bin")
+                .await
+                .expect("upload");
+            up.write_all(b"no-metadata").await.unwrap();
+            up.close().await.unwrap();
+        }
+
+        let before = s.blobs().find(doc! {}).await.unwrap();
+        assert_eq!(
+            before.try_collect::<Vec<_>>().await.unwrap().len(),
+            3,
+            "two orphans and one live payload are staged"
+        );
+
+        // Constructing a store over the same database runs the sweep.
+        let rebooted = MongoStore::from_database(s.db.clone()).await.unwrap();
+
+        let files = rebooted
+            .blobs()
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1, "both orphans are reclaimed");
+        assert_eq!(files[0].filename.as_deref(), Some("keep.png"));
+
+        // The live node still serves its bytes — the sweep did not touch it.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&rebooted, &company, "keep")
+                .await
+                .unwrap()
+                .expect("the live payload survives the sweep");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"live-bytes".to_vec());
+
+        drop_db(&s).await;
     }
 
     /// Shared-single-DB namespacing: two tenants registering the same template
@@ -2496,6 +3022,17 @@ mod test {
     async fn conformance_workspace_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The reason issue #553 could not defer the Mongo backend: hosted tenants
+    /// run MongoDB, and this is the only lane where the GridFS path — and the
+    /// 17 MiB case that proves the 16 MB BSON document cap is not in play —
+    /// actually executes.
+    #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_binary_store(s.clone()).await;
         drop_db(&s).await;
     }
 

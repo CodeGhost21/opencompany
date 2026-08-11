@@ -458,6 +458,50 @@ export function listWorkflowRuns(
 }
 
 /**
+ * One past run's durable per-node output snapshot (issue #596) — the data the
+ * run inspector renders when an operator opens a node.
+ *
+ * `nodes` is the engine's `{ "<node id>": { "items": [ … ] } }` map, bounded for
+ * storage; `truncated` says whether any value was clipped to fit the caps, so the
+ * inspector can badge it honestly.
+ */
+export interface WorkflowRunOutputRecord {
+  runId: string;
+  workflowId: string;
+  /** Epoch-millis the snapshot was captured (the run's settle time). */
+  atMillis: number;
+  /** The per-node output map — `{ "<node id>": { "items": [ … ] } }`. */
+  nodes: unknown;
+  /** Whether any value was clipped to fit the durable size caps. */
+  truncated: boolean;
+}
+
+/**
+ * Fetches one past run's per-node output snapshot (issue #596).
+ *
+ * This is the durable extension of {@link runWorkflow}'s in-memory `output`: a
+ * run reopened from History has no live result, so the inspector reads what each
+ * node produced from here instead. Lazy per-run by design — the history list
+ * stays structural (status + timing), and only the run an operator clicks into is
+ * fetched.
+ *
+ * **Throws `404` for a run with no captured output**, which is the normal state
+ * for a run that predates this feature, a dry run (persists nothing), or a
+ * hard-aborted run (no outcome to persist) — and for a host predating this
+ * route. Callers should treat a 404 as "no output to show" and render the empty
+ * state, not surface an error.
+ */
+export function workflowRunOutput(
+  client: OpenCompanyClient,
+  company: string | null,
+  runId: string,
+): Promise<WorkflowRunOutputRecord> {
+  return client.get<WorkflowRunOutputRecord>(
+    `${client.scopeFor(company)}/workflows/runs/${encodeURIComponent(runId)}/output`,
+  );
+}
+
+/**
  * Authors a new workflow graph (issues #69, #168): the console's form creator
  * posts the same shape `getWorkflow` returns, and the host persists it on the
  * company record — so this works on every deployment, including a hosted tenant

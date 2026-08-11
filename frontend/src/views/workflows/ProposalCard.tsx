@@ -11,12 +11,13 @@
 // writes nothing at all: the card greys out and stays in the transcript so a
 // later question can refer to what was turned down.
 
-import { AlertTriangle, ArrowRight, Check, Loader2, Minus, Plus, X } from "lucide-react";
+import { AlertTriangle, Check, Loader2, X } from "lucide-react";
 
-import type { GraphDiff, NodeChange } from "@/api/workflow-proposal";
+import type { GraphDiff } from "@/api/workflow-proposal";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { ProposalDiff } from "./ProposalDiff";
 
 /** Where a proposal has got to. Only `pending` can write anything. */
 export type ProposalState = "pending" | "applying" | "applied" | "dismissed";
@@ -67,33 +68,7 @@ export function ProposalCard({
         {state === "dismissed" && <span className="shrink-0 text-muted-foreground">Dismissed</span>}
       </div>
 
-      <ul className="mt-2 space-y-1">
-        {diff.nodes.map((node) => (
-          <li key={`n-${node.id}`}>
-            <NodeLine node={node} />
-          </li>
-        ))}
-        {diff.edges.map((edge) => (
-          <li
-            key={`e-${edge.change}-${edge.from}-${edge.to}`}
-            className="flex items-center gap-1 text-muted-foreground"
-          >
-            {edge.change === "added" ? (
-              <Plus className="size-3 shrink-0 text-status-done-text" />
-            ) : (
-              <Minus className="size-3 shrink-0 text-destructive" />
-            )}
-            <span className="font-mono">{edge.from}</span>
-            <ArrowRight className="size-3 shrink-0" aria-hidden />
-            <span className="font-mono">{edge.to}</span>
-          </li>
-        ))}
-        {diff.nodes.length === 0 && diff.edges.length === 0 && (
-          <li className="text-muted-foreground">
-            This would change nothing about the workflow as it stands.
-          </li>
-        )}
-      </ul>
+      <ProposalDiff diff={diff} />
 
       {blocked && !settled && (
         <Alert className="mt-2 py-1.5">
@@ -139,66 +114,5 @@ export function ProposalCard({
         </div>
       )}
     </div>
-  );
-}
-
-/** One step's line: added, removed, or changed with the fields that moved. */
-function NodeLine({ node }: { node: NodeChange }) {
-  if (node.change === "added") {
-    return (
-      <span className="block text-muted-foreground">
-        <span className="flex items-start gap-1">
-          <Plus className="mt-px size-3 shrink-0 text-status-done-text" />
-          <span>
-            new step <span className="font-mono">{node.id}</span>{" "}
-            <span className="text-foreground">{node.name}</span>
-          </span>
-        </span>
-        {/* A new step's whole payload, not just its name: its kind, and any
-            schedule, config or approval flag it arrives with, each of which
-            changes what the workflow does. Reviewing a name and applying a
-            scheduled auto-approving node is the gap this closes. */}
-        <span className="mt-0.5 ml-4 block space-y-0.5">
-          {node.fields.map((field) => (
-            <span key={field.field} className="block">
-              <span className="font-medium text-foreground">{field.field}</span>:{" "}
-              <span className="text-foreground">{field.after}</span>
-            </span>
-          ))}
-        </span>
-      </span>
-    );
-  }
-  if (node.change === "removed") {
-    return (
-      <span className="flex items-start gap-1 text-muted-foreground">
-        <Minus className="mt-px size-3 shrink-0 text-destructive" />
-        <span>
-          remove <span className="font-mono">{node.id}</span>{" "}
-          <span className="text-foreground">{node.name}</span>
-        </span>
-      </span>
-    );
-  }
-  return (
-    <span className="block text-muted-foreground">
-      <span className="flex items-start gap-1">
-        <ArrowRight className="mt-px size-3 shrink-0" aria-hidden />
-        <span>
-          <span className="font-mono">{node.id}</span>{" "}
-          <span className="text-foreground">{node.name}</span>
-        </span>
-      </span>
-      <span className="mt-0.5 ml-4 block space-y-0.5">
-        {node.fields.map((field) => (
-          <span key={field.field} className="block">
-            <span className="font-medium text-foreground">{field.field}</span>:{" "}
-            <span className="line-through">{field.before}</span>{" "}
-            <ArrowRight className="inline size-3 align-[-2px]" aria-hidden />{" "}
-            <span className="text-foreground">{field.after}</span>
-          </span>
-        ))}
-      </span>
-    </span>
   );
 }

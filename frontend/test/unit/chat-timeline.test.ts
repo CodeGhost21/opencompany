@@ -57,6 +57,39 @@ describe("buildTimeline", () => {
     expect(entries[0].replies.map((r) => r.id)).toEqual(["b", "c"]);
   });
 
+  it("renders a grandchild nowhere: the fold is exactly one level deep", () => {
+    // The property the Rust side depends on (issue #435). Only a parentless
+    // message becomes an entry, and only an entry carries a `replies` list, so
+    // a reply-to-a-reply is bucketed under a row that is never itself rendered
+    // and disappears — silently, with nothing thrown and the transcript looking
+    // complete.
+    //
+    // `cycle_conversation` in `src/runtime/cycle.rs` parents an approval
+    // continuation to the thread *root* rather than to the message that raised
+    // it, and this is the whole reason: parenting to the raiser would put the
+    // continuation exactly here whenever the raiser is itself a thread reply.
+    // The existing "parent is not in this channel" case below does NOT pin
+    // this — there the parent is absent from the transcript entirely, so it
+    // would keep passing if the console ever grew a second fold level and
+    // quietly made #435's routing choice unnecessary.
+    const entries = buildTimeline(
+      [
+        message({ id: "a", text: "can we ship?" }),
+        message({ id: "b", text: "yes", parentId: "a", at: T0 + 1 }),
+        message({ id: "c", text: "when?", parentId: "b", at: T0 + 2 }),
+      ],
+      CHANNEL,
+    );
+
+    // The root is the only row, and it holds only its direct reply.
+    expect(entries).toHaveLength(1);
+    expect(entries[0].message.id).toBe("a");
+    expect(entries[0].replies.map((r) => r.id)).toEqual(["b"]);
+    // And `c` is reachable from nowhere in the rendered output.
+    const rendered = entries.flatMap((e) => [e.message.id, ...e.replies.map((r) => r.id)]);
+    expect(rendered).not.toContain("c");
+  });
+
   it("drops a reply whose parent is not in this channel rather than promoting it", () => {
     // A reply pointing at an id this transcript does not hold must not fall
     // back to the channel — that is precisely the "the console lost my thread"

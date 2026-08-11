@@ -147,6 +147,10 @@ pub(super) struct AgentDetailDto {
 
 /// An agent's tool grants at all three levels, so the resolution is legible
 /// rather than asserted.
+///
+/// Built **only** through [`agent_tools`], so every surface that renders an
+/// agent's tools renders the same list — see that function for why that is a
+/// rule rather than a convenience.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct AgentToolsDto {
@@ -169,6 +173,85 @@ pub(super) struct AgentDeskDto {
     /// Whether this agent is the desk's lead — the first effective member, who
     /// receives a `delegate_to_desk` hand-off.
     lead: bool,
+}
+
+/// The tool globs an agent *asks* for, resolved identically for every reader.
+///
+/// A manifest teammate's `[[agent]].tools` line; an **empty** list for an
+/// overlay teammate, which mirrors `harness::overlay_agent_to_manifest` — and
+/// which means "the company's standard grant", not "no tools".
+///
+/// Its callers have already established that `agent_id` is on the roster, so a
+/// miss here can only be the overlay half.
+pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Vec<String> {
+    record
+        .manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .map(|agent| agent.tools.clone())
+        .unwrap_or_default()
+}
+
+/// The **declared** cognition-tier hint for `agent_id`: the manifest
+/// `[[agent]].tier` line verbatim, or `None` when the row declares none — and
+/// for every overlay teammate, which has no manifest row to declare one.
+///
+/// Verbatim is the whole contract. This is what the company *wrote*, not a
+/// resolved answer, and `None` means **undeclared** — a reader has to render
+/// that as "cannot say" rather than substituting a default. Issue #643 is
+/// exactly that substitution: the overview graph printed a literal `worker` for
+/// every teammate, so a company declaring `tier = "orchestrator"` read back as
+/// a worker on its own graph.
+///
+/// Sibling of [`requested_grants`] in shape and in reason: one lookup, shared
+/// by the roster list and the detail read, so the two cannot answer differently
+/// for the same teammate.
+pub(super) fn declared_tier(record: &CompanyRecord, agent_id: &str) -> Option<String> {
+    record
+        .manifest
+        .agents
+        .iter()
+        .find(|agent| agent.id == agent_id)
+        .and_then(|agent| agent.tier.clone())
+}
+
+/// Whether `agent_id` is this company's orchestrator.
+///
+/// Delegates to [`crate::company::orchestrator_id`] — the roster rule the
+/// harness itself resolves the orchestrator with (the agent tagged with the
+/// orchestrator tier, else the first declared agent), never a re-read of
+/// [`declared_tier`].
+///
+/// **This is not the same question as the tier.** A company that tags nobody
+/// still has an orchestrator, so an untagged first agent answers `true` here
+/// while [`declared_tier`] answers `None`; and a *second* agent tagged with the
+/// orchestrator tier carries that tier while answering `false` here, because the
+/// rule picks one. A caller that re-derived the marker from the tier string
+/// would get both of those backwards.
+pub(super) fn is_orchestrator(record: &CompanyRecord, agent_id: &str) -> bool {
+    crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id)
+}
+
+/// One agent's grants at all three levels — the single constructor for
+/// [`AgentToolsDto`].
+///
+/// `effective` comes from
+/// [`agent_effective_grants`](crate::runtime::builder::agent_effective_grants),
+/// the same function the harness builds the agent with, for the reason the
+/// module docs give. This function exists so the **roster list** and the
+/// **detail read** cannot answer that question differently either (issue
+/// #601): the overview graph reads the list and used to invent a tool shelf by
+/// dealing slices of `[tools].allow`, so the graph and the detail card beside
+/// it disagreed about the same agent. Sharing the constructor makes that
+/// disagreement unrepresentable rather than merely fixed once.
+pub(super) fn agent_tools(company_allow: &[String], requested: Vec<String>) -> AgentToolsDto {
+    let effective = agent_effective_grants(company_allow, &requested);
+    AgentToolsDto {
+        requested,
+        company_allow: company_allow.to_vec(),
+        effective,
+    }
 }
 
 /// The `PATCH` body. Every field is optional, and an absent field is left
@@ -325,7 +408,7 @@ async fn detail(
     let manifest_agent = record.manifest.agents.iter().find(|a| a.id == agent_id);
     let overlay_agent = record.overlay_agents.iter().find(|a| a.id == agent_id);
 
-    let (source, name, role, description, tier, requested) = match (manifest_agent, overlay_agent) {
+    let (source, name, role, description) = match (manifest_agent, overlay_agent) {
         // A manifest agent wins an id collision, exactly as `build_roster`
         // resolves one: the version-controlled roster is authoritative.
         (Some(agent), _) => (
@@ -333,19 +416,15 @@ async fn detail(
             None,
             agent.role.clone(),
             agent.description.clone(),
-            agent.tier.clone(),
-            agent.tools.clone(),
         ),
+        // An overlay teammate has no manifest row, so `declared_tier` below
+        // misses — and so does `requested_grants`: it holds the company's
+        // standard grant, mirroring `harness::overlay_agent_to_manifest`.
         (None, Some(agent)) => (
             AgentSource::Overlay,
             Some(agent.name.clone()),
             agent.role.clone(),
             agent.description.clone(),
-            // An overlay teammate has no manifest row, so no tier and no
-            // per-agent tool line: it holds the company's standard grant. This
-            // mirrors `harness::overlay_agent_to_manifest` exactly.
-            None,
-            Vec::new(),
         ),
         (None, None) => {
             return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
@@ -353,9 +432,6 @@ async fn detail(
             ))));
         }
     };
-
-    let company_allow = record.manifest.tools.allow.clone();
-    let effective = agent_effective_grants(&company_allow, &requested);
 
     let cap = record.effective_budget(agent_id);
     let attribution = record.budget_override(agent_id);
@@ -384,13 +460,12 @@ async fn detail(
             AgentSource::Overlay => OVERLAY_EDITABLE.to_vec(),
             AgentSource::Manifest => Vec::new(),
         },
-        tier,
-        is_orchestrator: crate::company::orchestrator_id(&record.manifest.agents) == Some(agent_id),
-        tools: AgentToolsDto {
-            requested,
-            company_allow,
-            effective,
-        },
+        tier: declared_tier(record, agent_id),
+        is_orchestrator: is_orchestrator(record, agent_id),
+        tools: agent_tools(
+            &record.manifest.tools.allow,
+            requested_grants(record, agent_id),
+        ),
         desks: desks_for(record, agent_id),
         inbox_enabled,
         budget_usd_daily: cap,
@@ -407,7 +482,11 @@ async fn detail(
 /// rather than by reading the declared member lists, so an operator-added
 /// membership and an operator-set lead order are both reflected — the same
 /// answer the Desks page and the harness `desk_lead` resolver give.
-fn desks_for(record: &CompanyRecord, agent_id: &str) -> Vec<AgentDeskDto> {
+///
+/// Shared with `GET {scope}/team` (issue #601) for the same anti-drift reason
+/// as [`agent_tools`]: desks are the overview graph's departments now, so the
+/// roster list and this read have to agree on which desks a teammate sits on.
+pub(super) fn desks_for(record: &CompanyRecord, agent_id: &str) -> Vec<AgentDeskDto> {
     let declared = record
         .manifest
         .group_chats
@@ -733,6 +812,149 @@ members = ["writer", "ceo"]
             vec!["workspace", "workspace.*", "composio"],
             "{agent}"
         );
+    }
+
+    /// Issue #601: the roster **list** answers for tools and desks too, with
+    /// the same values as the detail read.
+    ///
+    /// The overview graph is drawn from the list, so before this it had no way
+    /// to learn either without an N+1 fetch — and invented both instead, while
+    /// the detail card beside it rendered the real thing. The equality is the
+    /// contract; anything less lets the two surfaces disagree again.
+    #[tokio::test]
+    async fn the_roster_list_carries_the_same_tools_and_desks_as_the_detail_read() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        // An overlay teammate too, so the agreement is checked on both halves
+        // of the merged roster rather than only on the manifest half.
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+        assert_eq!(status, StatusCode::OK, "{roster}");
+        let rows = roster.as_array().unwrap();
+        assert_eq!(rows.len(), 4, "{roster}");
+
+        for row in rows {
+            let id = row["id"].as_str().unwrap();
+            let (_, detail) = get_agent(&state, id).await;
+            assert_eq!(
+                row["tools"], detail["tools"],
+                "the graph reads the list and the card reads the detail; they \
+                 must not disagree about {id}"
+            );
+            assert_eq!(row["desks"], detail["desks"], "desks disagree for {id}");
+        }
+
+        let row_of = |id: &str| {
+            rows.iter()
+                .find(|row| row["id"] == id)
+                .unwrap_or_else(|| panic!("{id} missing from {roster}"))
+                .clone()
+        };
+
+        // …and the shared values are the *right* ones, so a shared-but-wrong
+        // constructor cannot pass on agreement alone.
+        let ceo = row_of("ceo");
+        assert_eq!(
+            strings(&ceo["tools"]["effective"]),
+            vec!["workspace.read"],
+            "a request the company never allowed is not a grant: {ceo}"
+        );
+        let writer = row_of("writer");
+        assert!(
+            strings(&writer["tools"]["requested"]).is_empty(),
+            "{writer}"
+        );
+        assert_eq!(
+            strings(&writer["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "an agent that lists no tools holds the whole allow-list: {writer}"
+        );
+        assert_eq!(
+            strings(&writer["tools"]["companyAllow"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "the ceiling rides along, so a reader can tell an empty request \
+             from an empty grant: {writer}"
+        );
+
+        // Desks, which are the graph's departments now: declared membership,
+        // the lead flag off the effective order, and a stated empty list.
+        let writer_desks = writer["desks"].as_array().unwrap();
+        assert_eq!(writer_desks.len(), 1, "{writer}");
+        assert_eq!(writer_desks[0]["id"], "content", "{writer}");
+        assert_eq!(writer_desks[0]["name"], "Content desk", "{writer}");
+        assert_eq!(writer_desks[0]["lead"], true, "{writer}");
+        assert_eq!(ceo["desks"].as_array().unwrap()[0]["lead"], false, "{ceo}");
+        assert!(
+            row_of("hermit")["desks"].as_array().unwrap().is_empty(),
+            "a teammate on no desk says so with an empty list rather than by \
+             omitting the key: {roster}"
+        );
+        assert!(
+            row_of(&jamie)["desks"].as_array().unwrap().is_empty(),
+            "{roster}"
+        );
+    }
+
+    /// An operator-added desk membership reaches the list, not just the detail
+    /// read — otherwise the graph's pillars would go stale the moment somebody
+    /// moved a teammate.
+    #[tokio::test]
+    async fn a_desk_change_shows_up_on_the_roster_list() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/desks/content/members",
+            Some(json!({"agent_id": "hermit"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let (_, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+        let hermit = roster
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["id"] == "hermit")
+            .unwrap()
+            .clone();
+        let desks = hermit["desks"].as_array().unwrap();
+        assert_eq!(desks.len(), 1, "{hermit}");
+        assert_eq!(desks[0]["id"], "content", "{hermit}");
+    }
+
+    /// A teammate created through the console reads back with the grant it
+    /// actually holds, so the card the console renders from the POST response
+    /// says the same thing the next list read will.
+    #[tokio::test]
+    async fn a_new_overlay_teammate_is_created_with_the_standard_grant() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, created) = send(
+            &state,
+            "POST",
+            "/api/v1/company/team",
+            Some(json!({"name": "Robin", "role": "Support"})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{created}");
+        assert_eq!(
+            strings(&created["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "{created}"
+        );
+        assert!(
+            created["desks"].as_array().unwrap().is_empty(),
+            "nobody has put it on a desk yet: {created}"
+        );
+
+        let (_, detail) = get_agent(&state, created["id"].as_str().unwrap()).await;
+        assert_eq!(created["tools"], detail["tools"], "{created} vs {detail}");
+        assert_eq!(created["desks"], detail["desks"], "{created} vs {detail}");
     }
 
     // --- The edit half ------------------------------------------------------

@@ -186,6 +186,9 @@ fn folder(id: &str, name: &str) -> WorkspaceNode {
         updated_at_millis: crate::ports::now_millis(),
         created_by: WorkspaceOrigin::Operator,
         updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
     }
 }
 
@@ -198,6 +201,9 @@ fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
         updated_at_millis: crate::ports::now_millis(),
         created_by: WorkspaceOrigin::Operator,
         updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
     }
 }
 
@@ -275,6 +281,7 @@ async fn harness(
         skills: None,
         skills_source_dir: None,
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -284,6 +291,7 @@ async fn harness(
         pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
         workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
         run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+        run_output_store: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

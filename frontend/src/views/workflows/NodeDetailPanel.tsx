@@ -3,11 +3,15 @@
 // Extracted verbatim from `WorkflowsView.tsx` (issue #303).
 
 import type { ReactNode } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 
 import type { WorkflowNode as WorkflowNodeModel } from "@/api/workflows";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { nodeKindMeta } from "@/lib/workflow-sample";
+
+import { type NodeOutputView, parseNodeMessages } from "./run-output";
 
 /** A read-only inspector for a single graph node, overlaid on the canvas when
  * the operator clicks a node. Surfaces the fields already on the wire from
@@ -16,9 +20,17 @@ import { nodeKindMeta } from "@/lib/workflow-sample";
  * kind-specific config / error-handling policy. */
 export function NodeDetailPanel({
   node,
+  output,
   onClose,
 }: {
   node: WorkflowNodeModel;
+  /**
+   * This node's output on the run being inspected (issue #596). `undefined`
+   * means "not inspecting a run" — the panel then shows only the node's static
+   * config, exactly as before. When present, an Output section renders what the
+   * node produced (or a loading / empty state).
+   */
+  output?: NodeOutputView;
   onClose: () => void;
 }) {
   const meta = nodeKindMeta(node.kind);
@@ -109,7 +121,14 @@ export function NodeDetailPanel({
           </DetailField>
         )}
 
-        {!node.summary &&
+        {/* Issue #596: what this node actually produced on the run being
+            inspected — the make.com per-node output view. Only rendered when a
+            run is being inspected (a live run's clicked node, or a past run
+            reopened from History). */}
+        {output && <OutputSection output={output} />}
+
+        {!output &&
+          !node.summary &&
           !node.agent &&
           !hasConfig &&
           !node.onError &&
@@ -140,6 +159,81 @@ function describeDestination(destination: NonNullable<WorkflowNodeModel["destina
     default:
       return `${destination.kind}${destination.target ? ` → ${destination.target}` : ""}`;
   }
+}
+
+/**
+ * The Output section of the node inspector (issue #596): what this node produced
+ * on the run being inspected — markdown-rendered agent/tool messages, the raw
+ * value behind a toggle, a "truncated" badge when the durable snapshot was
+ * clipped, and an explicit empty state for a run that predates capture or
+ * produced nothing.
+ */
+function OutputSection({ output }: { output: NodeOutputView }) {
+  if (output.state === "loading") {
+    return (
+      <DetailField label="Output">
+        <p className="text-xs text-muted-foreground">Loading output…</p>
+      </DetailField>
+    );
+  }
+
+  if (output.state === "unavailable") {
+    return (
+      <DetailField label="Output">
+        <p className="text-xs text-muted-foreground" data-testid="node-output-empty">
+          No output for this node — this run predates output capture, or the node
+          produced none.
+        </p>
+      </DetailField>
+    );
+  }
+
+  const messages = parseNodeMessages(output.value);
+  return (
+    <DetailField label="Output">
+      <div className="space-y-2" data-testid="node-output">
+        {output.truncated && (
+          <Badge
+            variant="outline"
+            className="border-status-blocked/40 bg-status-blocked-soft font-normal"
+            data-testid="node-output-truncated"
+          >
+            truncated — clipped to fit
+          </Badge>
+        )}
+        {messages.length > 0 ? (
+          messages.map((m, i) => (
+            <div key={i} className={i > 0 ? "border-t pt-2" : undefined}>
+              {m.agentRef && (
+                <p className="mb-1 text-3xs uppercase tracking-wide text-muted-foreground">
+                  {m.agentRef}
+                </p>
+              )}
+              {m.text ? (
+                <div className="prose prose-sm max-w-none dark:prose-invert">
+                  <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.text}</ReactMarkdown>
+                </div>
+              ) : (
+                <p className="text-sm text-muted-foreground">—</p>
+              )}
+            </div>
+          ))
+        ) : (
+          <p className="text-xs text-muted-foreground" data-testid="node-output-none">
+            This node produced no readable text — see the raw value below.
+          </p>
+        )}
+        <details>
+          <summary className="cursor-pointer text-xs text-muted-foreground">
+            Show raw output
+          </summary>
+          <pre className="mt-1 overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
+            {JSON.stringify(output.value, null, 2)}
+          </pre>
+        </details>
+      </div>
+    </DetailField>
+  );
 }
 
 /** A labelled block inside the node inspector. */

@@ -43,6 +43,18 @@ pub struct AppConfig {
     /// [`credential_available`](Self::credential_available) — not this field —
     /// whether a credential can be obtained.
     pub tinyhumans_credential: Option<SecretValue>,
+    /// Install-wide default MCP servers (issue #527) — the normalized
+    /// `[[default_mcp_server]]` list from this instance's `config.toml`, handed
+    /// to every company this host builds so a fresh install has working tools
+    /// with no user setup.
+    ///
+    /// Normalized by
+    /// [`normalize_default_servers`](crate::company::mcp::normalize_default_servers)
+    /// at whichever boundary populates it — the same function
+    /// [`RuntimeConfig`](crate::app::config::RuntimeConfig) uses, so the two
+    /// config structs cannot disagree about what is shippable. Empty is the
+    /// default and means "ship no defaults", never "use a built-in set".
+    pub default_mcp_servers: Vec<crate::company::McpServer>,
     /// Platform (multi-tenant) auth. When set, `{id}` routes honor tenant scopes
     /// and provisioning/suspension require the `platform` scope.
     ///
@@ -57,6 +69,11 @@ pub struct AppConfig {
     pub max_companies_per_tenant: Option<usize>,
     /// Outbound webhook delivery configuration. `None` disables webhooks.
     pub webhook: Option<WebhookConfig>,
+    /// The byte limits every company's workspace tree is held to (issue #553),
+    /// resolved from the `[workspace]` section of `config.toml`. Threaded onto
+    /// each company's builder so the store-level quota decorator is configured
+    /// from one place rather than re-read per company.
+    pub workspace_quota: crate::runtime::WorkspaceQuota,
     /// Tenant namespace for shared-single-DB deployments
     /// (`OPENCOMPANY_TENANT_ID`). When set, provisioned/booted company ids are
     /// prefixed with `<tenant>--` via [`Self::namespaced_company_id`] so many
@@ -95,9 +112,11 @@ impl Default for AppConfig {
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
             public_url: None,
             tinyhumans_credential: None,
+            default_mcp_servers: Vec::new(),
             platform_auth: None,
             max_companies: None,
             max_companies_per_tenant: None,
+            workspace_quota: crate::runtime::WorkspaceQuota::default(),
             webhook: None,
             tenant_namespace: None,
             admin_email: None,

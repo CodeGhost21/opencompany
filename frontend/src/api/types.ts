@@ -519,6 +519,59 @@ export interface TeamMemberDto {
   budgetSetBy?: string;
   /** When that cap was set (epoch millis). Paired with `budgetSetBy`. */
   budgetSetAtMillis?: number;
+  /**
+   * The declared cognition-tier hint (`[[agent]].tier`) verbatim, from the same
+   * host-side helper that answers `GET .../team/{agentId}` (issue #643).
+   *
+   * **Optional on the type, and genuinely absent on the wire** for a teammate
+   * that declares none — which is a different statement from any tier string.
+   * Do not coalesce it to a default: the overview graph stamped a literal
+   * `"worker"` on every node for exactly this reason, so a company declaring
+   * `tier = "orchestrator"` read back as a worker on its own graph. `undefined`
+   * means "cannot say", and the honest rendering of that is "not declared".
+   */
+  tier?: string;
+  /**
+   * Whether this teammate is the company's orchestrator (issue #643).
+   *
+   * **NOT the same question as `tier`** — this is the host's roster rule (the
+   * agent tagged with the orchestrator tier, else the first declared agent),
+   * and the two disagree in both directions: a company that tags nobody still
+   * has an orchestrator (no `tier`, `true` here), and a second agent tagged
+   * with that tier is not one (`tier` present, `false` here). Never re-derive
+   * this from the tier string; read it.
+   *
+   * Optional only because a host predating #643 does not send it, in which case
+   * `undefined` means "this host cannot say" — draw no marker rather than
+   * guessing one from `tier`.
+   */
+  isOrchestrator?: boolean;
+  /**
+   * This teammate's tool grants (issue #601) — the **same** three lists, from
+   * the same host-side constructor, that `GET .../team/{agentId}` serves.
+   *
+   * On the list because the overview graph draws a ring of each teammate's
+   * tools and is built from the roster read: without this it would have to
+   * fetch every agent's detail on page load, and it invented a tool shelf
+   * instead. Read `effective` and nothing else when the question is "what does
+   * this agent hold" — see {@link AgentToolsDto} for why `requested` alone
+   * inverts the answer.
+   *
+   * **Optional on the type, not on the wire.** A host predating #601 sends no
+   * such field; `undefined` means "this host cannot say", which is a different
+   * statement from an empty `effective` ("holds nothing") and must not be
+   * collapsed into it.
+   */
+  tools?: AgentToolsDto;
+  /**
+   * The desks this teammate sits on (issue #601), same shape as the detail
+   * read. Desks are the company's real grouping, so these are what the
+   * overview graph draws its department pillars from.
+   *
+   * **Optional on the type, not on the wire**, same rule as `tools`: absent
+   * means the host does not answer, empty means "on no desk".
+   */
+  desks?: AgentDeskDto[];
 }
 
 /**
@@ -751,14 +804,26 @@ export interface McpServer {
   timeoutSecs: number;
   /** Whether an outbound credential is stored — never the credential itself. */
   authConfigured: boolean;
+  /**
+   * Ids of the company's agents whose effective tool grants cover this server —
+   * who can actually call it (issue #568). On an **enabled** server an empty
+   * array means no teammate can reach it, a probable misconfiguration the
+   * console flags loudly. A **disabled** server is always empty (the harness
+   * hands out no tool for it whatever the grants say), so the console reads the
+   * empty case against `enabled` and stays quiet there. Optional only for
+   * forward-compat with an older backend that does not send the field;
+   * `undefined` (unknown) is treated differently from `[]` (known-empty).
+   */
+  reachableBy?: string[];
   /** The last recorded (scrubbed) probe outcome, when the server has been probed. */
   health?: McpHealth;
 }
 
 /**
- * A mutating MCP response: the resulting server, a rebuild reminder, the live
- * probe result (absent on a non-`openhuman` host), and any non-blocking
- * endpoint advisory.
+ * A mutating MCP response: the resulting server, the host's pickup note (since
+ * issue #566 that is next-turn pickup with no restart, not a rebuild reminder),
+ * the live probe result (absent on a non-`openhuman` host), and any
+ * non-blocking endpoint advisory.
  */
 export interface McpMutationResponse {
   server: McpServer;
@@ -866,6 +931,15 @@ export interface CapabilityStatusDto {
   searchCredentialConfigured?: boolean;
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
+  /**
+   * Whether the agent-side MCP bridge is compiled into this build (issue #567).
+   * Not a grant question like the flags above: the `/mcp/servers` management
+   * routes ship in every build, so without this an operator can add a server,
+   * store a token and watch it probe healthy on a deployment that hands agents
+   * no MCP tool at all. `undefined` is **unknown** (an older host that does not
+   * send the field) and must never be rendered as "absent".
+   */
+  mcpInBuild?: boolean;
 }
 
 /** One day's token totals in the usage series (`GET .../usage`). */

@@ -69,6 +69,23 @@ export interface FsNode {
   createdBy: WorkspaceOrigin;
   /** Who last wrote this node's body. A rename or move does not change it. */
   updatedBy: WorkspaceOrigin;
+  /**
+   * The media type of a **binary** node's payload, e.g. `image/png` (#553).
+   *
+   * Present only on a binary node, and the single test for one — the host omits
+   * all three fields below on a prose note rather than sending nulls, so
+   * `mime !== undefined` means "render or download this instead of editing it".
+   */
+  mime?: string;
+  /** The payload's exact size in bytes. Host-computed. */
+  size?: number;
+  /** The payload's sha256, computed by the store from the stored bytes. */
+  sha256?: string;
+}
+
+/** Whether a node holds bytes rather than prose. */
+export function isBinary(node: Pick<FsNode, "mime">): boolean {
+  return node.mime !== undefined && node.mime !== null;
 }
 
 /** One file's body plus the notes that link to it, from `GET …/workspace/file/{id}`. */
@@ -143,6 +160,101 @@ export async function fetchFile(
   };
 }
 
+/**
+ * One search hit from `GET …/workspace/search` (issue #607).
+ *
+ * A hit is a node plus the two things only a search knows: where it sits, and
+ * why it came back. `path` matters because the tree view derives location from
+ * `parentId` by walking the tree, and a flat hit list has no tree to walk.
+ */
+export interface SearchHit extends FsNode {
+  /** The node's logical path, e.g. `Standards/Engineering.md`. */
+  path: string;
+  /** Whether the query matched the node's name or its body. */
+  matched: "name" | "content";
+  /**
+   * Text around the first body match.
+   *
+   * Absent for a name match, a folder, and a binary node — the host never
+   * excerpts a payload.
+   */
+  excerpt?: string;
+}
+
+/** A page of search hits plus how many matched in total. */
+export interface SearchResults {
+  hits: SearchHit[];
+  /** Matches before the limit — so the console can say "20 of 137". */
+  total: number;
+}
+
+/**
+ * Which notes mention `query`, matched case-insensitively as a substring of
+ * note names and note bodies.
+ *
+ * The host refuses an empty query with a 400 rather than treating it as "match
+ * everything", so callers must not send one — a cleared search box shows the
+ * tree again instead of fetching every note. {@link searchWorkspace} does not
+ * guard that itself: swallowing it here would hide a caller bug behind a silent
+ * empty result.
+ */
+export async function searchWorkspace(
+  client: OpenCompanyClient,
+  company: string | null,
+  query: string,
+  options?: { prefix?: string; limit?: number },
+): Promise<SearchResults> {
+  const params = new URLSearchParams({ q: query });
+  if (options?.prefix) params.set("prefix", options.prefix);
+  if (options?.limit !== undefined) params.set("limit", String(options.limit));
+  const results = await client.get<{
+    hits: (FsNodeWire & { path: string; matched: "name" | "content"; excerpt?: string })[];
+    total: number;
+  }>(`${client.scopeFor(company)}/workspace/search?${params.toString()}`);
+  return {
+    total: results.total,
+    // Destructured so the node half goes through the same {@link normalize} the
+    // tree read uses — spreading the raw hit back over it afterwards would undo
+    // the `parentId` and origin defaults it just applied.
+    hits: results.hits.map(({ path, matched, excerpt, ...node }) => ({
+      ...normalize(node),
+      path,
+      matched,
+      excerpt,
+    })),
+  };
+}
+
+/**
+ * Split `text` into alternating non-matching / matching runs for `query`,
+ * so a hit's excerpt can bold what matched.
+ *
+ * Case-insensitive, like the host's own matching, and it returns the **original**
+ * text in every run rather than the lowercased comparison copy — highlighting
+ * must not silently rewrite the operator's prose to lower case.
+ *
+ * An empty query yields one unmatched run, which is what keeps a cleared box
+ * from marking every character.
+ */
+export function highlightRuns(text: string, query: string): { text: string; hit: boolean }[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return [{ text, hit: false }];
+  const haystack = text.toLowerCase();
+  const runs: { text: string; hit: boolean }[] = [];
+  let at = 0;
+  // `indexOf` on the lowercased copy is safe here in a way it would not be in
+  // Rust: JavaScript indexes strings by UTF-16 code unit and `toLowerCase` is
+  // length-preserving for every character the browser will render in a note
+  // title, so the two strings stay aligned.
+  for (let found = haystack.indexOf(needle); found !== -1; found = haystack.indexOf(needle, at)) {
+    if (found > at) runs.push({ text: text.slice(at, found), hit: false });
+    runs.push({ text: text.slice(found, found + needle.length), hit: true });
+    at = found + needle.length;
+  }
+  if (at < text.length) runs.push({ text: text.slice(at), hit: false });
+  return runs;
+}
+
 /** Create a folder or file. The host mints the id and the timestamp. */
 export async function createNode(
   client: OpenCompanyClient,
@@ -203,4 +315,65 @@ export function deleteNode(
   id: string,
 ): Promise<void> {
   return client.del<void>(`${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`);
+}
+
+/**
+ * Upload a file of any kind (issue #553).
+ *
+ * `createNode` sends a JSON body, which cannot carry bytes, so an image or a
+ * PDF has to arrive as `multipart/form-data` on its own route. The host — not
+ * this function — decides whether the result is a note or a binary node: a file
+ * that is typed as text *and* decodes as UTF-8 becomes a prose note, so an
+ * uploaded `.md` keeps its editor, its backlinks and its diffable history.
+ *
+ * `fetch` directly rather than `client.post`: the shared request helper sets a
+ * JSON content-type and `JSON.stringify`s its body, and a multipart upload must
+ * let the browser set the boundary itself.
+ */
+export async function uploadFile(
+  client: OpenCompanyClient,
+  company: string | null,
+  file: File,
+  parentId?: string | null,
+): Promise<FsNode> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  if (parentId) form.append("parentId", parentId);
+  const node = await client.postForm<FsNodeWire>(
+    `${client.scopeFor(company)}/workspace/upload`,
+    form,
+  );
+  return normalize(node);
+}
+
+/**
+ * Fetch a binary node's payload as an object URL.
+ *
+ * A plain `<img src="…/workspace/blob/{id}">` would not work: the route needs
+ * the bearer token the client holds, and an image element cannot carry one. So
+ * the bytes are fetched through the authenticated client and wrapped in an
+ * object URL the element can point at.
+ *
+ * **The caller must revoke the returned URL** when it is done with it —
+ * `URL.revokeObjectURL` — or the blob stays resident for the life of the
+ * document.
+ */
+export async function fetchBlobUrl(
+  client: OpenCompanyClient,
+  company: string | null,
+  id: string,
+): Promise<string> {
+  const blob = await client.getBlob(
+    `${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(id)}`,
+  );
+  return URL.createObjectURL(blob);
+}
+
+/** A human-readable size, for the metadata a binary node shows instead of a body. */
+export function formatBytes(bytes: number | undefined): string {
+  if (bytes === undefined) return "unknown size";
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }

@@ -100,6 +100,24 @@ pub const MAX_DELEGATIONS_PER_TURN: usize = 3;
 const RECENT_EVENTS: usize = 10;
 /// How many facts [`QueryCompanyTool`] surfaces.
 const FACT_LIMIT: usize = 20;
+/// Longest a single fact body may render in the insight document before it is
+/// cut with an ellipsis. One verbose fact must not be able to crowd the whole
+/// budget on its own; the full body is still reachable through the fact store.
+const MAX_FACT_BODY_CHARS: usize = 400;
+/// Byte ceiling for the whole Facts section of the insight document.
+///
+/// The insight document is handed to the model through the harness tool-result
+/// path, which hard-cuts anything past
+/// [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES)
+/// — and that outer cut is blind, so a facts list long enough to blow the
+/// budget would take the facts `[TRUNCATED …]` marker AND every section below
+/// it (Recent activity, Saved workflows, Team, Desks) over the edge with it,
+/// including the Desks list `delegate_to_desk` depends on. Bounding the facts
+/// section here — the one section with a `query` narrowing argument to fall
+/// back on — keeps the announcement and the delegation-grounding sections
+/// inside the outer budget. Half the budget leaves the other half for
+/// everything below. Sized against the real ceiling per issue #417.
+const FACTS_SECTION_BUDGET_BYTES: usize = crate::harness::build::TOOL_RESULT_BUDGET_BYTES / 2;
 
 /// The `query_company` tool name.
 pub const QUERY_COMPANY_TOOL: &str = "query_company";
@@ -599,10 +617,15 @@ impl Tool for QueryCompanyTool {
         };
         let mut recent: Vec<String> = Vec::new();
         let mut discussion_posts = 0usize;
+        // Events actually visited before the tail filled. Anything past this is
+        // strictly older than everything shown (we walk newest-first), so it is
+        // the exact count of activity dropped off the far end.
+        let mut consumed = 0usize;
         for event in stored.iter().rev() {
             if recent.len() == RECENT_EVENTS {
                 break;
             }
+            consumed += 1;
             if matches!(event.event, CompanyEvent::TaskDiscussionPosted { .. }) {
                 // Counted over the same span the tail covers, not over all of
                 // history: this line reads as "recent activity" like the rows
@@ -616,7 +639,19 @@ impl Tool for QueryCompanyTool {
                 summarize_event(&event.event)
             ));
         }
+        // Older events the tail could not reach. The facts section one block
+        // down already announces its own cut (issue #410); this is the same
+        // silent-cut class on the activity tail — a full log handed the
+        // orchestrator only its last ten rows and read as complete. `stored`
+        // holds the whole log, so the drop is exactly countable. No remediation
+        // clause: `query_company` has no pagination argument to point at.
+        let older = stored.len() - consumed;
         recent.reverse(); // back to chronological order
+        if older > 0 {
+            // Dropped rows are older than everything below; the list renders
+            // oldest→newest, so the notice belongs at the top.
+            recent.insert(0, format!("- […{older} earlier event(s) not shown]"));
+        }
         if discussion_posts > 0 {
             let plural = if discussion_posts == 1 { "" } else { "s" };
             recent.push(format!(
@@ -629,24 +664,44 @@ impl Tool for QueryCompanyTool {
         if facts.is_empty() {
             md.push_str("_No durable facts recorded._\n");
         } else {
+            // Two bounds, so the facts section can never be the thing that
+            // pushes the outer tool-result cut into the sections below it
+            // (issue #420): each body is capped at MAX_FACT_BODY_CHARS, and the
+            // section as a whole stops once its rendered bytes reach
+            // FACTS_SECTION_BUDGET_BYTES. The budget is charged in bytes because
+            // the outer cut is bytes; the body cut counts characters so it can
+            // never split a codepoint.
+            let mut shown = 0usize;
+            let mut section_bytes = 0usize;
             for fact in facts.iter().take(FACT_LIMIT) {
-                md.push_str(&format!(
+                let line = format!(
                     "- **{}**: {}\n",
                     fact.title.trim(),
-                    fact.body.trim()
-                ));
+                    truncate_chars(fact.body.trim(), MAX_FACT_BODY_CHARS)
+                );
+                // Always render at least one fact; past that, stop before a line
+                // would carry the section over its byte budget.
+                if shown > 0 && section_bytes + line.len() > FACTS_SECTION_BUDGET_BYTES {
+                    break;
+                }
+                section_bytes += line.len();
+                md.push_str(&line);
+                shown += 1;
             }
             // Issue #410, the same silent-cut class one tool over: this list was
             // capped at FACT_LIMIT with no marker, so a company past twenty facts
             // handed the orchestrator a partial memory that read as complete —
             // and the narrowing argument that would have fixed it (`query`) was
-            // never mentioned at the point the cut happened.
-            if facts.len() > FACT_LIMIT {
+            // never mentioned at the point the cut happened. The count now covers
+            // both the FACT_LIMIT cap and the byte-budget cut (issue #420); the
+            // marker line itself is charged outside the budget so the
+            // announcement can never be the fact that gets squeezed out.
+            if shown < facts.len() {
                 md.push_str(&format!(
                     "\n[TRUNCATED — {} more fact(s) not shown. This is NOT the whole record. \
                      Narrow it with `{QUERY_COMPANY_TOOL}({{\"query\": \"<substring>\"}})` before \
                      concluding a fact is absent.]\n",
-                    facts.len() - FACT_LIMIT
+                    facts.len() - shown
                 ));
             }
         }
@@ -764,6 +819,7 @@ impl Tool for QueryCompanyTool {
             json!({
                 "facts": facts.len(),
                 "recent_events": recent.len(),
+                "events_not_shown": older,
                 "workflows": workflows.len(),
                 "team": roster.len(),
                 "desks": desks.len(),
@@ -771,6 +827,25 @@ impl Tool for QueryCompanyTool {
             md,
         ))
     }
+}
+
+/// Cut `s` to at most `max` characters, marking a cut with a trailing ellipsis.
+///
+/// Sibling of [`memory_loop::truncate_chars`](crate::harness::memory_loop) —
+/// kept a private copy here rather than coupled to it, since the two callers
+/// share only the shape, not a contract. The ellipsis is budgeted *inside*
+/// `max`: taking `max` characters and then appending would return `max + 1` and
+/// quietly exceed the cap it advertises. Cutting counts characters, never
+/// bytes, so a multibyte body can never be split mid-codepoint.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let head: String = s.chars().take(max - 1).collect();
+    format!("{head}…")
 }
 
 /// A short, non-sensitive one-line summary of an event for the insight surface.
@@ -1751,8 +1826,12 @@ enum RunOutputStored {
 /// tested no-output invariant), and the tenant workspace is for files on disk,
 /// not a run's in-memory items. Durability is not the requirement either — the
 /// consumer is the *same process* that produced the run, and the durable human
-/// record already exists (the console run drawer renders the full output from
-/// the POST run route, and run history covers the rest). So this is a plain
+/// record already exists: the console run drawer renders a live run's output
+/// from the POST run route, run history covers the settled trail, and since #596
+/// a **durable per-node snapshot** ([`WorkflowRunOutputStore`](crate::ports::run_output::WorkflowRunOutputStore))
+/// lets the console reopen any *past* run and read what each node produced. That
+/// store reads the same `output["nodes"]` capture this cache does but persists it
+/// on a sibling surface, so the two never share storage. So this is a plain
 /// in-memory cache, bounded two ways ([`RUN_OUTPUT_CACHE_RUNS`] runs and
 /// [`RUN_OUTPUT_CACHE_MAX_BYTES`] total), evicting oldest-first.
 ///
@@ -2043,7 +2122,28 @@ impl Tool for RunWorkflowTool {
         // re-entry guard that bounds a workflow reaching back into itself is
         // task-local. Spawning here would reset the depth mid-chain and turn the
         // guard off exactly where it is load-bearing.
-        let (ctx, _run_guard) = self.run_supervisor.begin(&wid, false);
+        // Issue #401: `begin` refuses when the company is already at its
+        // in-flight run ceiling. Return a `ToolResult::error` with retry-later
+        // guidance — the same "stop, don't retry blindly" convention as the
+        // cancelled-run arm below — rather than an `Err`, so the agent treats it
+        // as a reason to wait instead of a tool failure to surface as a crash.
+        // Nothing was started: no context, no run id, nothing journaled.
+        let (ctx, _run_guard) = match self.run_supervisor.begin(&wid, false) {
+            Ok(started) => started,
+            Err(err) => {
+                tracing::info!(
+                    company = %self.company,
+                    workflow = %wid,
+                    %err,
+                    "run_workflow: refused — company is at its in-flight run cap"
+                );
+                return Ok(ToolResult::error(format!(
+                    "Workflow `{wid}` wasn't started: {err}. Wait for a running workflow to finish \
+                     (or ask an operator to stop one from the runs view), then try again — don't \
+                     retry in a loop."
+                )));
+            }
+        };
         match runner.run(&self.company, &file, input, &ctx).await {
             Ok(run) => {
                 tracing::debug!(
@@ -3703,6 +3803,151 @@ members = ["nobody"]
         );
     }
 
+    /// Issue #420: the recent-activity tail keeps only [`RECENT_EVENTS`] rows,
+    /// and it used to drop everything older in silence — a full log read as
+    /// complete, the same silent-cut class the facts section one block down
+    /// already announces. The tail now names how many rows fell off the far end
+    /// (in the markdown) and reports the count (in the JSON summary). Discussion
+    /// posts pushed past the tail are dropped rows too, so they count toward it
+    /// rather than folding into their own line.
+    #[tokio::test]
+    async fn query_company_announces_the_dropped_event_tail() {
+        use crate::ports::types::StoredEvent;
+        use futures::stream::{self, BoxStream};
+
+        /// A log that replays a fixed history.
+        struct FixedLog(Vec<StoredEvent>);
+
+        #[async_trait]
+        impl EventLog for FixedLog {
+            async fn append(
+                &self,
+                _id: &CompanyId,
+                _event: CompanyEvent,
+            ) -> crate::Result<EventSeq> {
+                unreachable!("the insight surface only reads")
+            }
+            async fn read_from(
+                &self,
+                _id: &CompanyId,
+                seq: EventSeq,
+                limit: usize,
+            ) -> crate::Result<Vec<StoredEvent>> {
+                Ok(self
+                    .0
+                    .iter()
+                    .filter(|e| e.seq.value() >= seq.value())
+                    .take(limit)
+                    .cloned()
+                    .collect())
+            }
+            fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
+                Box::pin(stream::empty())
+            }
+        }
+
+        let company = CompanyId::new("acme");
+
+        // A distinct, non-discussion event so every row occupies a tail slot.
+        let dispatch = |seq: u64| StoredEvent {
+            seq: EventSeq::new(seq),
+            company: company.clone(),
+            event: CompanyEvent::TaskDispatched {
+                task_id: format!("t-{seq}"),
+                run_id: None,
+            },
+            at_millis: seq + 1,
+        };
+
+        // (a) Five more row-events than the tail is wide: the five oldest fall
+        // off, the notice sits at the top, and the JSON summary counts them.
+        let over: Vec<StoredEvent> = (0..(RECENT_EVENTS as u64 + 5)).map(dispatch).collect();
+        let log: Arc<dyn EventLog> = Arc::new(FixedLog(over));
+        let tool = QueryCompanyTool::new(company.clone(), None, Some(log), None, None);
+        let result = tool.execute(json!({})).await.expect("execute");
+        let md = result.output_for_llm(true);
+        let activity = md
+            .split("## Recent activity\n")
+            .nth(1)
+            .expect("recent activity section");
+        assert!(
+            activity.starts_with("- […5 earlier event(s) not shown]"),
+            "the dropped tail must be announced at the top: {md}"
+        );
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("\"events_not_shown\": 5"),
+            "the JSON summary must count the drop: {}",
+            result.output_for_llm(false)
+        );
+
+        // (b) Exactly the tail width: nothing was dropped, so nothing is said.
+        let exact: Vec<StoredEvent> = (0..RECENT_EVENTS as u64).map(dispatch).collect();
+        let log: Arc<dyn EventLog> = Arc::new(FixedLog(exact));
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+            .execute(json!({}))
+            .await
+            .expect("execute");
+        assert!(
+            !result
+                .output_for_llm(true)
+                .contains("earlier event(s) not shown"),
+            "a complete tail must stay silent: {}",
+            result.output_for_llm(true)
+        );
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("\"events_not_shown\": 0"),
+            "a complete tail reports zero dropped: {}",
+            result.output_for_llm(false)
+        );
+
+        // (c) Discussion posts older than the tail are dropped rows: they count
+        // toward the drop, not toward the fold line. Three posts (oldest) then
+        // enough dispatches to fill the tail — the posts never get visited.
+        let mut mixed: Vec<StoredEvent> = Vec::new();
+        for seq in 0..3u64 {
+            mixed.push(StoredEvent {
+                seq: EventSeq::new(seq),
+                company: company.clone(),
+                event: CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t-1".to_string(),
+                    text: format!("older chatter {seq}"),
+                    by: None,
+                },
+                at_millis: seq + 1,
+            });
+        }
+        for seq in 3..(RECENT_EVENTS as u64 + 5) {
+            mixed.push(dispatch(seq));
+        }
+        // total = 3 posts + (RECENT_EVENTS + 2) dispatches; the tail holds
+        // RECENT_EVENTS dispatches, so 2 dispatches + 3 posts = 5 fall off.
+        let log: Arc<dyn EventLog> = Arc::new(FixedLog(mixed));
+        let result = QueryCompanyTool::new(company.clone(), None, Some(log), None, None)
+            .execute(json!({}))
+            .await
+            .expect("execute");
+        let md = result.output_for_llm(true);
+        assert!(
+            md.contains("- […5 earlier event(s) not shown]"),
+            "dropped discussion posts must count toward the tail drop: {md}"
+        );
+        assert!(
+            !md.contains("discussion post"),
+            "an unvisited post must not also fold into its own line: {md}"
+        );
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("\"events_not_shown\": 5"),
+            "{}",
+            result.output_for_llm(false)
+        );
+    }
+
     /// Issue #410, point 4 (audit the same silent-cut class elsewhere): the
     /// fact list is capped at [`FACT_LIMIT`], and it used to be capped in
     /// silence. A company past twenty facts handed the orchestrator a partial
@@ -3764,6 +4009,118 @@ members = ["nobody"]
         );
         assert!(out.contains("7 more fact(s) not shown"), "{out}");
         assert!(out.contains("query_company"), "{out}");
+    }
+
+    /// Issue #420, the residual: the whole insight document is handed to the
+    /// model through the harness tool-result path, which hard-cuts anything past
+    /// its byte budget — blindly. A facts list long enough would carry that cut
+    /// into the sections below it, dropping the facts `[TRUNCATED]` marker and
+    /// the Desks list `delegate_to_desk` reads. So each fact body is capped and
+    /// the facts section is bounded in bytes; the marker and every later section
+    /// stay inside the outer budget. Cutting a body counts characters, never
+    /// bytes, so a multibyte body cannot panic mid-codepoint.
+    #[tokio::test]
+    async fn query_company_bounds_the_insight_document_size() {
+        use crate::ports::FactStore;
+        use crate::ports::facts::{FactKind, FactRecord};
+
+        struct Facts(Vec<FactRecord>);
+        #[async_trait]
+        impl FactStore for Facts {
+            async fn list(
+                &self,
+                _c: &CompanyId,
+                _q: Option<&str>,
+                _k: Option<FactKind>,
+            ) -> crate::Result<Vec<FactRecord>> {
+                Ok(self.0.clone())
+            }
+            async fn upsert(&self, _c: &CompanyId, _f: &FactRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn delete(&self, _c: &CompanyId, _id: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let mk = |i: usize, body: String| FactRecord {
+            id: format!("f-{i}"),
+            kind: FactKind::Fact,
+            title: format!("Fact {i}"),
+            body,
+            source: "ceo".to_string(),
+            updated_at_millis: i as u64,
+        };
+        let render = |facts: Vec<FactRecord>| async move {
+            let store: Arc<dyn FactStore> = Arc::new(Facts(facts));
+            QueryCompanyTool::new(CompanyId::new("acme"), Some(store), None, None, None)
+                .execute(json!({}))
+                .await
+                .expect("execute")
+                .output_for_llm(true)
+        };
+
+        // (e) A single multi-KB multibyte body: cut on a char boundary, marked
+        // with an ellipsis, exactly the cap wide, and no panic.
+        let out = render(vec![mk(0, "é".repeat(5_000))]).await;
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("- **Fact 0**: "))
+            .expect("fact line");
+        let body = line.strip_prefix("- **Fact 0**: ").unwrap();
+        assert!(body.ends_with('…'), "a cut body is marked: {body:?}");
+        assert_eq!(
+            body.chars().count(),
+            MAX_FACT_BODY_CHARS,
+            "the body is cut to exactly the cap"
+        );
+        assert!(
+            body.chars().take(MAX_FACT_BODY_CHARS - 1).all(|c| c == 'é'),
+            "the cut landed on a codepoint boundary, not inside one"
+        );
+
+        // (f) Enough capped bodies to blow the section byte budget. The count
+        // reflects the budget cut, not merely FACT_LIMIT, and the marker plus
+        // every section below Facts survives the outer tool-result cut.
+        let heavy: Vec<FactRecord> = (0..FACT_LIMIT)
+            .map(|i| mk(i, "é".repeat(MAX_FACT_BODY_CHARS)))
+            .collect();
+        let out = render(heavy).await;
+        let shown = out.matches("- **Fact ").count();
+        assert!(
+            (1..FACT_LIMIT).contains(&shown),
+            "the byte budget must cut before FACT_LIMIT yet keep at least one: shown={shown}"
+        );
+        assert!(
+            out.contains(&format!("{} more fact(s) not shown", FACT_LIMIT - shown)),
+            "the marker counts the budget cut: {out}"
+        );
+        for header in [
+            "[TRUNCATED",
+            "## Recent activity",
+            "## Saved workflows",
+            "## Team",
+            "## Desks",
+        ] {
+            assert!(
+                out.contains(header),
+                "the facts cut must not carry the outer budget into `{header}`: {out}"
+            );
+        }
+
+        // (g) A small document is byte-for-byte the pre-guard behavior: bodies
+        // under the cap render verbatim and nothing is announced.
+        let out = render(vec![
+            mk(0, "Body 0".to_string()),
+            mk(1, "Body 1".to_string()),
+        ])
+        .await;
+        assert!(
+            out.contains("## Facts\n- **Fact 0**: Body 0\n- **Fact 1**: Body 1\n"),
+            "the small-document path is unchanged: {out}"
+        );
+        assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
+        assert!(!out.contains('…'), "nothing was truncated: {out}");
     }
 
     #[tokio::test]
@@ -4525,6 +4882,78 @@ name = "Morning"
         assert!(
             result.output_for_llm(true).contains("Greeter"),
             "{result:?}"
+        );
+    }
+
+    /// Issue #401: the orchestrator's run tool refuses when the company is
+    /// already at its in-flight run ceiling. The refusal is a
+    /// `ToolResult::error` the agent should treat as "wait / stop one", NOT an
+    /// `Err`, and it registers nothing — a held guard stands in for the
+    /// in-flight run, so no wall-clock and no real second run is needed.
+    #[tokio::test]
+    async fn run_workflow_tool_refuses_at_the_in_flight_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+
+        // Author a runnable graph on disk so `execute` reaches the cap check.
+        let create = CreateWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        assert!(
+            !create
+                .execute(greeter_body())
+                .await
+                .expect("execute")
+                .is_error
+        );
+
+        // A supervisor with room for one run, whose only slot is already taken
+        // by a (simulated) in-flight run held for the length of the test.
+        let supervisor = crate::runtime::RunSupervisor::with_limit(1);
+        let (_ctx, _held) = supervisor
+            .begin("greeter", false)
+            .expect("the held run fills the cap of 1");
+
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(WorkflowRun {
+            output: json!({}),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+        }));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let run = RunWorkflowTool::new(
+            company.clone(),
+            Some(dir.path().to_path_buf()),
+            store.clone(),
+            handle,
+            supervisor.clone(),
+            None,
+            WorkflowRefQueue::default(),
+            RunOutputCache::default(),
+        );
+
+        let result = run
+            .execute(json!({ "id": "greeter" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "a run over the cap is refused: {result:?}");
+        let text = result.output_for_llm(false);
+        assert!(
+            text.contains("wasn't started") && text.contains("maximum"),
+            "the refusal names the cap and is actionable: {text}"
+        );
+        assert_eq!(
+            supervisor.len(),
+            1,
+            "the refused run registered nothing — only the held run remains"
         );
     }
 

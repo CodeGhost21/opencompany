@@ -726,6 +726,7 @@ async fn gather_evidence(
     // one seam the console's discovery route and the harness roster share.
     let mcp_servers = match crate::company::mcp::resolve_effective(
         runtime.id(),
+        runtime.default_mcp_servers(),
         &record.manifest.mcp_servers,
         runtime.secrets().as_ref(),
     )

@@ -36,7 +36,7 @@ use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
     McpFailure, McpFailureQueue, classify_mcp_error, operator_message, scrub, strip_endpoint,
 };
-use crate::runtime::tools::grant_matches;
+use crate::runtime::tools::{grant_matches, grants_cover_server};
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
 ///
@@ -86,14 +86,6 @@ pub fn registry_for_agent(
     } else {
         Some(Arc::new(registry))
     }
-}
-
-/// Whether an agent's effective `grants` cover the MCP server named `name`,
-/// using the same glob semantics as every other tool grant (`mcp:*` = all,
-/// `mcp:notion` = exact).
-fn grants_cover_server(grants: &[String], name: &str) -> bool {
-    let want = format!("mcp:{name}");
-    grants.iter().any(|grant| grant_matches(grant, &want))
 }
 
 /// Whether `agent`'s tool grants reach the MCP server named `name`, using the

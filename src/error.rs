@@ -124,6 +124,26 @@ pub enum OpenCompanyError {
     #[error("budget exceeded: {0}")]
     BudgetExceeded(String),
 
+    /// A workspace write would exceed the per-file cap or the company's tree
+    /// quota (issue #553). Refused before anything is stored, so the tree is
+    /// exactly as it was.
+    #[error("{0}")]
+    WorkspaceQuota(String),
+
+    /// A workflow run was refused because the company is already at its
+    /// configured ceiling of concurrent in-flight runs (issue #401).
+    ///
+    /// Raised before the run is registered or spawned, so nothing is journaled
+    /// and no run id is minted — the caller gets a `429` with no run to follow.
+    /// The message is actionable because the operator has three real levers.
+    #[error(
+        "this company is already running its maximum of {limit} workflow runs at once; wait for one to finish, stop one from the runs view (POST …/workflows/runs/{{id}}/cancel), or raise `[workflows].max_in_flight_runs`"
+    )]
+    WorkflowRunLimit {
+        /// The configured ceiling that was hit.
+        limit: usize,
+    },
+
     /// An operation conflicts with the company's lifecycle state (e.g. the
     /// company is paused or archived).
     #[error("company is {0}")]
@@ -265,6 +285,8 @@ impl OpenCompanyError {
             Self::McpServerNotFound(_) => "mcp_server_not_found".to_string(),
             Self::ToolNotGranted(_) => "tool_not_granted".to_string(),
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),
+            Self::WorkspaceQuota(_) => "workspace_quota_exceeded".to_string(),
+            Self::WorkflowRunLimit { .. } => "workflow_run_limit".to_string(),
             Self::LifecycleConflict(_) => "lifecycle_conflict".to_string(),
             Self::EmergencyStop(_) => "emergency_stop".to_string(),
             Self::Conflict(_) => "conflict".to_string(),

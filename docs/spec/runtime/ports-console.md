@@ -141,11 +141,93 @@ pub trait WorkspaceStore: Send + Sync {
     async fn rename_move(&self, /* id, new_name, new_parent */) -> Result<WorkspaceNode>;
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
     async fn is_empty(&self, company: &CompanyId) -> Result<bool>;
+
+    // Bytes (#553) — additive; the text path above is untouched.
+    async fn create_binary(&self, company: &CompanyId, node: &WorkspaceNode,
+                           bytes: &[u8]) -> Result<()>;
+    async fn write_binary(&self, company: &CompanyId, id: &str, bytes: &[u8],
+                          mime: Option<&str>, author: WorkspaceOrigin)
+        -> Result<WorkspaceNode>;
+    async fn read_bytes(&self, company: &CompanyId, id: &str)
+        -> Result<Option<(WorkspaceNode, BlobStream)>>;
 }
 ```
 
 Nodes are folders or files (`NodeKind`); `[[wikilink]]` backlinks are derived
 at read time by the GraphQL layer.
+
+**Bytes (#553).** A node holds prose or it holds a payload, never both. A
+binary node is a `File` whose `mime`, `size` and `sha256` are all `Some`;
+`mime` alone is the discriminator every surface keys off. `size` and `sha256`
+are computed **by the store** from the bytes it persists (`blob_metadata`) and
+are never accepted from a caller — a digest a caller supplies is an unverified
+claim, which is the one thing a digest must not be.
+
+The text path stays `String`, deliberately: ~17 call sites reference this port
+and none of them (the backlink scan, the seeder, the GraphQL projection, the
+agent tools) can do anything with a PNG. So a text `read` of a binary node
+yields an **empty body**, the same answer a folder gives, and a text `write` to
+one is refused rather than allowed to leave the recorded digest describing
+bytes that are gone.
+
+Writes buffer and reads stream. The asymmetry is what makes the quota
+enforceable: `QuotaEnforcedWorkspace` (`src/runtime/workspace_quota.rs`) wraps
+the store at the single assembly site, inside the announcer, and sees the full
+size **before** anything is written — so a refused write leaves no partial
+blob, no node and no orphan. It meters payloads only (prose is uncounted; the
+threat model is media) against a per-file cap (`[workspace] max_blob_mb`,
+default 64 MiB) and a per-company total (`[workspace] tree_quota_gb`,
+unlimited by default), answering 413. The console's upload route holds a
+separate 256 MiB body limit — a backstop against buffering an unbounded
+request, deliberately above the cap so the store's refusal is the one an
+operator sees (#647); see `storage.md`.
+
+Backends: sqlite keeps the blob in the node's own row, so it cannot orphan one.
+`FsOps` writes the file then the index — the benign order the text path already
+uses. MongoDB needs **GridFS** (a payload cannot ride in a 16 MB BSON document)
+and writes blob-first/document-second, deleting in the mirror order, so a crash
+strands only a blob nothing references; `MongoStore::from_database` sweeps those
+at boot. Tenancy in the shared bucket is a filter on `metadata.company_id` **and**
+`metadata.node_id` for every read, delete and sweep.
+
+**Search (#607).** Workspace search is a **company-layer helper**
+(`company::workspace_search`) over the port's existing `tree` + `read`, not a
+port method. A trait method would need five implementations *and* one agreed
+definition of matching across three engines, and SQLite's FTS5 tokeniser,
+MongoDB's `$text` stemming and a hand-rolled filesystem scan cannot be made to
+agree without either forbidding the native indexes or accepting that the same
+query answers differently per deployment. The helper is correct on all three
+backends by construction; the cost it accepts is O(N) reads per query, the same
+shape `workspace_links` already pays on every file open, and it is the named
+place to add an index later.
+
+A binary node is **matched by name and never content-scanned**. Its bytes are
+not text, so scanning them would produce mojibake matches, waste I/O
+proportional to the payload, and — on a streaming backend — pull a whole video
+through memory to find nothing.
+
+The port already makes the safe behaviour the default rather than a rule to
+remember: a text `read` of a binary node returns an **empty body** on all three
+backends, so a content scan built over `read`/`tree` finds nothing for one
+automatically. It does not need to know binaries exist, and it cannot
+accidentally index them. The helper states the rule anyway rather than
+inheriting the silence, because "found nothing" and "not searchable this way"
+are different answers and only one of them is true. A scan that wants to *say*
+something about a payload uses `mime`/`size`/`sha256` off the node, which the
+tree read already carries — the same fields `workspace_list` renders.
+`read_bytes` is for serving a download and appears nowhere in a search path.
+
+Paths in a hit come from `company::workspace_paths`, the same ancestor-chain
+rules the agent tools' `PathIndex` uses, so a node search offers is always a
+node `workspace_read` can open — an unaddressable node (dangling ancestor,
+illegal name segment) is excluded from hits and from `total` alike.
+
+`assert_workspace_binary_store` pins all of it across all three backends,
+including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:
+`GET …/workspace/blob/{id}` streams the payload (`ETag` = sha256) and
+`POST …/workspace/upload` takes multipart; a text-typed upload whose bytes
+decode as UTF-8 is stored as a note instead, so an uploaded `.md` keeps its
+editor and backlinks.
 
 **Authorship (#326).** Every `WorkspaceNode` carries `created_by` and
 `updated_by`, both a `WorkspaceOrigin` ∈ `seed | operator | agent{id}`. `write`
@@ -158,20 +240,29 @@ Backends persist the node as opaque JSON and both fields are
 round-trip, the write stamp, and the rename non-stamp across all three
 backends.
 
-**`Agents/` and `Desks/` (#551).** `company::workspace_scaffold` owns the
+**`Agents/` and `Desks/` (#551, #645).** `company::workspace_scaffold` owns the
 workspace's two reserved system roots and the folders beneath them, on two
 different schedules:
 
-* `ensure_workspace_scaffold` adopt-or-creates the `Agents` and `Desks` roots,
-  **empty**, from one seam: `RuntimeBuilder::build` (boot). It takes no roster
-  — a company with no agents gets both — so an existing company picks them up
-  on its next boot. Idempotent; one tree read.
+* `ensure_workspace_scaffold` adopt-or-creates the roots listed in
+  `SYSTEM_ROOTS` — `Agents` alone — **empty**, from one seam:
+  `RuntimeBuilder::build` (boot). It takes no roster (a company with no agents
+  still gets it), so an existing company picks it up on its next boot.
+  Idempotent; one tree read.
 * `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create
   `Agents/<agent-id>/` and `Desks/<desk-id>/` **on demand**, returning the node
   id, called when that agent or desk first produces something. A folder means
   "this member produced something"; an eager folder per roster member would be
   a claim the tree cannot back. `workspace_create` calls the agent minter when
   an agent writes into its own home; #552's publish path is the next caller.
+* **`Desks/` is not scaffolded** (#645). Both minters have always created an
+  absent root on their way down, and `ensure_desk_folder` has no callers yet, so
+  scaffolding the root gave every company a permanently empty folder
+  advertising a feature nothing fills — the same promise-not-record shape #570
+  removed at the member level. `ensure_desk_folder` now mints root and member
+  folder together on first use. A `Desks/` that already exists is untouched:
+  the scaffold only ever looks up the names in `SYSTEM_ROOTS`, so a legacy
+  company keeps its root, its contents and its authorship, un-warned.
 
 Both are fail-closed: a name collision (a *file* of that name, or several nodes
 sharing it) is never resolved by creating a duplicate that would make the path

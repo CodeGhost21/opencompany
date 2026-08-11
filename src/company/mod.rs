@@ -47,6 +47,18 @@ mod workflow_file;
 // REST route is in the default build, and one shared scan is what keeps the two
 // read surfaces from drifting.
 pub(crate) mod workspace_links;
+// How a node's logical path is rendered from its ancestor chain, and how a
+// caller-supplied one is validated. Shared by the agent tools' `PathIndex` and
+// by `workspace_search`, so a node search offers is always a node
+// `workspace_read` can open. Always compiled: search reaches the default-build
+// REST and GraphQL surfaces, the tools do not.
+pub(crate) mod workspace_paths;
+// Issue #607: text search over the shared tree, behind the agent
+// `workspace_search` tool, the REST `GET …/workspace/search` route and the
+// GraphQL `Company.workspaceSearch` resolver. Always compiled and openhuman-free
+// for the same reason `workspace_links` is: two of its three callers are in the
+// default build, and one shared scan is what stops them answering differently.
+pub mod workspace_search;
 // The workspace's `Agents/` + `Desks/` system roots, and the folders minted
 // beneath them on first use (issue #551). Always compiled and openhuman-free:
 // the scaffold is called from the runtime builder at boot, which is in the
@@ -61,11 +73,11 @@ pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use types::{
     Agent, BRAIN_MODES, Brain, Budget, ChannelConfig, Company, CompanyManifest, ComposioTools,
-    Connection, DEFAULT_ALWAYS_APPROVE, DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES,
-    INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS, McpServer, ORCHESTRATOR_TIER,
-    PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy, Schedule, Skill, TIERS,
-    TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit, grants_search_explicit,
-    grants_workspace_write_explicit, orchestrator_id,
+    Connection, DEFAULT_ALWAYS_APPROVE, DEFAULT_MAX_IN_FLIGHT_RUNS, DEFAULT_SEARCH_DAILY_CALLS,
+    GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS,
+    McpServer, ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy,
+    Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit,
+    grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,

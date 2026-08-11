@@ -146,7 +146,7 @@ use crate::ports::{
     EventLog, InboxStore, UserRole, UserStatus, UserStore, generate_id, now_millis,
 };
 use crate::runtime::cycle::EMAIL_SEND_KIND;
-use crate::runtime::journal::RuntimeJournal;
+use crate::runtime::journal::{ApprovalConversation, RuntimeJournal};
 use crate::runtime::workflow_resume::DeliveredReport;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
 use crate::server::ops::smtp::local_part;
@@ -922,7 +922,15 @@ impl DeliveryParking {
                 &effect,
                 now_millis(),
                 task_link,
-                thread,
+                // A channel but no thread root (issue #435), for a reason one
+                // step upstream of #469's: a workflow node's request is not
+                // raised by a chat message, so there is no message for a
+                // continuation to hang under. The channel is the whole of the
+                // conversation identity here, exactly as before.
+                ApprovalConversation {
+                    thread,
+                    parent: None,
+                },
                 // No turn key (issue #469): a workflow node's request is not
                 // raised by a cycle, so there is no turn holding a continuation
                 // for it. It resolves and continues on its own, exactly as it

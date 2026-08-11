@@ -101,6 +101,10 @@ pub mod workflow_spawn;
 /// console, an agent tool, the publish drain, the seeder — reaches a watching
 /// console without a reload. See [`workspace_events`].
 pub mod workspace_events;
+/// Issue #553: [`QuotaEnforcedWorkspace`] — the one place a workspace write is
+/// measured. Wrapped in beside [`WorkspaceAnnouncer`] so every writer is held
+/// to the company's byte limits without knowing it is. See [`workspace_quota`].
+pub mod workspace_quota;
 
 pub use advance::{SYSTEM_ATTRIBUTION, advance_settled_card, append_result};
 pub use board_events::{BoardAnnouncer, CHANGE_OPENED, CHANGE_REMOVED, CHANGE_UPDATED};
@@ -125,6 +129,9 @@ pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub use workflow_spawn::WorkflowSpawn;
 pub use workspace_events::WorkspaceAnnouncer;
+pub use workspace_quota::{
+    DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,
+};
 
 // The assembly struct lives under `company/` to match the `ports.md` sketch
 // (`src/company/runtime.rs`); re-export it here as the kernel's public surface.

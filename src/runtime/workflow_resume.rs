@@ -111,7 +111,7 @@
 //! task to cancel, no connection to close.
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
 
 use crate::Result;
 use crate::company::load_workflow_union;
@@ -141,6 +141,42 @@ pub const PAYLOAD_INPUT: &str = "input";
 pub const PAYLOAD_DELIVERED: &str = "delivered";
 /// The payload key holding the plain-prose statement of what approving costs.
 pub const PAYLOAD_NOTE: &str = "note";
+/// The payload key holding the verbatim output of the gate's upstream nodes —
+/// the content awaiting sign-off (issue #596). A map `{ "<upstream node id>":
+/// <bounded node output> }`. Deliberately **not** part of the gate's dedupe
+/// identity (see [`is_same_gate`]): two runs whose only difference is the content
+/// their upstream nodes produced are still one decision on the same gate.
+pub const PAYLOAD_CONTENT: &str = "content";
+/// The payload key holding the toolbelt slug a policy-gated `tool_call` node
+/// would run (issue #460). Absent on an authored `requires_approval` gate,
+/// which stops the run without any particular call behind it.
+pub const PAYLOAD_TOOL: &str = "tool";
+/// The payload key holding the policy's own words for why it stopped this call
+/// (issue #460) — the same sentence the agent path puts on its card. Absent for
+/// the same reason as [`PAYLOAD_TOOL`].
+pub const PAYLOAD_REASON: &str = "reason";
+/// The payload key holding what a policy-gated call would reach — `"POST
+/// api.example.com"` for an `http_request` node (issue #614). Absent when the
+/// node's call has no destination worth naming, or when the URL is still an
+/// unresolved `=`-expression at gate time.
+pub const PAYLOAD_TARGET: &str = "target";
+
+/// What a policy-gated node's card says about the call being decided
+/// (issues #460, #614).
+///
+/// Grouped rather than passed as three more arguments to [`gate_effect`]: they
+/// are written together or not at all, and an authored `requires_approval` gate
+/// passes `None` for the lot — no particular call is being decided there.
+#[derive(Debug, Clone, Copy)]
+pub struct GateCall<'a> {
+    /// The tool the node would run.
+    pub tool: &'a str,
+    /// The policy's own words for why it stopped.
+    pub reason: &'a str,
+    /// Method and host, when knowable. Never the path or query — see
+    /// `GatedCall::target` in `crate::workflows::gate` for why.
+    pub target: Option<&'a str>,
+}
 
 /// The reserved trigger-input key the delivery ledger rides into a continuation
 /// run under (issue #438).
@@ -254,31 +290,54 @@ fn delivery_ledger(input: &Value, deliveries: &[DeliveryReport]) -> Vec<Delivere
 /// It is folded into the card's ledger rather than looked up later for the same
 /// reason the input is copied in: a card that needs a side table is a card that
 /// stops working after a restart.
+///
+/// `call` is `Some(..)` when the company's `ApprovalPolicy` is what stopped this
+/// node (issues #460, #614), and `None` for an authored `requires_approval`
+/// gate, where no particular call is being decided. It is
+/// deliberately outside the dedupe identity ([`is_same_gate`]): it describes the
+/// *same* decision in more words, so two cards that differ only here are still
+/// one question.
 pub fn gate_effect(
     workflow_id: &str,
     node_id: &str,
     input: &Value,
     run_id: &str,
     deliveries: &[DeliveryReport],
+    call: Option<GateCall<'_>>,
 ) -> Effect {
+    let mut payload = Map::new();
+    payload.insert(PAYLOAD_WORKFLOW_ID.to_string(), json!(workflow_id));
+    payload.insert(PAYLOAD_NODE_ID.to_string(), json!(node_id));
+    // The whole trigger input, so the parked card is self-contained and a
+    // resume needs nothing but the journal. This is what makes
+    // approve-after-restart work.
+    payload.insert(PAYLOAD_INPUT.to_string(), input.clone());
+    // What must NOT be sent again when this card is approved.
+    payload.insert(
+        PAYLOAD_DELIVERED.to_string(),
+        json!(delivery_ledger(input, deliveries)),
+    );
+    // What approving costs, in the operator's own terms.
+    payload.insert(PAYLOAD_NOTE.to_string(), json!(CONTINUATION_NOTE));
+    // Issue #460: which call the policy stopped, and why. The keys are ABSENT
+    // rather than null on an authored gate — a card that names no tool is a
+    // different thing from one whose tool could not be determined, and a
+    // console reading `payload.tool` should be able to tell them apart.
+    if let Some(call) = call {
+        payload.insert(PAYLOAD_TOOL.to_string(), json!(call.tool));
+        payload.insert(PAYLOAD_REASON.to_string(), json!(call.reason));
+        if let Some(target) = call.target {
+            payload.insert(PAYLOAD_TARGET.to_string(), json!(target));
+        }
+    }
+
     Effect {
         kind: WORKFLOW_APPROVE_KIND.to_string(),
         group: crate::ports::types::EffectGroup::Other,
         amount_usd: None,
         established_thread: false,
         first_time_counterparty: false,
-        payload: serde_json::json!({
-            PAYLOAD_WORKFLOW_ID: workflow_id,
-            PAYLOAD_NODE_ID: node_id,
-            // The whole trigger input, so the parked card is self-contained and
-            // a resume needs nothing but the journal. This is what makes
-            // approve-after-restart work.
-            PAYLOAD_INPUT: input.clone(),
-            // What must NOT be sent again when this card is approved.
-            PAYLOAD_DELIVERED: delivery_ledger(input, deliveries),
-            // What approving costs, in the operator's own terms.
-            PAYLOAD_NOTE: CONTINUATION_NOTE,
-        }),
+        payload: Value::Object(payload),
         // Native, not a teammate's tool call — see the doc above.
         agent: None,
         // The run that paused. Not the run the approval will start (which does
@@ -286,6 +345,62 @@ pub fn gate_effect(
         // console tie the card back to the run history the operator was
         // watching.
         run_id: Some(run_id.to_string()),
+    }
+}
+
+/// The verbatim output of a gate's **upstream** nodes — the content an operator
+/// is being asked to sign off before it publishes (issue #596).
+///
+/// At park time the paused run's `outcome.output["nodes"]` already holds every
+/// completed upstream node's output (the gate node itself has not run — that is
+/// what "requires approval" means), so the pre-publish content is available with
+/// **zero engine change**: this reads it straight off the settled output.
+///
+/// For the given `gate_node`, it walks `edges` for every `from → gate_node` edge
+/// and collects that upstream node's output, [`bound`](crate::ports::bound_node_output)
+/// so a runaway node cannot bloat the card. The result is a map keyed by upstream
+/// node id; a gate with no upstream output (an unreachable graph, or output the
+/// run never produced) yields an empty map, which the console renders as "no
+/// content to preview".
+pub fn upstream_content(
+    output: &Value,
+    edges: &[crate::company::WorkflowEdgeDef],
+    gate_node: &str,
+) -> Value {
+    let nodes = output.get("nodes");
+    let mut content = Map::new();
+    for edge in edges {
+        if edge.to != gate_node {
+            continue;
+        }
+        // One entry per distinct upstream node, even if two edges connect them.
+        if content.contains_key(&edge.from) {
+            continue;
+        }
+        if let Some(node_output) = nodes.and_then(|n| n.get(&edge.from)) {
+            let (bounded, _truncated) = crate::ports::bound_node_output(node_output);
+            content.insert(edge.from.clone(), bounded);
+        }
+    }
+    Value::Object(content)
+}
+
+/// Attaches the gate's upstream content (issue #596) to an already-built park
+/// effect under [`PAYLOAD_CONTENT`].
+///
+/// A self-contained addition on top of [`gate_effect`] rather than a change to
+/// it: the effect's dedupe identity ([`is_same_gate`]) ignores this key, so
+/// enriching a card with content never splits one decision into two. A no-op on
+/// a non-object payload (which `gate_effect` never produces).
+pub fn attach_upstream_content(
+    effect: &mut Effect,
+    output: &Value,
+    edges: &[crate::company::WorkflowEdgeDef],
+    gate_node: &str,
+) {
+    let content = upstream_content(output, edges, gate_node);
+    if let Value::Object(map) = &mut effect.payload {
+        map.insert(PAYLOAD_CONTENT.to_string(), content);
     }
 }
 
@@ -399,8 +514,10 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
     // approvals request open for the length of a whole workflow run, which is
     // the drop-safety failure issue #380 already paid for once.
     // Issue #542: resuming an approved gate is always a real run — `false`.
+    // Issue #401: `spawn` refuses at the concurrency ceiling; propagate it so
+    // the approval-resume caller surfaces the same `WorkflowRunLimit` refusal.
     let (run_id, _handle) =
-        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false);
+        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false)?;
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,
@@ -529,7 +646,7 @@ mod tests {
     use super::*;
 
     fn effect(workflow: &str, node: &str, input: Value) -> Effect {
-        gate_effect(workflow, node, &input, "run-1", &[])
+        gate_effect(workflow, node, &input, "run-1", &[], None)
     }
 
     /// A delivery row with `status`, as `deliver_outputs` would have returned it.
@@ -661,6 +778,7 @@ mod tests {
                 delivery("owner_summary", "owner", DeliveryStatus::Sent),
                 delivery("cold_note", "email", DeliveryStatus::Pending),
             ],
+            None,
         );
         assert_eq!(
             ledger(&e),
@@ -693,6 +811,7 @@ mod tests {
                 &Value::Null,
                 "run-1",
                 &[delivery("summary", "owner", status)],
+                None,
             );
             assert!(
                 ledger(&e).is_empty(),
@@ -714,6 +833,7 @@ mod tests {
                 delivery("summary", "owner", DeliveryStatus::Sent),
                 delivery("summary", "owner", DeliveryStatus::Sent),
             ],
+            None,
         );
         assert_eq!(ledger(&e).len(), 1);
     }
@@ -728,6 +848,7 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            None,
         );
 
         let input = continuation_input(&card).expect("a well-formed card continues");
@@ -760,11 +881,12 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            None,
         );
         let continuation = continuation_input(&first).expect("continues");
 
         // Run 2 skips the summary (delivering nothing) and pauses on gate-b.
-        let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[]);
+        let second = gate_effect("digest", "gate-b", &continuation, "run-2", &[], None);
         assert_eq!(
             ledger(&second),
             vec![DeliveredReport {
@@ -801,6 +923,7 @@ mod tests {
             &serde_json::json!({ "request": "x" }),
             "run-1",
             &[delivery("summary", "owner", DeliveryStatus::Sent)],
+            None,
         );
         // The same gate, re-reached by the continuation the card started: same
         // input plus the approval… minus the approval, which the gate node
@@ -810,13 +933,97 @@ mod tests {
             .as_object_mut()
             .expect("object")
             .remove("approvals");
-        let re_reached = gate_effect("digest", "gate", &continuation, "run-2", &[]);
+        let re_reached = gate_effect("digest", "gate", &continuation, "run-2", &[], None);
 
         assert!(
             is_same_gate(&paused, &re_reached),
             "the ledger is not part of the decision:\n{:?}\n{:?}",
             paused.payload,
             re_reached.payload
+        );
+    }
+
+    // --- issue #596: the pre-publish content preview -------------------------
+
+    fn edge(from: &str, to: &str) -> crate::company::WorkflowEdgeDef {
+        crate::company::WorkflowEdgeDef {
+            from: from.to_string(),
+            to: to.to_string(),
+            label: None,
+        }
+    }
+
+    /// The parked gate carries the verbatim output of the nodes feeding it — the
+    /// content awaiting sign-off — keyed by upstream node id.
+    #[test]
+    fn a_parked_gate_carries_its_upstream_content() {
+        let output = serde_json::json!({
+            "nodes": {
+                "writer": { "items": [{ "text": "the draft tweet" }] },
+                "unrelated": { "items": ["not upstream of the gate"] },
+            }
+        });
+        let edges = [edge("start", "writer"), edge("writer", "publish")];
+
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
+        attach_upstream_content(&mut effect, &output, &edges, "publish");
+
+        let content = &effect.payload[PAYLOAD_CONTENT];
+        assert_eq!(
+            content["writer"]["items"][0]["text"], "the draft tweet",
+            "the gate's upstream node output must ride the card: {content}"
+        );
+        assert!(
+            content.get("unrelated").is_none(),
+            "a node that does not feed the gate must not be previewed: {content}"
+        );
+    }
+
+    /// A gate whose upstream produced nothing (or a graph with no such edge) gets
+    /// an empty preview rather than a missing key — the console renders "no
+    /// content".
+    #[test]
+    fn a_gate_with_no_upstream_output_gets_an_empty_preview() {
+        let output = serde_json::json!({ "nodes": {} });
+        let edges = [edge("writer", "publish")];
+        let mut effect = gate_effect("wf", "publish", &Value::Null, "run-1", &[], None);
+        attach_upstream_content(&mut effect, &output, &edges, "publish");
+        assert_eq!(effect.payload[PAYLOAD_CONTENT], serde_json::json!({}));
+    }
+
+    /// The content preview is NOT part of the gate's decision identity: two parks
+    /// that differ only in the upstream content their nodes produced are still one
+    /// decision on one gate, and must dedupe to a single card. Without this a
+    /// workflow whose upstream text changes each run would stack a fresh card
+    /// every time — the rubber-stamp failure #395 closed, re-opened by #596.
+    #[test]
+    fn two_parks_differing_only_in_content_still_dedupe() {
+        let edges = [edge("writer", "publish")];
+        let input = serde_json::json!({ "request": "x" });
+
+        let mut a = gate_effect("wf", "publish", &input, "run-1", &[], None);
+        attach_upstream_content(
+            &mut a,
+            &serde_json::json!({ "nodes": { "writer": { "items": ["draft one"] } } }),
+            &edges,
+            "publish",
+        );
+
+        let mut b = gate_effect("wf", "publish", &input, "run-2", &[], None);
+        attach_upstream_content(
+            &mut b,
+            &serde_json::json!({ "nodes": { "writer": { "items": ["a totally different draft"] } } }),
+            &edges,
+            "publish",
+        );
+
+        assert_ne!(
+            a.payload[PAYLOAD_CONTENT], b.payload[PAYLOAD_CONTENT],
+            "the two cards really do carry different content"
+        );
+        assert!(
+            is_same_gate(&a, &b),
+            "…but they are one decision on one gate and must dedupe to a single card"
         );
     }
 
@@ -885,7 +1092,7 @@ mod decide_tests {
     use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyId, Verdict};
     use crate::ports::{WorkflowRun, WorkflowRunContext, WorkflowRunner};
     use crate::runtime::RuntimeBuilder;
-    use crate::runtime::journal::TaskLink;
+    use crate::runtime::journal::{ApprovalConversation, TaskLink};
 
     /// What the resume actually asked for.
     #[derive(Clone, Debug)]
@@ -1022,7 +1229,7 @@ mode = "full"
         input: Value,
         deliveries: &[DeliveryReport],
     ) -> ApprovalId {
-        let effect = gate_effect("gated", "gate", &input, "run-that-paused", deliveries);
+        let effect = gate_effect("gated", "gate", &input, "run-that-paused", deliveries, None);
         let id = rt
             .approvals
             .park(rt.id(), effect.clone())
@@ -1034,7 +1241,7 @@ mode = "full"
                 &effect,
                 crate::ports::now_millis(),
                 TaskLink::Unlinked,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await

@@ -110,7 +110,7 @@ that does and does not imply.
 | `OPENCOMPANY_DATA_DIR` | `~/.opencompany` (workspace and bundle home alike; bundles at `companies/<slug>`) | The instance data root: both the workspace layout and the company-bundle home. `--home` outranks it for the bundle home **only** — the workspace (`memory/`, `store/`, `files/`, `logs/`, `tmp/`) still resolves under this variable, so `--home` alone does not move a whole instance. The only knob that isolates two hosts from each other — see [storage](storage.md#choosing-the-root-srcstorepathsrs) |
 | `OPENCOMPANY_BRAIN_MODE` | `hosted` | `hosted` \| `sidecar` (overrides `[brain].mode`) |
 | `OPENCOMPANY_OPENHUMAN_URL` | — | Attach to a running `openhuman-core serve` instead of launching |
-| `OPENCOMPANY_INFERENCE_KEY` | `TINYHUMANS_API_KEY` | Harness-brain credential (`openhuman` feature). Per-tenant override of the platform key |
+| `OPENCOMPANY_INFERENCE_KEY` | `TINYHUMANS_API_KEY` | Harness-brain credential (`openhuman` feature). Deploy-time default only — a company key set through the console (`PUT …/inference`) outranks both names |
 | `OPENCOMPANY_INFERENCE_URL` | `https://api.tinyhumans.ai/openai/v1` | Harness-brain OpenAI-compatible endpoint (`openhuman` feature) |
 | `OPENCOMPANY_INFERENCE_MODEL` | `chat-v1` | Roster-wide default model/tier for the harness brain (`openhuman` feature) |
 | `TINYPLACE_API_URL` | `https://api.tiny.place` | tiny.place base (staging/local override) |
@@ -147,6 +147,70 @@ configuration fails the boot rather than silently disabling mail.
 `email-smtp.<region>.amazonaws.com` with SES SMTP credentials. A native SES API
 transport is only worth adding for what the SMTP interface cannot express
 (configuration sets, per-message tags, richer send errors).
+
+## Default MCP servers
+
+A packaged Open Company can ship a set of MCP tool servers already registered
+and **enabled**, so a fresh install has working tools with no user setup
+(issue #527). They are declared in this instance's `config.toml` as
+`[[default_mcp_server]]` entries:
+
+```toml
+# MCP servers every company on this install gets, enabled, with no user action.
+#
+# PLACEHOLDER — intentionally empty. The shipped list is a product decision
+# (issue #527 assigns it to Steven / eng) and is deliberately NOT compiled into
+# the binary, so settling it is an edit to this file and a restart, never a
+# release. Uncomment and fill in:
+#
+# [[default_mcp_server]]
+# name = "deepwiki"
+# endpoint = "https://mcp.deepwiki.com/mcp"
+# description = "Documentation and Q&A for public GitHub repositories."
+# # optional: allowed_tools / disallowed_tools / timeout_secs / enabled
+```
+
+**An empty or absent list means "ship no defaults"** — never "fall back to a
+built-in set". There is no compiled-in list to fall back to, which is what makes
+the file the single source of truth.
+
+### What may be a default, and what may not
+
+A default is handed to every agent on the install unprompted, so it has to be
+safe unattended. Each entry is checked at boot by `normalize_default_servers`;
+an entry that fails is **dropped with a logged reason** rather than aborting the
+boot, because a typo in a packaged file should not stop an install from
+starting. The rules:
+
+| Rule | Why |
+| --- | --- |
+| `http(s)://` endpoint, no stdio `command` | The hosted-v1 transport boundary — the same `validate_one` check every other declaration path uses |
+| No credential in the endpoint (`user:pass@host`, or `?token=` / `?apiKey=` / `?access_token=` — percent-encoded key spellings included) | The entry ships to every company; a secret here is a secret everywhere |
+| No `auth_secret` | A default must not depend on a credential. A server needing auth is declared in that company's `company.toml`, or added from the console, where the token is stored per company |
+| Unique `name` | Two rows claiming one slug would let merge order decide which wins. The first is kept |
+
+A credential-carrying entry is **refused, not scrubbed**: scrubbing would ship a
+server whose auth silently no longer works, which fails at an agent's first tool
+call instead of here, where somebody is looking.
+
+### How a default merges with a company's own servers
+
+Three layers, lowest precedence first — **default → manifest → runtime**:
+
+- A company's `[[mcp_server]]` in `company.toml` **shadows** a default of the
+  same name: declaring it is saying something specific about it.
+- A console edit (the runtime index) overrides either, and its enable/disable
+  and tool lists win — but the declaration keeps the **lower** layer's source
+  badge. That is how an operator turns a shipped default off: the console writes
+  an override, which persists.
+- A default therefore **cannot be deleted** from the console, only disabled —
+  the same guard a manifest server already has, and for the same reason. Its
+  declaration lives in this file, so deleting the row would not remove it; the
+  next resolution would merge it straight back.
+
+The console shows which layer a server came from (`default`, `manifest`, or
+`runtime`), so a shipped default is never presented as something the operator
+added.
 
 ## Optional capabilities and their degradation
 

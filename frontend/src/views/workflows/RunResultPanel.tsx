@@ -13,21 +13,9 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 
 import { DeliveryRows } from "./RunHistoryPanel";
-
-/** A single agent reply extracted from a node's `items[].json`. */
-interface NodeMessage {
-  text: string | null;
-  agentRef: string | null;
-}
-
-/** One node's readable, shape-checked result, ready to render. */
-interface NodeResult {
-  id: string;
-  name: string;
-  /** The condition branch taken (`null` when the node isn't a branch point). */
-  port: string | null;
-  messages: NodeMessage[];
-}
+// Issue #596: the per-node parse is now shared with the durable run inspector
+// and the pre-publish approvals card, so it lives in `run-output.ts`.
+import { type NodeResult, parseRunNodes } from "./run-output";
 
 /** The run-output drawer: one readable card per executed node (the producing
  * agent and its reply, markdown-rendered) plus the branch each condition node
@@ -223,72 +211,3 @@ function NodeTimeline({
   );
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null;
-}
-
-/** A non-empty trimmed string, else `null` (defensive against non-strings). */
-function nonEmptyString(value: unknown): string | null {
-  return typeof value === "string" && value.trim() ? value : null;
-}
-
-/** Pull a field from an item's `json`, preferring the OUTERMOST value and
- * falling back to the NESTED `json.json.<key>` the engine sometimes emits.
- * Handles the observed shape where `json` carries both a top-level `text` and
- * a nested `json.json.text` — the outer one wins. */
-function readNested(json: unknown, key: string): string | null {
-  if (!isRecord(json)) return null;
-  const outer = nonEmptyString(json[key]);
-  if (outer) return outer;
-  const inner = json.json;
-  if (isRecord(inner)) return nonEmptyString(inner[key]);
-  return null;
-}
-
-/** Safely parse the engine's run output into per-node results, ordered by the
- * loaded graph when available (falling back to the map's insertion order).
- * Returns `null` when `output` doesn't match the expected `{ nodes: {…} }`
- * shape, signalling the caller to fall back to the raw JSON dump. Every access
- * is guarded — `output` is typed `unknown` and older/edge runs may be a plain
- * string, missing `nodes`, or carry malformed node values. */
-function parseRunNodes(
-  output: unknown,
-  graph: WorkflowGraph | null,
-): NodeResult[] | null {
-  if (!isRecord(output) || !isRecord(output.nodes)) {
-    console.debug(
-      "[WorkflowsView] run output missing a `nodes` map; showing raw JSON",
-      output,
-    );
-    return null;
-  }
-  const nodes = output.nodes;
-
-  // Order by the graph's node order when we have it, then append any node ids
-  // present in the output but not in the graph (in the map's insertion order).
-  const graphOrder = graph?.nodes.map((n) => n.id) ?? [];
-  const orderedIds = [
-    ...graphOrder.filter((id) => id in nodes),
-    ...Object.keys(nodes).filter((id) => !graphOrder.includes(id)),
-  ];
-
-  const nameById = new Map(graph?.nodes.map((n) => [n.id, n.name]) ?? []);
-
-  const results: NodeResult[] = orderedIds.map((id) => {
-    const raw = nodes[id];
-    const items = isRecord(raw) && Array.isArray(raw.items) ? raw.items : [];
-    const messages: NodeMessage[] = items
-      .map((item) => {
-        const json = isRecord(item) ? item.json : undefined;
-        return {
-          text: readNested(json, "text"),
-          agentRef: readNested(json, "agent_ref"),
-        };
-      })
-      .filter((m) => m.text || m.agentRef);
-    const port = isRecord(raw) ? nonEmptyString(raw.port) : null;
-    return { id, name: nameById.get(id) ?? id, port, messages };
-  });
-
-  return results;
-}

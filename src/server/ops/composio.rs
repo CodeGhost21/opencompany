@@ -66,7 +66,9 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::composio::{backend_url_or_default, store_token, token_configured};
+use crate::company::composio::{
+    CatalogEntry, backend_url_or_default, store_token, token_configured,
+};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
@@ -112,7 +114,12 @@ async fn effective_toolkits(
         (
             false,
             OpenModeToolkits {
-                toolkits: manifest.to_vec(),
+                // A manifest allowlist is slugs and nothing else — the company
+                // wrote it by hand, and the catalog is deliberately not
+                // consulted here (it must not be able to widen a list that
+                // narrowed on purpose). So these entries carry no metadata, and
+                // the console falls back to its own typography for them.
+                toolkits: manifest.iter().map(CatalogEntry::from_slug).collect(),
                 source: CatalogSource::Manifest,
                 notice: None,
             },
@@ -155,7 +162,7 @@ fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
 /// `Err` is a plain-language reason the console can show — never a bare
 /// fall-through to a short list that would look authoritative.
 #[cfg(feature = "composio")]
-async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<String>, String> {
+async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, String> {
     // No credential of any tier means there is nothing to dial the backend
     // with. Say that, rather than spending the timeout to discover it.
     let config = resolve_tenant(runtime).await.map_err(|_| {
@@ -179,7 +186,7 @@ async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<String>, String> 
 /// The status route still answers (reporting `inBuild:false`), and it says so
 /// rather than presenting the fallback as the backend's list.
 #[cfg(not(feature = "composio"))]
-async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<String>, String> {
+async fn fetch_catalog(_runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, String> {
     Err("Composio is not compiled into this build".to_string())
 }
 
@@ -240,6 +247,26 @@ struct ComposioStatusDto {
     /// mode this is still not a hard limit: any slug the backend permits can be
     /// authorized by typing it.
     effective_toolkits: Vec<String>,
+    /// The same providers as [`Self::effective_toolkits`], in the same order,
+    /// carrying whatever display metadata the backend published for each —
+    /// name, description, logo URL, and Composio's own category names (issue
+    /// #600).
+    ///
+    /// **Additive, and deliberately so.** The slug list above is the contract
+    /// every existing consumer reads and the only thing an authorize call
+    /// needs; this is the render model beside it. Replacing the slug list with
+    /// this one would have bought nothing and broken that contract.
+    ///
+    /// Empty metadata is a real state, not a bug: a manifest allowlist, a
+    /// fallback list, and a backend predating the dynamic catalog all yield
+    /// slug-only entries, and the console renders those with its own
+    /// typography.
+    ///
+    /// The categories are forwarded **verbatim**, uninterpreted. The console
+    /// buckets them by substring, which is what lets a Composio integration
+    /// added tomorrow land in the right group with no change on either side of
+    /// this wire.
+    effective_catalog: Vec<CatalogEntry>,
     /// Where [`Self::effective_toolkits`] came from — `manifest`, `backend`, or
     /// `fallback` (issue #397).
     ///
@@ -349,7 +376,8 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         backend_url: backend_url_or_default(env_url, api_url),
         toolkits,
         open_mode,
-        effective_toolkits: effective.toolkits,
+        effective_toolkits: effective.slugs(),
+        effective_catalog: effective.toolkits,
         catalog_source: effective.source,
         catalog_notice: effective.notice,
     })
@@ -566,7 +594,9 @@ async fn connections_impl(_runtime: &CompanyRuntime) -> Result<Json<Vec<Connecti
 
 #[cfg(test)]
 mod tests {
-    use super::{CatalogSource, ComposioStatusDto, CredentialSource, credential_source_for};
+    use super::{
+        CatalogEntry, CatalogSource, ComposioStatusDto, CredentialSource, credential_source_for,
+    };
     use crate::server::ops::composio_toolkits;
 
     use axum::body::{Body, to_bytes};
@@ -755,9 +785,24 @@ mod tests {
             .expect("company is registered")
     }
 
-    /// A hundred-slug catalog, the shape the backend actually returns.
+    /// A hundred-provider catalog, the shape the backend actually returns —
+    /// each entry carrying the display metadata #600 stopped discarding.
+    fn hundred_entries() -> Vec<CatalogEntry> {
+        (0..100)
+            .map(|i| CatalogEntry {
+                slug: format!("provider{i:03}"),
+                name: format!("Provider {i:03}"),
+                description: format!("Does provider-{i:03} things."),
+                logo: Some(format!("https://logos.example.test/provider{i:03}")),
+                categories: vec!["productivity".to_string()],
+            })
+            .collect()
+    }
+
+    /// Just the slugs of [`hundred_entries`], for asserting on the slug list
+    /// the wire has always carried.
     fn hundred_slugs() -> Vec<String> {
-        (0..100).map(|i| format!("provider{i:03}")).collect()
+        hundred_entries().into_iter().map(|e| e.slug).collect()
     }
 
     /// The heart of the reopened issue: in open mode the console is offered the
@@ -778,7 +823,7 @@ mod tests {
             "[company]\nname = \"Catalog Co\"\n[policy]\nmode = \"full\"\n[tools]\nallow = [\"composio\"]\n",
         )
         .await;
-        let catalog = hundred_slugs();
+        let catalog = hundred_entries();
         composio_toolkits::cache().store(
             &super::catalog_cache_key(runtime_of(&state, "catalogco").as_ref()),
             Ok(catalog.clone()),
@@ -800,7 +845,7 @@ mod tests {
         );
         assert_eq!(
             dto["effectiveToolkits"],
-            json!(catalog),
+            json!(hundred_slugs()),
             "open mode must serve what the backend permits, verbatim"
         );
         assert!(
@@ -829,7 +874,7 @@ mod tests {
         .await;
         composio_toolkits::cache().store(
             &super::catalog_cache_key(runtime_of(&state, "narrowco").as_ref()),
-            Ok(hundred_slugs()),
+            Ok(hundred_entries()),
             std::time::Instant::now(),
         );
 
@@ -909,7 +954,7 @@ mod tests {
         )
         .await;
         let key = super::catalog_cache_key(runtime_of(&state, "rotateco").as_ref());
-        composio_toolkits::cache().store(&key, Ok(hundred_slugs()), std::time::Instant::now());
+        composio_toolkits::cache().store(&key, Ok(hundred_entries()), std::time::Instant::now());
 
         let (status, resp, raw) = send_for(
             &state,
@@ -1063,6 +1108,7 @@ mod tests {
             toolkits: vec!["gmail".to_string()],
             open_mode: false,
             effective_toolkits: vec!["gmail".to_string()],
+            effective_catalog: vec![CatalogEntry::from_slug("gmail")],
             catalog_source: CatalogSource::Manifest,
             catalog_notice: None,
         };
@@ -1080,6 +1126,7 @@ mod tests {
                 "toolkits",
                 "openMode",
                 "effectiveToolkits",
+                "effectiveCatalog",
                 "catalogSource",
                 "catalogNotice"
             ],

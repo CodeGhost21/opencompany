@@ -199,6 +199,20 @@
     --tone-5: oklch(0.5544 0.0407 257.42); /* #64748B slate   */
     --tone-5-text: oklch(0.4455 0.0374 257.28); /* #475569  7.39:1 */
 
+    /*
+     * Search-match highlight — the ground behind a `<mark>`.
+     *
+     * Its own token rather than a status one. A matched substring is not a
+     * state: it is not blocked, and routing it through `--status-blocked`
+     * would put the colour that means "a human must act" behind every search
+     * result. Yellow because that is what a highlighter is, and the one place
+     * this system spends a hue on convention rather than meaning.
+     *
+     * Text on it stays `--foreground`: the mark tints the ground and never
+     * recolours the words, so an excerpt reads the same highlighted or not.
+     */
+    --highlight: oklch(0.9 0.16 100 / 55%);
+
     /* Charts. Brand leads slot 1, then the sequence walks the hue circle
        so neighbouring series never collide. Ordered by how often a series
        count occurs: the two-series case gets indigo/cyan, which are also
@@ -334,6 +348,10 @@
     --tone-4-text: oklch(0.833 0.1322 321.43); /* #F0ABFC */
     --tone-5-text: oklch(0.869 0.0198 252.89); /* #CBD5E1 */
 
+    /* Dimmer and more saturated on near-black: the light value washes out to
+       a grey smudge over the dark canvas. */
+    --highlight: oklch(0.78 0.17 98 / 32%);
+
     --sidebar: var(--gray-925);
     --sidebar-foreground: var(--gray-50);
     --sidebar-primary: var(--brand-400);
@@ -439,6 +457,8 @@
     --color-tone-4-text: var(--tone-4-text);
     --color-tone-5: var(--tone-5);
     --color-tone-5-text: var(--tone-5-text);
+
+    --color-highlight: var(--highlight);
 
     --color-chart-1: var(--chart-1);
     --color-chart-2: var(--chart-2);

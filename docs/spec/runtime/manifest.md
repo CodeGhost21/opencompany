@@ -13,8 +13,8 @@ a safe default; the defaults produce a working company with only
 
 Parsing lives in `src/company/manifest.rs` (`CompanyManifest::from_path`,
 serde + validation). Validation errors MUST be actionable in prosumer
-language ("`[policy].mode` must be one of readonly, supervised, full — you
-wrote `supervized`"), never serde traces.
+language ("`[policy].mode` must be one of readonly, supervised, auto, full —
+you wrote `supervized`"), never serde traces.
 
 ## Full schema
 
@@ -70,7 +70,7 @@ allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
-mode = "supervised"                # readonly | supervised (default) | full
+mode = "supervised"                # readonly | supervised (default) | auto | full
 always_approve = ["payment.send", "filing.submit", "external.publish"]
 auto_approve_under_usd = 1.0
 
@@ -87,6 +87,10 @@ monthly_usd = 200.0                # hard cap: inference + x402 combined
 name = "starter"                   # free | starter | pro | unlimited (optional)
 period = "daily"                   # daily (default) | monthly
 token_budgets = { web = 500000 }   # override/extend the named tier per namespace
+
+[workflows]                        # saved workflow graphs (issue #401)
+enabled = ["digest"]               # ids of workflows/<id>.toml graphs to enable
+max_in_flight_runs = 8             # concurrent-run ceiling (default 8; must be >= 1)
 
 [[schedule]]
 cron = "0 9 * * MON"
@@ -187,11 +191,14 @@ prompt = "Weekly review and operator digest"
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
-- **`[policy]`** configures the default `ApprovalGate`. `mode` mirrors
-  OpenHuman's security tiers. `always_approve` lists effect kinds that park
-  for approval regardless of amount; `auto_approve_under_usd` lets small
-  spends through. Defaults are conservative: `supervised`, with all
-  money/publish/filing effects gated.
+- **`[policy]`** configures the default `ApprovalGate`. `mode` takes three of
+  its four names from OpenHuman's security tiers; `auto` is opencompany's own
+  and sits between `supervised` and `full` (the agent's sandbox writes and
+  outward reads run unattended, anything that leaves the company or spends on
+  submit still parks). `always_approve` lists effect kinds that park for
+  approval regardless of amount and wins over every tier including `full`;
+  `auto_approve_under_usd` lets small spends through. Defaults are
+  conservative: `supervised`, with all money/publish/filing effects gated.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
@@ -260,7 +267,8 @@ prompt = "Weekly review and operator digest"
     the `Standards/` / `Playbooks/` / `Product/` documents seeded from
     `companies/<name>/workspace/**`, plus whatever the operator and the agents
     have written since. It is **split**, unlike every other namespace: *reads*
-    (`workspace_list`, `workspace_read`) follow the ordinary rule, so a
+    (`workspace_list`, `workspace_search`, `workspace_read`) follow the
+    ordinary rule, so a
     catch-all `*` confers them; *mutations* (`workspace_write`,
     `workspace_create`) need an **explicit** `workspace` or `workspace.write`
     entry in `[tools].allow`, because they change a tree every other agent then
@@ -268,7 +276,13 @@ prompt = "Weekly review and operator digest"
     genuinely read-only grant. Create and write ride the one flag on purpose:
     overwriting an existing standard is strictly more destructive than adding a
     note beside it, so a grant permitting the first has already permitted the
-    second. `workspace_write` overwrites one **existing** note and requires an
+    second. `workspace_search` (issue #607) is a read and rides the read side of
+    that split — **not** the metered `search` namespace, despite the name.
+    `search` is the paid external-credential grant that carries `web_search`;
+    reading the company's own notes must not require a billed credential, and
+    search reads exactly what `workspace_read` already grants, so it costs the
+    operator no additional decision. `workspace_write` overwrites one
+    **existing** note and requires an
     `expected_updated_at` revision token taken from a prior read, so a note
     edited in the console since the agent read it is refused rather than
     clobbered. `workspace_create` adds one folder or note at a path that is
@@ -286,7 +300,8 @@ prompt = "Weekly review and operator digest"
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
     `Agents/<agent-id>/` (minted the first time that agent puts something in it;
-    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    boot only scaffolds the empty `Agents/` root, and since issue #645 `Desks/`
+    is minted on first use rather than scaffolded) as the default
     home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both
@@ -310,6 +325,19 @@ prompt = "Weekly review and operator digest"
   separately, with the same dialect: its `trigger` node carries a `schedule`
   cron that the workflow scheduler fires (issue #169). A manifest schedule
   drives a company cycle; a trigger schedule drives one workflow run.
+- **`[workflows]`** enables saved graphs and bounds how many may run at once.
+  `enabled` lists the `workflows/<id>.toml` ids to turn on. `max_in_flight_runs`
+  (issue #401) is the company's concurrent-run ceiling — default **8**,
+  validated **>= 1** (a `0` would refuse every run and is rejected at load). It
+  applies to *every* entry point that starts a run (the manual run route, the
+  cron scheduler, an approved gate's continuation, and the orchestrator's
+  `run_workflow` tool), enforced at one choke point. The default sits above 1
+  deliberately: a running workflow's agent node can call `run_workflow` while
+  the parent run still holds a slot, so a ceiling of 1 would refuse legitimate
+  nesting. A run over the ceiling is **refused, never queued** — the run route
+  answers `429` (see `api.md`), a scheduled fire is skipped for that minute, and
+  the orchestrator tool tells the agent to wait. A slot frees the instant a run
+  settles.
 
 ## Layering and provenance
 

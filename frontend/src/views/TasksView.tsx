@@ -16,7 +16,9 @@ import {
   createTask,
   listTasks,
   patchTask,
+  type CreateTask,
   type Task,
+  type TaskDeliverable,
   type TaskPlan,
 } from "@/api/tasks";
 import type { OpenCompanyClient } from "@/api/client";
@@ -32,6 +34,13 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
@@ -611,6 +620,12 @@ function TaskItem({
           <span className="truncate text-xs text-muted-foreground">{task.assignee}</span>
         </div>
       )}
+      {task.deliverable === "workflow" && (
+        <div className="mt-2 inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-2xs text-muted-foreground">
+          <ListTree className="size-3 shrink-0" />
+          Workflow
+        </div>
+      )}
       {task.plan && <PlanBadgeRow plan={task.plan} />}
       {SHOWS_OUTPUT_LINK.has(task.column) && <OutputLinkRow task={task} />}
       {task.column === "paused" && (
@@ -779,6 +794,20 @@ export function derivePromptCard(prompt: string): { title: string; note?: string
 }
 
 /**
+ * The once-vs-workflow options, in review order (issue #580). Shared by the
+ * create dialog here and the edit dialog, so the two pickers can never offer a
+ * different vocabulary than the wire's {@link TaskDeliverable}.
+ */
+export const DELIVERABLE_OPTIONS: { value: TaskDeliverable; label: string; hint: string }[] = [
+  { value: "once", label: "Do it once", hint: "A one-off result." },
+  {
+    value: "workflow",
+    label: "Build me the workflow",
+    hint: "A reusable workflow you can open, edit and re-run.",
+  },
+];
+
+/**
  * New work enters the board through one prompt box (issue #301).
  *
  * Title/Note/Priority/Assignee used to be collected up front. They are not gone,
@@ -788,6 +817,12 @@ export function derivePromptCard(prompt: string): { title: string; note?: string
  * decides where the card lands — the same spend gate the transcript's "Add to
  * board" relies on, keeping the human drag into In progress the only thing that
  * spends an agent turn.
+ *
+ * The one field it does collect beyond the prompt is the deliverable (issue
+ * #580): once versus workflow is a decision about *what kind of thing* the card
+ * produces, not a default the host can pick, so the operator states it here. It
+ * still lands in To-do like any card — the builder pass fires only on the drag
+ * into In progress.
  */
 function CreateTaskDialog({
   open,
@@ -803,10 +838,14 @@ function CreateTaskDialog({
   company: string | null;
 }) {
   const [prompt, setPrompt] = useState("");
+  const [deliverable, setDeliverable] = useState<TaskDeliverable>("once");
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    if (open) setPrompt("");
+    if (open) {
+      setPrompt("");
+      setDeliverable("once");
+    }
   }, [open]);
 
   if (!open) return null;
@@ -816,7 +855,12 @@ function CreateTaskDialog({
     if (!title) return;
     setBusy(true);
     try {
-      const created = await createTask(client, company, { title, note });
+      const body: CreateTask = { title, note };
+      // Only `"workflow"` reaches the wire; `"once"` is the host default and is
+      // sent as nothing, so a one-off card's body is byte-identical to a
+      // pre-#580 one.
+      if (deliverable === "workflow") body.deliverable = "workflow";
+      const created = await createTask(client, company, body);
       onCreated(created);
       toast.success("Task created.");
     } catch (e) {
@@ -850,6 +894,28 @@ function CreateTaskDialog({
             onChange={(e) => setPrompt(e.target.value)}
             placeholder="Describe the work. The first line becomes the card's title."
           />
+        </div>
+
+        <div className="grid gap-1.5">
+          <Label htmlFor="new-deliverable">Deliverable</Label>
+          <Select
+            value={deliverable}
+            onValueChange={(v) => setDeliverable((v as TaskDeliverable) ?? "once")}
+          >
+            <SelectTrigger id="new-deliverable" data-testid="create-deliverable">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {DELIVERABLE_OPTIONS.map((option) => (
+                <SelectItem key={option.value} value={option.value}>
+                  {option.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          <p className="text-2xs text-muted-foreground">
+            {DELIVERABLE_OPTIONS.find((o) => o.value === deliverable)?.hint}
+          </p>
         </div>
 
         <DialogFooter>

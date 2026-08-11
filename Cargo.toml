@@ -44,9 +44,24 @@ required-features = ["openhuman"]
 async-graphql = "7"
 async-graphql-axum = "7"
 async-trait = "0.1"
-axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+# `multipart` is what lets the workspace accept a file upload at all (issue
+# #553): the existing create route takes a JSON body, and JSON cannot carry
+# bytes. Scoped to the one upload route, which sets its own `DefaultBodyLimit`.
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "multipart", "tokio"] }
 clap = { version = "4", features = ["derive"] }
 futures = "0.3"
+# Direct, not incidental: `Bytes` is the chunk type of `ports::workspace::BlobStream`,
+# so it appears in the port's public signature and cannot be a transitive detail.
+bytes = "1"
+# Extension → media type for uploads and for publishing a generated file. The
+# alternative is a hand-rolled table that is wrong for everything nobody thought
+# of, on a value the console uses to decide whether to render or download.
+mime_guess = "2"
+# `ReaderStream`, which turns the file `FsOps` already has on disk into the
+# `BlobStream` the port returns — so a large download is never resident.
+# `compat` bridges the same helper onto GridFS, whose streams implement
+# `futures_io`'s traits rather than tokio's.
+tokio-util = { version = "0.7", features = ["compat", "io"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"

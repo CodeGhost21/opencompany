@@ -83,6 +83,19 @@ closed tab or a proxy giving up no longer cancels it mid-graph — before this i
 did, and because a run journals a start first, the abandoned run then folded as
 `running: true` until the next host restart swept it.
 
+**A company bounds how many runs it will execute at once** (issue #401). Every
+run — this manual route, a cron fire, an approved gate's continuation, and one
+an orchestrator agent starts — counts against `[workflows].max_in_flight_runs`
+(default 8; see `manifest.md`). A run over the ceiling is **refused, never
+queued**: the route answers **`429 Too Many Requests`** with the standard
+`{ "error", "code": "workflow_run_limit" }` envelope and **no `runId`**, because
+nothing started. Both `detach` modes refuse identically — the check precedes the
+detach/sync branch, so a rejected run journals no `WorkflowRunStarted`. The
+message names the three levers: wait for a run to finish, stop one via
+`…/workflows/runs/{runId}/cancel`, or raise the manifest cap. A slot frees the
+moment a run settles (including on cancel or panic), so a refused run succeeds on
+the next attempt once the company is back under its ceiling.
+
 `…/runs/{runId}/cancel` answers `200 { "cancelling": true }` when the run is
 live and `404` when the run is unknown **or has already settled** — one answer,
 because they mean the same thing to the caller: there is nothing to stop. It is
@@ -123,6 +136,7 @@ POST   …/memory                             add a memory fact
 DELETE …/memory/{factId}                     delete a memory fact
 GET    …/workspace                          the whole tree (metadata; no bodies)
 GET    …/workspace/file/{nodeId}             one file: content + inbound backlinks
+GET    …/workspace/search?q=…                which notes mention a phrase (#607)
 POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
@@ -168,6 +182,23 @@ only — bodies are fetched per file, so a navigation read does not grow with th
 size of the workspace. Reading a folder id as a file is a `404`, never an empty
 note.
 
+`GET …/workspace/search?q=…` (#607) answers which notes mention a phrase, so
+discovery costs one call rather than a listing plus one read per candidate.
+Matching is a plain **case-insensitive substring** over node names and text
+bodies — no tokenising, no stemming, no ranking — which is the only definition
+that answers identically on all three storage backends, and it is defined once
+in `company::workspace_search`, shared with the GraphQL `Company.workspaceSearch`
+resolver and the agent `workspace_search` tool. Optional `prefix` scopes to a
+subtree; optional `limit` pages the answer (default 20, hard cap 50). A hit
+carries the node, its logical `path`, whether the `name` or the `content`
+matched, and — for a content match — a short `excerpt`. `total` reports every
+match, so a capped page says it is one. An empty `q` is a `400`, not "match
+everything": that is the tree read above, and answering it here would turn a
+cleared search box into a full-tree fetch. `limit=0` is a `400` for the same
+reason — it is never read as "no limit". A **binary** node matches on its name
+only: a text read of a payload is empty by the port's definition, and its bytes
+are never scanned or excerpted.
+
 Both workspace `GET`s — and the `POST` / `PATCH` node bodies — carry
 `createdBy` and `updatedBy` (#326), each `{"kind":"seed"|"operator"|"agent",
 "id"?}` with `id` present exactly when `kind` is `agent`. `createdBy` is fixed
@@ -177,13 +208,14 @@ and the last writer only when the two differ. Both fields are always serialized,
 and a node predating the field reads back as `operator`. The `PUT` write route
 stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
 which is fixed at agent-build time and never taken from tool arguments. Agents
-reach the same tree through `workspace_list` / `workspace_read` /
-`workspace_create` / `workspace_write`, and a created note has its default home
+reach the same tree through `workspace_list` / `workspace_search` /
+`workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
 in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
 brief steers toward, not a boundary the routes enforce. Boot scaffolds the
-`Agents/` and `Desks/` roots empty; an individual `Agents/<agent-id>/` is minted
-the first time that agent writes into it, so a tree read on a fresh company
-shows the two roots and no member folders.
+`Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
+time that agent writes into it, and the `Desks/` root is minted whole the first
+time a desk produces something (#645) — so a tree read on a fresh company shows
+exactly one root and no member folders.
 
 Team writes are an **operator overlay** persisted through the store, merged
 into the manifest roster at read time — the version-controlled `company.toml`

@@ -11,8 +11,11 @@ import {
   Loader2,
   MoreHorizontal,
   PanelLeft,
+  Download,
   RefreshCw,
+  Search,
   Upload,
+  X,
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -23,12 +26,19 @@ import type { OpenCompanyClient } from "@/api/client";
 import {
   createNode,
   deleteNode as deleteNodeApi,
+  fetchBlobUrl,
   fetchFile,
   fetchTree,
+  formatBytes,
+  isBinary,
   originLabel,
   renameMoveNode,
+  searchWorkspace,
+  uploadFile,
   writeFile,
   OPERATOR_ORIGIN,
+  type SearchHit,
+  type SearchResults as SearchResultsPage,
   type WorkspaceFile,
   type WorkspaceOrigin,
 } from "@/api/workspace";
@@ -70,6 +80,7 @@ import {
   titleOf,
 } from "@/lib/workspace";
 import { useLocalScope } from "@/connections/ConnectionContext";
+import { SearchResults } from "@/views/workspace/SearchResults";
 
 /**
  * The latest workspace write off the SSE feed (issue #327), as the shell hands
@@ -111,6 +122,17 @@ interface Props {
 
 /** How long typing settles before the editor pushes a save to the host. */
 const AUTOSAVE_DELAY_MS = 800;
+
+/**
+ * How long the search box waits after the last keystroke before asking the host
+ * (issue #607).
+ *
+ * The host's search is an O(N) scan over every note in the company, so a request
+ * per keystroke would put the whole tree through it several times for one word.
+ * Long enough to collapse a typed word into one call, short enough that the
+ * results still feel like they belong to what is on screen.
+ */
+const SEARCH_DEBOUNCE_MS = 250;
 
 /** The folder created to hold notes rescued from the retired local scratchpad. */
 const IMPORT_FOLDER_NAME = "Imported from this browser";
@@ -320,6 +342,16 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // whatever note is open, and this text belongs to one that no longer is.
   const [rescued, setRescued] = useState<Rescued | null>(null);
 
+  // Search (issue #607). `searchInput` is what the operator is typing;
+  // `searchQuery` is the debounced value the results below actually answer.
+  // Keeping them apart is what lets the header say "no notes mention X" about
+  // the query that ran rather than about the half-word in the box.
+  const [searchInput, setSearchInput] = useState("");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchPage, setSearchPage] = useState<SearchResultsPage | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [searchError, setSearchError] = useState<string | null>(null);
+
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
   const [prompt, setPrompt] = useState<PromptState | null>(null);
   const [moving, setMoving] = useState<FsNode | null>(null);
@@ -339,6 +371,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // file that has since been closed) can never overwrite the current one.
   const treeGen = useRef(0);
   const fileGen = useRef(0);
+  const searchGen = useRef(0);
   // Whether the explorer's initial folder expansion has happened yet, so a later
   // refresh never re-opens folders the operator collapsed.
   const expandedSeeded = useRef(false);
@@ -386,6 +419,57 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     [client, company],
   );
 
+  /* ---- search (#607) ---- */
+
+  // Resolves when the results are installed. Separated from the effect below so
+  // the refocus and live-write handlers can re-run the *active* search — a hit
+  // list that outlived the notes it names is worse than a stale tree, because
+  // clicking one 404s.
+  const runSearch = useCallback(
+    async (query: string) => {
+      const mine = ++searchGen.current;
+      setSearching(true);
+      try {
+        const page = await searchWorkspace(client, company, query);
+        if (mine !== searchGen.current) return;
+        setSearchPage(page);
+        setSearchError(null);
+      } catch (e) {
+        if (mine !== searchGen.current) return;
+        // The previous page is dropped rather than left standing: results that
+        // do not answer the query on screen are a lie the operator cannot see.
+        setSearchPage(null);
+        setSearchError(message(e, "could not search this workspace"));
+      } finally {
+        if (mine === searchGen.current) setSearching(false);
+      }
+    },
+    [client, company],
+  );
+
+  // Debounce the box into `searchQuery`.
+  useEffect(() => {
+    const trimmed = searchInput.trim();
+    if (!trimmed) {
+      // Clearing the box restores the tree immediately — no debounce, and no
+      // request: the host refuses an empty query with a 400 because "" is not
+      // "everything", so the console must not send one.
+      searchGen.current++;
+      setSearchQuery("");
+      setSearchPage(null);
+      setSearchError(null);
+      setSearching(false);
+      return;
+    }
+    const timer = setTimeout(() => setSearchQuery(trimmed), SEARCH_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+  }, [searchInput]);
+
+  useEffect(() => {
+    if (!searchQuery) return;
+    void runSearch(searchQuery);
+  }, [searchQuery, runSearch]);
+
   // Mount / company change: reset every scoped piece of state, then load.
   useEffect(() => {
     expandedSeeded.current = false;
@@ -394,6 +478,13 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     setOpenFile(null);
     setDraft(null);
     setSaveState("idle");
+    // Another company's notes are another namespace; a hit list surviving the
+    // switch would offer nodes this company does not have.
+    searchGen.current++;
+    setSearchInput("");
+    setSearchQuery("");
+    setSearchPage(null);
+    setSearchError(null);
     // Another company's note is another namespace, and rescued text offering to
     // be saved into the wrong workspace is worse than no offer at all.
     setRescued(null);
@@ -511,7 +602,13 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // the tab is the moment an operator most expects to see current state.
   useEffect(() => {
     const refresh = () => {
-      if (document.visibilityState === "visible") void loadTree({ silent: true });
+      if (document.visibilityState !== "visible") return;
+      void loadTree({ silent: true });
+      // An active search is the *only* thing in the explorer pane while it
+      // runs, so refreshing the tree behind it and leaving the hits alone would
+      // refresh nothing the operator can see — and would leave them clicking
+      // rows for notes that may since have been deleted.
+      if (searchQuery) void runSearch(searchQuery);
     };
     window.addEventListener("focus", refresh);
     document.addEventListener("visibilitychange", refresh);
@@ -519,7 +616,7 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       window.removeEventListener("focus", refresh);
       document.removeEventListener("visibilitychange", refresh);
     };
-  }, [loadTree]);
+  }, [loadTree, runSearch, searchQuery]);
 
   /* ---- live writes (#327) ---- */
 
@@ -547,6 +644,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     const frame = event;
     void (async () => {
       const tree = await loadTree({ silent: true });
+      // Same reasoning as the refocus handler: a live write can add, change or
+      // delete a note the hit list is naming, and the hit list is what is on
+      // screen.
+      if (searchQuery) void runSearch(searchQuery);
       const plan = planOpenNote({
         openId,
         event: frame,
@@ -715,7 +816,40 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
       for (const a of pathOf(nodes, id)) if (a.kind === "folder") next.add(a.id);
       return next;
     });
+    // A payload has no text body to fetch, and the host refuses the text read
+    // for one — asking anyway would put an error in `fileError` for a file that
+    // is perfectly fine (issue #553). `BinaryNodeView` fetches the bytes it
+    // needs itself.
+    const node = nodeById(nodes, id);
+    if (node && isBinary(node)) return;
     await loadFile(id);
+  }
+
+  /**
+   * Act on a search hit.
+   *
+   * A file goes through the ordinary `open` flow, so a hit behaves exactly like
+   * a tree click — including the binary case, which `open` already knows not to
+   * fetch a text body for. The search stays up: the operator is usually working
+   * a list of candidates, and clearing it on the first click would make them
+   * retype the query to reach the second.
+   *
+   * A folder cannot be "opened" — there is no pane for one — so it exits the
+   * search and reveals the folder in the tree, which is the only thing that
+   * could have been meant.
+   */
+  async function openHit(hit: SearchHit) {
+    if (hit.kind === "folder") {
+      setSearchInput("");
+      setExpanded((prev) => {
+        const next = new Set(prev);
+        for (const a of pathOf(nodes, hit.id)) if (a.kind === "folder") next.add(a.id);
+        next.add(hit.id);
+        return next;
+      });
+      return;
+    }
+    await open(hit.id);
   }
 
   function toggle(id: string) {
@@ -841,22 +975,23 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     await createAndOpen(target, `# ${target}\n`);
   }
 
+  /**
+   * Upload files of any kind (issue #553).
+   *
+   * Every file now goes to the host's multipart route, including Markdown.
+   * Reading the bytes here to decide would mean re-implementing the host's
+   * text-versus-binary rule in a second place, where the two could disagree
+   * about the same file; the host reads the bytes and answers with the node it
+   * made, so there is one rule and the console just renders the result.
+   */
   async function onUpload(files: FileList | null) {
     if (!files?.length) return;
-    const reads = await Promise.all(
-      Array.from(files).map(async (f) => ({ name: f.name, text: await f.text().catch(() => "") })),
-    );
-    for (const r of reads) {
+    for (const file of Array.from(files)) {
       try {
-        const created = await createNode(client, company, {
-          name: ensureMdExt(r.name),
-          kind: "file",
-          parentId: null,
-          content: r.text,
-        });
+        const created = await uploadFile(client, company, file, null);
         setNodes((all) => [...all, created]);
       } catch (e) {
-        toast.error(`${r.name}: ${message(e, "upload failed")}`);
+        toast.error(`${file.name}: ${message(e, "upload failed")}`);
       }
     }
   }
@@ -896,7 +1031,10 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
           <input
             ref={uploadRef}
             type="file"
-            accept=".md,.markdown,.txt"
+            // Anything. The tree holds bytes now, and the host decides what
+            // each file becomes — an allow-list here would be a second,
+            // narrower rule that silently refuses files the store supports.
+            accept="*/*"
             multiple
             hidden
             onChange={(e) => {
@@ -905,8 +1043,50 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
             }}
           />
         </div>
+        {/* Search (issue #607). In the explorer header beside the refresh
+            button, because it answers the same question the tree below it does
+            — "which note do I want?" — and an operator who cannot find a note
+            by eye reaches here next. */}
+        <div className="relative border-b px-2 py-1.5">
+          <Search className="pointer-events-none absolute top-1/2 left-4 size-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={searchInput}
+            onChange={(e) => setSearchInput(e.target.value)}
+            onKeyDown={(e) => {
+              // Escape restores the tree, the shortcut every search box has.
+              if (e.key === "Escape") setSearchInput("");
+            }}
+            placeholder="Search notes…"
+            aria-label="Search workspace notes"
+            className="h-8 pr-7 pl-7 text-sm"
+            data-testid="workspace-search"
+          />
+          {searchInput && (
+            <button
+              type="button"
+              onClick={() => setSearchInput("")}
+              aria-label="Clear search"
+              data-testid="workspace-search-clear"
+              className="absolute top-1/2 right-4 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+            >
+              <X className="size-3.5" />
+            </button>
+          )}
+        </div>
         <div className="flex-1 overflow-y-auto py-1" data-testid="workspace-tree">
-          {loading ? (
+          {/* An active search replaces the tree rather than sitting beside it —
+              showing both would leave the operator reading a tree that is not
+              what they just asked for. */}
+          {searchInput.trim() ? (
+            <SearchResults
+              query={searchQuery || searchInput.trim()}
+              hits={searchPage?.hits ?? []}
+              total={searchPage?.total ?? 0}
+              loading={searching || searchQuery !== searchInput.trim()}
+              error={searchError}
+              onOpen={(hit) => void openHit(hit)}
+            />
+          ) : loading ? (
             <div className="space-y-2 px-2 py-2">
               <Skeleton className="h-5 w-4/5" />
               <Skeleton className="h-5 w-3/5" />
@@ -1018,20 +1198,32 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
                 {formatUpdated(openFile?.updatedAt ?? openNode.updatedAt)}
               </span>
               <SaveStatus state={saveState} />
-              <Tabs
-                value={mode}
-                onValueChange={(v) => void changeMode(v as "read" | "edit")}
-                className="ml-auto"
-              >
-                <TabsList>
-                  <TabsTrigger value="read">Reading</TabsTrigger>
-                  <TabsTrigger value="edit">Edit</TabsTrigger>
-                </TabsList>
-              </Tabs>
+              {/* A payload has no prose to read or edit, so the mode switch is
+                  hidden rather than shown-and-broken (issue #553). The host
+                  refuses a text write to one, so an Edit tab here would be a
+                  control whose only outcome is an error toast. */}
+              {!isBinary(openNode) && (
+                <Tabs
+                  value={mode}
+                  onValueChange={(v) => void changeMode(v as "read" | "edit")}
+                  className="ml-auto"
+                >
+                  <TabsList>
+                    <TabsTrigger value="read">Reading</TabsTrigger>
+                    <TabsTrigger value="edit">Edit</TabsTrigger>
+                  </TabsList>
+                </Tabs>
+              )}
             </div>
             <div className="flex flex-1 overflow-hidden">
               <div className="flex-1 overflow-y-auto">
-                {fileError ? (
+                {isBinary(openNode) ? (
+                  // Checked before `fileError` and before the skeleton: a
+                  // payload is never fetched through the text route at all, so
+                  // neither of those states is reachable for one and both would
+                  // be wrong answers here.
+                  <BinaryNodeView client={client} company={company} node={openNode} />
+                ) : fileError ? (
                   <div className="p-6">
                     <Alert variant="destructive">
                       <AlertDescription>{fileError}</AlertDescription>
@@ -1268,6 +1460,123 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
 }
 
 /* ---- note markdown with wiki links ---- */
+
+/**
+ * A binary workspace node: rendered if it is an image, described and offered
+ * for download if it is not (issue #553).
+ *
+ * # Why the bytes are fetched rather than linked
+ *
+ * The blob route needs the bearer token the API client holds, and an `<img
+ * src>` cannot carry an `Authorization` header — so a direct link would 401 for
+ * every operator. The bytes come through the authenticated client and become an
+ * object URL the element can point at.
+ *
+ * The URL is revoked on unmount and whenever the node changes. An object URL is
+ * a document-lifetime reference to the blob behind it, so a view that minted one
+ * per opened image without revoking would hold every image the operator had
+ * looked at, in memory, until the tab was closed.
+ *
+ * A non-image is deliberately **not** previewed. The console has no viewer for a
+ * PDF or a zip, and a browser plugin rendering one inside the app frame is not
+ * something this view can promise across browsers — so it shows what the file
+ * is, exactly, and hands over the download.
+ */
+function BinaryNodeView({
+  client,
+  company,
+  node,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  node: FsNode;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const isImage = (node.mime ?? "").startsWith("image/");
+
+  useEffect(() => {
+    let revoked = false;
+    let current: string | null = null;
+    setUrl(null);
+    setError(null);
+    fetchBlobUrl(client, company, node.id)
+      .then((next) => {
+        // The effect may have been torn down (or the node switched) while the
+        // fetch was in flight; revoking immediately is what stops that race
+        // from leaking the blob it just created.
+        if (revoked) {
+          URL.revokeObjectURL(next);
+          return;
+        }
+        current = next;
+        setUrl(next);
+      })
+      .catch((e) => {
+        if (!revoked) setError(message(e, "could not load this file"));
+      });
+    return () => {
+      revoked = true;
+      if (current) URL.revokeObjectURL(current);
+    };
+  }, [client, company, node.id]);
+
+  return (
+    <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-binary">
+      {error ? (
+        <Alert variant="destructive">
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
+      ) : isImage ? (
+        url ? (
+          <img
+            src={url}
+            alt={node.name}
+            data-testid="workspace-image"
+            className="max-h-[70vh] w-auto max-w-full rounded-md border bg-card object-contain"
+          />
+        ) : (
+          <Skeleton className="h-64 w-full" />
+        )
+      ) : null}
+      <div className="mt-4 rounded-md border bg-card/40 p-4" data-testid="workspace-binary-meta">
+        <p className="text-sm font-medium">{node.name}</p>
+        <dl className="mt-2 grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs text-muted-foreground">
+          <dt>Type</dt>
+          <dd className="font-mono">{node.mime}</dd>
+          <dt>Size</dt>
+          <dd>{formatBytes(node.size)}</dd>
+          {node.sha256 && (
+            <>
+              <dt>sha256</dt>
+              {/* Wrapped, not truncated: a digest an operator cannot read in
+                  full cannot be compared against anything, which is the only
+                  reason to show one. */}
+              <dd className="font-mono break-all">{node.sha256}</dd>
+            </>
+          )}
+        </dl>
+        <p className="mt-3 text-xs text-muted-foreground">
+          This file is stored as data, so it has no text to edit here.
+        </p>
+        {url && (
+          // A real anchor rather than a Button with an onClick: `download` on
+          // an <a> is what makes the browser save the file under the node's own
+          // name instead of navigating to a blob: URL.
+          <a
+            href={url}
+            download={node.name}
+            data-testid="workspace-download"
+            className="mt-3 inline-flex items-center rounded-md border px-3 py-1.5 text-xs font-medium hover:bg-accent"
+          >
+            <Download className="mr-1 size-4" />
+            Download
+          </a>
+        )}
+      </div>
+    </div>
+  );
+}
 
 function NoteMarkdown({
   source,
