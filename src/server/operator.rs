@@ -1049,6 +1049,13 @@ struct ChatMessage {
     /// rather than a silently-dropped thread.
     #[serde(default)]
     parent: Option<String>,
+    /// Whether an actionable request in this message opens a one-off card or a
+    /// workflow card (issue #580). The operator chooses explicitly (decision
+    /// D2a); absent means `once`, so an ordinary chat request is unchanged. Only
+    /// consulted when the message actually carries a task intent — a greeting or
+    /// a question opens no card regardless.
+    #[serde(default)]
+    deliverable: Option<crate::ports::tasks::TaskDeliverable>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1145,7 +1152,13 @@ async fn run_chat(
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
-            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            // Issue #580: carry the operator's explicit once-vs-workflow choice
+            // from the chat payload onto the card. Absent means `once`, so a
+            // plain "do X" chat request opens a one-off card exactly as before;
+            // "build me a workflow for X" (deliverable: "workflow") routes the
+            // card through the builder pass when it reaches In Progress. Nothing
+            // here infers the choice from the text (decision D2a).
+            deliverable: message.deliverable.unwrap_or_default(),
             workflow_proposal: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
