@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { KeyRound, Loader2, Save, ShieldCheck, Trash2, Wallet } from "lucide-react";
 import { toast } from "sonner";
 
@@ -54,12 +54,25 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
 
+  // Discards the result of a request whose company is no longer the one on
+  // screen. `refresh` re-runs when `company` changes, but nothing cancels the
+  // request already in flight, so two responses can land out of order and the
+  // later `setStatus` be the *earlier* company's. On this card that is
+  // decision-shaped rather than cosmetic: an admin who reads "configured" for a
+  // company that in fact has no key will not set one. Same generation guard
+  // `ComposioSection` uses next door.
+  const requestGeneration = useRef(0);
+
   const refresh = useCallback(async () => {
+    const generation = ++requestGeneration.current;
     try {
-      setStatus(await getCompanyCredential(client, company));
+      const next = await getCompanyCredential(client, company);
+      if (generation !== requestGeneration.current) return;
+      setStatus(next);
       setError(null);
       setLoad("ready");
     } catch (err) {
+      if (generation !== requestGeneration.current) return;
       // Only a genuinely absent route hides the card. A host predating this
       // plane 404s, and rendering nothing is right there — the console still
       // works, this company just has no such surface.
@@ -87,13 +100,20 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
 
   async function write(value: string, mode: "save" | "clear") {
     setBusy(mode);
+    const generation = ++requestGeneration.current;
     try {
       const result = await setCompanyCredential(client, company, value);
-      setStatus(result.status);
-      setKey("");
+      // The toast is unconditional: the write really did land, and an admin who
+      // navigated away mid-request is still owed that fact. What is conditional
+      // is the *state* — `result.status` describes the company that was on
+      // screen when the write started, so painting it after a switch would put
+      // one company's credential state under another's name.
       toast.success(mode === "save" ? "Credential saved." : "Credential cleared.", {
         description: result.note,
       });
+      if (generation !== requestGeneration.current) return;
+      setStatus(result.status);
+      setKey("");
       onChanged?.();
     } catch (err) {
       // Show the host's own reason when it sent one — an admin-only refusal or a
