@@ -8,6 +8,7 @@ pub mod a2a;
 /// console shell.
 #[cfg(feature = "acp")]
 pub mod acp;
+pub(crate) mod approval_visibility;
 pub mod chat_history;
 pub mod cors;
 mod error;

@@ -34,6 +34,14 @@ type Approval {
 	range that would overflow GraphQL's `Int`.
 	"""
 	atMillis: Float!
+	"""
+	Whether `amountUsd` was withheld from this reader by their role (#618).
+	
+	Carried for the same reason it is on the REST summary: a `null` amount
+	otherwise means "this effect involves no money", and a Member looking at
+	a withheld payment would read it as a free action.
+	"""
+	contentsHidden: Boolean!
 }
 
 """
@@ -98,6 +106,11 @@ type Company {
 	pendingApprovals: Int!
 	"""
 	The approvals currently awaiting the operator for this company.
+	
+	Contents are role-gated exactly as on the REST list (issue #618). This
+	is the surface that made the question worth asking: it maps the same
+	projection, so a redaction applied only to the REST handlers would leave
+	the whole boundary reachable through one GraphQL field.
 	"""
 	approvals: [Approval!]!
 	"""

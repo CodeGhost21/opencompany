@@ -337,6 +337,20 @@ export interface ApprovalSummary {
    */
   payload?: unknown;
   /**
+   * Whether {@link payload} and {@link amount_usd} were withheld from **this
+   * reader** because of their role (#618).
+   *
+   * Membership decides whether you may know an approval exists; role decides
+   * whether you may read its contents. An admin never sees this set.
+   *
+   * The console must not treat a withheld approval as an empty one. `payload`
+   * being absent already means "the effect carries no arguments", so without
+   * this flag a hidden payment and a no-argument tool call are the same bytes —
+   * and a member would read "nothing to show" where the truth is "not shown to
+   * you". Render the difference; see `ApprovalPayload`.
+   */
+  contents_hidden?: boolean;
+  /**
    * The chat thread this approval was raised in (#379) — the **host** thread id,
    * which is a desk id for a channel and a roster agent id for a direct message.
    * Resolve it to a console channel id with `channelIdForThread`.
