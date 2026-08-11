@@ -250,8 +250,24 @@ test("a card raised on the board leaves no channel marker", async ({ page, reque
     (await request.patch(`${SCOPE}/tasks/${id}`, { data: { column: "in_progress" } })).ok(),
   ).toBeTruthy();
 
-  // Give the run the same window the test above allows before believing this.
-  await page.waitForTimeout(20_000);
+  // Wait for the dispatch to actually *settle*, not merely for time to pass.
+  //
+  // A fixed sleep here would make this test pass for the wrong reason: if the
+  // run were still `in_progress` when the clock ran out, no terminal has fired,
+  // so no marker could exist yet and the absence below would be vacuous — green
+  // whether or not an originless completion wrongly marks a channel. Polling
+  // the card's own column means the assertion only runs once the event that
+  // could have produced a marker has been emitted.
+  await expect
+    .poll(
+      async () => {
+        const res = await request.get(`${SCOPE}/tasks/${id}`);
+        if (!res.ok()) return "in_progress";
+        return ((await res.json()).column as string) ?? "in_progress";
+      },
+      { timeout: 60_000, intervals: [1_000] },
+    )
+    .not.toBe("in_progress");
   // The load-bearing assertion: nothing anywhere links *this* card. It is
   // addressed by href rather than by count, so it cannot be satisfied or
   // broken by any other test's marker.
