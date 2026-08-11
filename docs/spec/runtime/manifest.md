@@ -296,7 +296,8 @@ prompt = "Weekly review and operator digest"
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
     `Agents/<agent-id>/` (minted the first time that agent puts something in it;
-    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    boot only scaffolds the empty `Agents/` root, and since issue #645 `Desks/`
+    is minted on first use rather than scaffolded) as the default
     home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both

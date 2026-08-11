@@ -237,20 +237,29 @@ Backends persist the node as opaque JSON and both fields are
 round-trip, the write stamp, and the rename non-stamp across all three
 backends.
 
-**`Agents/` and `Desks/` (#551).** `company::workspace_scaffold` owns the
+**`Agents/` and `Desks/` (#551, #645).** `company::workspace_scaffold` owns the
 workspace's two reserved system roots and the folders beneath them, on two
 different schedules:
 
-* `ensure_workspace_scaffold` adopt-or-creates the `Agents` and `Desks` roots,
-  **empty**, from one seam: `RuntimeBuilder::build` (boot). It takes no roster
-  — a company with no agents gets both — so an existing company picks them up
-  on its next boot. Idempotent; one tree read.
+* `ensure_workspace_scaffold` adopt-or-creates the roots listed in
+  `SYSTEM_ROOTS` — `Agents` alone — **empty**, from one seam:
+  `RuntimeBuilder::build` (boot). It takes no roster (a company with no agents
+  still gets it), so an existing company picks it up on its next boot.
+  Idempotent; one tree read.
 * `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create
   `Agents/<agent-id>/` and `Desks/<desk-id>/` **on demand**, returning the node
   id, called when that agent or desk first produces something. A folder means
   "this member produced something"; an eager folder per roster member would be
   a claim the tree cannot back. `workspace_create` calls the agent minter when
   an agent writes into its own home; #552's publish path is the next caller.
+* **`Desks/` is not scaffolded** (#645). Both minters have always created an
+  absent root on their way down, and `ensure_desk_folder` has no callers yet, so
+  scaffolding the root gave every company a permanently empty folder
+  advertising a feature nothing fills — the same promise-not-record shape #570
+  removed at the member level. `ensure_desk_folder` now mints root and member
+  folder together on first use. A `Desks/` that already exists is untouched:
+  the scaffold only ever looks up the names in `SYSTEM_ROOTS`, so a legacy
+  company keeps its root, its contents and its authorship, un-warned.
 
 Both are fail-closed: a name collision (a *file* of that name, or several nodes
 sharing it) is never resolved by creating a duplicate that would make the path

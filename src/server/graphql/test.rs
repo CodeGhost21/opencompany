@@ -808,12 +808,12 @@ async fn memory_page_reflects_upserts() {
 /// An unpopulated surface resolves to `[]`, never to `null` or an error.
 ///
 /// `workspaceTree` is the exception and states why: since issue #551 a company
-/// is never born with an empty tree — boot scaffolds the reserved `Agents/` and
-/// `Desks/` roots — so what it proves here is that the resolver answers with
-/// exactly that and invents nothing else. A member folder is *not* part of that
-/// baseline; this mints one to pin the authorship projection (#326), which is
-/// the only place in the GraphQL surface where `WorkspaceOrigin` is rendered
-/// with an agent id.
+/// is never born with an empty tree — boot scaffolds the reserved `Agents/`
+/// root (and, until issue #645, an empty `Desks/` beside it) — so what it
+/// proves here is that the resolver answers with exactly that and invents
+/// nothing else. A member folder is *not* part of that baseline; this mints one
+/// to pin the authorship projection (#326), which is the only place in the
+/// GraphQL surface where `WorkspaceOrigin` is rendered with an agent id.
 #[tokio::test]
 async fn empty_surfaces_resolve_to_empty_lists() {
     let home_dir = home();
@@ -840,15 +840,13 @@ async fn empty_surfaces_resolve_to_empty_lists() {
         .map(|node| node["name"].as_str().unwrap())
         .collect();
     names.sort_unstable();
-    assert_eq!(names, vec!["Agents", "Desks", "maya"]);
-    for root in ["Agents", "Desks"] {
-        let node = tree
-            .iter()
-            .find(|node| node["name"] == serde_json::json!(root))
-            .unwrap();
-        assert_eq!(node["createdBy"]["kind"], "seed");
-        assert!(node["createdBy"]["agentId"].is_null());
-    }
+    assert_eq!(names, vec!["Agents", "maya"]);
+    let root = tree
+        .iter()
+        .find(|node| node["name"] == serde_json::json!("Agents"))
+        .unwrap();
+    assert_eq!(root["createdBy"]["kind"], "seed");
+    assert!(root["createdBy"]["agentId"].is_null());
     let folder = tree
         .iter()
         .find(|node| node["name"] == serde_json::json!("maya"))
