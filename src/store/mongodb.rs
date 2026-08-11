@@ -545,6 +545,7 @@ impl MemoryStore for MongoStore {
         let removed = match policy {
             EvictionPolicy::KeepRecent { n } => {
                 // Collect the seqs to keep (newest n), delete the rest.
+                //
                 let mut keep = Vec::new();
                 if n > 0 {
                     let mut find = traces
@@ -1933,6 +1934,9 @@ fn mongo_workspace_descendants(
 /// The conformance suite needs a live server; there is no in-process MongoDB.
 /// Set `OPENCOMPANY_TEST_MONGODB_URI` (e.g. `mongodb://localhost:27017`) to
 /// run these; without it every test is a skip, keeping `cargo test` offline.
+///
+/// CI additionally sets `OPENCOMPANY_TEST_MONGODB_REQUIRED=1`, which turns that
+/// skip into a failure — see `required()` below.
 #[cfg(test)]
 mod test {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1942,10 +1946,40 @@ mod test {
 
     static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Whether a missing server must FAIL rather than skip. Issue #555.
+    ///
+    /// The `OPENCOMPANY_TEST_MONGODB_URI` skip above is right for a laptop with
+    /// no MongoDB — it keeps a default `cargo test` offline — and wrong for the
+    /// CI lane whose entire purpose is running this suite. There, an unset URI
+    /// is a misconfigured job, and the skip would report it as a pass: the
+    /// whole suite silently absent behind a green tick, which is the exact
+    /// defect this lane was added to fix, reintroduced one layer down.
+    ///
+    /// So CI sets this second variable and nothing else does. Set = the caller
+    /// has promised a reachable server, so not finding one is an error.
+    ///
+    /// `0` and the empty string read as unset, so the variable can be threaded
+    /// through a workflow matrix or a shell wrapper that always defines it.
+    fn required() -> bool {
+        std::env::var("OPENCOMPANY_TEST_MONGODB_REQUIRED")
+            .is_ok_and(|value| !value.is_empty() && value != "0")
+    }
+
     async fn store() -> Option<Arc<MongoStore>> {
-        let Ok(uri) = std::env::var("OPENCOMPANY_TEST_MONGODB_URI") else {
-            eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
-            return None;
+        let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
+            Ok(uri) => uri,
+            Err(_) => {
+                assert!(
+                    !required(),
+                    "OPENCOMPANY_TEST_MONGODB_REQUIRED is set but \
+                     OPENCOMPANY_TEST_MONGODB_URI is not. This lane exists to run the \
+                     MongoDB conformance suite against a real server, so a skip here is \
+                     a misconfigured job rather than a pass — point the URI at the \
+                     service container."
+                );
+                eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
+                return None;
+            }
         };
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1957,7 +1991,13 @@ mod test {
             nonce,
             DB_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let store = MongoStore::connect(&uri, &db).await.expect("connect");
+        // `connect` creates indexes, so it round-trips to the server rather
+        // than resolving lazily: an unreachable host fails HERE, after the
+        // driver's server-selection timeout, instead of much later inside
+        // whichever assertion happened to touch the database first.
+        let store = MongoStore::connect(&uri, &db)
+            .await
+            .unwrap_or_else(|err| panic!("could not reach the MongoDB server at {uri}: {err}"));
         Some(Arc::new(store))
     }
 
