@@ -152,7 +152,9 @@ use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::orchestrator::DelegationQueue;
 use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
-use crate::ports::types::{BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, TurnStep};
+use crate::ports::types::{
+    BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, PolicyOverride, TurnStep,
+};
 use crate::ports::{
     ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
     UsageMeter,
@@ -815,6 +817,11 @@ pub struct HarnessPool {
     /// A company that never sets an override keeps an empty set and a stable
     /// fingerprint — no rebuild, byte-identical to the pre-#343 behaviour.
     budget_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Per-company fingerprint of the operator `[policy]` override (issue #562),
+    /// so a console tier change rebuilds the roster instead of waiting for a
+    /// restart. Without this axis the override persists and is silently ignored:
+    /// `ApprovalPolicy` is built once per roster, not once per call.
+    policy_fingerprints: RwLock<HashMap<CompanyId, u64>>,
     /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
     /// failure has already been reported (issue #449).
     ///
@@ -860,6 +867,7 @@ impl HarnessPool {
             composio_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
             budget_fingerprints: RwLock::new(HashMap::new()),
+            policy_fingerprints: RwLock::new(HashMap::new()),
             workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
     }
@@ -943,9 +951,11 @@ impl HarnessPool {
 
         // Re-resolve + fingerprint the live overlay-agent set the same way, and
         // the operator budget overrides riding the same store read (issue #343).
-        let (overlay_agents, overlay_budgets) = self.resolve_effective_overlay(company, deps).await;
+        let (overlay_agents, overlay_budgets, overlay_policy) =
+            self.resolve_effective_overlay(company, deps).await;
         let overlay_fp = overlay_fingerprint(&overlay_agents);
         let budget_fp = budget_fingerprint(&overlay_budgets);
+        let policy_fp = policy_fingerprint(overlay_policy.as_ref());
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
@@ -983,6 +993,7 @@ impl HarnessPool {
             let composio_fingerprints = self.composio_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
             let budget_fingerprints = self.budget_fingerprints.read().await;
+            let policy_fingerprints = self.policy_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
@@ -990,6 +1001,7 @@ impl HarnessPool {
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
                 && budget_fingerprints.get(&company.id) == Some(&budget_fp)
+                && policy_fingerprints.get(&company.id) == Some(&policy_fp)
             {
                 return Ok(());
             }
@@ -1018,6 +1030,11 @@ impl HarnessPool {
         // so installing the live set here is what carries a console budget edit
         // into the roster the very next turn runs on.
         fresh_company.overlay_budgets = overlay_budgets;
+        // Issue #562: same treatment for the policy override — `build_roster`
+        // resolves the tier through `fresh_company.effective_policy`, so installing
+        // the live value here is what carries a console tier change into the roster
+        // the next turn runs on.
+        fresh_company.overlay_policy = overlay_policy;
 
         // Issue #551 note — this rebuild deliberately touches no workspace.
         //
@@ -1062,6 +1079,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), budget_fp);
+        self.policy_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), policy_fp);
         Ok(())
     }
 
@@ -1181,12 +1202,21 @@ impl HarnessPool {
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
-    ) -> (Vec<OverlayAgent>, Vec<BudgetOverride>) {
+    ) -> (
+        Vec<OverlayAgent>,
+        Vec<BudgetOverride>,
+        Option<PolicyOverride>,
+    ) {
         match deps.store.load(&company.id).await {
-            Ok(Some(record)) => (record.overlay_agents, record.overlay_budgets),
+            Ok(Some(record)) => (
+                record.overlay_agents,
+                record.overlay_budgets,
+                record.overlay_policy,
+            ),
             _ => (
                 company.overlay_agents.clone(),
                 company.overlay_budgets.clone(),
+                company.overlay_policy.clone(),
             ),
         }
     }
@@ -1857,6 +1887,67 @@ fn overlay_fingerprint(agents: &[OverlayAgent]) -> u64 {
 ///   what keeps `Some(0.0)` distinct from `None` in the hash — the very
 ///   distinction the issue insists must not collapse. `to_bits` additionally
 ///   makes the hash total over values `PartialEq` would call incomparable.
+/// A stable hash of the operator's `[policy]` override, so a console tier change
+/// rebuilds the roster on the company's next `ensure` (issue #562).
+///
+/// # Why this axis has to exist at all
+///
+/// `ApprovalPolicy` is constructed in [`build_roster`], **once per roster
+/// build** — not once per call. The roster is cached and rebuilt only when one
+/// of the fingerprints in the staleness check moves. So without this function a
+/// console tier change would be written, persisted, and then **silently ignored
+/// until the process restarted**: the write route would return `204`, the
+/// console would show the new tier, and every agent would keep running the old
+/// one. That is the same failure the skill-delta fingerprint above exists to
+/// prevent, and it is invisible from the outside.
+///
+/// # What is hashed, and what deliberately is not
+///
+/// - `mode` and `always_approve` are hashed — they are what the gate reads.
+/// - `always_approve` is hashed **in order**, unlike the budget set. The order
+///   is the operator's own list as they wrote it, not an accumulation of
+///   independent rows, so a reorder is a real edit rather than a spurious
+///   difference. Its length is folded in first so `["a","b"]` cannot collide
+///   with `["ab"]`.
+/// - The `Some`/`None` distinction is hashed for both fields, because "not
+///   overridden" and "overridden to the manifest's current value" must stay
+///   apart: the manifest can change under a rebuild, and collapsing them would
+///   pin the override to a value the operator never chose.
+/// - **Attribution (`set_by`, `at_millis`) is deliberately NOT hashed**, for the
+///   same reason the budget fingerprint omits it: who set the tier and when
+///   changes nothing an agent can act on, and folding it in would rebuild the
+///   roster — dropping live agent sessions — on a save that re-set the same tier.
+fn policy_fingerprint(override_: Option<&PolicyOverride>) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut hasher = DefaultHasher::new();
+    match override_ {
+        None => 0u8.hash(&mut hasher),
+        Some(entry) => {
+            1u8.hash(&mut hasher);
+            match &entry.mode {
+                Some(mode) => {
+                    1u8.hash(&mut hasher);
+                    mode.hash(&mut hasher);
+                }
+                None => 0u8.hash(&mut hasher),
+            }
+            match &entry.always_approve {
+                Some(kinds) => {
+                    1u8.hash(&mut hasher);
+                    kinds.len().hash(&mut hasher);
+                    for kind in kinds {
+                        kind.hash(&mut hasher);
+                    }
+                }
+                None => 0u8.hash(&mut hasher),
+            }
+        }
+    }
+    hasher.finish()
+}
+
 fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
@@ -1931,7 +2022,15 @@ pub(crate) fn build_roster(
     deps: &HarnessDeps,
     skill_deltas: &[SkillState],
 ) -> crate::Result<Vec<Arc<CompanyAgent>>> {
-    let policy: &Policy = &company.manifest.policy;
+    // Issue #562: the policy in force, not the one the manifest shipped with —
+    // the same relationship `effective_budget` (issue #343) has to the manifest
+    // cap, and resolved through the same record so the console and this gate
+    // cannot disagree about which tier is live.
+    //
+    // Owned rather than borrowed because the effective value is a field-wise
+    // merge of the override and the manifest, so there may be nothing to borrow.
+    let effective = company.effective_policy();
+    let policy: &Policy = &effective;
     let company_name = &company.manifest.company.name;
     let allow = &company.manifest.tools.allow;
     // The orchestrator agent (tier `orchestrator`, else the first agent) receives
