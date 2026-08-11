@@ -33,6 +33,10 @@ pub mod mcp;
 pub mod memory;
 pub mod runs;
 pub mod scope;
+/// First-run company setup: propose a starting roster from three answers
+/// (`docs/spec/runtime/company-setup.md`). Proposes only — the console creates
+/// each teammate through [`team`], so setup has no second write path.
+pub mod setup;
 pub mod skills;
 pub mod smtp;
 pub mod task_export;
@@ -169,6 +173,7 @@ pub fn router() -> Router<AppState> {
         .merge(mcp::router())
         .merge(inference::router())
         .merge(team::router())
+        .merge(setup::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]
