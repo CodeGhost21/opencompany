@@ -1,20 +1,49 @@
 // The workflow creator (issue #69): a plain form editor — not a drag canvas —
 // that builds a `WorkflowGraph` and posts it via `createWorkflow`. Node kinds
-// are restricted to the ones the engine actually executes today
-// (`CREATABLE_NODE_KINDS`); `tool_call`/`http_request` stay off the palette
-// until they're wired (see `src/workflows/caps.rs`).
+// are the ones the engine executes and the console can author from a form
+// (`CREATABLE_NODE_KINDS`). The five that need kind-specific config —
+// `tool_call`, `http_request`, `switch`, `output_parser`, `sub_workflow` —
+// grew their controls in issue #541; each renders `NodeConfigFields`, whose
+// spec table (`@/lib/workflow-node-config`) is the single source of the engine
+// keys each kind emits.
+//
+// It is also the EDITOR (issue #259): pass a `workflow` and the same form
+// hydrates from that saved graph and saves through `updateWorkflow`, carrying
+// the graph's `version` as the optimistic-concurrency token. One component
+// rather than two because an edit is the same form with the same rules — a
+// second one would drift the moment either side grew a field.
 
 import { useEffect, useId, useState } from "react";
-import { Plus, Trash2 } from "lucide-react";
+import { History, Plus, RotateCcw, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
+  DESTINATION_KINDS,
   createWorkflow,
+  listWorkflowRevisions,
+  listWorkflows,
+  restoreWorkflowRevision,
+  updateWorkflow,
+  type WorkflowDestination,
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowNode,
+  type WorkflowRevision,
+  type WorkflowSummary,
 } from "@/api/workflows";
+import {
+  blankConfigDraft,
+  configDraftFrom,
+  configDraftProblem,
+  configFieldSpecs,
+  configFieldProblem,
+  configFromDraft,
+  hasConfigForm,
+} from "@/lib/workflow-node-config";
 import type { OpenCompanyClient } from "@/api/client";
+import { ApiError } from "@/api/types";
+import { CronPreviewLine } from "@/views/CronPreviewLine";
+import { NodeConfigFields } from "@/views/workflows/NodeConfigFields";
 import type { TeamMemberDto } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -46,6 +75,130 @@ interface DraftNode {
   name: string;
   summary: string;
   agent: string;
+  /** The trigger's cron expression (issue #169). Empty means "no schedule";
+   * only ever set on the trigger node, which is where the host allows it. */
+  schedule: string;
+  /** Output nodes only. `""` means "don't route this anywhere" — the pre-#170
+   * behaviour, where the report only shows in the run drawer. */
+  destinationKind: "" | WorkflowDestination["kind"];
+  /** The address (`email`) or channel id (`channel`). Unused for `owner`. */
+  destinationTarget: string;
+  /**
+   * Fields the form has no control for, carried through an edit **verbatim**
+   * (issue #259).
+   *
+   * An overlay graph can carry them — `POST`/`PUT` accept them and the
+   * orchestrator's own `create_workflow` tool writes them — so a graph authored
+   * outside this dialog can reach it. Rebuilding the node from the visible
+   * controls alone would then quietly delete a retry policy or an approval gate
+   * on the first save, which is a worse bug than the write-once one this fixes.
+   *
+   * They ride on the ROW, not on the node id, so they follow the row when its
+   * id is edited. `config` is the exception: it is kind-specific, so
+   * {@link changeKind} drops it along with every other kind-conditional field.
+   *
+   * `config` here carries the raw overlay only for kinds WITHOUT a config form.
+   * The five form kinds (issue #541) instead hold their config in
+   * {@link configDraft} (the form strings) and {@link configExtra} (keys with
+   * no control, preserved verbatim — the same anti-data-loss guard, but per
+   * key). `submit()` rebuilds their `config` from those two.
+   */
+  config?: unknown;
+  /** Per-field config strings for a form kind, keyed by engine key (#541).
+   * Empty `{}` for kinds without a form. */
+  configDraft: Record<string, string>;
+  /** A form kind's config keys the form has no control for, kept verbatim so an
+   * edit never drops an orchestrator-authored `connection_ref`/`execution`/… */
+  configExtra?: Record<string, unknown>;
+  onError?: string;
+  retry?: WorkflowNode["retry"];
+  requiresApproval?: boolean;
+}
+
+/** "No schedule" — the workflow runs only when something starts it. A sentinel
+ * rather than `""` because a select option with an empty value is ambiguous. */
+const NO_SCHEDULE = "none";
+/** "Type your own cron." Neither sentinel is a valid 5-field cron, so neither
+ * can collide with a preset or a custom value. */
+const CUSTOM_SCHEDULE = "custom";
+
+/** The friendly schedule choices offered on the trigger row. Each preset emits
+ * a real 5-field cron — the host only ever stores and matches cron, so the
+ * friendliness lives here rather than in a second wire format. Times are UTC,
+ * which the hint under the field says out loud. */
+const SCHEDULE_PRESETS = [
+  { value: NO_SCHEDULE, label: "No schedule (run manually)" },
+  { value: "0 * * * *", label: "Hourly — on the hour" },
+  { value: "0 9 * * *", label: "Daily — 09:00 UTC" },
+  { value: "0 9 * * MON", label: "Weekly — Monday 09:00 UTC" },
+] as const;
+
+/** Whether `cron` is one of the presets (so the Select shows it directly rather
+ * than dropping into the custom input). An empty schedule is "none". */
+function isPresetSchedule(cron: string): boolean {
+  if (cron === "") return true;
+  return SCHEDULE_PRESETS.some((p) => p.value === cron);
+}
+
+/** A cheap 5-field shape check, mirroring the host's `CronExpr::parse` arity
+ * rule so the obvious mistake ("hourly", "every day") is caught before a round
+ * trip. Real validation — ranges, names, steps — is the server's 400. */
+function looksLikeCron(cron: string): boolean {
+  return cron.trim().split(/\s+/).length === 5;
+}
+
+/** What is wrong with `schedule`, or `null` when it is postable.
+ *
+ * One field, one message, no node context — so the same rule can answer both
+ * callers: `validate()` at submit (which prefixes the node it belongs to) and
+ * the field's own blur handler (which shows it under the input). An empty
+ * schedule is fine: "no schedule" is a real choice.
+ */
+function scheduleProblem(schedule: string): string | null {
+  if (!schedule.trim()) return null;
+  if (!looksLikeCron(schedule)) {
+    return "A schedule is a 5-field cron, e.g. `0 9 * * MON` (minute hour day month weekday).";
+  }
+  return null;
+}
+
+/** What is wrong with an output node's `destination.target` for `kind`, or
+ * `null` when it is postable. Mirrors the host's per-kind target contract in
+ * `src/company/workflow_file.rs`; `owner` and "no destination" carry no target
+ * and so have nothing to check.
+ *
+ * Same two-caller contract as {@link scheduleProblem}.
+ *
+ * Issue #260: each message ends with the SAME fix instruction the host's
+ * rejection ends with, and echoes the offending target the same way, so an
+ * author who trips the pre-flight and an author who trips the 400 are told the
+ * same thing. `destination_messages_match_the_console` in
+ * `src/company/workflow_file.rs` fails if either side is reworded alone.
+ */
+function destinationTargetProblem(
+  kind: DraftNode["destinationKind"],
+  target: string,
+): string | null {
+  const value = target.trim();
+  if (kind === "email" && !value.includes("@")) {
+    return `\`${value}\` is not an email address — give the recipient's full address.`;
+  }
+  if (kind === "channel" && !value) {
+    return "A channel destination needs a channel id — name the channel to post the report to.";
+  }
+  return null;
+}
+
+/** How a validation message names a node.
+ *
+ * Issue #260: the dialog reported `Node \`2\`` — the id, which on a row the
+ * author never renamed is whatever the form put there — while the author had
+ * typed a name. Prefer the name they chose; fall back to the id, and to a
+ * position-free phrase when the row is still blank (which the "needs an id"
+ * check above will have already reported).
+ */
+function nodeLabel(node: DraftNode): string {
+  return node.name.trim() || node.id.trim() || "this node";
 }
 
 interface DraftEdge {
@@ -55,14 +208,129 @@ interface DraftEdge {
   label: string;
 }
 
+/** The node fields that validate on blur (issue #261) — the ones with a real
+ * contract, which are the ones authors get wrong. `config:${key}` covers the
+ * kind-specific config fields (issue #541), filed under the field's engine key
+ * (e.g. `config:slug`). */
+type ValidatedField = "schedule" | "destinationTarget" | `config:${string}`;
+
+/** The key a field's error is filed under.
+ *
+ * Deliberately `node.key`, the stable row key, and NOT `node.id`: the id is a
+ * text field the author edits, so keying on it would strand every error the
+ * moment they renamed a node — the error would still render, attached to
+ * nothing that can clear it.
+ */
+function errorKey(nodeKey: string, field: ValidatedField): string {
+  return `${nodeKey}:${field}`;
+}
+
+/** The "no destination" option's value. A Select item cannot carry an empty
+ * string, so the sentinel stands in for `destinationKind: ""`. */
+const NO_DESTINATION = "__none__";
+
 let seq = 0;
 function nextKey(): string {
   seq += 1;
   return `row-${seq}`;
 }
 
+/** The field updates for changing a node's kind: the new kind, plus a reset of
+ * every field only the OLD kind's controls could edit.
+ *
+ * The rule is "draft state matches the visible controls", and it covers EVERY
+ * kind-conditional field — `agent` (agent nodes), `schedule` (trigger nodes),
+ * and the destination pair (output nodes). Clearing beats tolerating a stale
+ * value: `submit()` already drops fields that don't match the kind, but a stale
+ * `destinationKind` also had to pass validation, and there was no control left
+ * on screen to fix it with. `agent` and `schedule` never trapped the form that
+ * way; they are cleared so there is one rule here rather than three, and so
+ * that switching a node's kind and back doesn't silently resurrect a value the
+ * author can no longer see.
+ *
+ * Anything added to `DraftNode` behind a `node.kind === …` control belongs in
+ * this reset.
+ */
+function changeKind(kind: string): Partial<DraftNode> {
+  return {
+    kind,
+    agent: "",
+    schedule: "",
+    destinationKind: "",
+    destinationTarget: "",
+    // Kind-specific by definition (a `switch`'s branch key, a `sub_workflow`'s
+    // target), so it means nothing on the new kind. `config` is the raw overlay
+    // for form-less kinds; `configDraft`/`configExtra` are the form kinds'
+    // (#541). All three reset to the new kind's blank state — the kind-agnostic
+    // policies (`onError`, `retry`, `requiresApproval`) are kept.
+    config: undefined,
+    configDraft: blankConfigDraft(kind),
+    configExtra: undefined,
+  };
+}
+
+/** A blank node row, so every construction site stays in step as the shape grows. */
+function blankNode(fields: Partial<DraftNode> = {}): DraftNode {
+  return {
+    key: nextKey(),
+    id: "",
+    kind: "agent",
+    name: "",
+    summary: "",
+    agent: "",
+    schedule: "",
+    destinationKind: "",
+    destinationTarget: "",
+    configDraft: {},
+    ...fields,
+  };
+}
+
 function starterNodes(): DraftNode[] {
-  return [{ key: nextKey(), id: "start", kind: "trigger", name: "Start", summary: "", agent: "" }];
+  return [blankNode({ id: "start", kind: "trigger", name: "Start" })];
+}
+
+/** The saved graph's nodes as draft rows (issue #259).
+ *
+ * Every row goes through {@link blankNode}, so each gets a **fresh** `key` from
+ * `nextKey()`. Reusing the saved node ids as keys would be the obvious shortcut
+ * and a real bug: `fieldErrors` is keyed on `key`, so two graphs that share a
+ * node id (`start` is the starter row's id, so most of them do) would share an
+ * error map, and a complaint raised on one graph would render on the next.
+ */
+function draftNodes(graph: WorkflowGraph): DraftNode[] {
+  return graph.nodes.map((n) => {
+    const common = {
+      id: n.id,
+      kind: n.kind,
+      name: n.name,
+      summary: n.summary ?? "",
+      agent: n.agent ?? "",
+      schedule: n.schedule ?? "",
+      destinationKind: (n.destination?.kind ?? "") as DraftNode["destinationKind"],
+      destinationTarget: n.destination?.target ?? "",
+      onError: n.onError,
+      retry: n.retry,
+      requiresApproval: n.requiresApproval,
+    };
+    // A form kind (#541) hydrates its config into per-field strings plus a
+    // preserved `extra` bag; a form-less kind keeps the raw overlay in `config`.
+    if (hasConfigForm(n.kind)) {
+      const { draft, extra } = configDraftFrom(n.kind, n.config);
+      return blankNode({ ...common, configDraft: draft, configExtra: extra });
+    }
+    return blankNode({ ...common, config: n.config, configDraft: {} });
+  });
+}
+
+/** The saved graph's edges as draft rows, on the same fresh-key rule. */
+function draftEdges(graph: WorkflowGraph): DraftEdge[] {
+  return graph.edges.map((e) => ({
+    key: nextKey(),
+    from: e.from,
+    to: e.to,
+    label: e.label ?? "",
+  }));
 }
 
 /** A safe on-disk id: only letters, digits, `_`, and `-` — a subset of what the
@@ -78,33 +346,92 @@ export function WorkflowCreateDialog({
   open,
   onOpenChange,
   onCreated,
+  workflow = null,
+  onSaved,
+  onConflict,
 }: {
   client: OpenCompanyClient;
   company: string | null;
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onCreated: (graph: WorkflowGraph) => void;
+  /** Called with the stored graph after a create. Create mode only. */
+  onCreated?: (graph: WorkflowGraph) => void;
+  /**
+   * The saved graph to edit (issue #259). `null` is create mode. Pass the graph
+   * straight from `getWorkflow` — its `version` is what makes the save
+   * conditional, so a copy without one silently loses the guard.
+   */
+  workflow?: WorkflowGraph | null;
+  /** Called with the stored graph, and its FRESH version, after an edit. */
+  onSaved?: (graph: WorkflowGraph) => void;
+  /**
+   * The host's message when it refused the save with a `409` — the graph moved
+   * under this edit, or the new display name is taken. The dialog stays open
+   * with the same message inline (so the author keeps what they typed); this
+   * hands it to the view, whose persistent banner carries the way out (Reload).
+   */
+  onConflict?: (message: string) => void;
 }) {
+  const editing = workflow !== null;
   const [id, setId] = useState("");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
   const [nodes, setNodes] = useState<DraftNode[]>(starterNodes());
   const [edges, setEdges] = useState<DraftEdge[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
+  /** The company's workflows, for the `sub_workflow` config picker (#541). The
+   * graph's own id is dropped at render time — a sub-workflow can't call
+   * itself. Degrades to a free-text id field when the host offers no list. */
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  /** Per-field problems raised on blur (issue #261), keyed by
+   * {@link errorKey}. Separate from `error`, the submit-time banner: this one
+   * is inline, scoped to the control that caused it, and never blocks Save on
+   * its own — `validate()` remains the gate. */
+  const [fieldErrors, setFieldErrors] = useState<Record<string, string>>({});
+  // Issue #274: the edit history panel (edit mode only). It fetches lazily — the
+  // first time an operator expands it — so opening the dialog to make an edit
+  // costs no extra request unless they actually want to look back.
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [revisions, setRevisions] = useState<WorkflowRevision[]>([]);
+  const [revisionsLoaded, setRevisionsLoaded] = useState(false);
+  const [revisionsLoading, setRevisionsLoading] = useState(false);
+  const [revisionsError, setRevisionsError] = useState<string | null>(null);
+  /** The revision currently being restored, so its row can show a spinner and
+   * every Restore button disables while one restore is in flight. */
+  const [restoringId, setRestoringId] = useState<string | null>(null);
   const formId = useId();
 
   // Reload the roster (for the agent-node picker) and reset the draft each
   // time the dialog opens, so a prior attempt never leaks into the next one.
+  //
+  // Edit mode hydrates HERE rather than anywhere else on purpose (issue #259):
+  // this is the one place `fieldErrors` is cleared, so a draft populated by any
+  // other path would carry the previous graph's errors — attached to rows that
+  // no longer exist and pointing at fields nobody can see.
+  //
+  // `workflow` is a dependency, so the conflict banner's Reload re-hydrates an
+  // open dialog with the fresh graph and its fresh token. That discards what
+  // was typed, which is the honest outcome: Reload means "show me the latest",
+  // and keeping the edit would keep the stale token with it.
   useEffect(() => {
     if (!open) return;
-    setId("");
-    setName("");
-    setDescription("");
-    setNodes(starterNodes());
-    setEdges([]);
+    setId(workflow?.id ?? "");
+    setName(workflow?.name ?? "");
+    setDescription(workflow?.description ?? "");
+    setNodes(workflow ? draftNodes(workflow) : starterNodes());
+    setEdges(workflow ? draftEdges(workflow) : []);
     setError(null);
+    setFieldErrors({});
+    // Issue #274: a fresh open (or a re-hydrate after a restore) must not carry
+    // the previous graph's history. It re-loads on the next expand, and against
+    // the freshly-restored body's version token.
+    setHistoryOpen(false);
+    setRevisions([]);
+    setRevisionsLoaded(false);
+    setRevisionsError(null);
+    setRestoringId(null);
     let live = true;
     (async () => {
       try {
@@ -116,25 +443,123 @@ export function WorkflowCreateDialog({
         if (live) setRoster([]);
       }
     })();
+    // The sub_workflow picker's options (issue #541). Same degrade-on-failure
+    // shape as the roster: a host that can't list workflows leaves the field a
+    // free-text id, never blocks authoring.
+    (async () => {
+      try {
+        const list = await listWorkflows(client, company);
+        if (live) setWorkflows(list);
+      } catch {
+        if (live) setWorkflows([]);
+      }
+    })();
     return () => {
       live = false;
     };
-  }, [open, client, company]);
+  }, [open, client, company, workflow]);
 
   function addNode() {
-    setNodes((rows) => [
-      ...rows,
-      { key: nextKey(), id: "", kind: "agent", name: "", summary: "", agent: "" },
-    ]);
+    setNodes((rows) => [...rows, blankNode()]);
   }
 
   function updateNode(key: string, fields: Partial<DraftNode>) {
     setNodes((rows) => rows.map((r) => (r.key === key ? { ...r, ...fields } : r)));
+    // Clear whatever the edit invalidated. This MUST stay in step with
+    // `changeKind`: that reset exists so the draft never holds a value whose
+    // control is off screen, and an error is a value too — leaving one behind
+    // would show a complaint about a field the author can no longer see, let
+    // alone fix. Same reasoning for `destinationKind`, which swaps which target
+    // contract (address vs channel id) applies.
+    setFieldErrors((prev) => {
+      const stale: ValidatedField[] = [];
+      if ("kind" in fields) stale.push("schedule", "destinationTarget");
+      if ("destinationKind" in fields) stale.push("destinationTarget");
+      // Typing in a field clears its own error: the author is already fixing
+      // it, and re-checking mid-word would fail on every prefix of a correct
+      // answer (`n`, `no`, `nop` on the way to an address).
+      if ("schedule" in fields) stale.push("schedule");
+      if ("destinationTarget" in fields) stale.push("destinationTarget");
+
+      const next = { ...prev };
+      let changed = false;
+      for (const field of stale) {
+        const k = errorKey(key, field);
+        if (k in next) {
+          delete next[k];
+          changed = true;
+        }
+      }
+      // A kind change resets the config draft (see `changeKind`), so this row's
+      // config-field errors point at fields that are gone — drop them too.
+      if ("kind" in fields) {
+        const prefix = `${key}:config:`;
+        for (const k of Object.keys(next)) {
+          if (k.startsWith(prefix)) {
+            delete next[k];
+            changed = true;
+          }
+        }
+      }
+      return changed ? next : prev;
+    });
+  }
+
+  /** Updates one config field's draft string and clears its own blur error —
+   * the author is fixing it, same reasoning as {@link updateNode}. Kept
+   * separate because config fields nest under `configDraft`, keyed by their
+   * engine key rather than being top-level `DraftNode` fields (issue #541). */
+  function updateConfigField(nodeKey: string, key: string, value: string) {
+    setNodes((rows) =>
+      rows.map((r) =>
+        r.key === nodeKey ? { ...r, configDraft: { ...r.configDraft, [key]: value } } : r,
+      ),
+    );
+    setFieldErrors((prev) => {
+      const k = errorKey(nodeKey, `config:${key}`);
+      if (!(k in prev)) return prev;
+      const next = { ...prev };
+      delete next[k];
+      return next;
+    });
+  }
+
+  /** Checks one field's own rule, on blur. Returns nothing — the result lands
+   * in `fieldErrors` — so the caller stays a one-liner on the control.
+   *
+   * An EMPTY field is never flagged here. "You haven't filled this in yet" is
+   * true of every field an author tabs past on the way to somewhere else;
+   * saying so is nagging, not feedback. Emptiness stays `validate()`'s business
+   * at submit, where it is actually a problem. */
+  function validateField(nodeKey: string, field: ValidatedField, value: string) {
+    if (!value.trim()) return;
+    const node = nodes.find((n) => n.key === nodeKey);
+    if (!node) return;
+    let problem: string | null = null;
+    if (field === "schedule") {
+      problem = scheduleProblem(value);
+    } else if (field === "destinationTarget") {
+      problem = destinationTargetProblem(node.destinationKind, value);
+    } else if (field.startsWith("config:")) {
+      const key = field.slice("config:".length);
+      const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
+      if (spec) problem = configFieldProblem(spec, value);
+    }
+    if (problem) {
+      setFieldErrors((prev) => ({ ...prev, [errorKey(nodeKey, field)]: problem }));
+    }
   }
 
   function removeNode(key: string) {
     const removed = nodes.find((n) => n.key === key);
     setNodes((rows) => rows.filter((r) => r.key !== key));
+    // The row is gone, so its errors have nothing left to point at.
+    setFieldErrors((prev) => {
+      const next = Object.fromEntries(
+        Object.entries(prev).filter(([k]) => !k.startsWith(`${key}:`)),
+      );
+      return Object.keys(next).length === Object.keys(prev).length ? prev : next;
+    });
     // Drop any edge that pointed at the removed node's id — a dangling
     // reference would just bounce back from the server as a 400.
     if (removed?.id) {
@@ -167,10 +592,31 @@ export function WorkflowCreateDialog({
       if (!n.id.trim()) return "Every node needs an id.";
       if (ids.has(n.id.trim())) return `Node id \`${n.id}\` is used more than once.`;
       ids.add(n.id.trim());
-      if (!n.name.trim()) return `Node \`${n.id}\` needs a name.`;
+      if (!n.name.trim()) return `Node \`${nodeLabel(n)}\` needs a name.`;
       if (n.kind === "agent" && !n.agent.trim()) {
-        return `Node \`${n.id}\` is an agent node — pick who does it.`;
+        return `Node \`${nodeLabel(n)}\` is an agent node — pick who does it.`;
       }
+      // Only fires for a node that IS a trigger, so this is a check on visible
+      // state, never an off-kind trap.
+      if (n.kind === "trigger") {
+        const problem = scheduleProblem(n.schedule);
+        if (problem) return `Node \`${nodeLabel(n)}\`: ${problem}`;
+      }
+      // Mirrors the host's `destination` target rules so a wrong target is
+      // caught here rather than after a round trip. There is deliberately NO
+      // "destination on a non-output node" check: `changeKind` makes that state
+      // unreachable, and re-adding the check would only recreate the trap of an
+      // error the author has no visible control to clear.
+      const destinationProblem = destinationTargetProblem(
+        n.destinationKind,
+        n.destinationTarget,
+      );
+      if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
+      // Kind-specific config (issue #541): required keys, malformed JSON, the
+      // switch field-or-expression rule, a sub_workflow pointed at its own id.
+      // Only ever checks a form kind, so it is a check on visible state.
+      const configProblem = configDraftProblem(n.kind, n.id, n.configDraft);
+      if (configProblem) return `Node \`${nodeLabel(n)}\`: ${configProblem}`;
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {
@@ -183,6 +629,77 @@ export function WorkflowCreateDialog({
       if (e.from === e.to) return "An edge can't loop a node back to itself.";
     }
     return null;
+  }
+
+  // Issue #274: fetch this workflow's edit history. Called on first expand and
+  // again after a restore, so the list reflects the snapshot the restore just
+  // captured. A host predating #274 has no such route; the panel degrades to
+  // "no revisions" rather than throwing.
+  async function loadRevisions() {
+    if (!workflow) return;
+    setRevisionsLoading(true);
+    setRevisionsError(null);
+    try {
+      const rows = await listWorkflowRevisions(client, company, workflow.id);
+      setRevisions(rows);
+      setRevisionsLoaded(true);
+    } catch (e) {
+      setRevisionsError(
+        e instanceof Error ? e.message : "could not load the edit history",
+      );
+    } finally {
+      setRevisionsLoading(false);
+    }
+  }
+
+  function toggleHistory() {
+    const next = !historyOpen;
+    setHistoryOpen(next);
+    // Lazy: only fetch the first time it opens (or after a reset cleared it).
+    if (next && !revisionsLoaded && !revisionsLoading) void loadRevisions();
+  }
+
+  // Issue #274: restore one snapshot. A confirm names the undoability, because a
+  // restore overwrites the live graph — but the body it replaces is itself
+  // snapshotted, so the operator can walk it back. On success the dialog
+  // re-hydrates from the returned graph exactly as a save does (via `onSaved`),
+  // so the canvas shows the restored body and the next edit carries its fresh
+  // token; the history list is then refreshed to include the pre-restore body.
+  async function restore(rev: WorkflowRevision) {
+    if (!workflow || restoringId) return;
+    const ok = window.confirm(
+      `Restore "${rev.name}"? This replaces the current graph. The version you have now ` +
+        `is saved to history first, so you can restore back to it.`,
+    );
+    if (!ok) return;
+    setRestoringId(rev.id);
+    setRevisionsError(null);
+    try {
+      const restored = await restoreWorkflowRevision(
+        client,
+        company,
+        workflow.id,
+        rev.id,
+        // Condition on the graph the operator is looking at, so a concurrent
+        // edit is a 409 rather than a silent clobber.
+        workflow.version,
+      );
+      onSaved?.(restored);
+      // The parent updates `workflow`, which re-hydrates this dialog and resets
+      // the history state; re-fetch so the panel (if still open) reflects the
+      // snapshot the restore just captured.
+      await loadRevisions();
+    } catch (e) {
+      // 409 (moved under us) / 400 (invalid against the current graph) / 404 —
+      // surface the host's prosumer-language message in the panel. A 409 also
+      // rides out to the view's persistent reload banner, same as a save.
+      setRevisionsError(
+        e instanceof Error ? e.message : "could not restore this revision",
+      );
+      if (e instanceof ApiError && e.status === 409) onConflict?.(e.message);
+    } finally {
+      setRestoringId(null);
+    }
   }
 
   async function submit() {
@@ -204,6 +721,33 @@ export function WorkflowCreateDialog({
           name: n.name.trim(),
           summary: n.summary.trim() || undefined,
           agent: n.kind === "agent" ? n.agent.trim() : undefined,
+          // The host rejects a schedule on any non-trigger node, so only the
+          // trigger's value is ever sent.
+          schedule:
+            n.kind === "trigger" && n.schedule.trim() ? n.schedule.trim() : undefined,
+          // Only output nodes route a report, and `owner` resolves server-side
+          // so it must carry no target — the host rejects one.
+          destination:
+            n.kind === "output" && n.destinationKind
+              ? {
+                  kind: n.destinationKind,
+                  target:
+                    n.destinationKind === "owner"
+                      ? undefined
+                      : n.destinationTarget.trim() || undefined,
+                }
+              : undefined,
+          // Config: a form kind (#541) rebuilds it from its per-field draft
+          // plus the preserved `extra` bag (so an edit keeps orchestrator keys
+          // it has no control for); a form-less kind passes its raw overlay
+          // straight back out — an edit must not delete what it cannot show.
+          // `undefined` is omitted from the JSON body.
+          config: hasConfigForm(n.kind)
+            ? configFromDraft(n.kind, n.configDraft, n.configExtra)
+            : n.config,
+          onError: n.onError,
+          retry: n.retry,
+          requiresApproval: n.requiresApproval,
         }),
       ),
       edges: edges.map(
@@ -215,11 +759,42 @@ export function WorkflowCreateDialog({
       ),
     };
     try {
-      const created = await createWorkflow(client, company, graph);
-      onCreated(created);
+      if (workflow) {
+        // The id keys the saved graph, the schedule and the run history, so it
+        // is the graph's own id that is sent, not the (read-only) field —
+        // there is no path here that renames anything, and the host answers
+        // 400 if one ever appeared. `version` makes the write conditional: it
+        // means "save over the graph I was looking at", not "over whatever is
+        // there now". The response carries a fresh token, so a second save
+        // needs no intervening read.
+        const saved = await updateWorkflow(
+          client,
+          company,
+          workflow.id,
+          graph,
+          workflow.version,
+        );
+        onSaved?.(saved);
+      } else {
+        const created = await createWorkflow(client, company, graph);
+        onCreated?.(created);
+      }
       onOpenChange(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "could not create the workflow");
+      setError(
+        e instanceof Error
+          ? e.message
+          : workflow
+            ? "could not save the workflow"
+            : "could not create the workflow",
+      );
+      // A refused write is the one failure the operator can act on, and the
+      // action (reload, or pick another name) happens out in the view — so it
+      // is raised there too, where the banner persists past this dialog. The
+      // dialog stays open with the same message so the edit is not thrown away.
+      if (workflow && e instanceof ApiError && e.status === 409) {
+        onConflict?.(e.message);
+      }
     } finally {
       setSubmitting(false);
     }
@@ -229,21 +804,36 @@ export function WorkflowCreateDialog({
     <Dialog open={open} onOpenChange={(o) => !submitting && onOpenChange(o)}>
       <DialogContent className="max-h-[85vh] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>New workflow</DialogTitle>
+          <DialogTitle>{editing ? "Edit workflow" : "New workflow"}</DialogTitle>
           <DialogDescription>
-            Define the graph by hand — nodes, then how they connect.
+            {editing
+              ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
+              : "Define the graph by hand — nodes, then how they connect."}
           </DialogDescription>
         </DialogHeader>
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="grid gap-2">
             <Label htmlFor={`${formId}-id`}>Id</Label>
+            {/* Read-only in edit mode, not merely rejected on save: the id keys
+                the saved graph, the scheduler and every past run, so the host
+                answers 400 to a rename. Letting an author type a new one and
+                then refusing it would be a trap. */}
             <Input
               id={`${formId}-id`}
               value={id}
               onChange={(e) => setId(e.target.value)}
+              readOnly={editing}
+              aria-readonly={editing || undefined}
+              className={editing ? "text-muted-foreground" : undefined}
               placeholder="e.g. campaign_pipeline"
             />
+            {editing && (
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                A workflow&apos;s id can&apos;t change. It keys the saved graph, its
+                schedule and its run history.
+              </p>
+            )}
           </div>
           <div className="grid gap-2">
             <Label htmlFor={`${formId}-name`}>Name</Label>
@@ -278,7 +868,22 @@ export function WorkflowCreateDialog({
               <NodeRow
                 key={n.key}
                 node={n}
+                client={client}
+                company={company}
                 roster={roster}
+                workflows={workflows}
+                errors={{
+                  schedule: fieldErrors[errorKey(n.key, "schedule")],
+                  destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
+                }}
+                configErrors={Object.fromEntries(
+                  configFieldSpecs(n.kind).map((s) => [
+                    s.key,
+                    fieldErrors[errorKey(n.key, `config:${s.key}`)],
+                  ]),
+                )}
+                onValidateField={(field, value) => validateField(n.key, field, value)}
+                onConfigChange={(key, value) => updateConfigField(n.key, key, value)}
                 onChange={(fields) => updateNode(n.key, fields)}
                 onRemove={() => removeNode(n.key)}
               />
@@ -328,12 +933,89 @@ export function WorkflowCreateDialog({
           </Alert>
         )}
 
+        {/* Issue #274: the edit-history panel. Edit mode only — a workflow being
+            created has nothing to look back on. */}
+        {editing && (
+          <div className="rounded-lg border">
+            <button
+              type="button"
+              onClick={toggleHistory}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-sm font-medium"
+              aria-expanded={historyOpen}
+              data-testid="workflow-history-toggle"
+            >
+              <span className="flex items-center gap-2">
+                <History className="size-4" />
+                History
+              </span>
+              <span className="text-xs text-muted-foreground">
+                {historyOpen ? "Hide" : "Show"}
+              </span>
+            </button>
+            {historyOpen && (
+              <div className="border-t px-3 py-2">
+                {revisionsLoading && (
+                  <p className="py-2 text-center text-xs text-muted-foreground">
+                    Loading history…
+                  </p>
+                )}
+                {revisionsError && (
+                  <Alert variant="destructive" className="my-2">
+                    <AlertDescription>{revisionsError}</AlertDescription>
+                  </Alert>
+                )}
+                {!revisionsLoading && !revisionsError && revisions.length === 0 && (
+                  <p className="py-2 text-center text-xs text-muted-foreground">
+                    No earlier versions yet — every edit you save will show up here.
+                  </p>
+                )}
+                <ul className="divide-y">
+                  {revisions.map((rev) => (
+                    <li
+                      key={rev.id}
+                      className="flex items-center justify-between gap-3 py-2"
+                    >
+                      <div className="min-w-0">
+                        <p className="truncate text-sm">{rev.name}</p>
+                        <p className="text-[11px] text-muted-foreground">
+                          {relativeTime(rev.createdAtMillis)}
+                        </p>
+                      </div>
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        onClick={() => void restore(rev)}
+                        disabled={restoringId !== null || submitting}
+                        aria-label={`Restore ${rev.name}`}
+                      >
+                        <RotateCcw className="mr-1 size-3.5" />
+                        {restoringId === rev.id ? "Restoring…" : "Restore"}
+                      </Button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+          </div>
+        )}
+
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={submitting}>
             Cancel
           </Button>
-          <Button onClick={() => void submit()} disabled={submitting}>
-            {submitting ? "Creating…" : "Create workflow"}
+          <Button
+            onClick={() => void submit()}
+            disabled={submitting}
+            data-testid="workflow-dialog-submit"
+          >
+            {editing
+              ? submitting
+                ? "Saving…"
+                : "Save changes"
+              : submitting
+                ? "Creating…"
+                : "Create workflow"}
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -341,17 +1023,48 @@ export function WorkflowCreateDialog({
   );
 }
 
+/** A one-line problem shown under the control that caused it (issue #261). */
+function FieldError({ id, message }: { id: string; message?: string }) {
+  if (!message) return null;
+  return (
+    <p id={id} className="text-[11px] leading-snug text-destructive">
+      {message}
+    </p>
+  );
+}
+
 function NodeRow({
   node,
+  client,
+  company,
   roster,
+  workflows,
+  errors,
+  configErrors,
+  onValidateField,
+  onConfigChange,
   onChange,
   onRemove,
 }: {
   node: DraftNode;
+  /** Threaded through solely so the trigger row's schedule field can ask the
+   * host what its cron means (issue #262). */
+  client: OpenCompanyClient;
+  company: string | null;
   roster: TeamMemberDto[];
+  /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
+  workflows: WorkflowSummary[];
+  /** Blur-time problems for this row's validated fields, if any. */
+  errors: Partial<Record<ValidatedField, string>>;
+  /** Blur-time problems for this row's config fields, keyed by engine key. */
+  configErrors: Record<string, string | undefined>;
+  onValidateField: (field: ValidatedField, value: string) => void;
+  onConfigChange: (key: string, value: string) => void;
   onChange: (fields: Partial<DraftNode>) => void;
   onRemove: () => void;
 }) {
+  const rowId = useId();
+  const targetErrorId = `${rowId}-target-error`;
   return (
     <div className="grid gap-2 rounded-lg border p-2 sm:grid-cols-[1fr_1fr_1.4fr_auto] sm:items-start">
       <div className="grid gap-1">
@@ -361,7 +1074,11 @@ function NodeRow({
           placeholder="node id"
           aria-label="Node id"
         />
-        <Select value={node.kind} onValueChange={(v) => onChange({ kind: v ?? "" })}>
+        {/* Changing the kind clears every kind-conditional field, so the draft
+            never holds a value whose control is no longer on screen. Without
+            this, picking a destination and then changing the kind left the row
+            un-submittable with nothing visible to clear. */}
+        <Select value={node.kind} onValueChange={(v) => onChange(changeKind(v ?? ""))}>
           <SelectTrigger className="h-8" aria-label="Node kind">
             <SelectValue />
           </SelectTrigger>
@@ -404,12 +1121,100 @@ function NodeRow({
             />
           ))}
       </div>
-      <Input
-        value={node.summary}
-        onChange={(e) => onChange({ summary: e.target.value })}
-        placeholder="summary (optional)"
-        aria-label="Node summary"
-      />
+      <div className="grid gap-1">
+        <Input
+          value={node.summary}
+          onChange={(e) => onChange({ summary: e.target.value })}
+          placeholder="summary (optional)"
+          aria-label="Node summary"
+        />
+        {node.kind === "trigger" && (
+          <ScheduleField
+            client={client}
+            company={company}
+            schedule={node.schedule}
+            error={errors.schedule}
+            onChange={(schedule) => onChange({ schedule })}
+            onBlurValidate={(value) => onValidateField("schedule", value)}
+          />
+        )}
+        {/* Only an output node reports back, so only it can route that report
+            somewhere. "Nowhere" stays the default: the result still shows in the
+            run drawer, which is all an output node did before. */}
+        {node.kind === "output" && (
+          <>
+            <Select
+              value={node.destinationKind || NO_DESTINATION}
+              onValueChange={(v) =>
+                onChange({
+                  destinationKind:
+                    !v || v === NO_DESTINATION
+                      ? ""
+                      : (v as WorkflowDestination["kind"]),
+                  // Switching to `owner` (or to no destination) clears the
+                  // target — the host rejects an `owner` that carries one.
+                  ...(v === "owner" || !v || v === NO_DESTINATION
+                    ? { destinationTarget: "" }
+                    : {}),
+                })
+              }
+            >
+              <SelectTrigger className="h-8" aria-label="Send report to">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value={NO_DESTINATION}>
+                  Send report to… nowhere (run result only)
+                </SelectItem>
+                {DESTINATION_KINDS.map((d) => (
+                  <SelectItem key={d.value} value={d.value}>
+                    {d.label}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            {(node.destinationKind === "email" || node.destinationKind === "channel") && (
+              <>
+                <Input
+                  value={node.destinationTarget}
+                  onChange={(e) => onChange({ destinationTarget: e.target.value })}
+                  onBlur={(e) => onValidateField("destinationTarget", e.target.value)}
+                  aria-invalid={Boolean(errors.destinationTarget)}
+                  aria-describedby={errors.destinationTarget ? targetErrorId : undefined}
+                  placeholder={
+                    node.destinationKind === "email" ? "recipient@example.com" : "channel id"
+                  }
+                  aria-label={
+                    node.destinationKind === "email" ? "Recipient address" : "Channel id"
+                  }
+                />
+                <FieldError id={targetErrorId} message={errors.destinationTarget} />
+              </>
+            )}
+            {node.destinationKind === "email" && (
+              <p className="text-[11px] leading-snug text-muted-foreground">
+                Only sends if this company grants email and the recipient has
+                already written in.
+              </p>
+            )}
+          </>
+        )}
+        {/* The five kinds that need config to run (issue #541). Rendered here,
+            alongside the trigger's schedule and the output's destination, so a
+            node's kind-specific controls all live in the same column. */}
+        {hasConfigForm(node.kind) && (
+          <NodeConfigFields
+            idPrefix={rowId}
+            kind={node.kind}
+            draft={node.configDraft}
+            errors={configErrors}
+            workflows={workflows}
+            selfId={node.id}
+            onChange={onConfigChange}
+            onValidate={(key, value) => onValidateField(`config:${key}`, value)}
+          />
+        )}
+      </div>
       <Button
         type="button"
         variant="ghost"
@@ -422,6 +1227,111 @@ function NodeRow({
       </Button>
     </div>
   );
+}
+
+/** The trigger row's schedule control (issue #169): a preset picker that emits
+ * real cron strings, plus a Custom escape hatch for anything the presets don't
+ * cover. Rendered only on the trigger node, mirroring how the teammate picker
+ * appears only on agent nodes. */
+function ScheduleField({
+  client,
+  company,
+  schedule,
+  error,
+  onChange,
+  onBlurValidate,
+}: {
+  client: OpenCompanyClient;
+  company: string | null;
+  schedule: string;
+  /** The blur-time cron problem for this field, when there is one. */
+  error?: string;
+  onChange: (schedule: string) => void;
+  onBlurValidate: (value: string) => void;
+}) {
+  const fieldId = useId();
+  const errorId = `${fieldId}-error`;
+  // A non-empty value that isn't a preset means the operator typed their own.
+  const custom = schedule !== "" && !isPresetSchedule(schedule);
+  // Track "Custom is selected but nothing typed yet" so the input stays open.
+  const [customOpen, setCustomOpen] = useState(custom);
+  const showCustom = custom || customOpen;
+
+  return (
+    <div className="grid gap-1">
+      <Select
+        value={showCustom ? CUSTOM_SCHEDULE : schedule || NO_SCHEDULE}
+        onValueChange={(v) => {
+          if (v === CUSTOM_SCHEDULE) {
+            setCustomOpen(true);
+            return;
+          }
+          setCustomOpen(false);
+          onChange(v === NO_SCHEDULE || !v ? "" : v);
+        }}
+      >
+        <SelectTrigger className="h-8" aria-label="Schedule">
+          <SelectValue placeholder="No schedule (run manually)" />
+        </SelectTrigger>
+        <SelectContent>
+          {SCHEDULE_PRESETS.map((p) => (
+            <SelectItem key={p.value} value={p.value}>
+              {p.label}
+            </SelectItem>
+          ))}
+          <SelectItem value={CUSTOM_SCHEDULE}>Custom cron…</SelectItem>
+        </SelectContent>
+      </Select>
+      {showCustom && (
+        <Input
+          className="h-8 font-mono text-xs"
+          value={schedule}
+          onChange={(e) => onChange(e.target.value)}
+          onBlur={(e) => onBlurValidate(e.target.value)}
+          aria-invalid={Boolean(error)}
+          aria-describedby={error ? errorId : undefined}
+          placeholder="0 9 * * MON"
+          aria-label="Custom cron schedule"
+        />
+      )}
+      <FieldError id={errorId} message={error} />
+      {(showCustom || schedule) && (
+        <p className="text-[10px] text-muted-foreground">
+          5-field cron. Times are UTC.
+        </p>
+      )}
+      {/* The hint above says the contract; this says what THIS expression means
+          under it (issue #262) — including for a preset, since "Daily — 09:00
+          UTC" is only obviously wrong once you see it land at 14:30 your time.
+          Gated on the same 5-field shape check the pre-flight uses, so nothing
+          goes on the wire until there is a whole expression to read. */}
+      {looksLikeCron(schedule) && (
+        <CronPreviewLine
+          client={client}
+          company={company}
+          schedule={schedule}
+          suppressError={Boolean(error)}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * A compact "how long ago" label for a revision row (issue #274). Coarse on
+ * purpose — the history list wants "2h ago", not a timestamp — and it falls back
+ * to a locale date past a week so an old snapshot reads as a real date.
+ */
+function relativeTime(millis: number): string {
+  const secs = Math.max(0, Math.round((Date.now() - millis) / 1000));
+  if (secs < 60) return "just now";
+  const mins = Math.round(secs / 60);
+  if (mins < 60) return `${mins}m ago`;
+  const hours = Math.round(mins / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.round(hours / 24);
+  if (days < 7) return `${days}d ago`;
+  return new Date(millis).toLocaleDateString();
 }
 
 function EdgeRow({

@@ -16,8 +16,35 @@
 //!     policy + native runtime + per-workspace audit; `web` (`web_fetch`,
 //!     `http_request`, `curl`, `image_info`) behind the same policy plus a
 //!     per-company SSRF domain allowlist. The `subagent` namespace is reserved
-//!     but empty in v1. Still deferred: browser automation (needs a backend),
-//!     search (needs engine keys), and Node/NPM exec (need a managed bootstrap).
+//!     but empty in v1. Still deferred: browser automation (needs a backend)
+//!     and Node/NPM exec (need a managed bootstrap).
+//! * **Metered web search** (issue #238, [`search`](crate::harness::search)):
+//!   `web_search` over the managed backend, the discovery half the `web` tools
+//!   never had — they read a *known* URL and cannot find one. Two hard gates
+//!   before it is wired: an **explicit** `search` grant (a bare `*` does not
+//!   confer it, the media/composio precedent) and a managed platform
+//!   credential; granted-but-uncredentialed wires nothing and warns. Every call
+//!   is charged by the backend, so a per-company **daily call cap** is enforced
+//!   before the request and exactly one priced `SearchCall` usage sample is
+//!   recorded after it completes.
+//! * **Company workspace** (issue #237, [`workspace_tools`](crate::harness::workspace_tools)):
+//!   `workspace_list` / `workspace_read` over the operator's shared note tree,
+//!   granted under the ordinary namespace rule (`*` confers them) and hit live
+//!   per call so there is no snapshot to go stale. `workspace_write` is added
+//!   only under an **explicit** `workspace` / `workspace.write` grant — a bare
+//!   `*` does not confer it — and is guarded by a required compare-and-swap
+//!   revision token. Unlike the file tools these are scoped by the store, not
+//!   the filesystem: every call resolves through one company-scoped `tree()`
+//!   read, so no host path is ever built from agent input.
+//! * **Delegation is orchestrator-only.** `query_company` / `spawn_task` /
+//!   `delegate_to_desk` (and the other orchestrator roster/workflow tools) are
+//!   wired only when `is_orchestrator`; a **dispatched** desk/roster agent never
+//!   gets them. That is the depth cap = 1 / "no re-delegation in v1" invariant
+//!   (issue #178). The dispatched belt is thus a curated, metered derivative of
+//!   an OpenHuman agent — the exec subset above plus intrinsic memory / file /
+//!   MCP / skill tools, and nothing more. Both halves (the exact dispatched set,
+//!   and the orchestrator-vs-dispatched delegation contrast) are pinned by the
+//!   contract tests in this module's `tests` submodule.
 //! * **Workflows/skills** start empty. Parsing enabled `SKILL.md` bodies via
 //!   `openhuman::skills::ops_parse` depends on WS1's skill parsing; the seam is
 //!   the `.workflows(...)` setter.
@@ -34,8 +61,8 @@ use std::sync::Arc;
 
 use openhuman_core::openhuman as oh;
 
+use oh::agent::prompts::SystemPromptBuilder;
 use oh::agent::{Agent, AgentBuilder};
-use oh::context::prompt::SystemPromptBuilder;
 use oh::memory::tools::{MemoryRecallTool, MemoryStoreTool};
 use oh::memory::traits::Memory;
 use oh::security::SecurityPolicy;
@@ -60,6 +87,38 @@ use crate::harness::tool_dispatcher::AttrTolerantXmlDispatcher;
 use crate::harness::toolbelt;
 use crate::ports::skills_state::SkillState;
 use crate::ports::types::CompanyId;
+use crate::runtime::tools::extends_on_boundary;
+
+/// The per-tool-result byte budget every OpenCompany agent runs under.
+///
+/// The harness cuts **every** tool result to this many bytes on its way into
+/// the model's context — `ToolOutputMiddleware`, fed from
+/// `ContextManager::tool_result_budget_bytes`, which [`build_agent`] threads in
+/// below via [`AgentBuilder::context_config`]. It is the real ceiling on what a
+/// model ever sees from a tool, and it is *smaller* than the caps individual
+/// tools tend to write for themselves.
+///
+/// It is stated here rather than inherited on purpose (issue #417). Before this
+/// constant existed `build_agent` never called `context_config`, so the builder
+/// fell back to `ContextConfig::default()` and the 16 KiB became OpenCompany's
+/// effective bound by accident — invisible from this crate, and out of step
+/// with a tool that had capped itself at 64 KiB. `workspace_read` consequently
+/// told the model "nothing was dropped, you may write the complete body back"
+/// about a note the model had only seen the first 16 KiB of, and the resulting
+/// `workspace_write` silently destroyed the rest.
+///
+/// So any tool whose result carries a *contract* — "this is the whole thing",
+/// "act on the trailer below" — must size itself against this number, not
+/// against a cap of its own choosing. [`workspace_tools`] derives its read and
+/// write caps from it directly.
+///
+/// The value still tracks the vendored default: keeping the number identical
+/// makes adopting it a no-op today, so the behaviour change belongs to the
+/// consumers that now respect it, not to this line.
+///
+/// [`workspace_tools`]: crate::harness::workspace_tools
+pub(crate) const TOOL_RESULT_BUDGET_BYTES: usize =
+    oh::agent::context::DEFAULT_TOOL_RESULT_BUDGET_BYTES;
 
 /// Map a manifest cognition-tier hint to a hosted model/tier name.
 ///
@@ -132,11 +191,32 @@ pub fn build_agent(
         deps.context.clone(),
     ));
 
-    let workspace = deps
-        .workspace_root
-        .join(company.as_ref())
-        .join(&manifest_agent.id)
-        .join("workspace");
+    // Create the sandbox now, before any tool — or any `SecurityPolicy` — is
+    // bound to it. See [`ensure_agent_workspace`] for why an absent directory
+    // breaks relative writes outright, and why creating it late is not the same
+    // as creating it here.
+    //
+    // Best-effort: a failure here is logged, not fatal. The tools then behave
+    // exactly as they did before, the dispatch path gets a second attempt just
+    // before the agent acts, and the agent is still perfectly able to run a turn
+    // that touches no files. The message names the real condition — a directory
+    // that could not be created — rather than leaving the operator with the
+    // guard's traversal wording as the only clue.
+    let workspace = match ensure_agent_workspace(&deps.workspace_root, company, &manifest_agent.id)
+    {
+        Ok(workspace) => workspace,
+        Err(err) => {
+            let workspace = agent_workspace(&deps.workspace_root, company, &manifest_agent.id);
+            tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                workspace = %workspace.display(),
+                error = %err,
+                "[build] could not create the agent workspace; file tools will refuse relative paths"
+            );
+            workspace
+        }
+    };
 
     // Intrinsic memory tools: every agent can deliberately store and recall over
     // its own company memory, complementing the automatic retrieve→inject→store
@@ -148,8 +228,8 @@ pub fn build_agent(
     {
         // These config-free tools read OpenHuman's live process registry, so
         // installs and lifecycle changes are visible without rebuilding agents.
-        tools.push(Box::new(oh::mcp_registry::tools::McpRegistryListToolsTool));
-        tools.push(Box::new(oh::mcp_registry::tools::McpRegistryToolCallTool));
+        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryListToolsTool));
+        tools.push(Box::new(oh::mcp::registry::tools::McpRegistryToolCallTool));
     }
 
     // Granted file tools, sandboxed to this agent's own workspace directory. An
@@ -157,8 +237,41 @@ pub fn build_agent(
     // namespace (`docs.*`, `files.*`, or `*`). The security policy is
     // `workspace_only`, so a granted agent can read and write within its
     // workspace and nowhere else on the host.
-    if grants_cover(grants, "files") || grants_cover(grants, "docs") {
+    let wants_files = grants_cover(grants, "files") || grants_cover(grants, "docs");
+    if wants_files {
         tools.extend(file_tools(&workspace));
+    }
+
+    // `publish_artifact` (issue #244) — the only way a file the agent wrote
+    // becomes a deliverable. Two gates, and it is wired only when both hold:
+    //
+    //  1. the **same** `files`/`docs` grant the file tools ride on. An agent
+    //     that cannot write a file has nothing to publish, and offering it the
+    //     tool would only buy a confusing refusal mid-turn.
+    //  2. a configured **artifact store** (`deps.artifacts`). This is the
+    //     fail-closed half, following the `media` precedent: a tool that stages
+    //     into a queue nothing will ever drain looks like it worked, tells the
+    //     agent its deliverable is safe, and drops it. Better to not offer it
+    //     and say why in the log.
+    //
+    // Unlike `media` the grant is the ordinary namespace rule (a bare `*`
+    // confers it): publishing spends nothing and reaches nothing outside the
+    // company's own board.
+    let publishing = wants_files && deps.artifacts.is_some();
+    if publishing {
+        tools.push(Box::new(crate::harness::publish::PublishArtifactTool::new(
+            workspace.clone(),
+            manifest_agent.id.clone(),
+            deps.pending_publishes.clone(),
+        )));
+    } else if wants_files {
+        tracing::warn!(
+            company = %company,
+            agent = %manifest_agent.id,
+            "[build] agent is granted file tools but no artifact store is configured; \
+             `publish_artifact` NOT wired (fail-closed) — this agent's files cannot become \
+             deliverables"
+        );
     }
 
     // Exec-grade coding + web tools (Cell A), each behind its own grant
@@ -261,7 +374,18 @@ pub fn build_agent(
     #[cfg(feature = "composio")]
     if crate::company::grants_composio_explicit(grants) {
         match &deps.composio {
-            Some(config) => tools.extend(crate::harness::composio::composio_tools(config)),
+            // The metering handle lets `composio_execute` record an `OauthCall`
+            // usage sample per completed call, so the Usage view's
+            // calls-by-provider chart reflects real connected-tool activity
+            // (issue #152). A `None` meter simply leaves metering off.
+            Some(config) => tools.extend(crate::harness::composio::composio_tools(
+                config,
+                crate::harness::composio::ComposioMetering {
+                    company: company.clone(),
+                    agent: manifest_agent.id.clone(),
+                    meter: deps.meter.clone(),
+                },
+            )),
             None => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
@@ -270,9 +394,120 @@ pub fn build_agent(
         }
     }
 
+    // Metered web search (issue #238) — the discovery tool the `web` namespace
+    // never had. `web_fetch` / `http_request` / `curl` read a URL the agent
+    // already has; nothing could find one, while three shipped skills instruct
+    // the agent to "search broadly" and cite sources. Two hard gates:
+    //
+    //  1. an **EXPLICIT** `search` grant (`grants_search_explicit`) — the
+    //     catch-all `*` does NOT confer it, following `media` / `composio`,
+    //     because each call is a priced request on the managed platform.
+    //  2. a MANAGED backend credential on the deps (`deps.search`), resolved
+    //     env-only by the runtime builder — never a tenant secret.
+    //
+    // Granted-but-uncredentialed wires nothing and warns (fail-closed), which
+    // is the state the skills' degradation clause is written for.
+    //
+    // NOT feature-gated, unlike `media` and `composio`: it needs only the
+    // always-compiled `openhuman_core` integrations client, and CI's gated lane
+    // builds `--features openhuman,tinycortex`. Hiding a real-money tool behind
+    // a feature no CI job compiles is how #288 / #281 / #297 each happened.
+    if crate::company::grants_search_explicit(grants) {
+        match &deps.search {
+            Some(backend) => tools.extend(crate::harness::search::search_tools(
+                backend,
+                crate::harness::search::SearchMetering {
+                    company: company.clone(),
+                    agent: manifest_agent.id.clone(),
+                    meter: deps.meter.clone(),
+                },
+            )),
+            None => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `search` but no managed search backend is configured; web_search NOT wired (fail-closed)"
+            ),
+        }
+    }
+
+    // Company workspace (issues #237, #551) — live read (and optionally
+    // create/write) tools over the shared note tree, so an agent can ground an
+    // answer in the company's own `Standards/` / `Playbooks/` instead of
+    // guessing, and can put what it produces somewhere the operator and its
+    // teammates will actually find it. Two independent gates, deliberately
+    // asymmetric:
+    //
+    //  1. READS follow the ordinary namespace rule, so a catch-all `*` confers
+    //     them — the whole point of #237 is that shared guidance should be
+    //     reachable by default.
+    //  2. CREATE + WRITE need an **EXPLICIT** `workspace` (or
+    //     `workspace.write`) grant (`grants_workspace_write_explicit`); `*`
+    //     does NOT confer them, mirroring the media/composio precedent, because
+    //     they mutate a tree every other agent then trusts. Both ride the one
+    //     flag: overwriting an existing standard is strictly more destructive
+    //     than adding a note beside it, so a grant that permits the first has
+    //     already permitted the second.
+    //
+    // Unwired-store is fail-closed: with no `deps.workspace` no tool is built
+    // and the agent behaves exactly as it did before this cell.
+    //
+    // Note what does and does not contain a write here, now that create is
+    // agent-reachable (#551). It is NOT intra-company isolation — an agent may
+    // create and overwrite anywhere in its company's tree, by design. What
+    // holds is: company tenancy (the store is pinned to one `CompanyId` at
+    // build time, and every tool resolves inside a single company-scoped tree
+    // read); the explicit grant above; the write tool's required
+    // `expected_updated_at` CAS token; policy parking, since `workspace_write`
+    // and `workspace_create` are both `Reach::Consequence` and never grantable
+    // standing (`policy::consequence`); and authorship, since every node
+    // records who created it and who last wrote it (#326). Rename and delete
+    // remain operator-only — they are not on this surface at all.
+    //
+    // Not mapped in `toolbelt::namespace_of`, so these stay intrinsic to the
+    // capability filter (the `file_tools` precedent): the reads are free and
+    // correctness-critical, and shedding them under token-budget pressure
+    // would make agents hallucinate company standards to save nothing.
+    let workspace_writes = crate::company::grants_workspace_write_explicit(grants);
+    let workspace_tools = match &deps.workspace {
+        Some(store) if grants_cover(grants, "workspace") => {
+            Some(crate::harness::workspace_tools::workspace_tools(
+                store.clone(),
+                // Issue #552: so an overwrite of a *published* note is recorded
+                // on that deliverable's artifact chain rather than diverging
+                // from it. Read-only for the write tool's mirroring — no tool
+                // here opens or deletes an artifact.
+                deps.artifacts.clone(),
+                company.clone(),
+                manifest_agent.id.clone(),
+                workspace_writes,
+            ))
+        }
+        _ => None,
+    };
+    let workspace_granted = workspace_tools.is_some();
+    if let Some(workspace_tools) = workspace_tools {
+        tools.extend(workspace_tools);
+    }
+
     // Persona over openhuman's own identity: `omit_identity = true` drops the
     // "you are OpenHuman" preamble so the agent speaks as its company role.
     let mut persona = persona_prompt(company_name, manifest_agent);
+
+    // A short, STATIC brief — never a tree snapshot. A snapshot baked into the
+    // system prompt would be stale the moment the operator edits a note, which
+    // is exactly what hitting the store per call avoids.
+    if workspace_granted {
+        persona.push_str(&crate::harness::workspace_tools::workspace_brief(
+            workspace_writes,
+        ));
+    }
+
+    // Issue #244: what a deliverable is, and how to hand one over. Only when
+    // the tool was actually wired above — describing a tool the agent does not
+    // have is how you get a turn spent calling something that does not exist.
+    if publishing {
+        persona.push_str(&crate::harness::publish::publish_brief());
+    }
 
     // Skill read surface (read-only catalogue slice). Only materializes when the
     // harness is wired to a skills source; otherwise the agent stays skill-less
@@ -287,6 +522,7 @@ pub fn build_agent(
         let effective = EffectiveSkills::materialize(
             skill_ws,
             deps.skills_source_dir.as_deref(),
+            &deps.skills_registry,
             skill_deltas,
         )?;
         if !effective.is_empty() {
@@ -346,9 +582,20 @@ pub fn build_agent(
             // which the `run_workflow` tool loads graphs from.
             deps.skills_source_dir.clone(),
             deps.workflow_runner.clone(),
+            // Issue #383: the same supervisor the console's cancel route reads,
+            // so a run this agent starts is stoppable by an operator too.
+            deps.run_supervisor.clone(),
             // The company store, for the `add_agent` tool to persist overlay
             // teammates through the same path the console `POST .../team` uses.
             deps.store.clone(),
+            // Issue #339: the shared queue `run_workflow` / `create_workflow`
+            // stage onto, so a dispatched card can link to the workflow its
+            // attempt built or ran. Orchestrator-only, like the tools.
+            deps.workflow_refs.clone(),
+            // Issue #418: the shared run-output cache `run_workflow` fills and
+            // the `read_run_output` companion reads back, so a clipped preview
+            // is reachable within the turn. Orchestrator-only, like the tools.
+            deps.run_outputs.clone(),
         ));
     }
 
@@ -370,15 +617,46 @@ pub fn build_agent(
     // always kept.
     let tools = toolbelt::filter_by_capabilities(tools, &deps.capabilities);
 
+    // Tool-calling transport follows the provider's advertised capability. A
+    // provider that advertises native tool calling (`profile().tool_calling`,
+    // e.g. the managed hosted/tenant surface) gets openhuman's
+    // [`NativeToolDispatcher`], so the harness sends structured `tools` and reads
+    // `message.tool_calls` back — the reliable multi-step path. A provider that
+    // does not (the offline `MockProvider`, a keyless local model with no profile)
+    // keeps the prompt-guided [`AttrTolerantXmlDispatcher`] fallback. Without this
+    // every turn is pinned to prompt-XML and a model that narrates prose instead
+    // of the exact `<tool_call>` tag silently runs no tools (bug #1).
+    use oh::agent::dispatcher::{NativeToolDispatcher, ToolDispatcher};
+    let native_tools = deps
+        .provider
+        .profile()
+        .map(|profile| profile.tool_calling)
+        .unwrap_or(false);
+    let tool_dispatcher: Box<dyn ToolDispatcher> = if native_tools {
+        Box::new(NativeToolDispatcher)
+    } else {
+        Box::new(AttrTolerantXmlDispatcher::default())
+    };
+
     AgentBuilder::default()
         // `HarnessModel` upcasts to the tinyagents `ChatModel<()>` the builder's
         // native injection seam takes (the old `Provider` adapter is gone).
         .chat_model(deps.provider.clone() as Arc<dyn tinyagents::harness::model::ChatModel<()>>)
         .memory(memory)
         .tools(tools)
-        .tool_dispatcher(Box::new(AttrTolerantXmlDispatcher::default()))
+        .tool_dispatcher(tool_dispatcher)
         .tool_policy(Arc::new(policy))
         .prompt_builder(prompt_builder)
+        // Stated, not inherited (issue #417). Omitting this call leaves the
+        // builder on `ContextConfig::default()`, which lands on the same number
+        // — so this is behaviour-identical today. What changes is that the
+        // number is now *chosen here*, where tools that must size their results
+        // against it can read it as [`TOOL_RESULT_BUDGET_BYTES`], instead of
+        // being a vendored default no OpenCompany source mentioned.
+        .context_config(oh::config::ContextConfig {
+            tool_result_budget_bytes: TOOL_RESULT_BUDGET_BYTES,
+            ..Default::default()
+        })
         .model_name(model)
         .workspace_dir(workspace)
         .agent_definition_name(manifest_agent.id.clone())
@@ -402,16 +680,89 @@ fn memory_tools(memory: Arc<dyn Memory>) -> Vec<Box<dyn Tool>> {
     ]
 }
 
+/// The namespace separator for a `[tools].allow` grant: only `.`, because a
+/// namespace grant is written dotted (`docs.read`). Deliberately narrower than
+/// [`crate::runtime::tools`]'s tool-name set — `files_scratch` is not a grant
+/// under the `files` namespace, and never was.
+const NAMESPACE_SEPARATORS: &[char] = &['.'];
+
 /// Whether an agent's effective `grants` cover a tool `namespace`.
 ///
 /// Matches the bare namespace (`docs`), any glob under it (`docs.*`,
 /// `docs.read`), or the catch-all `*`. Shared with the workflow toolbelt
 /// ([`crate::workflows::caps`]) so a workflow `tool_call` is gated by the same
 /// namespace-grant rule an agent's exec tools are.
+///
+/// A thin caller of [`extends_on_boundary`] rather than its own prefix test.
+/// This matcher always required the prefix to stop on a separator (so
+/// `documentation.*` is not a grant on `docs`) while the per-tool matcher did
+/// not, and the two drifted apart unnoticed. The rule now exists once in the
+/// crate, next to [`grant_matches`](crate::runtime::tools), and cannot fork
+/// again (issue #461).
 pub(crate) fn grants_cover(grants: &[String], namespace: &str) -> bool {
-    grants.iter().any(|grant| {
-        grant == "*" || grant == namespace || grant.starts_with(&format!("{namespace}."))
-    })
+    grants
+        .iter()
+        .any(|grant| grant == "*" || extends_on_boundary(grant, namespace, NAMESPACE_SEPARATORS))
+}
+
+/// One agent's sandbox directory: `{root}/{company}/{agent}/workspace`.
+///
+/// A named function rather than a repeated `join` chain because three callers
+/// now need to agree on it exactly: [`build_agent`], which sandboxes the file
+/// tools to it; the brain's #244 unpublished-file scan, which snapshots it; and
+/// [`ensure_agent_workspace`], which creates it. A second transcription of the
+/// layout would make the scan silently look at the wrong directory — reporting
+/// nothing, forever, with no error anywhere.
+///
+/// Naming only — this never touches the disk. Anything that needs the directory
+/// to *exist* goes through [`ensure_agent_workspace`].
+pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
+    root.join(company.as_ref()).join(agent_id).join("workspace")
+}
+
+/// Create one agent's sandbox directory, returning the path
+/// [`agent_workspace`] names. Idempotent.
+///
+/// The single **creation** site for the agent-workspace layout, and not a
+/// convenience: the file tools do not work without the directory. OpenHuman's
+/// `validate_parent_path` resolves a relative write against `action_dir`, then
+/// walks up to the deepest *existing* ancestor to canonicalize it. With the
+/// workspace absent that walk climbs straight past it — through `{agent}/` and
+/// `{company}/` to the workspace root — and the ancestor it lands on is,
+/// correctly, outside the agent's own sandbox. The write is then refused as
+/// *"Resolved parent path escapes workspace"* for a path that is plainly inside
+/// it (issue #409).
+///
+/// Nothing else mints this directory. `<home>/harness` is deliberately absent
+/// from [`DataLayout::ensure`](crate::store::DataLayout::ensure), which
+/// pre-creates only the instance-shared trees; per-company and per-agent trees
+/// are minted on demand by whoever owns them, the same rule `companies/`
+/// follows. The near miss is
+/// [`EffectiveSkills::materialize`](crate::harness::skills::EffectiveSkills),
+/// which creates `{agent}/skill-catalog/` — a *sibling* of `workspace`, so it
+/// makes the walk stop one level higher and refuse just the same.
+///
+/// Called from two places, because one is not enough:
+///
+///  * [`build_agent`], before any [`SecurityPolicy`] is constructed over the
+///    path. Ordering matters beyond the guard: the per-workspace audit logger
+///    keys its process-global registry on the *canonicalized* workspace path and
+///    falls back to the raw one when the directory is missing, so a workspace
+///    created late can be registered twice under one physical directory.
+///  * the dispatch path ([`HarnessPool::run`](crate::harness::HarnessPool::run)
+///    and friends), because a roster is built once and then cached behind
+///    fingerprints and handed across an in-place rebuild — so a workspace that
+///    disappears after the roster was built (a restored/wiped data dir, an
+///    operator clearing the tree, a boot that raced a not-yet-mounted volume)
+///    would otherwise stay missing for the life of the process.
+pub fn ensure_agent_workspace(
+    root: &Path,
+    company: &CompanyId,
+    agent_id: &str,
+) -> std::io::Result<PathBuf> {
+    let workspace = agent_workspace(root, company, agent_id);
+    std::fs::create_dir_all(&workspace)?;
+    Ok(workspace)
 }
 
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
@@ -518,6 +869,183 @@ mod tests {
         assert!(names.contains(&"file_write"), "got {names:?}");
     }
 
+    // --- Agent-workspace provisioning (issue #409) --------------------------
+
+    #[test]
+    fn ensure_agent_workspace_mints_the_whole_chain_and_is_idempotent() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let company = CompanyId::new("acme");
+
+        // Nothing under the root exists yet — not the company segment, not the
+        // agent segment. This is a company that has never run.
+        let named = agent_workspace(root.path(), &company, "ceo");
+        assert!(!named.exists(), "precondition: nothing minted yet");
+
+        let made = ensure_agent_workspace(root.path(), &company, "ceo").expect("first ensure");
+        assert_eq!(made, named, "creation and naming must agree exactly");
+        assert!(made.is_dir());
+
+        // Idempotent: a second call on an existing tree is a success, not an
+        // `AlreadyExists` error — the dispatch path calls this on every turn.
+        let again = ensure_agent_workspace(root.path(), &company, "ceo").expect("second ensure");
+        assert_eq!(again, made);
+        assert!(again.is_dir());
+    }
+
+    /// The bug, pinned. With the workspace absent, `validate_parent_path` walks
+    /// up past it to an ancestor that really *is* outside the sandbox and
+    /// refuses a plainly-inside relative path — the refusal an agent granted
+    /// `files` but not `shell` used to hit on every write.
+    #[tokio::test]
+    async fn a_missing_workspace_makes_a_plain_relative_write_look_like_an_escape() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace = agent_workspace(root.path(), &CompanyId::new("acme"), "ceo");
+        assert!(!workspace.exists(), "precondition: never provisioned");
+
+        let policy = workspace_security(&workspace);
+        let err = policy
+            .validate_parent_path("notes.md")
+            .await
+            .expect_err("a missing workspace refuses the write");
+        assert!(
+            err.contains("escapes workspace"),
+            "the guard blames traversal for a missing directory: {err}"
+        );
+    }
+
+    /// The fix. The same policy over an *ensured* workspace resolves the same
+    /// relative path, inside the sandbox.
+    #[tokio::test]
+    async fn an_ensured_workspace_resolves_a_relative_write_inside_the_sandbox() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace =
+            ensure_agent_workspace(root.path(), &CompanyId::new("acme"), "ceo").expect("ensure");
+
+        let policy = workspace_security(&workspace);
+        let resolved = policy
+            .validate_parent_path("notes.md")
+            .await
+            .expect("an existing workspace accepts a relative write");
+
+        let canonical = workspace.canonicalize().expect("canonicalize");
+        assert!(
+            resolved.starts_with(&canonical),
+            "{} is not inside {}",
+            resolved.display(),
+            canonical.display()
+        );
+        assert_eq!(
+            resolved.file_name().and_then(|n| n.to_str()),
+            Some("notes.md")
+        );
+
+        // A nested path whose parent does not exist yet still resolves — the
+        // guard only ever needed *some* existing ancestor inside the sandbox.
+        let nested = policy
+            .validate_parent_path("reports/q3/summary.md")
+            .await
+            .expect("a not-yet-created subdirectory still resolves");
+        assert!(nested.starts_with(&canonical));
+    }
+
+    /// Provisioning does not loosen the guard: a genuine escape is still
+    /// refused — and it comes back **word for word** the same as the
+    /// missing-workspace refusal above. That is why #409 was filed rather than
+    /// closed by the one-line create.
+    ///
+    /// Reaching the resolved-parent arm with a real escape takes some care,
+    /// which is itself part of the finding. A symlink whose *immediate* parent
+    /// resolves (`escape/loot.txt`) is caught earlier, by the string-level
+    /// symlink check, with a different and perfectly clear message. The arm
+    /// under test is reached only when no existing ancestor can be canonicalized
+    /// up front: a symlink out of the sandbox plus a not-yet-created
+    /// subdirectory under it. So in a `workspace_only` agent sandbox this
+    /// wording fires for exactly two conditions — a hostile symlink and a
+    /// workspace that was never created — and says "escapes workspace" for both.
+    ///
+    /// Pinned here so a wording change upstream surfaces in this repo instead of
+    /// drifting silently.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_real_escape_and_a_missing_workspace_are_refused_in_identical_words() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let outside = tempfile::tempdir().expect("outside tempdir");
+        let workspace =
+            ensure_agent_workspace(root.path(), &CompanyId::new("acme"), "ceo").expect("ensure");
+        std::os::unix::fs::symlink(outside.path(), workspace.join("escape")).expect("symlink");
+
+        let policy = workspace_security(&workspace);
+
+        // The easy half: the immediate parent resolves, so the string-level
+        // symlink check refuses it first — clearly, and distinguishably.
+        let shallow = policy
+            .validate_parent_path("escape/loot.txt")
+            .await
+            .expect_err("a symlink out of the sandbox is refused");
+        assert!(
+            shallow.contains("Path not allowed by security policy"),
+            "expected the string-level refusal: {shallow}"
+        );
+
+        // The arm this issue is about: nothing up front can be canonicalized,
+        // so the ancestor walk runs and lands outside the sandbox.
+        let deep = policy
+            .validate_parent_path("escape/nested/loot.txt")
+            .await
+            .expect_err("a real escape must still be refused");
+        assert!(
+            deep.contains("Resolved parent path escapes workspace"),
+            "expected the resolved-parent refusal: {deep}"
+        );
+
+        // The same arm, reached instead by a workspace nobody ever created.
+        let absent = agent_workspace(root.path(), &CompanyId::new("acme"), "nobody");
+        let missing = workspace_security(&absent)
+            .validate_parent_path("notes.md")
+            .await
+            .expect_err("a missing workspace refuses too");
+        assert!(
+            missing.contains("Resolved parent path escapes workspace"),
+            "{missing}"
+        );
+
+        // Verbatim identical up to the path each names. A reader given either
+        // one goes looking for a traversal attempt; only one of them is.
+        let strip = |m: &str| {
+            m.split_once("escapes workspace: ")
+                .map(|(head, _)| head.to_string())
+                .unwrap_or_default()
+        };
+        assert_eq!(
+            strip(&deep),
+            strip(&missing),
+            "an attack and an unprovisioned directory should not read alike"
+        );
+    }
+
+    /// A `..` traversal is refused earlier, by the string-level check, and
+    /// *does* read differently — so the ambiguity above is specifically about
+    /// the resolved-parent arm, not about every refusal.
+    #[tokio::test]
+    async fn a_dot_dot_traversal_is_refused_with_a_distinguishable_message() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let workspace =
+            ensure_agent_workspace(root.path(), &CompanyId::new("acme"), "ceo").expect("ensure");
+
+        let err = workspace_security(&workspace)
+            .validate_parent_path("../../loot.txt")
+            .await
+            .expect_err("a traversal is refused");
+        assert!(
+            err.contains("Path not allowed by security policy"),
+            "expected the string-level refusal: {err}"
+        );
+        assert!(
+            !err.contains("escapes workspace"),
+            "this arm is already distinguishable: {err}"
+        );
+    }
+
     #[test]
     fn model_for_tier_maps_hints_and_defaults() {
         assert_eq!(model_for_tier(Some("reasoning")), "reasoning-v1");
@@ -554,5 +1082,580 @@ mod tests {
         assert!(!persona.contains("   Engineer"));
         // No trailing description clause.
         assert!(persona.trim_end().ends_with("role."), "{persona}");
+    }
+
+    // --- Dispatched-agent toolbelt contract (issue #188a) -------------------
+    //
+    // These tests PIN the tool surface a dispatched company agent receives by
+    // building a real agent via `build_agent` and reading back its live
+    // `tools()` list. They lock three things so a future change can neither
+    // silently widen nor narrow the belt:
+    //
+    //   a. the EXACT set of tool names a dispatched desk agent gets (snapshot);
+    //   b. delegation tools are ABSENT for a dispatched agent but PRESENT for
+    //      the orchestrator (the depth-cap = 1 / "no re-delegation" invariant,
+    //      issue #178 — the single most important thing to pin);
+    //   c. none of the deferred families (browser / search / node / subagent-
+    //      spawn / skill-exec / memory-tree / `forget`) appear in the belt.
+    //
+    // Compiled under the module's default `--features openhuman` config (the
+    // whole `harness` module is `openhuman`-gated), so the pinned set is the
+    // openhuman-only belt: the `media` (#109) and `composio` (#110) tool arms
+    // are inert without their features and are never wired here. Their
+    // namespace mapping is pinned separately by the `namespace_of` tests in
+    // `toolbelt.rs`.
+
+    use crate::company::Policy;
+    use crate::harness::mcp_probe::McpFailureQueue;
+    use crate::harness::orchestrator::{DelegationQueue, WorkflowRunnerHandle};
+    use crate::harness::policy::ApprovalRequestQueue;
+    use crate::harness::provider::MockProvider;
+    use crate::ports::CompanyStore;
+    use crate::ports::types::{
+        ChunkAddr, ChunkHit, ChunkMeta, CompanyRecord, CompanySummary, ContextChunk, LedgerEntry,
+    };
+
+    /// A no-op context store — the belt tests never exercise memory, they only
+    /// assert the wired tool surface.
+    struct PinContext;
+    #[async_trait::async_trait]
+    impl crate::ports::ContextStore for PinContext {
+        async fn put(&self, _: &CompanyId, _: ContextChunk) -> crate::Result<ChunkAddr> {
+            Ok(ChunkAddr::new("x"))
+        }
+        async fn list(&self, _: &CompanyId, _: &str) -> crate::Result<Vec<ChunkMeta>> {
+            Ok(Vec::new())
+        }
+        async fn peek(
+            &self,
+            _: &CompanyId,
+            _: &ChunkAddr,
+            _: Option<std::ops::Range<usize>>,
+        ) -> crate::Result<String> {
+            Ok(String::new())
+        }
+        async fn search(&self, _: &CompanyId, _: &str, _: usize) -> crate::Result<Vec<ChunkHit>> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// A no-op company store — `build_agent` only needs a handle; nothing here
+    /// loads or persists.
+    struct PinStore;
+    #[async_trait::async_trait]
+    impl CompanyStore for PinStore {
+        async fn load(&self, _: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Ok(None)
+        }
+        async fn save(&self, _: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _: &CompanyId, _: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Minimal `HarnessDeps` for building a single agent: offline mock provider,
+    /// no-op stores, no meter/skills/mcp/media/composio, `AllowAll` capability
+    /// filter (identity). Workspace lands under a caller-owned tempdir.
+    fn pin_deps(workspace_root: std::path::PathBuf) -> HarnessDeps {
+        HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context: Arc::new(PinContext),
+            store: Arc::new(PinStore),
+            meter: None,
+            workspace_root,
+            model_override: None,
+            tasks: None,
+            artifacts: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan: None,
+            media: None,
+            composio: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            // Fail-closed default: with no managed search backend wired, the
+            // #238 tool is never built and the pinned belt below is the
+            // pre-#238 belt exactly.
+            search: None,
+            // Fail-closed default: with no workspace store wired, the #237
+            // tools are never built and the pinned belt below is the
+            // pre-#237 belt exactly.
+            workspace: None,
+        }
+    }
+
+    /// Build one agent under `grants` and return its live tool names, sorted, so
+    /// a snapshot compares byte-stably against a literal.
+    fn built_tool_names(grants: &[&str], is_orchestrator: bool) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = pin_deps(dir.path().to_path_buf());
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            is_orchestrator,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// Build one agent under `grants` with a MANAGED search backend wired, and
+    /// return its live tool names. Mirrors [`built_tool_names`], differing only
+    /// in `deps.search` — so the difference between the two is exactly "a
+    /// credential exists", which is one of the three gate states pinned below.
+    fn built_tool_names_with_search(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.search = Some(crate::harness::search::SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed-platform-token"),
+            crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+        ));
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    // --- Company-workspace wiring gates (issue #237) -----------------------
+
+    /// Build one agent with a workspace store wired and return its tool names.
+    /// Mirrors [`built_tool_names`], differing only in `deps.workspace`.
+    fn built_tool_names_with_workspace(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// Build one agent with an artifact store wired, so the #244 publish gate
+    /// can be exercised in both its states.
+    fn built_tool_names_with_artifacts(grants: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// Issue #244's two gates, in one table.
+    ///
+    /// The fail-closed row is the load-bearing one: an agent granted file tools
+    /// with **no artifact store** must not be offered `publish_artifact`. The
+    /// tool stages into a queue; with nothing to drain it, a call would report
+    /// success, tell the agent its deliverable was safe, and drop it. Not
+    /// offering it is the only honest option.
+    #[test]
+    fn publish_artifact_needs_both_a_file_grant_and_a_store() {
+        let tool = crate::harness::publish::PUBLISH_ARTIFACT_TOOL.to_string();
+
+        // `files` (and its aliases and the wildcard) + a store → present.
+        // Publishing spends nothing and reaches nothing outside the company, so
+        // unlike `media`/`search` it rides the ordinary namespace rule.
+        for grant in ["files", "docs", "files.write", "*"] {
+            let names = built_tool_names_with_artifacts(&[grant]);
+            assert!(
+                names.contains(&tool),
+                "`{grant}` + a store must wire publish_artifact: {names:?}"
+            );
+        }
+
+        // No file grant → absent. An agent that cannot write a file has nothing
+        // to publish.
+        let unfiled = built_tool_names_with_artifacts(&["web"]);
+        assert!(
+            !unfiled.contains(&tool),
+            "an agent with no file tools must not be offered publish_artifact: {unfiled:?}"
+        );
+
+        // File grant, NO store → absent, fail-closed.
+        let storeless = built_tool_names(&["files"], false);
+        assert!(
+            !storeless.contains(&tool),
+            "without an artifact store the tool would stage into a void: {storeless:?}"
+        );
+        // …and the rest of the file belt is untouched, so the gate withholds one
+        // tool rather than breaking the agent.
+        assert!(
+            storeless.contains(&"file_write".to_string()),
+            "{storeless:?}"
+        );
+    }
+
+    /// The three gate states of the metered `web_search` surface (issue #238),
+    /// in one table.
+    ///
+    /// The load-bearing row is the first: a broad `*` grant does **not** wire
+    /// `web_search` even with a credential present. Every call is a priced
+    /// request on the managed platform, so — like `media` and `composio` — it
+    /// must be opted into by name and can never ride in on the wildcard a
+    /// company set for its file and shell tools.
+    #[test]
+    fn web_search_is_wired_only_by_explicit_grant_and_credential() {
+        // `*` + credential → absent. The wildcard never confers spend.
+        let wildcard = built_tool_names_with_search(&["*"]);
+        assert!(
+            !wildcard.contains(&"web_search".to_string()),
+            "a bare `*` must NOT confer the metered search family: {wildcard:?}"
+        );
+
+        // explicit `search` + credential → present.
+        let granted = built_tool_names_with_search(&["search"]);
+        assert!(
+            granted.contains(&"web_search".to_string()),
+            "an explicit `search` grant with a credential must wire web_search: {granted:?}"
+        );
+        // The sub-grant form works the same way `media.*` / `composio.*` do.
+        let sub_granted = built_tool_names_with_search(&["search.web"]);
+        assert!(
+            sub_granted.contains(&"web_search".to_string()),
+            "{sub_granted:?}"
+        );
+
+        // explicit `search`, NO credential → absent, fail-closed.
+        let uncredentialed = built_tool_names(&["search"], false);
+        assert!(
+            !uncredentialed.contains(&"web_search".to_string()),
+            "a search grant with no managed credential must wire nothing: {uncredentialed:?}"
+        );
+
+        // An unrelated grant confers nothing even with a credential wired.
+        let unrelated = built_tool_names_with_search(&["web.*"]);
+        assert!(
+            !unrelated.contains(&"web_search".to_string()),
+            "an unrelated grant must not confer web_search: {unrelated:?}"
+        );
+    }
+
+    /// Granting `search` must not quietly hand over anything *else*: the
+    /// credentialed `["search"]` belt is the ungranted belt plus exactly one
+    /// tool. A namespace that widens the belt beyond its own family is how a
+    /// grant stops meaning what the operator read.
+    #[test]
+    fn the_search_grant_adds_exactly_one_tool() {
+        let mut baseline = built_tool_names(&[], false);
+        let granted = built_tool_names_with_search(&["search"]);
+        baseline.push("web_search".to_string());
+        baseline.sort();
+        assert_eq!(granted, baseline, "the `search` grant widened the belt");
+    }
+
+    /// The four gate states of the workspace surface, in one table.
+    ///
+    /// The load-bearing row is the second: a broad `*` grant yields the READ
+    /// tools but NOT `workspace_write`. Writes mutate operator-owned guidance
+    /// every other agent then trusts, so — like `media` and `composio` — they
+    /// must be opted into by name and can never ride in on a wildcard.
+    #[test]
+    fn workspace_tools_are_wired_by_grant_and_store_presence() {
+        // No store wired → fail closed, nothing built, whatever the grant.
+        let unwired = built_tool_names(&["workspace"], false);
+        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+            assert!(
+                !unwired.contains(&tool.to_string()),
+                "no store must mean no `{tool}`: {unwired:?}"
+            );
+        }
+
+        // `*` → reads only. This is the whole asymmetry.
+        let wildcard = built_tool_names_with_workspace(&["*"]);
+        assert!(
+            wildcard.contains(&"workspace_list".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            wildcard.contains(&"workspace_read".to_string()),
+            "{wildcard:?}"
+        );
+        assert!(
+            !wildcard.contains(&"workspace_write".to_string()),
+            "a bare `*` must NOT confer workspace writes: {wildcard:?}"
+        );
+
+        // Explicit `workspace` → reads + write.
+        let explicit = built_tool_names_with_workspace(&["workspace"]);
+        assert!(
+            explicit.contains(&"workspace_write".to_string()),
+            "{explicit:?}"
+        );
+
+        // No workspace grant at all → nothing, even with a store wired.
+        let ungranted = built_tool_names_with_workspace(&["web.*"]);
+        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+            assert!(
+                !ungranted.contains(&tool.to_string()),
+                "an unrelated grant must not confer `{tool}`: {ungranted:?}"
+            );
+        }
+    }
+
+    /// `workspace.read` is a genuinely read-only grant.
+    ///
+    /// A deliberate divergence from the `media` / `composio` helpers, which
+    /// match any `<ns>.` prefix and would therefore let `workspace.read` confer
+    /// writes — a footgun on a destructive surface.
+    #[test]
+    fn a_workspace_read_grant_does_not_confer_writes() {
+        let read_grant = built_tool_names_with_workspace(&["workspace.read"]);
+        assert!(
+            read_grant.contains(&"workspace_read".to_string()),
+            "{read_grant:?}"
+        );
+        assert!(
+            !read_grant.contains(&"workspace_write".to_string()),
+            "`workspace.read` must not confer writes: {read_grant:?}"
+        );
+
+        let write_grant = built_tool_names_with_workspace(&["workspace.write"]);
+        assert!(
+            write_grant.contains(&"workspace_write".to_string()),
+            "{write_grant:?}"
+        );
+    }
+
+    /// (a) The EXACT tool belt a dispatched desk agent receives with the broad
+    /// `*` grant. Any tool added to or removed from a dispatched agent flips
+    /// this snapshot and fails CI — the whole point of the pin. The set is the
+    /// curated exec subset (shell / code / web) plus the intrinsic memory + file
+    /// tools; it contains NO delegation tool and NO deferred family, and — the
+    /// #238 addition — no `web_search`, because a bare `*` does not confer the
+    /// `search` grant.
+    ///
+    /// **Feature-aware (issue #297).** The belt genuinely differs by feature
+    /// set: `#[cfg(feature = "mcp")]` pushes two `mcp_registry_*` tools
+    /// unconditionally in `build_agent`, so a flat literal was *wrong* under
+    /// `--features openhuman,mcp,telegram` — the combination a full local build
+    /// and the shipped tenant image both use, and which no CI lane ran. The pin
+    /// was therefore failing unseen on `main`. Extending the array
+    /// unconditionally would only move the failure onto plain
+    /// `--features openhuman`, which CI *does* run, so the fix has to branch.
+    /// Composing the expectation from the same `cfg` the wiring uses keeps the
+    /// two from drifting again.
+    #[test]
+    fn dispatched_desk_agent_tool_belt_is_pinned() {
+        let names = built_tool_names(&["*"], false);
+        // `mut` is only used by the `mcp` arm below; without the feature the
+        // literal is already the whole expectation.
+        #[cfg_attr(not(feature = "mcp"), allow(unused_mut))]
+        let mut expected = vec![
+            "apply_patch",
+            "csv_export",
+            "curl",
+            "edit",
+            "file_read",
+            "file_write",
+            "git_operations",
+            "glob",
+            "grep",
+            "http_request",
+            "image_info",
+            "list",
+            "memory_recall",
+            "memory_store",
+            "read_workspace_state",
+            "shell",
+            "web_fetch",
+        ];
+        // Mirrors the unconditional `#[cfg(feature = "mcp")]` push in
+        // `build_agent`. These two are intrinsic (unmapped by `namespace_of`),
+        // so no grant gates them — enabling the feature is the whole condition.
+        #[cfg(feature = "mcp")]
+        {
+            expected.push("mcp_registry_list_tools");
+            expected.push("mcp_registry_tool_call");
+            expected.sort();
+        }
+        assert_eq!(names, expected, "dispatched desk belt drifted: {names:?}");
+    }
+
+    /// (b) The depth-cap = 1 invariant (issue #178): a dispatched desk agent
+    /// must NEVER receive the orchestrator's delegation tools, while the
+    /// orchestrator agent MUST. Building both from the same grant and contrasting
+    /// them is the registration check that a dispatched turn cannot re-delegate.
+    #[test]
+    fn dispatched_agent_has_no_delegation_tools_but_orchestrator_does() {
+        let delegation = ["query_company", "spawn_task", "delegate_to_desk"];
+
+        let dispatched = built_tool_names(&["*"], false);
+        for tool in delegation {
+            assert!(
+                !dispatched.contains(&tool.to_string()),
+                "dispatched desk agent must NOT receive delegation tool `{tool}`: {dispatched:?}"
+            );
+        }
+
+        let orchestrator = built_tool_names(&["*"], true);
+        for tool in delegation {
+            assert!(
+                orchestrator.contains(&tool.to_string()),
+                "orchestrator agent MUST receive delegation tool `{tool}`: {orchestrator:?}"
+            );
+        }
+    }
+
+    /// (c) No deferred family leaks into a dispatched belt: raw browser
+    /// automation, Node/NPM exec, OpenHuman sub-agent spawn tools (the
+    /// `subagent` namespace is reserved but empty in v1), skill *execution*,
+    /// the raw memory-tree tool surface, and `forget`. A negative assertion, so
+    /// it stays honest even as OpenHuman renames tools upstream — the pin is
+    /// "none of these shapes appear".
+    ///
+    /// **`web_search` was removed from this list by issue #238** — and only
+    /// `web_search`. It was deferred for one *infrastructure* reason ("need
+    /// engine keys") that the managed-credential pattern dissolved; the other
+    /// families here were deferred for *safety* reasons that still hold. The
+    /// remaining `search` / `google_search` entries stay pinned, so OpenHuman's
+    /// broader search families cannot arrive on the back of this decision.
+    ///
+    /// That `web_search` is nonetheless absent from a `*`-granted belt is not
+    /// this test's job any more — it is pinned deliberately by
+    /// [`web_search_is_wired_only_by_explicit_grant_and_credential`] and by the
+    /// exact snapshot in
+    /// [`dispatched_desk_agent_tool_belt_is_pinned`], which would both fail if
+    /// the wildcard ever started conferring spend.
+    #[test]
+    fn dispatched_belt_excludes_every_deferred_family() {
+        let names = built_tool_names(&["*"], false);
+        let forbidden = [
+            // raw browser automation
+            "browser",
+            "browser_navigate",
+            "browser_click",
+            "browser_screenshot",
+            // the search families still deferred (`web_search` is admitted
+            // under an explicit `search` grant — issue #238)
+            "search",
+            "google_search",
+            // Node / NPM exec
+            "node",
+            "npm",
+            "run_node",
+            "run_npm",
+            // OpenHuman sub-agent spawn (subagent namespace reserved, empty v1)
+            "spawn_subagent",
+            "spawn_agent",
+            "delegate_archivist",
+            // skill execution
+            "run_skill",
+            "skill_run",
+            "run_workflow",
+            "await_workflow",
+            // raw memory-tree tool surface
+            "memory_tree",
+            "memory_tree_search",
+            "memory_tree_get",
+            // destructive memory
+            "forget",
+            "memory_forget",
+        ];
+        for tool in forbidden {
+            assert!(
+                !names.contains(&tool.to_string()),
+                "deferred tool `{tool}` leaked into the dispatched belt: {names:?}"
+            );
+        }
     }
 }

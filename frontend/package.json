@@ -9,17 +9,27 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
+    "typecheck:e2e": "tsc -p tsconfig.e2e.json",
+    "typecheck:unit": "tsc -p tsconfig.unit.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "e2e": "playwright test",
-    "e2e:headed": "playwright test --headed"
+    "e2e:headed": "playwright test --headed",
+    "e2e:live": "PW_LIVE_BRAIN=1 playwright test",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
     "@fontsource-variable/geist": "^5.2.9",
     "@tailwindcss/typography": "^0.5.20",
     "@tailwindcss/vite": "^4.3.2",
+    "@tauri-apps/api": "^2.10.1",
+    "@types/d3-force": "^3.0.10",
     "@xyflow/react": "^12.11.2",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
+    "d3-force": "^3.0.0",
     "lucide-react": "^1.24.0",
     "next-themes": "^0.4.6",
     "react": "^18.3.1",
@@ -36,11 +46,14 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.49.0",
+    "@tauri-apps/cli": "^2.10.1",
     "@types/node": "^22.9.0",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.4",
+    "jsdom": "^27.0.1",
     "typescript": "^5.6.3",
-    "vite": "^5.4.11"
+    "vite": "^5.4.11",
+    "vitest": "^3.2.7"
   }
 }

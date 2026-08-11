@@ -17,6 +17,14 @@
 //!   so an edge leaving a condition node maps its label to a `true`/`false`
 //!   port. Every other edge stays on the default `"main"` port.
 //!
+//! An `output` node's [`destination`](crate::company::WorkflowDestinationDef)
+//! is deliberately **not** translated. Delivery runs host-side after the engine
+//! returns (see [`super::delivery`]), so the engine has no use for it and a
+//! `destination` key in node config would be inert cargo. A destination-bearing
+//! `output` node therefore lowers to exactly the same bare pass-through
+//! `Transform` as one without — pinned by the
+//! `an_output_destination_never_reaches_the_engine_graph` test below.
+//!
 //! An **agent** node's roster teammate id becomes the tinyflows `agent_ref` in
 //! node config, which the engine's `agent` node routes to the injected
 //! `AgentRunner` — that is how a step lands on the harness pool (see
@@ -300,7 +308,8 @@ mod tests {
         assert_eq!(kind("strategist"), Some(NodeKind::Agent));
         assert_eq!(kind("gate"), Some(NodeKind::Condition));
         assert_eq!(kind("research"), Some(NodeKind::ToolCall));
-        assert_eq!(kind("publish"), Some(NodeKind::HttpRequest));
+        // `publish` is an agent assembly step (#530) — there is no CMS to POST to.
+        assert_eq!(kind("publish"), Some(NodeKind::Agent));
         // `output` lowers to a pass-through `transform`.
         assert_eq!(kind("done"), Some(NodeKind::Transform));
     }
@@ -360,11 +369,13 @@ mod tests {
 
     // --- P1: config overlay + error/retry/approval + error routing ---------
 
-    /// A snapshot pinning that the shipped campaign pipeline (which uses none of
-    /// the P1 fields) translates byte-identically to the pre-P1 output: every
-    /// node's config equals exactly what the old kind-only mapping produced.
+    /// A snapshot pinning the shipped campaign pipeline's translated config. Most
+    /// nodes carry only kind-derived config; the `research` `tool_call` binds the
+    /// metered `web_search` slug + args and an `on_error = "continue"` policy
+    /// (#530), and `publish` is an `agent` assembly step (there is no CMS to POST
+    /// to), so each carries exactly the config those choices imply.
     #[test]
-    fn campaign_translation_is_byte_identical_to_legacy() {
+    fn campaign_translation_lowers_to_the_expected_engine_config() {
         let file = parse_workflow(CAMPAIGN).expect("campaign parses");
         let graph = translate(&file);
         let config = |id: &str| {
@@ -381,8 +392,21 @@ mod tests {
             json!({ "agent_ref": "brand_strategist", "prompt": "Turns the brief into an angle + outline." })
         );
         assert_eq!(config("gate"), json!({}));
-        assert_eq!(config("research"), json!({ "slug": "research" }));
-        assert_eq!(config("publish"), json!({}));
+        assert_eq!(
+            config("research"),
+            json!({
+                "slug": "web_search",
+                "args": { "query": "=item.text", "max_results": 5 },
+                "on_error": "continue"
+            })
+        );
+        assert_eq!(
+            config("publish"),
+            json!({
+                "agent_ref": "copywriter",
+                "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off."
+            })
+        );
         assert_eq!(config("done"), json!({}));
     }
 
@@ -432,10 +456,12 @@ mod tests {
                 name: "Worker".into(),
                 summary: None,
                 agent: Some("real".into()),
+                schedule: None,
                 config: Some(json!({ "agent_ref": "impostor" })),
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: Vec::new(),
         };
@@ -547,10 +573,12 @@ mod tests {
                     name: "Gate".into(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: Some("route".into()),
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 node_stub("yes_path"),
                 node_stub("no_path"),
@@ -608,10 +636,12 @@ mod tests {
                     name: "N".into(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 }],
                 edges: Vec::new(),
             };
@@ -635,10 +665,12 @@ mod tests {
                     name: "Switch".into(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 node_stub("paid"),
                 node_stub("error_case"),
@@ -665,6 +697,73 @@ mod tests {
         assert_eq!(port("fallthrough").as_deref(), Some("default"));
     }
 
+    /// **The delivery invariant (issue #170).** An `output` node's
+    /// `destination` is host-side routing, not engine config: it must NOT reach
+    /// the compiled graph. A destination-bearing output node lowers to exactly
+    /// the same bare pass-through `Transform` it lowered to before the field
+    /// existed — so translation of a graph is unaffected by where its report
+    /// goes, and the engine never gains an inert key it does not understand.
+    #[test]
+    fn an_output_destination_never_reaches_the_engine_graph() {
+        let with_destination = crate::company::parse_workflow(
+            r#"
+id = "wf"
+name = "WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Report"
+[node.destination]
+kind = "email"
+target = "ada@example.com"
+[[edge]]
+from = "start"
+to = "done"
+"#,
+        )
+        .expect("parses");
+        let without = crate::company::parse_workflow(
+            r#"
+id = "wf"
+name = "WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Report"
+[[edge]]
+from = "start"
+to = "done"
+"#,
+        )
+        .expect("parses");
+
+        let done = |file: &crate::company::WorkflowFile| {
+            translate(file)
+                .nodes
+                .into_iter()
+                .find(|n| n.id == "done")
+                .expect("output node lowered")
+        };
+        let with = done(&with_destination);
+        let plain = done(&without);
+
+        assert_eq!(with.kind, NodeKind::Transform, "output lowers to transform");
+        // A bare pass-through: no `set` bindings, and above all no destination.
+        assert_eq!(with.config, json!({}));
+        assert_eq!(
+            with.config, plain.config,
+            "a destination must not change the engine config"
+        );
+    }
+
     fn node_stub(id: &str) -> crate::company::WorkflowNodeDef {
         crate::company::WorkflowNodeDef {
             id: id.into(),
@@ -672,10 +771,12 @@ mod tests {
             name: id.into(),
             summary: None,
             agent: None,
+            schedule: None,
             config: None,
             on_error: None,
             retry: None,
             requires_approval: None,
+            destination: None,
         }
     }
 

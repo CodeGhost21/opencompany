@@ -10,6 +10,29 @@
 //!   balance → [`Finances`] (balance, budget vs spend, revenue, spend by
 //!   category, the transaction journal).
 //!
+//! The write-side pieces sit here rather than at their (feature-gated) call
+//! sites, so their contracts are compiled and tested by the default CI build —
+//! see each module's docs:
+//!
+//! - [`oauth`] mints the
+//!   [`SampleKind::OauthCall`](crate::ports::usage::SampleKind) samples
+//!   [`bucket_usage`] turns into the calls-by-provider chart.
+//! - [`search`] mints the
+//!   [`SampleKind::SearchCall`](crate::ports::usage::SampleKind) samples behind
+//!   the `searchCalls` counter and the cost the managed search backend charged
+//!   (issue #238) — a *priced* call, deliberately not folded into the
+//!   zero-cost, connection-minting `OauthCall` stream.
+//! - [`inference`] mints the
+//!   [`SampleKind::Inference`](crate::ports::usage::SampleKind) samples behind
+//!   the token series and the token/cost totals, for **every** cognition path
+//!   rather than only the `openhuman` harness (issue #174).
+//! - [`planning`] mints the
+//!   [`SampleKind::PlanningCall`](crate::ports::usage::SampleKind) samples one
+//!   planning pass produces (issue #337) — charged to the whole-company bucket
+//!   rather than to the card's assignee, because planning is frequently what
+//!   *picks* the assignee and because a teammate at its daily cap must not be
+//!   unable to have work planned for it.
+//!
 //! WS2 owns the async-graphql wrappers (`graphql/usage.rs`,
 //! `graphql/finances.rs`); this module deliberately has no async-graphql
 //! dependency so the projections can be unit-tested against seeded data and
@@ -22,17 +45,39 @@ use crate::ports::types::OverlayAgent;
 
 mod calendar;
 pub mod capability;
+pub mod daily_budget;
 mod finances;
+pub mod inference;
+pub mod oauth;
+/// Issue #337: the planning pass's usage sample and its company-bucket
+/// attribution rule. See [`planning`].
+pub mod planning;
+pub mod search;
 mod types;
 mod usage;
+/// Issue #580: the workflow-builder pass's usage sample and its
+/// assignee/run attribution rule (the mirror image of [`planning`]). See
+/// [`workflow_build`].
+pub mod workflow_build;
 
 pub use capability::{BudgetPeriod, CapabilityPlan, TierBudgetStatus, plan_named, tokens_in};
+pub use daily_budget::{AgentBudgetStatus, usd_spent_by_agent, utc_day_start_millis};
 pub use finances::{category_label, finances_from};
+pub use inference::{
+    INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
+    inference_sample, record_inference_usage,
+};
+pub use oauth::{UNKNOWN_PROVIDER, oauth_call_sample, record_oauth_call};
+pub use planning::{planning_sample, record_planning_usage};
+pub use search::{
+    FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
+};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
     UsageRange, UsageTotals,
 };
 pub use usage::bucket_usage;
+pub use workflow_build::{record_workflow_build_usage, workflow_build_sample};
 
 /// Builds the teammate id → display-name map [`bucket_usage`] resolves against,
 /// in prosumer language.

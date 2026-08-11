@@ -4,6 +4,8 @@
 //! manifest, JSONL for append-only logs, content-addressed blobs for context).
 //! Appends are the hot path and never rewrite the whole file; per-path
 //! `tokio::sync::Mutex` locks serialize concurrent writers within a process.
+//! Those locks live in one process-wide registry (`path_lock`) rather than on
+//! each store, so two instances over one bundle actually meet (issue #388).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -17,7 +19,7 @@ use tokio::sync::{Mutex as TokioMutex, broadcast};
 use crate::Result;
 use crate::error::OpenCompanyError;
 use crate::ports::context::ContextStore;
-use crate::ports::events::EventLog;
+use crate::ports::events::{EventLog, PruneReport, RetentionPolicy, plan_prune};
 use crate::ports::inbox::{EmailRecord, InboxMeta, InboxStore};
 use crate::ports::memory::MemoryStore;
 use crate::ports::secrets::SecretStore;
@@ -54,6 +56,56 @@ impl PathLocks {
         let mut map = self.inner.lock().expect("path-lock map poisoned");
         map.entry(path.to_path_buf()).or_default().clone()
     }
+}
+
+/// Every filesystem store's write locks, shared by every instance in the
+/// process (issue #388).
+///
+/// The locks these replaced were **fields** on `FsCompanyStore`, `FsEventLog`,
+/// `FsMemoryStore`, `FsContextStore`, `FsInboxStore` and `FsOps` — so two stores
+/// over one bundle serialised against nothing, which is the state those types
+/// have always been in and which nothing stopped a caller reaching: each
+/// constructor takes a root and builds a fresh registry. A `static` is the only
+/// thing two independently-constructed instances can share.
+///
+/// The damage that let through was not theoretical. `FsEventLog::append`
+/// derives the next sequence from the current line count and then appends, so
+/// two unsynchronised instances hand out the **same** `seq` — breaking every
+/// consumer that treats it as an identity. And the read-modify-write sites
+/// (`FsMemoryStore::evict`, `FsInboxStore::mark_read`, and the whole-file
+/// rewrites in [`FsOps`](crate::store::fs_ops::FsOps)) replace the file with a
+/// snapshot, so an append that raced one of them was simply erased.
+///
+/// Mirrors the precedent
+/// [`JOURNAL_WRITE_LOCKS`](crate::runtime::journal) set for the runtime journal
+/// in issue #386, deliberately including its caveats — see [`path_lock`].
+static FS_WRITE_LOCKS: std::sync::LazyLock<PathLocks> =
+    std::sync::LazyLock::new(PathLocks::default);
+
+/// The process-wide write lock for `path`.
+///
+/// Keyed on the **absolutised** path, so a relative and an absolute spelling of
+/// one file meet on the same lock instead of racing.
+///
+/// Two limits, both by construction rather than oversight:
+///
+/// * **Absolutising is not canonicalising.** `std::path::absolute` is purely
+///   lexical: it never touches the filesystem, so it does not resolve symlinks
+///   and it does not collapse `..` across one. Two spellings that differ by a
+///   symlinked ancestor therefore land on two different locks. Resolving that
+///   would mean a `canonicalize` syscall on every append — on the hot path, for
+///   a case no caller in this crate produces (every path is built by
+///   [`Bundle`] from one configured root). What keeps the missed case from
+///   tearing is [`append_line`]'s single `O_APPEND` write, not this lock.
+/// * **In-process only.** A second *process* over the same
+///   `OPENCOMPANY_DATA_DIR` is outside any in-process lock's reach, and no
+///   amount of `static` fixes that. Write atomicity is what keeps that case
+///   safe: appends are one `O_APPEND` write and rewrites go through
+///   [`write_atomic`]'s temp-file-plus-rename. That bounds the damage to a lost
+///   update, never a torn file. Real cross-process exclusion would need file
+///   locking, which is a separate change with a separate portability argument.
+pub(crate) fn path_lock(path: &Path) -> Arc<TokioMutex<()>> {
+    FS_WRITE_LOCKS.get(&std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()))
 }
 
 /// Appends one line (a `\n` is added) to `path`, creating the file if absent.
@@ -94,6 +146,26 @@ pub(crate) async fn read_optional(path: &Path) -> Result<String> {
 }
 
 /// Parses every non-empty JSONL line of `path` into `T`, skipping absent files.
+///
+/// **Strict**: one unparseable line fails the whole read. That is the right
+/// default for everything that still uses it, and it is a decision rather than
+/// an oversight (issue #387):
+///
+/// * **Read-modify-write callers must stay strict.** `evict` and `mark_read`
+///   read a file here and then [`write_atomic`] it back. A tolerant read would
+///   drop the damaged line from the in-memory vector, and the rewrite would then
+///   erase it from disk — turning recoverable damage into permanent deletion,
+///   silently. See [`read_jsonl_lenient`] for the same boundary stated from the
+///   other side.
+/// * **Request-time read-only callers stay strict too.** A failed inbox or
+///   context read surfaces as one failed request the operator can retry and
+///   report; it does not cost a company its boot. Making those tolerant is a
+///   separate judgement about each surface's error budget, and it is not made
+///   here.
+///
+/// Only the *boot* path — the ledger read in [`FsCompanyStore::load`] — is
+/// tolerant, because there the failure is not one request but the whole
+/// company, and the console that would repair the file is behind the boot.
 pub(crate) async fn read_jsonl<T>(path: &Path) -> Result<Vec<T>>
 where
     T: serde::de::DeserializeOwned,
@@ -107,6 +179,92 @@ where
         out.push(serde_json::from_str(line)?);
     }
     Ok(out)
+}
+
+/// A JSONL line [`read_jsonl_lenient`] could not parse: quarantined in place,
+/// never deleted.
+///
+/// Carries where the line is, how big it is, and what the parser rejected —
+/// and **never the line's contents**. A ledger memo is free text a person or an
+/// agent wrote; echoing it into a log to explain a parse failure would put
+/// arbitrary tenant prose into the container log. The 1-based line number and
+/// the byte length are enough for an operator to find the line by hand.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct SkippedLine {
+    /// The line's 1-based number in the file.
+    pub(crate) line: usize,
+    /// The line's length in bytes, as it sits on disk.
+    pub(crate) bytes: usize,
+    /// What the parse rejected. `serde_json`'s message is positional
+    /// ("EOF while parsing a string at line 1 column 74") and quotes no input.
+    pub(crate) message: String,
+}
+
+/// Parses every non-empty JSONL line of `path` into `T`, **skipping** the lines
+/// that will not parse and reporting them rather than failing the read.
+///
+/// Returns the values that did parse, oldest first, plus one [`SkippedLine`]
+/// per line that did not. An absent file is an empty read, as in [`read_jsonl`].
+///
+/// Bytes are read and decoded per line, not through `read_to_string`. A torn
+/// write can split a multi-byte codepoint, and a whole-file UTF-8 decode fails
+/// on that one bad byte — losing the entire file to damage confined to a single
+/// line. Decoding lossily per line keeps the damage where it is. This mirrors
+/// [`RuntimeJournal::load`](crate::runtime::journal::RuntimeJournal::load),
+/// which reached the same conclusion for the journal (issue #386).
+///
+/// # Tolerance boundary — do not widen it
+///
+/// **A read-modify-write consumer must never call this.** Skipping is only safe
+/// because the bytes stay on disk: the caller drops the line from its in-memory
+/// view and a person can still repair the file. A caller that reads here and
+/// then rewrites the file atomically would write back exactly the lines that
+/// parsed, deleting the damaged one for good — converting a recoverable fault
+/// into silent, permanent data loss, which is strictly worse than the failed
+/// boot this function exists to prevent. Rewriters ([`FsMemoryStore::evict`],
+/// [`FsInboxStore::mark_read`]) stay on strict [`read_jsonl`], where a damaged
+/// line aborts the rewrite instead of laundering it.
+///
+/// The one caller today is the ledger read in [`FsCompanyStore::load`]. A ledger
+/// entry is descriptive accounting: dropping one from a boot-time view
+/// misreports spend until the file is repaired, which is recoverable and
+/// visible. It is not an at-most-once safety key — the journal's
+/// `EffectExecuted` records are, and they are handled separately and more
+/// carefully for exactly that reason.
+pub(crate) async fn read_jsonl_lenient<T>(path: &Path) -> Result<(Vec<T>, Vec<SkippedLine>)>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let contents = match tokio::fs::read(path).await {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok((Vec::new(), Vec::new())),
+        Err(e) => return Err(io_err(path, e)),
+    };
+
+    let mut out = Vec::new();
+    let mut skipped = Vec::new();
+    for (index, raw) in contents.split(|b| *b == b'\n').enumerate() {
+        // Lossy on purpose: an invalid byte becomes U+FFFD, the line then fails
+        // to parse as JSON, and it lands on the same skip-and-report path as any
+        // other unreadable line instead of aborting the whole read.
+        let line = String::from_utf8_lossy(raw);
+        let line = line.as_ref();
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str(line) {
+            Ok(value) => out.push(value),
+            Err(error) => skipped.push(SkippedLine {
+                line: index + 1,
+                // The on-disk length, not the lossily-decoded one: U+FFFD is
+                // three bytes and would inflate the count for exactly the lines
+                // an operator is trying to locate.
+                bytes: raw.len(),
+                message: error.to_string(),
+            }),
+        }
+    }
+    Ok((out, skipped))
 }
 
 /// Atomically writes `contents` to `path` via a temp file + rename.
@@ -142,6 +300,47 @@ struct Meta {
     /// The operator desk-creation overlay (desks created at runtime).
     #[serde(default)]
     overlay_desks: Vec<crate::ports::types::OverlayDesk>,
+    /// The operator workflow-authoring overlay (graphs created at runtime).
+    /// Absent on meta files written before runtime workflow bodies persisted
+    /// through the store, so `#[serde(default)]` keeps those loading.
+    #[serde(default)]
+    overlay_workflows: Vec<crate::ports::types::OverlayWorkflow>,
+    /// The operator-set per-teammate daily spend caps (issue #343). Absent on
+    /// meta files written before the console could write a budget, so
+    /// `#[serde(default)]` keeps those loading with the manifest in charge.
+    #[serde(default)]
+    overlay_budgets: Vec<crate::ports::types::BudgetOverride>,
+    /// The workflow ids the operator has switched off (issue #276). Absent on
+    /// meta files written before the pause switch existed, and
+    /// `#[serde(default)]` reads that absence as "nothing is paused" — which is
+    /// exactly what those companies meant.
+    #[serde(default)]
+    disabled_workflows: Vec<String>,
+    /// The source-template provenance stamped at launch. `None` for companies
+    /// provisioned from a raw manifest and for legacy meta files written before
+    /// provenance existed (the `#[serde(default)]` keeps those loading).
+    #[serde(default)]
+    template_provenance: Option<crate::ports::types::TemplateProvenance>,
+}
+
+impl Default for Meta {
+    /// A bundle whose meta file has not been written yet: a running company
+    /// with no operator overlays and no recorded provenance. `lifecycle` is
+    /// `"running"` rather than `String::default()` — an empty lifecycle is not
+    /// a state this runtime has.
+    fn default() -> Self {
+        Self {
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -153,16 +352,12 @@ struct Meta {
 #[derive(Clone)]
 pub struct FsCompanyStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsCompanyStore {
     /// Creates a store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -184,37 +379,58 @@ impl CompanyStore for FsCompanyStore {
             .map_err(|e| OpenCompanyError::Store(format!("invalid company.toml: {e}")))?;
 
         let meta_src = read_optional(&bundle.meta_json()).await?;
-        let (lifecycle, overlay_agents, overlay_desk_members, overlay_desk_order, overlay_desks) =
-            if meta_src.trim().is_empty() {
-                (
-                    "running".to_string(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                    Vec::new(),
-                )
-            } else {
-                let meta: Meta = serde_json::from_str(&meta_src)?;
-                (
-                    meta.lifecycle,
-                    meta.overlay_agents,
-                    meta.overlay_desk_members,
-                    meta.overlay_desk_order,
-                    meta.overlay_desks,
-                )
-            };
+        // A bundle with no meta file yet is a running company with no overlays —
+        // which is exactly `Meta::default()`. Carrying that through one value
+        // rather than a positional tuple keeps adding an overlay collection a
+        // one-line change here instead of a four-place one.
+        let meta: Meta = if meta_src.trim().is_empty() {
+            Meta::default()
+        } else {
+            serde_json::from_str(&meta_src)?
+        };
 
-        let ledger = read_jsonl::<LedgerEntry>(&bundle.ledger_jsonl()).await?;
+        // The ledger is read leniently, and this is the only place in the fs
+        // backend that is (issue #387). Every other read here is either a
+        // rewriter — where skipping would delete the damaged line on write-back
+        // — or a request-time reader, where a failure costs one request. This
+        // one is neither: it is on the boot path, so a single malformed
+        // accounting line used to take the whole company down, and the repair
+        // console an operator would use sits behind the boot it killed.
+        //
+        // The skipped lines stay on disk untouched. Nothing in `load` writes,
+        // and `append_ledger` only appends, so the file after a tolerated boot
+        // is byte-identical to the file before it.
+        let ledger_path = bundle.ledger_jsonl();
+        let (ledger, skipped) = read_jsonl_lenient::<LedgerEntry>(&ledger_path).await?;
+        if let Some(first) = skipped.first() {
+            // `error!`, not `warn!`: the company is running on an incomplete
+            // ledger, so its reported spend is wrong until someone repairs the
+            // file. Loud once per load, naming the file and the first bad line —
+            // never the line's contents, which are operator/agent free text.
+            tracing::error!(
+                company = %id,
+                ledger = %ledger_path.display(),
+                skipped = skipped.len(),
+                first_line = first.line,
+                first_bytes = first.bytes,
+                error = %first.message,
+                "[store] ledger lines could not be parsed; they were skipped so the company can still boot, and left on disk for repair — reported spend is incomplete until they are fixed"
+            );
+        }
 
         Ok(Some(CompanyRecord {
             id: id.clone(),
             manifest,
             ledger,
-            lifecycle,
-            overlay_agents,
-            overlay_desk_members,
-            overlay_desk_order,
-            overlay_desks,
+            lifecycle: meta.lifecycle,
+            overlay_agents: meta.overlay_agents,
+            overlay_desk_members: meta.overlay_desk_members,
+            overlay_desk_order: meta.overlay_desk_order,
+            overlay_desks: meta.overlay_desks,
+            overlay_workflows: meta.overlay_workflows,
+            overlay_budgets: meta.overlay_budgets,
+            disabled_workflows: meta.disabled_workflows,
+            template_provenance: meta.template_provenance,
         }))
     }
 
@@ -232,6 +448,10 @@ impl CompanyStore for FsCompanyStore {
             overlay_desk_members: record.overlay_desk_members.clone(),
             overlay_desk_order: record.overlay_desk_order.clone(),
             overlay_desks: record.overlay_desks.clone(),
+            overlay_workflows: record.overlay_workflows.clone(),
+            overlay_budgets: record.overlay_budgets.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
+            template_provenance: record.template_provenance.clone(),
         };
         write_atomic(&bundle.meta_json(), &serde_json::to_string(&meta)?).await?;
         Ok(())
@@ -281,7 +501,7 @@ impl CompanyStore for FsCompanyStore {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.ledger_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &serde_json::to_string(&entry)?).await
     }
@@ -296,7 +516,18 @@ impl CompanyStore for FsCompanyStore {
 #[derive(Clone)]
 pub struct FsEventLog {
     root: PathBuf,
-    locks: PathLocks,
+    /// Live subscribers, keyed by company.
+    ///
+    /// **Deliberately per-instance, and not part of issue #388's fix.** The
+    /// write locks moved to a process-wide registry because two instances over
+    /// one file must exclude each other. This map is the opposite kind of state:
+    /// it is a fan-out to the subscribers *this* instance handed streams to, and
+    /// nothing about durability or ordering depends on two instances sharing it.
+    /// A subscriber that misses an event because it subscribed through the other
+    /// instance is a delivery gap in a best-effort live feed, recoverable by
+    /// [`read_from`](EventLog::read_from) against the durable log — not the
+    /// silent write loss the lock change fixes. Making it global would give one
+    /// company's stream process-global lifetime for a much weaker reason.
     senders: Arc<StdMutex<HashMap<CompanyId, broadcast::Sender<StoredEvent>>>>,
 }
 
@@ -305,7 +536,6 @@ impl FsEventLog {
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             root: root.into(),
-            locks: PathLocks::default(),
             senders: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
@@ -328,13 +558,27 @@ impl EventLog for FsEventLog {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.events_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
 
-        // The next sequence is the current line count; held under the lock so
-        // concurrent appends never collide on a seq.
+        // The next sequence is one past the highest already present; held under
+        // the lock so concurrent appends never collide on a seq.
+        //
+        // Reading the *maximum* rather than the line count is what makes
+        // `prune` safe (issue #275): a count-derived sequence silently reuses
+        // the numbers of any removed lines, and sequences are stable ids —
+        // thread parents, reaction targets and #358's redaction tombstone all
+        // address a message by one. For a log that has never been pruned the
+        // two agree exactly (n lines numbered 0..n-1 both yield n), so this
+        // changes no existing behaviour.
         let existing = read_optional(&path).await?;
-        let seq = existing.lines().filter(|l| !l.trim().is_empty()).count() as u64;
+        let seq = existing
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .filter_map(|l| serde_json::from_str::<StoredEvent>(l).ok())
+            .map(|ev| ev.seq.value() + 1)
+            .max()
+            .unwrap_or(0);
 
         let stored = StoredEvent {
             seq: EventSeq::new(seq),
@@ -377,6 +621,43 @@ impl EventLog for FsEventLog {
         });
         Box::pin(stream)
     }
+
+    async fn prune(&self, id: &CompanyId, policy: &RetentionPolicy) -> Result<PruneReport> {
+        let path = self.bundle(id).events_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+
+        // Strict parsing on purpose: `read_jsonl` fails the whole pass on a
+        // line it cannot read, where `read_jsonl_lenient` would skip it and
+        // then the rewrite below would drop it for good. A file we cannot
+        // fully understand is a file we must not rewrite.
+        let all = read_jsonl::<StoredEvent>(&path).await?;
+        let doomed = plan_prune(&all, policy);
+
+        let mut report = PruneReport {
+            scanned: all.len(),
+            removed: 0,
+            oldest_retained: all.iter().map(|e| e.seq).min(),
+        };
+        if doomed.is_empty() {
+            return Ok(report);
+        }
+
+        let kept: Vec<StoredEvent> = all
+            .into_iter()
+            .filter(|ev| doomed.binary_search(&ev.seq).is_err())
+            .collect();
+        report.removed = doomed.len();
+        report.oldest_retained = kept.iter().map(|e| e.seq).min();
+
+        let mut body = String::new();
+        for record in &kept {
+            body.push_str(&serde_json::to_string(record)?);
+            body.push('\n');
+        }
+        write_atomic(&path, &body).await?;
+        Ok(report)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -387,16 +668,12 @@ impl EventLog for FsEventLog {
 #[derive(Clone)]
 pub struct FsMemoryStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsMemoryStore {
     /// Creates a memory store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -410,7 +687,7 @@ impl MemoryStore for FsMemoryStore {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.traces_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &serde_json::to_string(&trace)?).await
     }
@@ -427,7 +704,7 @@ impl MemoryStore for FsMemoryStore {
         let bundle = self.bundle(id);
         bundle.ensure_dirs().await?;
         let path = bundle.tasks_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &serde_json::to_string(&result)?).await
     }
@@ -435,7 +712,7 @@ impl MemoryStore for FsMemoryStore {
     async fn evict(&self, id: &CompanyId, policy: EvictionPolicy) -> Result<u64> {
         let bundle = self.bundle(id);
         let path = bundle.traces_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
 
         let all = read_jsonl::<CompressedTrace>(&path).await?;
@@ -469,12 +746,18 @@ impl MemoryStore for FsMemoryStore {
 // ContextStore
 // ---------------------------------------------------------------------------
 
-/// A context index line pairing an address with its label and length.
+/// A context index line pairing an address with its label, length, and the
+/// epoch-millis it was first stored.
+///
+/// `stored_at_millis` defaults to `0` so index lines written before the field
+/// existed still deserialize — they simply report an unknown store time.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct IndexEntry {
     addr: String,
     label: String,
     len: usize,
+    #[serde(default)]
+    stored_at_millis: u64,
 }
 
 /// Filesystem [`ContextStore`]: content-addressed blobs plus a JSONL index.
@@ -484,16 +767,12 @@ struct IndexEntry {
 #[derive(Clone)]
 pub struct FsContextStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsContextStore {
     /// Creates a context store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -514,12 +793,13 @@ impl ContextStore for FsContextStore {
             .map_err(|e| io_err(&blob_path, e))?;
 
         let index_path = bundle.context_index_jsonl();
-        let lock = self.locks.get(&index_path);
+        let lock = path_lock(&index_path);
         let _guard = lock.lock().await;
         let entry = IndexEntry {
             addr: addr.clone(),
             label: chunk.label,
             len: chunk.body.len(),
+            stored_at_millis: now_millis(),
         };
         append_line(&index_path, &serde_json::to_string(&entry)?).await?;
         Ok(ChunkAddr::new(addr))
@@ -534,6 +814,7 @@ impl ContextStore for FsContextStore {
                 addr: ChunkAddr::new(e.addr),
                 label: e.label,
                 len: e.len,
+                stored_at_millis: e.stored_at_millis,
             })
             .collect())
     }
@@ -645,16 +926,12 @@ impl SecretStore for FsSecretStore {
 #[derive(Clone)]
 pub struct FsInboxStore {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsInboxStore {
     /// Creates an inbox store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -700,7 +977,7 @@ impl InboxStore for FsInboxStore {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.inbox_meta_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut map = self.load_meta(company).await?;
         map.insert(key.to_string(), meta.clone());
@@ -728,7 +1005,7 @@ impl InboxStore for FsInboxStore {
         bundle.ensure_dirs().await?;
         let path = bundle.inbox_jsonl();
         let line = serde_json::to_string(msg)?;
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &line).await
     }
@@ -740,7 +1017,7 @@ impl InboxStore for FsInboxStore {
         ids: Option<&[String]>,
     ) -> Result<u64> {
         let path = self.bundle(company).inbox_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut all = read_jsonl::<EmailRecord>(&path).await?;
         for record in all.iter_mut() {
@@ -777,8 +1054,11 @@ mod test {
     use crate::store::conformance;
     use futures::StreamExt;
 
-    fn tmp_root() -> PathBuf {
-        std::env::temp_dir().join(format!("opencompany-test-{}", generate_id()))
+    fn tmp_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-test-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     #[tokio::test]
@@ -788,7 +1068,8 @@ mod test {
         // `read_jsonl` reports as a "trailing characters" parse error). The
         // single-write `append_line` makes each record one atomic O_APPEND
         // write, so this holds deterministically.
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         tokio::fs::create_dir_all(&root).await.unwrap();
         let path = root.join("log.jsonl");
 
@@ -811,8 +1092,6 @@ mod test {
         let mut seen: Vec<u64> = rows.iter().map(|r| r["i"].as_u64().unwrap()).collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..N).collect::<Vec<_>>(), "all records intact");
-
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     // The fs backend runs the identical port-conformance suite the sqlite
@@ -820,7 +1099,8 @@ mod test {
     // stores start empty.
     #[tokio::test]
     async fn conformance_isolation_by_company() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_isolation_by_company(
             Arc::new(FsCompanyStore::new(&root)),
             Arc::new(FsEventLog::new(&root)),
@@ -828,37 +1108,138 @@ mod test {
             Arc::new(FsContextStore::new(&root)),
         )
         .await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_append_only_event_and_ledger() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_append_only_event_and_ledger(
             Arc::new(FsCompanyStore::new(&root)),
             Arc::new(FsEventLog::new(&root)),
         )
         .await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_monotonic_event_seq() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_monotonic_event_seq(Arc::new(FsEventLog::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    #[tokio::test]
+    async fn conformance_event_retention() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_event_retention(Arc::new(FsEventLog::new(&root))).await;
     }
 
     #[tokio::test]
     async fn conformance_inbox_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_inbox_store(Arc::new(FsInboxStore::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    #[tokio::test]
+    async fn conformance_context_chunk_stamps() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_context_chunk_stamps(Arc::new(FsContextStore::new(&root))).await;
+    }
+
+    /// Two event logs over one data root must not hand out the same sequence
+    /// number (issue #388).
+    ///
+    /// `EventLog::append` computes the next `seq` by counting the lines already
+    /// in the file, then appends. That read-then-append is only atomic under a
+    /// lock, and the lock used to be a **field** on `FsEventLog` — so two
+    /// instances over one bundle serialised against nothing, both read the same
+    /// count, and both wrote the same `seq`. A duplicate sequence number breaks
+    /// every consumer that treats it as an identity: `read_from`'s `seq >=`
+    /// cursor silently replays, and the console's resume-from-seq skips.
+    ///
+    /// Nothing stops a second instance being constructed — `FsEventLog::new`
+    /// takes a root and is called wherever one is needed — so this is reachable
+    /// without any exotic setup, which is exactly what makes it worth a lock in
+    /// the registry rather than a convention.
+    #[tokio::test]
+    async fn two_event_logs_over_one_root_never_reuse_a_sequence() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        // Two independently-constructed logs over the same data root — the shape
+        // a second runtime, a maintenance task, or an export job produces.
+        let first = Arc::new(FsEventLog::new(&root));
+        let second = Arc::new(FsEventLog::new(&root));
+        let id = CompanyId::new("acme");
+
+        const N: u64 = 32;
+        let mut set = tokio::task::JoinSet::new();
+        for i in 0..N {
+            let log = if i % 2 == 0 {
+                first.clone()
+            } else {
+                second.clone()
+            };
+            let id = id.clone();
+            set.spawn(async move {
+                log.append(
+                    &id,
+                    CompanyEvent::OperatorMessage {
+                        parent: None,
+                        text: format!("event {i}"),
+                        by: None,
+                        chat: None,
+                    },
+                )
+                .await
+                .expect("append succeeds")
+            });
+        }
+        let mut handed_out = Vec::new();
+        while let Some(res) = set.join_next().await {
+            handed_out.push(res.expect("task joins").value());
+        }
+
+        handed_out.sort_unstable();
+        assert_eq!(
+            handed_out,
+            (0..N).collect::<Vec<_>>(),
+            "the sequences handed to callers must be unique and dense — a repeat \
+             means two instances read the same line count before either appended"
+        );
+
+        // And the same must hold for what actually landed on disk.
+        let stored = first.read_from(&id, EventSeq::new(0), 1024).await.unwrap();
+        assert_eq!(stored.len() as u64, N, "every append is on disk");
+        let mut persisted: Vec<u64> = stored.iter().map(|e| e.seq.value()).collect();
+        persisted.sort_unstable();
+        assert_eq!(
+            persisted,
+            (0..N).collect::<Vec<_>>(),
+            "the persisted sequences must be unique and dense too"
+        );
+    }
+
+    /// The fs backend's migration path: index lines written before
+    /// `stored_at_millis` existed carry no such field, and must still
+    /// deserialize — reporting an unknown (`0`) store time rather than failing
+    /// the read and blanking the whole Brain list.
+    #[test]
+    fn legacy_context_index_line_without_a_stamp_still_parses() {
+        let legacy = r#"{"addr":"abc123","label":"agent/ceo","len":24}"#;
+        let entry: IndexEntry = serde_json::from_str(legacy).expect("legacy index line parses");
+        assert_eq!(entry.addr, "abc123");
+        assert_eq!(entry.label, "agent/ceo");
+        assert_eq!(entry.len, 24);
+        assert_eq!(entry.stored_at_millis, 0);
     }
 
     #[tokio::test]
     async fn conformance_export_totality() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_export_totality(
             Arc::new(FsCompanyStore::new(&root)),
             Arc::new(FsEventLog::new(&root)),
@@ -866,7 +1247,6 @@ mod test {
             Arc::new(FsContextStore::new(&root)),
         )
         .await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     fn sample_manifest() -> crate::company::CompanyManifest {
@@ -887,7 +1267,8 @@ mod test {
 
     #[tokio::test]
     async fn company_store_saves_and_loads() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let store = FsCompanyStore::new(&root);
         let id = CompanyId::new("acme");
         let record = CompanyRecord {
@@ -899,6 +1280,10 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         };
         store.save(&record).await.unwrap();
 
@@ -918,12 +1303,12 @@ mod test {
                 .unwrap()
                 .is_none()
         );
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn append_ledger_grows_without_rewrite() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let store = FsCompanyStore::new(&root);
         let id = CompanyId::new("acme");
         store
@@ -936,6 +1321,10 @@ mod test {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();
@@ -957,12 +1346,138 @@ mod test {
         let loaded = store.load(&id).await.unwrap().unwrap();
         assert_eq!(loaded.ledger.len(), 3);
         assert_eq!(loaded.ledger[2].memo, "entry 2");
-        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    /// A company with a damaged ledger still boots, and the damage is
+    /// quarantined rather than deleted (issue #387).
+    ///
+    /// Before this, `read_jsonl` parsed inside its loop, so the first bad line
+    /// returned `Err` from `FsCompanyStore::load`, the builder propagated it,
+    /// and one torn accounting line made the company unbootable — with the
+    /// console that would repair it sitting behind the boot it killed.
+    ///
+    /// Four lines, two of them damaged in the two ways a torn write actually
+    /// produces: JSON that stops mid-value, and a byte sequence that is not
+    /// UTF-8 at all. The second is the reason this reads bytes rather than a
+    /// `String`: a whole-file decode would fail on that one byte and lose all
+    /// four lines to damage confined to one.
+    #[tokio::test]
+    async fn a_damaged_ledger_line_is_skipped_and_left_on_disk() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let store = FsCompanyStore::new(&root);
+        let id = CompanyId::new("acme");
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: sample_manifest(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        // The memo text the report must never echo. Distinctive enough that a
+        // substring search cannot pass by accident.
+        const MEMO_TWO: &str = "acquire-northwind-holdings";
+        const MEMO_THREE: &str = "settle-quarterly-invoice";
+
+        let mut bytes: Vec<u8> = Vec::new();
+        // 1. Intact.
+        bytes.extend_from_slice(
+            br#"{"at_millis":1,"kind":"inference.spend","amount_usd":1.0,"memo":"first entry"}"#,
+        );
+        bytes.push(b'\n');
+        // 2. A torn write: the JSON stops in the middle of the memo string.
+        bytes.extend_from_slice(
+            format!(
+                r#"{{"at_millis":2,"kind":"inference.spend","amount_usd":2.0,"memo":"{MEMO_TWO}"#
+            )
+            .as_bytes(),
+        );
+        bytes.push(b'\n');
+        // 3. Invalid UTF-8 in a structural position, so the lossy U+FFFD lands
+        //    where a key is expected and the line cannot parse. (Damage *inside*
+        //    a string would decode to a valid — if mangled — record, which is
+        //    the recoverable case and deliberately not skipped.)
+        bytes.extend_from_slice(br#"{"at_millis":3,"#);
+        bytes.push(0xFF);
+        bytes.extend_from_slice(
+            format!(r#""kind":"inference.spend","amount_usd":3.0,"memo":"{MEMO_THREE}"}}"#)
+                .as_bytes(),
+        );
+        bytes.push(b'\n');
+        // 4. Intact.
+        bytes.extend_from_slice(
+            br#"{"at_millis":4,"kind":"inference.spend","amount_usd":4.0,"memo":"fourth entry"}"#,
+        );
+        bytes.push(b'\n');
+
+        let path = Bundle::new(root.clone(), &id).ledger_jsonl();
+        tokio::fs::write(&path, &bytes).await.unwrap();
+
+        // The company boots, carrying the entries that survived.
+        let loaded = store
+            .load(&id)
+            .await
+            .expect("a damaged ledger line must not fail the load")
+            .expect("the company exists");
+        assert_eq!(
+            loaded.ledger.len(),
+            2,
+            "the two intact entries load; the two damaged ones are skipped"
+        );
+        assert_eq!(loaded.ledger[0].memo, "first entry");
+        assert_eq!(loaded.ledger[1].memo, "fourth entry");
+
+        // The report locates the damage without quoting it.
+        let (entries, skipped) = read_jsonl_lenient::<LedgerEntry>(&path).await.unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            skipped.iter().map(|s| s.line).collect::<Vec<_>>(),
+            vec![2, 3],
+            "the report names the 1-based line numbers of the damaged lines"
+        );
+        for entry in &skipped {
+            assert!(
+                entry.bytes > 0,
+                "the report carries the on-disk line length"
+            );
+            assert!(
+                !entry.message.is_empty(),
+                "the report says what was rejected"
+            );
+            for memo in [MEMO_TWO, MEMO_THREE] {
+                assert!(
+                    !entry.message.contains(memo),
+                    "a memo is free text and must never reach the report: {:?}",
+                    entry.message
+                );
+            }
+        }
+
+        // Quarantine, not repair: the file is untouched, so an operator can
+        // still recover the damaged lines by hand.
+        let after = tokio::fs::read(&path).await.unwrap();
+        assert_eq!(
+            after, bytes,
+            "loading must not rewrite the ledger — skipping a line the reader \
+             could not parse must never become deleting it"
+        );
     }
 
     #[tokio::test]
     async fn event_log_assigns_monotonic_seqs_and_resumes() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let log = FsEventLog::new(&root);
         let id = CompanyId::new("acme");
 
@@ -970,6 +1485,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "a".into(),
                     by: None,
                     chat: None,
@@ -981,6 +1497,7 @@ mod test {
             .append(
                 &id,
                 CompanyEvent::OperatorMessage {
+                    parent: None,
                     text: "b".into(),
                     by: None,
                     chat: None,
@@ -996,12 +1513,12 @@ mod test {
         let from_one = log.read_from(&id, EventSeq::new(1), 10).await.unwrap();
         assert_eq!(from_one.len(), 1);
         assert_eq!(from_one[0].seq, EventSeq::new(1));
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn event_log_subscribe_delivers_new_event() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let log = FsEventLog::new(&root);
         let id = CompanyId::new("acme");
         let mut stream = log.subscribe(&id);
@@ -1009,6 +1526,7 @@ mod test {
         log.append(
             &id,
             CompanyEvent::OperatorMessage {
+                parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
@@ -1020,17 +1538,18 @@ mod test {
         assert_eq!(
             received.event,
             CompanyEvent::OperatorMessage {
+                parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None
             }
         );
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn memory_store_traces_tail_and_evict() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let mem = FsMemoryStore::new(&root);
         let id = CompanyId::new("acme");
         for i in 0..5 {
@@ -1048,12 +1567,12 @@ mod test {
             .unwrap();
         assert_eq!(removed, 4);
         assert_eq!(mem.recent_traces(&id, 10).await.unwrap().len(), 1);
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn context_store_put_peek_search() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let ctx = FsContextStore::new(&root);
         let id = CompanyId::new("acme");
         let addr = ctx
@@ -1079,12 +1598,12 @@ mod test {
         let hits = ctx.search(&id, "brown", 5).await.unwrap();
         assert_eq!(hits.len(), 1);
         assert!(hits[0].snippet.contains("brown"));
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn secret_store_isolates_companies() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let secrets = FsSecretStore::new(&root);
         let a = CompanyId::new("company-a");
         let b = CompanyId::new("company-b");
@@ -1099,6 +1618,5 @@ mod test {
         );
         // Company B cannot see company A's secret.
         assert_eq!(secrets.get(&b, "github_token").await.unwrap(), None);
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 }

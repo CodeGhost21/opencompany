@@ -24,6 +24,7 @@
 
 use std::collections::HashMap;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 
@@ -38,11 +39,82 @@ use crate::ports::types::{
 /// Default time-to-live for a parked approval: 7 days in milliseconds.
 pub const DEFAULT_TTL_MILLIS: u64 = 7 * 24 * 60 * 60 * 1000;
 
+/// Replays a company's event log to decide whether it should boot with the
+/// emergency stop engaged (issue #86).
+///
+/// **The event log is the durable state, not a mirror of it.** The kill switch
+/// deliberately has no field on
+/// [`CompanyRecord`](crate::ports::types::CompanyRecord): a second copy of a
+/// safety flag is a second thing that can disagree with the first, and the
+/// append-only log already answers "what did the last operator decide" exactly.
+/// The last [`EmergencyPauseChanged`](crate::ports::types::CompanyEvent::EmergencyPauseChanged)
+/// wins; a log with none was never stopped.
+///
+/// # Fail-safe
+///
+/// A read failure returns `Err`, and the caller
+/// ([`hydrate_emergency`](crate::runtime::CompanyRuntime::hydrate_emergency))
+/// turns that into **stopped**. This deliberately diverges from
+/// [`sweep_interrupted_runs`](crate::runtime::sweep_interrupted_runs) beside it,
+/// which swallows read failures because record-keeping must never stop a company
+/// booting. Here the read *is* the safety decision: a company that cannot prove
+/// it was running must not assume it was.
+pub async fn replayed_emergency(
+    events: &std::sync::Arc<dyn crate::ports::EventLog>,
+    company: &CompanyId,
+) -> Result<bool> {
+    use crate::ports::types::{CompanyEvent, EventSeq};
+
+    // A full scan, on the same terms as the interrupted-run sweep beside it:
+    // boot already reads this log end to end, and the port exposes no reverse
+    // or filtered read to do better with.
+    let stored = events
+        .read_from(company, EventSeq::new(0), usize::MAX)
+        .await?;
+    Ok(stored
+        .iter()
+        .rev()
+        .find_map(|stored| match &stored.event {
+            CompanyEvent::EmergencyPauseChanged { engaged, .. } => Some(*engaged),
+            _ => None,
+        })
+        .unwrap_or(false))
+}
+
 /// A parked effect awaiting operator resolution.
 #[derive(Clone, Debug)]
 struct ParkedEffect {
     effect: Effect,
     parked_at_millis: u64,
+}
+
+/// What actually happened when a resolve reached the queue (issue #243).
+///
+/// The [`ApprovalGate`] port's `resolve` returns `Option<Effect>`, which
+/// collapses four distinct situations into one `None`: the approval was denied,
+/// it expired, it was never parked, or it was already resolved. That is enough
+/// for "should I execute the effect?" and nowhere near enough for anything else
+/// — most importantly it cannot tell "the operator denied this" from "this
+/// approval is already gone", so a double-submit (a double-click, a retried
+/// request, two operators on the same queue) looked exactly like a deny and got
+/// the full treatment: a second `ApprovalResolved` journal line and a second
+/// follow-up cycle, both describing an approval that no longer existed.
+///
+/// Returned by the concrete gate rather than widened onto the port, following
+/// the amend path — [`resolve_amended`](ManifestApprovalGate::resolve_amended) —
+/// which already reaches past the `dyn` boundary for the same reason.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ResolveOutcome {
+    /// No such approval is parked: an unknown id, or one already resolved by an
+    /// earlier call. The caller must treat this as a no-op, not a deny.
+    NotParked,
+    /// The approval was parked but is past its TTL, so it resolves to a
+    /// default-deny whatever the operator asked for. It IS removed.
+    Expired,
+    /// The operator denied it. Removed; nothing to execute.
+    Denied,
+    /// The operator approved it in time. Removed, and here is the effect.
+    Approved(Effect),
 }
 
 /// The default [`ApprovalGate`]: evaluates effects against a company's
@@ -51,6 +123,19 @@ pub struct ManifestApprovalGate {
     policy: Policy,
     ttl_millis: u64,
     parked: Mutex<HashMap<ApprovalId, ParkedEffect>>,
+    /// The governance kill switch (issue #86).
+    ///
+    /// An `AtomicBool` rather than a lock because `evaluate` reads it on every
+    /// effect and a kill switch that adds contention to the path it guards is a
+    /// poor one. It is a *cache* of the event log, hydrated at boot by
+    /// [`replayed_emergency`]; the log is the durable truth.
+    ///
+    /// Defaults to `false` because a freshly constructed gate has not been told
+    /// anything yet, and the one caller that can distinguish "not in emergency"
+    /// from "could not find out" — the boot path — engages it explicitly on a
+    /// read failure. See
+    /// [`hydrate_emergency`](crate::runtime::CompanyRuntime::hydrate_emergency).
+    emergency: AtomicBool,
 }
 
 impl ManifestApprovalGate {
@@ -60,7 +145,31 @@ impl ManifestApprovalGate {
             policy,
             ttl_millis: DEFAULT_TTL_MILLIS,
             parked: Mutex::new(HashMap::new()),
+            emergency: AtomicBool::new(false),
         }
+    }
+
+    /// Engages (`true`) or releases (`false`) the emergency stop.
+    ///
+    /// Returns the **previous** value. The atomic swap is what makes a
+    /// transition race-safe: exactly one caller observes the old state, so
+    /// [`CompanyRuntime::emergency_pause`] and
+    /// [`CompanyRuntime::emergency_resume`] can journal an
+    /// [`EmergencyPauseChanged`](crate::ports::types::CompanyEvent::EmergencyPauseChanged)
+    /// event only for the caller that actually changed the switch, matching the
+    /// event count to the number of real transitions under a double-press.
+    ///
+    /// `Ordering::SeqCst` on both ends: this is a safety flag read by request
+    /// handlers on other threads, and the cost of the strongest ordering on a
+    /// single boolean is irrelevant next to being sure a handler that starts
+    /// after the switch was pulled observes it pulled.
+    pub fn set_emergency(&self, engaged: bool) -> bool {
+        self.emergency.swap(engaged, Ordering::SeqCst)
+    }
+
+    /// Whether the emergency stop is currently engaged.
+    pub fn is_emergency(&self) -> bool {
+        self.emergency.load(Ordering::SeqCst)
     }
 
     /// Overrides the parked-approval TTL (default [`DEFAULT_TTL_MILLIS`]).
@@ -142,6 +251,35 @@ impl ManifestApprovalGate {
         Some(amended)
     }
 
+    /// Resolves a parked approval as of `now`, reporting **which** of the four
+    /// outcomes occurred rather than collapsing them into an `Option`
+    /// (issue #243).
+    ///
+    /// The `remove` and the outcome decision are one critical section, so two
+    /// concurrent resolves of the same id cannot both win: whichever thread
+    /// takes the lock first gets `Approved` / `Denied` / `Expired`, and every
+    /// other thread finds the map empty and gets [`ResolveOutcome::NotParked`].
+    /// That is what makes an approve idempotent at the source instead of
+    /// depending on callers to check-then-act, which is racy by construction.
+    pub fn resolve_outcome(
+        &self,
+        id: &ApprovalId,
+        verdict: Verdict,
+        _by: Actor,
+        now_millis: u64,
+    ) -> ResolveOutcome {
+        let Some(parked) = self.parked.lock().expect("parked map poisoned").remove(id) else {
+            return ResolveOutcome::NotParked;
+        };
+        if now_millis.saturating_sub(parked.parked_at_millis) >= self.ttl_millis {
+            return ResolveOutcome::Expired;
+        }
+        match verdict {
+            Verdict::Approve => ResolveOutcome::Approved(parked.effect),
+            Verdict::Deny => ResolveOutcome::Denied,
+        }
+    }
+
     /// Resolves a parked approval as of `now`, so expiry is testable.
     ///
     /// An expired approval resolves to deny (`None`) regardless of `verdict`.
@@ -164,6 +302,34 @@ impl ManifestApprovalGate {
             Verdict::Approve => Some(parked.effect),
             Verdict::Deny => None,
         }
+    }
+
+    /// Whether this effect is one a person would want to know had **already
+    /// happened** before re-running the work that produced it (issue #351).
+    ///
+    /// It is the supervised checkpoint taxonomy read as a question about the
+    /// past rather than the future: signing, publishing, touching identity,
+    /// spending at or over the cap, first contact with a counterparty. Those
+    /// are the effects `evaluate_supervised` refuses to wave through, and they
+    /// are refused precisely because they cannot be taken back.
+    ///
+    /// Deliberately **mode-independent**. A `full`-mode company executes every
+    /// one of these without ever parking it, which is exactly the case this
+    /// warning exists for: the operator was never asked, so the retry dialog is
+    /// the first and only place they learn a filing was already submitted.
+    /// Asking the same taxonomy the same way for every mode also means a
+    /// company that later tightens its policy does not retroactively change
+    /// what its history says it did.
+    ///
+    /// Delegating to [`evaluate_supervised`](Self::evaluate_supervised) rather
+    /// than restating the rules is the point: two copies of "which effects are
+    /// irreversible" would drift, and the copy in the retry dialog would drift
+    /// silently — nobody notices a warning that stopped naming something.
+    pub fn is_irreversible(&self, effect: &Effect) -> bool {
+        matches!(
+            self.evaluate_supervised(effect),
+            PolicyDecision::RequireApproval
+        )
     }
 
     /// The supervised-mode checkpoint taxonomy.
@@ -208,6 +374,23 @@ impl ManifestApprovalGate {
 #[async_trait]
 impl ApprovalGate for ManifestApprovalGate {
     async fn evaluate(&self, _company: &CompanyId, effect: &Effect) -> Result<PolicyDecision> {
+        // 0. The emergency stop (issue #86), ahead of every policy rule
+        //    including `always_approve`.
+        //
+        //    `Deny`, not `RequireApproval`: parking would leave the queue as the
+        //    escape hatch from the kill switch, so an operator who pulled it
+        //    could re-authorise the very effects they just stopped without ever
+        //    releasing it. Denial returns to the brain as a refusal it replans
+        //    around, which is what "park all new work" has to mean.
+        //
+        //    `EffectGroup::Other` is exempt so chat survives — the operator has
+        //    to be able to ask the company what it was doing. The gate does not
+        //    police which tools `Other` covers, so "chat survives" is an
+        //    observation, not a promise about every non-conversational effect.
+        if self.is_emergency() && effect.group != EffectGroup::Other {
+            return Ok(PolicyDecision::Deny);
+        }
+
         // 1. `never_do` hard-deny — the delegation-rule compiler is a Phase-1
         //    stub, so this list is currently always empty.
 
@@ -233,6 +416,20 @@ impl ApprovalGate for ManifestApprovalGate {
     }
 
     async fn park(&self, _company: &CompanyId, effect: Effect) -> Result<ApprovalId> {
+        // The emergency stop (issue #86) vetoes the park path too, not just
+        // `evaluate`. The harness approval route — a tool call OpenHuman already
+        // gated inline — parks without ever consulting `evaluate`, so without
+        // this check a gated effect queued *after* the switch was pulled could
+        // be released for execution by an approver. This is the same veto
+        // `evaluate` applies, so an `EffectGroup::Other` effect (chat) still
+        // parks and an approval parked *before* the stop stays resolvable.
+        if self.is_emergency() && effect.group != EffectGroup::Other {
+            return Err(crate::OpenCompanyError::EmergencyStop(format!(
+                "refusing to park {} while stopped",
+                effect.kind
+            )));
+        }
+
         let id = ApprovalId::generate();
         self.parked.lock().expect("parked map poisoned").insert(
             id.clone(),
@@ -278,6 +475,8 @@ mod test {
             established_thread: false,
             first_time_counterparty: false,
             payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
         }
     }
 
@@ -467,6 +666,176 @@ mod test {
         assert!(gate.parked_ids().is_empty());
     }
 
+    /// Issue #243: the four outcomes the port's `Option<Effect>` cannot tell
+    /// apart. The important pair is `Denied` vs `NotParked` — the caller must
+    /// journal and re-cycle the first and do nothing at all for the second.
+    #[tokio::test]
+    async fn resolve_outcome_distinguishes_all_four_results() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None));
+        let eff = effect("filing.submit", EffectGroup::Sign);
+
+        // Unknown id.
+        assert_eq!(
+            gate.resolve_outcome(
+                &ApprovalId::new("never-parked"),
+                Verdict::Approve,
+                operator(),
+                now_millis()
+            ),
+            ResolveOutcome::NotParked
+        );
+
+        // Approved in time.
+        let id = gate.park(&company(), eff.clone()).await.unwrap();
+        assert_eq!(
+            gate.resolve_outcome(&id, Verdict::Approve, operator(), now_millis()),
+            ResolveOutcome::Approved(eff.clone())
+        );
+        // ...and resolving it a second time is NOT a deny, it is a no-op.
+        assert_eq!(
+            gate.resolve_outcome(&id, Verdict::Approve, operator(), now_millis()),
+            ResolveOutcome::NotParked,
+            "an already-resolved approval must not look like a fresh deny"
+        );
+
+        // Denied.
+        let id = gate.park(&company(), eff.clone()).await.unwrap();
+        assert_eq!(
+            gate.resolve_outcome(&id, Verdict::Deny, operator(), now_millis()),
+            ResolveOutcome::Denied
+        );
+
+        // Expired: past the TTL, an approve still resolves to a default-deny,
+        // and reports it as expiry rather than as the operator's choice.
+        let short = ManifestApprovalGate::new(policy("supervised", None)).with_ttl_millis(1000);
+        let id = short.park(&company(), eff).await.unwrap();
+        assert_eq!(
+            short.resolve_outcome(&id, Verdict::Approve, operator(), now_millis() + 10_000),
+            ResolveOutcome::Expired
+        );
+        assert!(
+            short.parked_ids().is_empty(),
+            "expiry still drains the queue"
+        );
+    }
+
+    /// Two operators (or one double-click, or a retried request) resolving the
+    /// same approval concurrently: exactly one wins.
+    ///
+    /// The `remove` and the outcome decision share a critical section precisely
+    /// so this cannot double-fire. A check-then-act caller — "is it parked? then
+    /// resolve it" — would let both threads through and execute the approved
+    /// effect twice; the at-most-once journal key would catch the *effect*, but
+    /// the duplicate journal record and the duplicate follow-up cycle would
+    /// still land.
+    #[tokio::test]
+    async fn concurrent_resolves_of_one_approval_yield_exactly_one_winner() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let gate = Arc::new(ManifestApprovalGate::new(policy("supervised", None)));
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+
+        let approvals = Arc::new(AtomicUsize::new(0));
+        let not_parked = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+
+        let mut tasks = Vec::new();
+        for _ in 0..8 {
+            let gate = Arc::clone(&gate);
+            let id = id.clone();
+            let approvals = Arc::clone(&approvals);
+            let not_parked = Arc::clone(&not_parked);
+            let barrier = Arc::clone(&barrier);
+            tasks.push(tokio::task::spawn_blocking(move || {
+                barrier.wait();
+                match gate.resolve_outcome(&id, Verdict::Approve, operator(), now_millis()) {
+                    ResolveOutcome::Approved(_) => approvals.fetch_add(1, Ordering::SeqCst),
+                    ResolveOutcome::NotParked => not_parked.fetch_add(1, Ordering::SeqCst),
+                    other => panic!("unexpected outcome {other:?}"),
+                };
+            }));
+        }
+        for t in tasks {
+            t.await.expect("task");
+        }
+
+        assert_eq!(approvals.load(Ordering::SeqCst), 1, "exactly one winner");
+        assert_eq!(not_parked.load(Ordering::SeqCst), 7, "the rest are no-ops");
+        assert!(gate.parked_ids().is_empty());
+    }
+
+    /// Issue #351: the irreversibility question, answered by the same taxonomy
+    /// that decides what parks — and answered the same way whatever mode the
+    /// company runs in.
+    ///
+    /// The mode-independence is the part worth pinning. A `full`-mode company
+    /// executes a filing without ever parking it, so the retry dialog is the
+    /// only place anybody will ever be told it happened; a predicate that read
+    /// the company's mode would say "nothing to warn about" in exactly the
+    /// configuration that needs the warning most.
+    #[test]
+    fn irreversibility_follows_the_supervised_taxonomy_in_every_mode() {
+        for mode in ["supervised", "full", "readonly"] {
+            let gate = ManifestApprovalGate::new(policy(mode, Some(100.0)));
+
+            for group in [
+                EffectGroup::Sign,
+                EffectGroup::Publish,
+                EffectGroup::Identity,
+            ] {
+                assert!(
+                    gate.is_irreversible(&effect("filing.submit", group)),
+                    "{mode}: {group:?} is irreversible by construction",
+                );
+            }
+
+            // Spend: the cap decides, strictly.
+            let mut under = effect("x402.spend", EffectGroup::Spend);
+            under.amount_usd = Some(99.0);
+            assert!(!gate.is_irreversible(&under), "{mode}: under the cap");
+            let mut at_cap = effect("x402.spend", EffectGroup::Spend);
+            at_cap.amount_usd = Some(100.0);
+            assert!(gate.is_irreversible(&at_cap), "{mode}: at the cap");
+
+            // Send: first contact is the irreversible half.
+            let mut established = effect("email.send", EffectGroup::Send);
+            established.established_thread = true;
+            assert!(!gate.is_irreversible(&established), "{mode}: a live thread");
+            let mut cold = effect("email.send", EffectGroup::Send);
+            cold.first_time_counterparty = true;
+            assert!(gate.is_irreversible(&cold), "{mode}: first contact");
+
+            // A read changes nothing and warns about nothing.
+            assert!(
+                !gate.is_irreversible(&effect("web.search", EffectGroup::Other)),
+                "{mode}: an ordinary read must not raise a retry warning",
+            );
+        }
+    }
+
+    /// `always_approve` is a *parking* rule, not an irreversibility one, so it
+    /// deliberately does not leak into the warning.
+    ///
+    /// Both live on the same policy block and it would be easy to fold them
+    /// together. They answer different questions: `always_approve` is "ask me
+    /// first", which an operator sets for anything they want a say in, while
+    /// this dialog claims something cannot be taken back. Widening it would
+    /// warn about routine work and teach people to click through.
+    #[tokio::test]
+    async fn always_approve_does_not_widen_what_counts_as_irreversible() {
+        let gate = ManifestApprovalGate::new(policy("supervised", Some(100.0)));
+        let mut cheap = effect("payment.send", EffectGroup::Spend);
+        cheap.amount_usd = Some(1.0);
+        // `payment.send` is in the default always_approve list, so it parks...
+        assert_eq!(decide(&gate, &cheap).await, PolicyDecision::RequireApproval);
+        // ...but a dollar under a hundred-dollar cap is not irreversible.
+        assert!(!gate.is_irreversible(&cheap));
+    }
+
     #[tokio::test]
     async fn sweep_expired_removes_stale_entries() {
         let gate = ManifestApprovalGate::new(policy("supervised", None)).with_ttl_millis(0);
@@ -478,5 +847,223 @@ mod test {
         let expired = gate.sweep_expired(now_millis() + 1);
         assert_eq!(expired, vec![id]);
         assert!(gate.parked_ids().is_empty());
+    }
+
+    // -- Emergency stop (issue #86) -----------------------------------------
+
+    /// Every side-effecting group is denied. Enumerated rather than sampled:
+    /// this is a kill switch, and a group added to the taxonomy without being
+    /// added here is a category of work that quietly keeps running.
+    #[tokio::test]
+    async fn emergency_denies_every_side_effecting_group() {
+        // `full` mode — the most permissive policy there is. If the stop only
+        // worked under `supervised` it would be useless exactly when it matters.
+        let gate = ManifestApprovalGate::new(policy("full", None));
+        gate.set_emergency(true);
+
+        for group in [
+            EffectGroup::Spend,
+            EffectGroup::Send,
+            EffectGroup::Sign,
+            EffectGroup::Publish,
+            EffectGroup::Hire,
+            EffectGroup::Identity,
+        ] {
+            assert_eq!(
+                decide(&gate, &effect("some.effect", group)).await,
+                PolicyDecision::Deny,
+                "{group:?} was not denied under emergency stop"
+            );
+        }
+    }
+
+    /// Chat survives, or the operator cannot ask what happened.
+    #[tokio::test]
+    async fn emergency_permits_other_so_chat_keeps_working() {
+        let gate = ManifestApprovalGate::new(policy("full", None));
+        gate.set_emergency(true);
+        assert_eq!(
+            decide(&gate, &effect("chat.reply", EffectGroup::Other)).await,
+            PolicyDecision::Allow
+        );
+    }
+
+    /// The stop outranks `always_approve`, which would otherwise park — and
+    /// parking is a way *out* of the stop, since the operator could then approve
+    /// the effect they just stopped without ever releasing the switch.
+    #[tokio::test]
+    async fn emergency_denies_rather_than_parking_an_always_approve_effect() {
+        let gate = ManifestApprovalGate::new(policy("supervised", Some(100.0)));
+        // Baseline: this kind parks under normal policy.
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::RequireApproval
+        );
+        gate.set_emergency(true);
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
+        );
+        // And nothing was parked as a side effect of being denied.
+        assert!(gate.parked_ids().is_empty());
+    }
+
+    /// Parks *new* work without corrupting *in-flight* work: an approval already
+    /// waiting on a person stays resolvable, and approving it still yields the
+    /// effect to execute. Denying already-parked work instead would strand
+    /// decisions the operator had already been asked for.
+    #[tokio::test]
+    async fn emergency_leaves_already_parked_approvals_resolvable() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None));
+        let parked = effect("filing.submit", EffectGroup::Sign);
+        let id = gate.park(&company(), parked.clone()).await.unwrap();
+
+        gate.set_emergency(true);
+
+        // Still visible to the operator...
+        assert_eq!(gate.parked_ids(), vec![id.clone()]);
+        assert_eq!(gate.parked_effect(&id), Some(parked.clone()));
+        // ...and still resolvable, yielding the effect to execute.
+        let resolved = gate
+            .resolve(&id, Verdict::Approve, operator())
+            .await
+            .unwrap();
+        assert_eq!(resolved, Some(parked));
+    }
+
+    /// A denial for a parked approval is still a denial while stopped — the
+    /// switch must not turn "deny" into "approve" by accident.
+    #[tokio::test]
+    async fn emergency_refuses_to_park_new_side_effecting_effects() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None));
+        gate.set_emergency(true);
+
+        // A side-effecting effect cannot be queued for approval while stopped —
+        // the harness approval route parks without consulting `evaluate`, so
+        // without this veto a gated effect could be released after the stop.
+        let err = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap_err();
+        assert!(matches!(err, crate::OpenCompanyError::EmergencyStop(_)));
+        assert!(gate.parked_ids().is_empty());
+
+        // Chat still parks while stopped — the veto is the *same* one `evaluate`
+        // applies, so an `EffectGroup::Other` effect is not caught by it.
+        let id = gate
+            .park(&company(), effect("chat.reply", EffectGroup::Other))
+            .await
+            .expect("an Other-group effect parks while stopped");
+        assert_eq!(gate.parked_ids(), vec![id]);
+    }
+
+    /// A denial for a parked approval is still a denial while stopped — the
+    /// switch must not turn "deny" into "approve" by accident.
+    #[tokio::test]
+    async fn emergency_does_not_change_a_denied_resolution() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None));
+        let id = gate
+            .park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+        let resolved = gate.resolve(&id, Verdict::Deny, operator()).await.unwrap();
+        assert_eq!(resolved, None);
+    }
+
+    /// Releasing restores the *previous* policy exactly — the stop is a veto
+    /// layered over evaluation, not a rewrite of it.
+    #[tokio::test]
+    async fn releasing_restores_normal_evaluation() {
+        let gate = ManifestApprovalGate::new(policy("full", None));
+        let spend = effect("payment.send", EffectGroup::Spend);
+        // `payment.send` is in the default always_approve list, so `full` parks it.
+        let before = decide(&gate, &spend).await;
+        assert_eq!(before, PolicyDecision::RequireApproval);
+
+        gate.set_emergency(true);
+        assert_eq!(decide(&gate, &spend).await, PolicyDecision::Deny);
+
+        gate.set_emergency(false);
+        assert_eq!(decide(&gate, &spend).await, before);
+    }
+
+    /// **No implicit un-pause.** The TTL sweep expires parked *approvals*; it
+    /// must never touch the switch. A kill switch with a timeout is a delay, and
+    /// the failure mode is silent: work resumes at 3am with nobody watching.
+    #[tokio::test]
+    async fn emergency_does_not_decay_with_the_approval_ttl() {
+        let gate = ManifestApprovalGate::new(policy("supervised", None)).with_ttl_millis(0);
+        gate.park(&company(), effect("filing.submit", EffectGroup::Sign))
+            .await
+            .unwrap();
+        gate.set_emergency(true);
+
+        // Sweep far past any TTL: every parked approval expires...
+        let expired = gate.sweep_expired(now_millis() + DEFAULT_TTL_MILLIS * 1000);
+        assert_eq!(expired.len(), 1);
+
+        // ...and the stop is still engaged.
+        assert!(gate.is_emergency());
+        assert_eq!(
+            decide(&gate, &effect("payment.send", EffectGroup::Spend)).await,
+            PolicyDecision::Deny
+        );
+    }
+
+    /// Boot replay: the *last* `EmergencyPauseChanged` decides, so a stop
+    /// survives a restart and a release survives one too.
+    ///
+    /// This is the property the whole persistence design exists for — a kill
+    /// switch that evaporates when the process restarts is not a kill switch,
+    /// and a release that does not stick would strand a company nobody can
+    /// restart.
+    #[tokio::test]
+    async fn replay_takes_the_last_emergency_event() {
+        use crate::ports::EventLog;
+        use crate::ports::types::CompanyEvent;
+        use std::sync::Arc;
+
+        let home = tempfile::Builder::new()
+            .prefix("oc-emergency-replay-")
+            .tempdir()
+            .expect("tempdir");
+        let events: Arc<dyn EventLog> = Arc::new(crate::store::FsEventLog::new(home.path()));
+        let id = company();
+
+        // A log with no such event was never stopped.
+        assert!(!replayed_emergency(&events, &id).await.unwrap());
+
+        let change = |engaged: bool| CompanyEvent::EmergencyPauseChanged {
+            engaged,
+            by: operator(),
+            reason: None,
+        };
+
+        events.append(&id, change(true)).await.unwrap();
+        assert!(replayed_emergency(&events, &id).await.unwrap());
+
+        events.append(&id, change(false)).await.unwrap();
+        assert!(!replayed_emergency(&events, &id).await.unwrap());
+
+        // A second stop after a release wins again — the switch is not
+        // one-shot, and "last write wins" must hold in both directions.
+        events.append(&id, change(true)).await.unwrap();
+        assert!(replayed_emergency(&events, &id).await.unwrap());
+    }
+
+    /// A fresh gate is not stopped. The boot path is the only caller that can
+    /// tell "not stopped" from "could not find out", and it says so explicitly.
+    #[tokio::test]
+    async fn a_new_gate_is_not_stopped() {
+        let gate = ManifestApprovalGate::new(policy("full", None));
+        assert!(!gate.is_emergency());
+        // A side-effecting group, so this would be `Deny` if the switch
+        // defaulted engaged — but a kind outside `always_approve`, so under
+        // `full` the undisturbed answer is `Allow` rather than a park.
+        assert_eq!(
+            decide(&gate, &effect("blog.post", EffectGroup::Publish)).await,
+            PolicyDecision::Allow
+        );
     }
 }

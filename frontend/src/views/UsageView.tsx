@@ -9,7 +9,7 @@ import {
   XAxis,
   YAxis,
 } from "recharts";
-import { Coins, CreditCard, Gauge, Plug, Zap } from "lucide-react";
+import { Coins, CreditCard, Gauge, Plug, Search, Zap } from "lucide-react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { CapabilityStatusDto, UsageDto } from "@/api/types";
@@ -71,7 +71,15 @@ const EMPTY_USAGE: UsageDto = {
   series: [],
   byAgent: [],
   byProvider: [],
-  totals: { inputTokens: 0, outputTokens: 0, tokens: 0, costUsd: 0, oauthCalls: 0, connections: 0 },
+  totals: {
+    inputTokens: 0,
+    outputTokens: 0,
+    tokens: 0,
+    costUsd: 0,
+    oauthCalls: 0,
+    connections: 0,
+    searchCalls: 0,
+  },
 };
 
 /** In-depth usage: token burn over time, by agent, and OAuth calls by provider. */
@@ -143,11 +151,15 @@ export function UsageView({ client, company }: Props) {
         </div>
 
         {/* KPIs */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-5">
           <Kpi icon={Coins} label="Total tokens" value={compact(totals.tokens)} hint={`${compact(totals.inputTokens)} in · ${compact(totals.outputTokens)} out`} />
-          <Kpi icon={CreditCard} label="Est. cost" value={usd(totals.costUsd)} hint="At blended token rates" />
+          <Kpi icon={CreditCard} label="Est. cost" value={usd(totals.costUsd)} hint="Tokens plus metered calls" />
           <Kpi icon={Zap} label="OAuth calls" value={compact(totals.oauthCalls)} hint={`Across ${totals.connections} providers`} />
           <Kpi icon={Plug} label="Connections" value={String(totals.connections)} hint="Active integrations" />
+          {/* Issue #238. Its own KPI rather than a line inside "OAuth calls":
+              a search is a priced call on the managed platform, not a connected
+              account, and folding it in would overstate integrations. */}
+          <Kpi icon={Search} label="Web searches" value={compact(totals.searchCalls ?? 0)} hint="Billed per search" />
         </div>
 
         {/* Tokens over time */}
@@ -234,13 +246,20 @@ export function UsageView({ client, company }: Props) {
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
+            {/* Plan-level total token ceiling (issue #188): a HARD stop — once
+                spend crosses it the harness refuses to dispatch further turns,
+                unlike the soft per-namespace bars below. Rendered first, and on
+                its own even when no per-namespace tiers are configured. */}
+            {capsLoaded && caps?.configured && caps.total ? (
+              <TotalCeilingRow total={caps.total} />
+            ) : null}
             {capsLoaded && caps?.configured && caps.tiers && caps.tiers.length > 0 ? (
               <div className="space-y-4">
                 {caps.tiers.map((tier) => (
                   <CapabilityRow key={tier.namespace} tier={tier} />
                 ))}
               </div>
-            ) : (
+            ) : capsLoaded && caps?.configured && caps.total ? null : (
               <p className="py-2 text-sm text-muted-foreground">
                 {capsLoaded ? "No token plan configured." : "Loading budgets…"}
               </p>
@@ -251,6 +270,9 @@ export function UsageView({ client, company }: Props) {
             {/* Per-tenant Composio (issue #110): opt-in, per-tenant-token-gated —
                 its own status row like media. */}
             {capsLoaded && caps ? <ComposioStatusRow caps={caps} /> : null}
+            {/* Metered web search (issue #238): opt-in, managed-credential-gated,
+                and capped per day — its own status row like media/composio. */}
+            {capsLoaded && caps ? <SearchStatusRow caps={caps} /> : null}
           </CardContent>
         </Card>
       </div>
@@ -266,6 +288,7 @@ const NAMESPACE_LABELS: Record<string, string> = {
   subagent: "Sub-agents",
   media: "Media generation",
   composio: "Composio (Gmail/Slack/GitHub)",
+  search: "Web search",
 };
 
 // Badge variant subset the media status row uses.
@@ -336,9 +359,97 @@ function composioStatus(caps: CapabilityStatusDto): { label: string; variant: Ba
   return { label: "Active", variant: "default" };
 }
 
+/**
+ * Metered web search (issue #238) is opt-in per tool grant, gated on a managed
+ * platform credential, and bounded by a per-company daily call cap rather than a
+ * token budget — so it gets its own status row like media and composio. The cap
+ * is surfaced here because it is the *only* hard boundary on search spend:
+ * individual searches deliberately do not park for approval.
+ */
+function SearchStatusRow({ caps }: { caps: CapabilityStatusDto }) {
+  const { label, variant } = searchStatus(caps);
+  const cap = caps.searchDailyCallCap;
+  return (
+    <div className="flex items-center justify-between gap-3 border-t pt-4 text-sm">
+      <div className="space-y-0.5">
+        <span className="font-medium">Web search</span>
+        <p className="text-xs text-muted-foreground">
+          Source discovery for research — opt-in, runs on the managed platform credential, and
+          billed per search.{" "}
+          {typeof cap === "number"
+            ? `Capped at ${cap} searches per day; past that the tool refuses rather than returning nothing.`
+            : "Capped per day; past that the tool refuses rather than returning nothing."}
+        </p>
+      </div>
+      <Badge variant={variant} className="shrink-0">
+        {label}
+      </Badge>
+    </div>
+  );
+}
+
+function searchStatus(caps: CapabilityStatusDto): { label: string; variant: BadgeVariant } {
+  if (caps.searchInBuild === false) return { label: "Not in this build", variant: "outline" };
+  if (!caps.searchGranted) return { label: "Not granted", variant: "secondary" };
+  if (!caps.searchCredentialConfigured)
+    return { label: "Awaiting credential", variant: "destructive" };
+  // A zero cap leaves the grant in place but spends nothing — say so rather
+  // than reporting "Active" for a tool that will refuse every call.
+  if (caps.searchDailyCallCap === 0) return { label: "Paused (cap 0)", variant: "destructive" };
+  return { label: "Active", variant: "default" };
+}
+
 // A budget large enough that we treat it as effectively unlimited (the backend
 // sends u64::MAX for the `unlimited` tier, which arrives as a huge float).
 const UNLIMITED_THRESHOLD = 1e15;
+
+/**
+ * The plan-level total token ceiling (issue #188). Unlike a per-namespace tier
+ * bar — a soft gate that only trims exec tools — crossing this is a hard stop:
+ * the harness refuses to dispatch further turns this period. Rendered with
+ * stronger emphasis (its own labelled bar + a "Dispatch paused" badge when
+ * exhausted) so an operator can tell the hard cap apart from the soft ones.
+ */
+function TotalCeilingRow({ total }: { total: NonNullable<CapabilityStatusDto["total"]> }) {
+  const unlimited = total.budgetTokens >= UNLIMITED_THRESHOLD;
+  const pct = unlimited
+    ? Math.min(100, total.spentTokens > 0 ? 2 : 0)
+    : total.budgetTokens > 0
+      ? Math.min(100, (total.spentTokens / total.budgetTokens) * 100)
+      : 100;
+
+  return (
+    <div className="space-y-1.5 rounded-md border p-3">
+      <div className="flex items-center justify-between gap-2 text-sm">
+        <span className="font-medium">Total token ceiling</span>
+        {total.exhausted ? (
+          <Badge variant="destructive">Dispatch paused</Badge>
+        ) : (
+          <span className="text-xs text-muted-foreground tabular-nums">
+            {compact(total.remainingTokens)} left
+          </span>
+        )}
+      </div>
+      <div className="h-2 w-full overflow-hidden rounded-full bg-muted">
+        <div
+          className={cn(
+            "h-full rounded-full transition-all",
+            total.exhausted ? "bg-destructive" : "bg-primary",
+          )}
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <div className="flex items-center justify-between text-xs text-muted-foreground tabular-nums">
+        <span>{compact(total.spentTokens)} spent</span>
+        <span>{unlimited ? "Unlimited" : `${compact(total.budgetTokens)} ceiling`}</span>
+      </div>
+      <p className="text-xs text-muted-foreground">
+        A hard cap on total spend this period. When it&apos;s reached, new turns are
+        refused until the period resets — separate from the per-tool budgets below.
+      </p>
+    </div>
+  );
+}
 
 function CapabilityRow({ tier }: { tier: NonNullable<CapabilityStatusDto["tiers"]>[number] }) {
   const label = NAMESPACE_LABELS[tier.namespace] ?? tier.namespace;

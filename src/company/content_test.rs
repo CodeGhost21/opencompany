@@ -6,7 +6,11 @@
 
 use std::path::{Path, PathBuf};
 
-use super::{CompanyManifest, load_dir_skills, parse_workflow, walk_workspace};
+use super::{
+    CompanyManifest, Tools, grants_composio_explicit, grants_media_explicit,
+    grants_search_explicit, load_dir_skills, parse_workflow, walk_workspace,
+};
+use crate::runtime::builder::effective_grants;
 
 fn repo_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -86,6 +90,149 @@ fn every_company_skill_and_workspace_parses() {
     }
 }
 
+/// Templates whose shipped skills (`web-research`, `seo-audit`,
+/// `competitor-scan`) instruct agents to search the web and cite sources, so
+/// each must carry an explicit `search` grant (issue #312).
+const SEARCH_GRANTED_COMPANIES: [&str; 6] = [
+    "agentic_consultation_firm",
+    "agentic_design_studio",
+    "agentic_law_firm",
+    "agentic_marketing_agency",
+    "agentic_media_company",
+    "signals_opportunity_studio",
+];
+
+/// Templates that must NEVER reach the metered search backend: `e2e_harness` is
+/// a deterministic fixture (a priced network call would make it non-hermetic and
+/// flaky), and `openhuman_demo` is a walkthrough nobody opted into spend for.
+const SEARCH_DENIED_COMPANIES: [&str; 2] = ["e2e_harness", "openhuman_demo"];
+
+/// The subset of [`SEARCH_GRANTED_COMPANIES`] that restates the default belt
+/// verbatim and appends `search`. `signals_opportunity_studio` is deliberately
+/// excluded: it overrides the default down to a research-only belt on purpose.
+const FULL_BELT_PLUS_SEARCH: [&str; 5] = [
+    "agentic_consultation_firm",
+    "agentic_design_studio",
+    "agentic_law_firm",
+    "agentic_marketing_agency",
+    "agentic_media_company",
+];
+
+fn load_company(name: &str) -> CompanyManifest {
+    let dir = repo_root().join("companies").join(name);
+    CompanyManifest::from_path(&dir).unwrap_or_else(|err| panic!("{}: {err}", dir.display()))
+}
+
+/// One agent's effective grants: the company `[tools].allow` narrowed by that
+/// agent's own `tools`. Runs the *real* narrowing (`effective_grants` over a
+/// one-agent roster) rather than reimplementing it, so the test cannot drift
+/// from the rule the harness applies.
+fn grants_for_one_agent(manifest: &CompanyManifest, index: usize) -> Vec<String> {
+    let mut solo = manifest.clone();
+    solo.agents = vec![manifest.agents[index].clone()];
+    effective_grants(&solo)
+}
+
+/// The metered `web_search` tool (issue #238) is wired only behind an explicit
+/// `search` grant — the catch-all `*` deliberately does not confer it. That
+/// grant is narrowed twice: by the company-wide `[tools].allow`, and again by
+/// each agent's own `tools` list. An agent that declares `tools` and omits
+/// `search` is silently searchless even when the company grants it, which is
+/// exactly how `signals_opportunity_studio`'s scout shipped unable to search.
+#[test]
+fn research_templates_grant_search_at_both_layers() {
+    for name in SEARCH_GRANTED_COMPANIES {
+        let manifest = load_company(name);
+        assert!(
+            grants_search_explicit(&manifest.tools.allow),
+            "{name}: company-wide `[tools].allow` must grant `search` \
+             (found {:?}); note `web.*` confers nothing here — the check \
+             matches only `search` / `search.`",
+            manifest.tools.allow
+        );
+        assert!(
+            !manifest.agents.is_empty(),
+            "{name}: expected a roster to check per-agent grants against"
+        );
+        for (index, agent) in manifest.agents.iter().enumerate() {
+            let grants = grants_for_one_agent(&manifest, index);
+            assert!(
+                grants_search_explicit(&grants),
+                "{name}: agent `{}` ends up without `search`. Its own \
+                 `tools` list ({:?}) narrows the company allow-list ({:?}), so \
+                 `search` has to appear in BOTH — either edit alone is a \
+                 silent no-op.",
+                agent.id,
+                agent.tools,
+                manifest.tools.allow
+            );
+        }
+    }
+}
+
+/// The deterministic fixture and the demo must stay off the priced path.
+#[test]
+fn fixture_templates_never_grant_search() {
+    for name in SEARCH_DENIED_COMPANIES {
+        let manifest = load_company(name);
+        let grants = effective_grants(&manifest);
+        assert!(
+            !grants_search_explicit(&grants),
+            "{name}: must not grant `search` — a priced network call here \
+             makes the fixture non-hermetic (found {grants:?})"
+        );
+    }
+}
+
+/// The footgun this suite exists to catch: `[tools].allow` **replaces** the
+/// default (`["*", "media", "composio"]`), it never extends it. A reviewer
+/// "simplifying" a grant to `allow = ["search"]` would silently strip
+/// files/docs/shell/code/web/subagent, `media` and `composio` from every agent
+/// in the company — no parse error, no warning, just a company that quietly
+/// lost its tool belt. This asserts both halves: the shipped form keeps the
+/// inherited entries, and the reduced form provably loses them.
+#[test]
+fn granting_search_never_strips_the_inherited_default_belt() {
+    let default_allow = Tools::default().allow;
+    assert!(
+        !grants_search_explicit(&default_allow),
+        "the default belt is expected to stay search-free (opt-in per #238); \
+         if that changed, these templates no longer need to restate it"
+    );
+
+    for name in FULL_BELT_PLUS_SEARCH {
+        let manifest = load_company(name);
+        for inherited in &default_allow {
+            assert!(
+                manifest.tools.allow.contains(inherited),
+                "{name}: `[tools].allow` is {:?} and dropped the inherited \
+                 default entry `{inherited}`. `allow` REPLACES the default \
+                 ({default_allow:?}) — it must be restated verbatim, then \
+                 extended.",
+                manifest.tools.allow
+            );
+        }
+
+        // Prove the loss is real rather than asserted: reduce the same
+        // manifest to the "simplified" form and watch the belt vanish.
+        let mut reduced = manifest.clone();
+        reduced.tools.allow = vec!["search".to_string()];
+        let grants = effective_grants(&reduced);
+        assert!(
+            !grants.iter().any(|grant| grant == "*"),
+            "{name}: expected `allow = [\"search\"]` to strip the `*` belt"
+        );
+        assert!(
+            !grants_media_explicit(&grants),
+            "{name}: expected `allow = [\"search\"]` to strip `media`"
+        );
+        assert!(
+            !grants_composio_explicit(&grants),
+            "{name}: expected `allow = [\"search\"]` to strip `composio`"
+        );
+    }
+}
+
 #[test]
 fn the_repo_skill_registry_parses() {
     let skills = load_dir_skills(&repo_root().join("skills"))
@@ -102,4 +249,137 @@ fn the_repo_skill_registry_parses() {
             skill.slug
         );
     }
+}
+
+/// Every bundled workflow must be *runnable*, not merely parseable (issue #530).
+/// `every_workflow_graph_parses` only proves the TOML deserializes; it never
+/// checks that a `tool_call` names a wired tool or that an `agent` names a real
+/// teammate — which is exactly how the marketing agency preset shipped pointing
+/// `research` at an unwired slug (halt) and `publish` at a nonexistent HTTP node.
+///
+/// This translates each graph the way the engine will and asserts the two facts
+/// that decide whether a run halts: every `tool_call` slug resolves to a real
+/// toolbelt namespace ([`namespace_of`]), and every `agent` ref is on that
+/// company's roster.
+///
+/// Gated on `openhuman` because `translate` and `namespace_of` live behind that
+/// feature; the `Rust (openhuman, tinycortex)` CI lane runs it.
+#[cfg(feature = "openhuman")]
+#[test]
+fn every_bundled_workflow_is_runnable_against_its_roster() {
+    use std::collections::BTreeSet;
+
+    use tinyflows::model::NodeKind;
+
+    use crate::harness::toolbelt::namespace_of;
+    use crate::workflows::translate;
+
+    for company in subdirs(&repo_root().join("companies")) {
+        let manifest = CompanyManifest::from_path(&company)
+            .unwrap_or_else(|err| panic!("{}: {err}", company.display()));
+        let roster: BTreeSet<&str> = manifest.agents.iter().map(|a| a.id.as_str()).collect();
+
+        for file in toml_files(&company.join("workflows")) {
+            let text = std::fs::read_to_string(&file)
+                .unwrap_or_else(|err| panic!("read {}: {err}", file.display()));
+            let workflow =
+                parse_workflow(&text).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
+            let graph = translate(&workflow);
+
+            for node in &graph.nodes {
+                match node.kind {
+                    NodeKind::ToolCall => {
+                        let slug = node
+                            .config
+                            .get("slug")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{} node `{}`: a tool_call with no slug",
+                                    file.display(),
+                                    node.id
+                                )
+                            });
+                        assert!(
+                            namespace_of(slug).is_some(),
+                            "{} node `{}`: tool_call slug `{slug}` maps to no toolbelt namespace, so \
+                             the run halts on it — every tool_call must name a wired tool (shell / \
+                             code / web / search / …).",
+                            file.display(),
+                            node.id
+                        );
+                        // Beyond "is it wired", the company must GRANT the slug's
+                        // namespace or the run is denied at the invoke gate. Use
+                        // the same search-explicit / grants_cover split the
+                        // run-time invoker and the author-time create path use.
+                        let namespace = namespace_of(slug).expect("asserted present just above");
+                        let granted = if namespace == "search" {
+                            grants_search_explicit(&manifest.tools.allow)
+                        } else {
+                            crate::harness::build::grants_cover(&manifest.tools.allow, namespace)
+                        };
+                        assert!(
+                            granted,
+                            "{} node `{}`: tool_call slug `{slug}` (namespace `{namespace}`) is not \
+                             granted by this company's [tools].allow ({:?}) — the run is denied at \
+                             the invoke gate. Grant it in `[tools].allow`.",
+                            file.display(),
+                            node.id,
+                            manifest.tools.allow
+                        );
+                    }
+                    NodeKind::Agent => {
+                        let agent_ref = node
+                            .config
+                            .get("agent_ref")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or_else(|| {
+                                panic!(
+                                    "{} node `{}`: an agent node with no agent_ref",
+                                    file.display(),
+                                    node.id
+                                )
+                            });
+                        assert!(
+                            roster.contains(agent_ref),
+                            "{} node `{}`: agent_ref `{agent_ref}` is not on the roster ({roster:?}) \
+                             — the step would route to a teammate that does not exist.",
+                            file.display(),
+                            node.id
+                        );
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+/// The marketing agency's default desktop preset specifically — the three
+/// defects issue #530 fixed, pinned so a future edit cannot silently reintroduce
+/// them: `research` calls the metered `web_search` and continues past a search
+/// failure rather than halting, and `publish` is the copywriter assembly step
+/// (there is no CMS to POST to).
+#[cfg(feature = "openhuman")]
+#[test]
+fn the_marketing_campaign_preset_is_runnable() {
+    use crate::workflows::translate;
+
+    let path =
+        repo_root().join("companies/agentic_marketing_agency/workflows/campaign_pipeline.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let graph = translate(&parse_workflow(&text).expect("campaign parses"));
+    let node = |id: &str| {
+        graph
+            .nodes
+            .iter()
+            .find(|n| n.id == id)
+            .unwrap_or_else(|| panic!("no node `{id}`"))
+    };
+
+    let research = node("research");
+    assert_eq!(research.config["slug"], "web_search");
+    assert_eq!(research.config["on_error"], "continue");
+
+    assert_eq!(node("publish").config["agent_ref"], "copywriter");
 }

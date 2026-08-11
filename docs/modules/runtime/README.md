@@ -19,6 +19,81 @@ learns the verdict.
 due. The clock is injectable so schedule firing is tested deterministically
 without wall-clock waits.
 
+`workflow_scheduler.rs` drives the *other* kind of cron: the `schedule` a saved
+workflow graph's `trigger` node carries (issue #169). Same `CronExpr` matcher,
+same injectable `Clock`, same minute-boundary loop — but **one process-wide
+task**, not one per company, because workflow schedules are runtime data
+(creating a workflow in the console adds a cron with no reboot, and a hosted
+tenant can be registered after boot). Each tick re-reads `CompanyRegistry`,
+skips companies that aren't `running` or have no `WorkflowRunner` wired, and
+enumerates graphs through the seed ∪ overlay union
+(`list_workflows_union`) so console-created workflows — which exist only as
+record overlays — are scheduled too. A matching minute fires the workflow on its
+own tokio task (a scheduled run is a *new* causal chain at `WORKFLOW_DEPTH` 0,
+exactly like an operator clicking Run) with an in-flight guard per
+`(company, workflow)` so a slow run never overlaps itself — held as an RAII
+guard, so a run that panics releases its slot on the unwind instead of retiring
+that schedule for the life of the process. Missed runs are skipped, never caught
+up. All cron times are UTC, and a graph may carry at most one scheduled trigger
+(validated in `workflow_file.rs`).
+
+**When a company has schedules but no runner**, the scheduler says so once. This
+is the default build's inert seam, but it is *also* what a configured build looks
+like when its inference source fails to resolve at boot — in which case a saved
+schedule silently never fires and looks identical to a working one. The warning
+is latched per company rather than emitted per tick (once a minute forever would
+be ~1440 lines a day per tenant, burying the signal it raises), and re-armed on
+either state change: a runner appearing, or the company's scheduled-workflow
+count dropping to zero — so a schedule saved later onto a still-unwired company
+is reported rather than swallowed by the latch. A company with no scheduled
+workflows and no runner is not misconfigured and stays silent.
+
+`workflow_spawn.rs` owns the two things every entry point that *starts* a
+workflow run owes it: minting the run id through the `RunSupervisor` (so the id
+the console correlates SSE frames on is also the address a cancel is sent to),
+and journalling the outcome through `record_run_finished` on **both** arms with
+the `RunGuard` held across the write. The console run route and the
+approved-gate resume arm both go through `WorkflowSpawn`, so they cannot drift.
+It holds four cloned handles rather than an `Arc<CompanyRuntime>`, which is what
+lets a caller with only a `&CompanyRuntime` start a run. The cron scheduler
+above keeps its own spawn body — it wraps the same two steps in a schedule claim
+and a per-delivery log sweep that only make sense for a fire nobody is watching.
+
+`workflow_resume.rs` is what approving a paused `requires_approval` node
+actually does (issue #395). The engine **settles** a paused run rather than
+suspending it, so there is nothing to resume: the module reads the workflow id,
+node id and trigger input off the parked `workflow.approve` effect, unions the
+gate id into the input's `approvals` array, and starts a fresh supervised run.
+That makes it restart-durable for free — the parked card is self-contained, so
+journal replay is all a continuation needs — at the documented cost that
+upstream nodes re-execute. See
+[`docs/spec/company-brain/approvals.md`](../../spec/company-brain/approvals.md).
+
+## Background listeners
+
+Two per-company background loops sit beside the scheduler, both spawned in
+`serve` and stopped by the same shutdown `Notify`:
+
+- `mailbox_poller.rs` — the IMAP mailbox poll (feature `imap`), on a fixed
+  interval (`OPENCOMPANY_MAIL_POLL_SECONDS`, default `60`).
+- `telegram_poller.rs` — Telegram `getUpdates` long-polling (feature
+  `telegram`), the inbound path that **needs no public URL**. It dials out to
+  `api.telegram.org`, so it works on localhost, behind NAT, and on any
+  self-hosted box — where Telegram's servers can never reach an inbound
+  `/hooks/{company}/telegram` route. Setup is the bot token alone; the loop
+  idles until one is stored and picks up a token pasted into the console on its
+  next tick, with no restart. Long-poll hold and idle back-off are
+  `OPENCOMPANY_TELEGRAM_POLL_SECONDS` (default `30`).
+
+The webhook route (`server::hooks`) stays as an optional hosted fast-path, and
+is offered only when `OPENCOMPANY_PUBLIC_URL` is a public **https** URL. The two
+paths never both consume an update: Telegram refuses `getUpdates` while a
+webhook is registered, so the poller checks `getWebhookInfo` first and stands by
+on a publicly reachable host — while on a host with no public URL a registered
+webhook can only be a dead endpoint, so it clears it and takes inbound back.
+Both paths run the same turn and share `telegram::deliver_replies`, so which one
+delivered an update is invisible downstream.
+
 ## Harness pool (`src/harness/`, feature `openhuman`)
 
 `src/harness/` embeds `openhuman_core` as a library (see
@@ -53,3 +128,31 @@ async-graphql wrappers live in `server::graphql`, not here.
 The workspace store seeds a new company from its `companies/<name>/workspace/**`
 template on first use (`WorkspaceStore::is_empty` gates the seed); skills read
 the company's `skills/<id>/SKILL.md` plus the repo-level shared registry.
+
+Boot also scaffolds the two reserved system roots, `Agents/` and `Desks/`
+(issue #551), via `company::workspace_scaffold::ensure_workspace_scaffold`.
+That call is gated on "this is not a rebuild" and on **nothing else** —
+deliberately not on `seed_dir`, since a provisioned tenant and the desktop
+build have no company bundle to seed from and their workspace needs the same
+shape; deliberately not on `is_empty`, since that gate exists to make operator
+deletions stick against re-seeding, and an existing company only ever picks the
+roots up on a later boot; and deliberately not on the roster, since the roots
+are part of what a workspace is. It is idempotent, so it costs one tree read
+per boot.
+
+The roots are created **empty**. `Agents/<agent-id>/` and `Desks/<desk-id>/`
+are minted on demand by `ensure_agent_folder` / `ensure_desk_folder`, at the
+moment that agent or desk first produces something — a folder per roster member
+would fill the tree with empty directories for teammates who have done nothing.
+The minters find-or-create the root they need, so they double as the repair
+path if boot's fail-soft create ever misses. There is deliberately no
+roster-rebuild seam: `HarnessPool::ensure` writes nothing to the workspace,
+because a member folder is no longer a function of the roster.
+
+The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
+(`workspace`), so agents read and write the shared note tree through the tools
+in `harness::workspace_tools` (issues #237, #551) rather than being blind to it.
+One handle, three writers — console REST, GraphQL, and a granted agent — so an
+operator edit is what the next turn reads, with no rebuild, and an agent's note
+is in the tab the operator is already looking at. Each write records its author
+(issue #326). `None` fails closed: no workspace tools are wired.

@@ -73,8 +73,11 @@ mod tests {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-finances-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-finances-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     /// Builds a runtime under `manifest_toml`, then appends `ledger` through the
@@ -99,6 +102,10 @@ mod tests {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();
@@ -138,7 +145,8 @@ mod tests {
     /// still read from the manifest `[budget]`.
     #[tokio::test]
     async fn empty_ledger_projects_zeroes_with_budget() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_ledger(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n[budget]\nmonthly_usd = 2000.0\n",
@@ -154,15 +162,14 @@ mod tests {
         assert_eq!(dto["netUsd"], 0.0);
         assert!(dto["byCategory"].as_array().unwrap().is_empty(), "{dto}");
         assert!(dto["transactions"].as_array().unwrap().is_empty(), "{dto}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A ledger with a spend and a revenue entry this month projects the
     /// expected budget / spend / revenue / net, by-category, and journal.
     #[tokio::test]
     async fn ledger_projects_spend_revenue_and_journal() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         // Timestamp entries "now" so they land in the current UTC month.
         let now = crate::ports::now_millis();
         let ledger = vec![
@@ -216,7 +223,5 @@ mod tests {
             .map(|t| t["direction"].as_str().unwrap())
             .collect();
         assert!(dirs.contains(&"in") && dirs.contains(&"out"), "{dto}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

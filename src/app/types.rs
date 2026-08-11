@@ -4,8 +4,9 @@ use std::sync::{Arc, OnceLock, RwLock};
 
 use serde::Serialize;
 
-use crate::app::config::{BrainMode, redacted};
-use crate::company::{SkillDoc, load_dir_skills};
+use crate::app::config::{BrainMode, EnvSource, redacted};
+use crate::company::{CredentialSource, SkillDoc, TinyhumansTokenSource, load_dir_skills};
+use crate::ports::normalize_email;
 use crate::ports::types::{CompanyId, SecretValue};
 use crate::runtime::CompanyRegistry;
 use crate::server::platform_auth::PlatformAuthConfig;
@@ -24,6 +25,11 @@ pub struct AppConfig {
     pub openhuman_root: Option<PathBuf>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
+    /// An operator-set display name for this instance
+    /// (`OPENCOMPANY_INSTANCE_NAME`), surfaced by `/spec` so a client holding
+    /// several connections can show something friendlier than a URL. Purely
+    /// cosmetic and untrusted — it never selects, authorizes, or routes.
+    pub instance_name: Option<String>,
     /// Which brain the runtime drives.
     pub brain_mode: BrainMode,
     /// tiny.place economy API base URL.
@@ -31,7 +37,11 @@ pub struct AppConfig {
     /// Public host base URL advertised in published Agent Cards. When `None`,
     /// the card endpoint falls back to `http://{bind}`.
     pub public_url: Option<String>,
-    /// TinyHumans hosted-brain credential, if configured. Redacted in `Debug`.
+    /// A **static** TinyHumans hosted-brain credential, if configured. Redacted
+    /// in `Debug`. This is only the static tier: a hosted tenant instead reads a
+    /// platform-projected token file, so ask
+    /// [`credential_available`](Self::credential_available) — not this field —
+    /// whether a credential can be obtained.
     pub tinyhumans_credential: Option<SecretValue>,
     /// Platform (multi-tenant) auth. When set, `{id}` routes honor tenant scopes
     /// and provisioning/suspension require the `platform` scope.
@@ -54,6 +64,24 @@ pub struct AppConfig {
     /// unique index. `None` (the default) is a no-op: db-per-tenant and
     /// single-tenant deployments are unaffected.
     pub tenant_namespace: Option<String>,
+    /// One address the deployment bootstraps as an admin of every company it
+    /// serves (`OPENCOMPANY_ADMIN_EMAIL`), on top of each manifest's
+    /// `[users] admins`.
+    ///
+    /// A company the *platform* provisions has no one in its manifest: the
+    /// person who asked for it is recorded on the control plane's tenant row,
+    /// which the manifest never sees. With an empty `[users] admins` and no
+    /// invite outstanding nobody is eligible, and there is no operator token to
+    /// send the first invite with — the company is unreachable by the human who
+    /// created it (issue #321). This is the seam the platform injects that
+    /// address through.
+    ///
+    /// It is a *standing invite*, not an account: exactly like a manifest
+    /// admin, listing the address makes it eligible to log in, and only
+    /// redeeming a link mints the user. Unsetting it stops future bootstrapping
+    /// and does not delete an account it already created. `None` — and an empty
+    /// or whitespace-only value — is a clean no-op.
+    pub admin_email: Option<String>,
 }
 
 impl Default for AppConfig {
@@ -62,6 +90,7 @@ impl Default for AppConfig {
             bind: "127.0.0.1:8080".to_string(),
             openhuman_root: None,
             api_url: crate::app::config::DEFAULT_API_URL.to_string(),
+            instance_name: None,
             brain_mode: BrainMode::Hosted,
             tinyplace_api_url: crate::app::config::DEFAULT_TINYPLACE_API_URL.to_string(),
             public_url: None,
@@ -71,6 +100,7 @@ impl Default for AppConfig {
             max_companies_per_tenant: None,
             webhook: None,
             tenant_namespace: None,
+            admin_email: None,
         }
     }
 }
@@ -108,9 +138,65 @@ pub fn canonical_tenant(tenant: &str) -> &str {
 }
 
 impl AppConfig {
-    /// True when hosted cognition can run: hosted mode plus a credential.
+    /// True when hosted cognition can run: hosted brain mode plus a credential
+    /// this instance can **obtain** — see [`Self::credential_available`].
     pub fn cycles_available(&self) -> bool {
-        self.brain_mode == BrainMode::Hosted && self.tinyhumans_credential.is_some()
+        self.cycles_available_in(&crate::app::config::ProcessEnv)
+    }
+
+    /// [`Self::cycles_available`] against an explicit environment seam.
+    pub fn cycles_available_in(&self, env: &dyn EnvSource) -> bool {
+        self.brain_mode == BrainMode::Hosted && self.credential_available_in(env)
+    }
+
+    /// Whether a TinyHumans credential can be obtained at all — a static one
+    /// resolved into [`Self::tinyhumans_credential`], **or** a platform-projected
+    /// token source ([`TinyhumansTokenSource::from_env`]).
+    ///
+    /// The question changed from "do I hold a secret?" to "can I get a token?".
+    /// A hosted tenant holds nothing: the platform projects a short-lived,
+    /// audience-bound token into a file that rotates in place. Asking about a
+    /// stored secret would report such an instance as unable to think.
+    ///
+    /// The projected file is read from the **environment** rather than threaded
+    /// through a config layer on purpose: the platform injects it into the pod and
+    /// an operator never configures it, so there is nothing to resolve by
+    /// precedence. [`Self::credential_available_in`] takes the seam explicitly for
+    /// tests.
+    pub fn credential_available(&self) -> bool {
+        self.credential_available_in(&crate::app::config::ProcessEnv)
+    }
+
+    /// [`Self::credential_available`] against an explicit environment seam.
+    pub fn credential_available_in(&self, env: &dyn EnvSource) -> bool {
+        self.tinyhumans_credential.is_some() || TinyhumansTokenSource::from_env(env).is_some()
+    }
+
+    /// Which tier the credential comes from, for operator-facing output. The
+    /// projected file wins, mirroring [`TinyhumansTokenSource::from_env`].
+    pub fn credential_source_in(&self, env: &dyn EnvSource) -> CredentialSource {
+        match TinyhumansTokenSource::from_env(env) {
+            Some(source) => source.credential_source(),
+            None if self.tinyhumans_credential.is_some() => CredentialSource::Static,
+            None => CredentialSource::None,
+        }
+    }
+
+    /// The deployment-wide bootstrap admin address, normalized, or `None`.
+    ///
+    /// Normalization goes through the same [`normalize_email`] the manifest and
+    /// login paths use, so `Ada@Example.com ` and `ada@example.com` name one
+    /// address here exactly as they do there — an injected value that only
+    /// matched with the right capitalization would be a lockout that looks like
+    /// a typo. A value that is empty or trims to nothing is `None`: the
+    /// platform renders this variable for every tenant, and a tenant with no
+    /// recorded creator must be indistinguishable from one deployed before the
+    /// variable existed.
+    pub fn bootstrap_admin(&self) -> Option<String> {
+        self.admin_email
+            .as_deref()
+            .map(normalize_email)
+            .filter(|email| !email.is_empty())
     }
 
     /// Namespaces a company id for shared-single-DB mode.
@@ -134,6 +220,31 @@ impl AppConfig {
             Some(url) => url.clone(),
             None => format!("http://{}", self.bind),
         }
+    }
+
+    /// The base URL a third party can deliver an inbound webhook to, if there
+    /// is one — otherwise `None`.
+    ///
+    /// Distinct from [`Self::host_base_url`], which always answers *something*
+    /// (falling back to `http://{bind}`) because an Agent Card must carry an
+    /// endpoint. A webhook URL has no such fallback: a provider that cannot
+    /// reach the URL simply never delivers. So this is `Some` only when an
+    /// explicit `public_url` is configured **and** it is `https` — Telegram
+    /// (issue #203) refuses any other scheme for `setWebhook`, and the
+    /// `http://127.0.0.1:<port>` bind fallback is unreachable from the internet
+    /// by construction. Callers use it to decide whether to offer a webhook at
+    /// all, rather than showing an operator a URL that can never work.
+    pub fn public_webhook_base_url(&self) -> Option<&str> {
+        self.public_url
+            .as_deref()
+            .map(str::trim)
+            .map(|url| url.trim_end_matches('/'))
+            .filter(|url| {
+                url.len() > "https://".len()
+                    && url
+                        .get(.."https://".len())
+                        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("https://"))
+            })
     }
 
     /// Whether this host is reachable only from this machine.
@@ -238,9 +349,20 @@ pub struct AppState {
     /// Injected network seams for the credential surfaces (DNS resolver, mail
     /// sender). Empty by default so the build stays offline.
     connections: crate::server::ops::ConnectionsRuntime,
+    /// The hub exchange backing `…/auth/hub`. `None` (the default, and every
+    /// self-hosted host) means the console offers no ecosystem sign-in at all,
+    /// rather than offering a button that leads nowhere.
+    hub_identity: Option<Arc<dyn crate::server::hub_identity::HubIdentityExchange>>,
     /// Cross-origin allowlist. Empty (the default) means CORS is off, which is
     /// correct for every same-origin deployment.
     cors: crate::server::cors::CorsConfig,
+    /// This host's stable public identity, minted on first boot and cached for
+    /// the process. Lazy because it is a disk read that only `/spec` needs, and
+    /// `AppState::new` is deliberately IO-free.
+    instance_id: Arc<OnceLock<String>>,
+    /// Which storage backend is serving the durable ports. Reported by `/spec`
+    /// as a kind only — never a path or a connection string.
+    storage_kind: crate::store::StorageKind,
     /// Host-global replay-protection cache shared across every inbound A2A
     /// request. Gated behind `tinyplace` so the default build links no crypto.
     #[cfg(feature = "tinyplace")]
@@ -260,6 +382,22 @@ pub struct AppState {
             HashMap<String, (std::time::Instant, crate::company::mcp_oauth::PendingOAuth)>,
         >,
     >,
+    /// Issue #290: this host's ability to rebuild a registered company's runtime
+    /// in place, so a first-time inference config takes effect without a process
+    /// restart.
+    ///
+    /// Wired by the binary, which is where the builder inputs (harness pool,
+    /// OpenHuman RPC, managed backends, per-tenant mailbox) are assembled.
+    /// `None` — every test host, and any embedder that does not wire one — keeps
+    /// the pre-#290 behaviour: the inference status still reports
+    /// `restartRequired` and the console still says so, which is the honest
+    /// answer when a rebuild is genuinely unavailable.
+    rebuilder: Option<Arc<dyn crate::runtime::RuntimeRebuilder>>,
+    /// The boot-only builder inputs recorded per company at registration, so a
+    /// rebuild configures the successor exactly as boot configured its
+    /// predecessor. See [`BootInputs`](crate::runtime::BootInputs) for why
+    /// `--discoverable` in particular cannot be recovered any other way.
+    boot_inputs: Arc<RwLock<HashMap<CompanyId, crate::runtime::BootInputs>>>,
 }
 
 impl std::fmt::Debug for AppState {
@@ -286,14 +424,53 @@ impl AppState {
             memory_overlay: None,
             skills_root: None,
             skill_registry: Arc::new(OnceLock::new()),
+            instance_id: Arc::new(OnceLock::new()),
+            storage_kind: crate::store::StorageKind::default(),
             schema: crate::server::graphql::build_schema(),
             connections: crate::server::ops::ConnectionsRuntime::new(),
+            hub_identity: None,
             cors: crate::server::cors::CorsConfig::default(),
             #[cfg(feature = "tinyplace")]
             nonce: std::sync::Arc::new(crate::economy::NonceCache::new()),
             #[cfg(feature = "mcp")]
             oauth_pending: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            rebuilder: None,
+            boot_inputs: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Wires this host's in-place runtime rebuilder (issue #290).
+    pub fn with_rebuilder(mut self, rebuilder: Arc<dyn crate::runtime::RuntimeRebuilder>) -> Self {
+        self.rebuilder = Some(rebuilder);
+        self
+    }
+
+    /// This host's in-place runtime rebuilder, when one is wired.
+    pub fn rebuilder(&self) -> Option<Arc<dyn crate::runtime::RuntimeRebuilder>> {
+        self.rebuilder.clone()
+    }
+
+    /// Records the boot-only builder inputs for `id`, at registration.
+    ///
+    /// Cloned state shares this map (it is `Arc`-backed), so a company
+    /// registered after the router was built is still reachable by a rebuild.
+    pub fn set_boot_inputs(&self, id: CompanyId, inputs: crate::runtime::BootInputs) {
+        self.boot_inputs
+            .write()
+            .expect("boot inputs poisoned")
+            .insert(id, inputs);
+    }
+
+    /// The boot-only builder inputs recorded for `id`, or the defaults when the
+    /// company was registered without any (a platform-provisioned tenant has no
+    /// source directory and was never `--discoverable`).
+    pub fn boot_inputs(&self, id: &CompanyId) -> crate::runtime::BootInputs {
+        self.boot_inputs
+            .read()
+            .expect("boot inputs poisoned")
+            .get(id)
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Sets the OpenCompany home root used to resolve company identities.
@@ -326,6 +503,21 @@ impl AppState {
         self.stores.as_ref()
     }
 
+    /// Records which storage backend was opened, for `/spec` to report.
+    pub fn with_storage_kind(mut self, kind: crate::store::StorageKind) -> Self {
+        self.storage_kind = kind;
+        self
+    }
+
+    /// This host's stable public identity, minted on first use.
+    ///
+    /// See [`crate::app::instance`] for why it is random rather than derived
+    /// from anything about the deployment.
+    pub fn instance_id(&self) -> &str {
+        self.instance_id
+            .get_or_init(|| crate::app::instance::load_or_create(&self.home))
+    }
+
     /// Installs the memory engine overlay selected by `OPENCOMPANY_MEMORY`.
     pub fn with_memory_overlay(mut self, overlay: crate::store::MemoryOverlay) -> Self {
         self.memory_overlay = Some(overlay);
@@ -352,6 +544,27 @@ impl AppState {
         Ok(self.skill_registry.get().cloned().unwrap_or(registry))
     }
 
+    /// The repo-level shared skill registry, empty when nothing backs it.
+    ///
+    /// Empty means exactly one thing: no [`skills_root`](Self::skills_root) is
+    /// configured, so this host serves no shared library (platform-provisioned
+    /// mode). Callers read that as "there is nothing to resolve against" and
+    /// fall back accordingly — the install route, for one, then accepts the
+    /// client's own metadata.
+    ///
+    /// A *configured* root that cannot load is therefore never flattened to
+    /// empty: doing so would silently downgrade a server-authoritative install
+    /// into a client-authored one whenever a `SKILL.md` is malformed or the
+    /// directory is unreadable. The load error propagates instead, and callers
+    /// surface it (a server error on the HTTP surfaces, a failed boot on the
+    /// serve path).
+    pub fn shared_skill_registry(&self) -> crate::Result<Arc<[SkillDoc]>> {
+        let Some(dir) = self.skills_root() else {
+            return Ok(Arc::from([]));
+        };
+        self.skill_registry(dir)
+    }
+
     /// Installs the injected connection seams (DNS resolver, mail sender).
     pub fn with_connections(mut self, connections: crate::server::ops::ConnectionsRuntime) -> Self {
         self.connections = connections;
@@ -372,6 +585,33 @@ impl AppState {
     /// The injected connection seams for the credential surfaces.
     pub fn connections(&self) -> &crate::server::ops::ConnectionsRuntime {
         &self.connections
+    }
+
+    /// Installs the hub identity exchange backing `…/auth/hub`.
+    ///
+    /// An injected seam rather than a client built per request, so the route's
+    /// refusals — rejected token, unreachable hub, address not on this
+    /// company's roster — are testable offline against
+    /// [`MockHubIdentityExchange`](crate::server::hub_identity::MockHubIdentityExchange)
+    /// in a build that links no HTTP crate at all.
+    pub fn with_hub_identity(
+        mut self,
+        exchange: Arc<dyn crate::server::hub_identity::HubIdentityExchange>,
+    ) -> Self {
+        self.hub_identity = Some(exchange);
+        self
+    }
+
+    /// The hub identity exchange, when one is wired.
+    ///
+    /// `None` means this host has no ecosystem to sign in against, which is the
+    /// correct default: a host that cannot ask the hub whose token it is
+    /// holding has no way to check one, and accepting it on trust would make an
+    /// unverifiable JWT a bearer credential for this company.
+    pub fn hub_identity(
+        &self,
+    ) -> Option<&Arc<dyn crate::server::hub_identity::HubIdentityExchange>> {
+        self.hub_identity.as_ref()
     }
 
     /// Installs platform (multi-tenant) auth. Mirrors [`Self::with_home`].
@@ -548,7 +788,29 @@ impl AppState {
                 .map(|path| path.display().to_string()),
             api_url: self.config.api_url.clone(),
             cycles_available: self.config.cycles_available(),
+            instance_id: self.instance_id().to_string(),
+            display_name: self.config.instance_name.clone(),
+            capabilities: self.capabilities(),
+            storage: self.storage_kind.as_str(),
         }
+    }
+
+    /// What this host can do, as flat feature names a client can test for.
+    ///
+    /// Additive and open-ended by design. A client reading an **older** host's
+    /// `/spec` finds no `capabilities` field at all, and must treat that as
+    /// "assume nothing beyond REST" — which is why every entry here names a
+    /// capability rather than a version number. Growing the list must never
+    /// break a client that has not heard of the new entry.
+    fn capabilities(&self) -> Vec<&'static str> {
+        let mut out = vec!["rest", "graphql", "sse", "approvals", "devices"];
+        if self.hub_identity.is_some() {
+            out.push("hub-identity");
+        }
+        if self.config.platform_auth.is_some() {
+            out.push("platform-auth");
+        }
+        out
     }
 }
 
@@ -569,9 +831,23 @@ pub struct AppSpec {
     pub openhuman_root: Option<String>,
     /// TinyHumans orchestration API base URL.
     pub api_url: String,
-    /// Whether hosted cognition can run (hosted brain plus a credential). No
-    /// secret bytes are surfaced.
+    /// Whether hosted cognition can run (hosted brain plus a credential this
+    /// instance can obtain, from either tier). No secret bytes are surfaced.
     pub cycles_available: bool,
+    /// This host's stable identity, so a client holding several connections can
+    /// tell one server from another across URL changes. Random, not derived —
+    /// see [`crate::app::instance`].
+    pub instance_id: String,
+    /// An operator-set name for this instance (`OPENCOMPANY_INSTANCE_NAME`),
+    /// shown in a client's connection list. Untrusted, display-only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub display_name: Option<String>,
+    /// Flat, additive feature names. Absent on a host predating this field,
+    /// which a client must read as "REST only".
+    pub capabilities: Vec<&'static str>,
+    /// The storage backend kind. Deliberately the kind alone: `/spec` is
+    /// unauthenticated, so a path or connection string here would be a gift.
+    pub storage: &'static str,
 }
 
 #[cfg(test)]
@@ -709,6 +985,44 @@ mod tests {
         assert_eq!(public.host_base_url(), "https://acme.example");
     }
 
+    /// Issue #203: unlike `host_base_url`, this has no bind fallback — a URL a
+    /// provider cannot reach is worse than none, because it silently swallows
+    /// every inbound delivery.
+    #[test]
+    fn public_webhook_base_url_requires_an_explicit_https_url() {
+        // The default (loopback bind, no public_url) offers no webhook — this
+        // is exactly the `http://127.0.0.1:8080/hooks/...` URL of issue #203.
+        assert_eq!(AppConfig::default().public_webhook_base_url(), None);
+
+        let with = |url: &str| AppConfig {
+            public_url: Some(url.into()),
+            ..AppConfig::default()
+        };
+        // Plain http never qualifies: Telegram's setWebhook refuses it, and a
+        // public-looking http URL is no more deliverable than a loopback one.
+        assert_eq!(with("http://acme.example").public_webhook_base_url(), None);
+        // Neither does a scheme-less or empty value.
+        assert_eq!(with("acme.example").public_webhook_base_url(), None);
+        assert_eq!(with("   ").public_webhook_base_url(), None);
+        assert_eq!(with("https://").public_webhook_base_url(), None);
+
+        assert_eq!(
+            with("https://acme.example").public_webhook_base_url(),
+            Some("https://acme.example")
+        );
+        // Surrounding whitespace and a trailing slash are normalized away, so
+        // callers can join a `/hooks/...` path without doubling the separator.
+        assert_eq!(
+            with("  https://acme.example/  ").public_webhook_base_url(),
+            Some("https://acme.example")
+        );
+        // The scheme is case-insensitive, as in any URL.
+        assert_eq!(
+            with("HTTPS://acme.example").public_webhook_base_url(),
+            Some("HTTPS://acme.example")
+        );
+    }
+
     #[test]
     fn debug_redacts_the_credential() {
         let config = AppConfig {
@@ -720,9 +1034,105 @@ mod tests {
         assert!(rendered.contains("set"));
     }
 
+    /// With neither tier configured there is nothing to obtain, so no cycles.
+    /// Driven through the env seam so an ambient `TINYHUMANS_*` in a developer's
+    /// shell cannot decide the result.
     #[test]
     fn default_config_cannot_run_cycles() {
-        assert!(!AppConfig::default().cycles_available());
+        use crate::app::config::MapEnv;
+        let empty = MapEnv::default();
+        assert!(!AppConfig::default().cycles_available_in(&empty));
+        assert!(!AppConfig::default().credential_available_in(&empty));
+        assert_eq!(
+            AppConfig::default().credential_source_in(&empty),
+            CredentialSource::None
+        );
+    }
+
+    /// A temp directory holding a stand-in for the platform's projected token
+    /// file (mounted at `/var/run/secrets/tinyhumans.ai/token` in production).
+    /// The tier is only selected when the path exists, so the test needs a real
+    /// one.
+    /// Returns the directory handle alongside the path: dropping it removes the
+    /// fixture, and holding it is what keeps the file alive for the assertions.
+    fn projected_token_file() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-appcfg-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "projected-token").unwrap();
+        (dir, path)
+    }
+
+    /// The hosted shape: no static secret at all, just a projected token file.
+    /// Cognition must be considered available, and the source reads `attested`.
+    #[test]
+    fn a_projected_token_file_alone_enables_cycles() {
+        use crate::app::config::MapEnv;
+        let (_dir, path) = projected_token_file();
+        let env = MapEnv::new([(
+            crate::company::credentials::TOKEN_FILE_ENV,
+            path.display().to_string(),
+        )]);
+        let config = AppConfig::default();
+        assert!(config.tinyhumans_credential.is_none(), "nothing stored");
+        assert!(config.credential_available_in(&env));
+        assert!(config.cycles_available_in(&env));
+        assert_eq!(
+            config.credential_source_in(&env),
+            CredentialSource::Attested
+        );
+
+        // A sidecar brain still cannot run hosted cycles, credential or not.
+        let sidecar = AppConfig {
+            brain_mode: crate::app::config::BrainMode::Sidecar,
+            ..AppConfig::default()
+        };
+        assert!(!sidecar.cycles_available_in(&env));
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    /// Docker development is unaffected: the static tier still answers yes, and
+    /// a projected file present alongside it outranks it as the source.
+    #[test]
+    fn static_tier_still_answers_and_is_outranked_by_a_projected_file() {
+        use crate::app::config::MapEnv;
+        let config = AppConfig {
+            tinyhumans_credential: Some(SecretValue("th_static".into())),
+            ..AppConfig::default()
+        };
+        let empty = MapEnv::default();
+        assert!(config.cycles_available_in(&empty));
+        assert_eq!(
+            config.credential_source_in(&empty),
+            CredentialSource::Static
+        );
+
+        let (_dir, path) = projected_token_file();
+        let projected = MapEnv::new([(
+            crate::company::credentials::TOKEN_FILE_ENV,
+            path.display().to_string(),
+        )]);
+        assert_eq!(
+            config.credential_source_in(&projected),
+            CredentialSource::Attested
+        );
+
+        // A leftover variable pointing at a path the runtime never mounted (the
+        // docker case) degrades to the static tier rather than breaking cycles.
+        let stale = MapEnv::new([(
+            crate::company::credentials::TOKEN_FILE_ENV,
+            "/nonexistent/oc/token",
+        )]);
+        assert_eq!(
+            config.credential_source_in(&stale),
+            CredentialSource::Static
+        );
+        assert!(config.cycles_available_in(&stale));
+
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]
@@ -733,6 +1143,16 @@ mod tests {
         let first = state.skill_registry(&dir).expect("registry loads");
         assert!(first.iter().any(|skill| skill.slug == "web-research"));
         assert!(first.iter().any(|skill| skill.slug == "weekly-report"));
+        // The post-call half of the meeting pair (#240): its body must carry the
+        // full contract, not just the frontmatter description.
+        let debrief = first
+            .iter()
+            .find(|skill| skill.slug == "call-debrief")
+            .expect("call-debrief is in the shared library");
+        assert_eq!(debrief.name, "Call Debrief");
+        assert_eq!(debrief.category.as_deref(), Some("Ops"));
+        assert!(debrief.body.contains("## Steps"), "{}", debrief.body);
+        assert!(debrief.body.contains("## Output"), "{}", debrief.body);
 
         // A second call returns the same cached allocation, ignoring the path.
         let second = state

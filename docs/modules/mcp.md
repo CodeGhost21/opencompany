@@ -69,6 +69,25 @@ tools = ["mcp:notion", "mcp:linear"]   # or "mcp:*"
 `mcp_call_tool` runs under a permissive OpenHuman `SecurityPolicy`; the
 company's own `ApprovalPolicy` tool policy remains the real per-call gate.
 
+## What parks for approval
+
+`mcp_call_tool` parks under the default `supervised` mode and is denied under
+`readonly`: it can perform any effect the remote server advertises, and it can
+never be granted standing for the same reason.
+
+`mcp_list_servers` and `mcp_list_tools` **never** park (issue #443). They read
+local registration state with credentials already redacted and reach nothing.
+This matters more than one saved prompt: the persona brief appended to every
+MCP-granted agent *instructs* it to answer capability questions from a live
+`mcp_list_servers` call rather than from memory, so while these parked, the
+guidance written to stop stale answers could only be followed by interrupting an
+operator. An agent's very first move parked, before it had done anything.
+
+Both verdicts are declared in [`policy::consequence`](../../src/policy/consequence.rs)
+alongside every other tool, and a test builds the live toolbelt and fails if a
+wired tool has no declaration — so a new read-only bridge tool cannot quietly
+start asking for permission.
+
 ## HTTP surface
 
 Both scope forms are registered (`…/companies/{id}/…` and the single-company
@@ -85,6 +104,20 @@ alias `…/company/…`). See [`server::ops::mcp`](../../src/server/ops/mcp.rs).
 Discovery is gated on the `openhuman` feature (the MCP transport lives there);
 without it the route reports `not_wired` and the console falls back to the
 declared tool lists. Every mutating response carries a `note` reminder.
+
+## Console surface
+
+One component reads these routes —
+[`McpServersSection`](../../frontend/src/views/connections/McpServersSection.tsx),
+over the standalone functions in `frontend/src/api/mcp.ts` — rendered from two
+places: inline on Connections, and as the whole of Settings, MCP Servers.
+
+There is deliberately no MCP method on `OpenCompanyClient`. A second set used to
+sit there, declaring a `{ servers }` wrapper around this table's bare array,
+`server_id` keys, and `/connect` / `/disconnect` routes that exist nowhere; the
+Settings page built on it crashed on open (issue #414). The client casts an
+unparsed body to the declared type, so a second surface is never caught by the
+compiler — only by whoever opens the page.
 
 ## Pool-staleness caveat
 

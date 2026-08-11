@@ -9,6 +9,7 @@
 mod ids;
 
 pub mod approvals;
+pub mod artifacts;
 pub mod brain;
 pub mod channel;
 pub mod context;
@@ -18,6 +19,8 @@ pub mod facts;
 pub mod inbox;
 pub mod login_codes;
 pub mod memory;
+pub mod runs;
+pub mod schedule_fires;
 pub mod secrets;
 pub mod sessions;
 pub mod skills_state;
@@ -27,22 +30,32 @@ pub mod tools;
 pub mod types;
 pub mod usage;
 pub mod users;
+pub mod workflow_revisions;
 pub mod workflow_runner;
 pub mod workspace;
 
 pub use approvals::ApprovalGate;
-pub use brain::{Brain, CycleHost};
+pub use artifacts::{
+    ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactStore, ArtifactVersion,
+    DiffLine, DiffOp,
+};
+pub use brain::{Brain, Cognition, CycleHost, UsageMetering};
 pub use channel::ChannelAdapter;
 pub use context::ContextStore;
 pub use economy::AgentEconomy;
-pub use events::EventLog;
+pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_prune};
 pub use facts::{FactKind, FactRecord, FactStore};
 pub use ids::{generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;
+pub use runs::{
+    NewRun, RunFilter, RunOutcome, RunRecord, RunStatus, RunStepRecord, RunStore,
+    reap_orphaned_runs,
+};
+pub use schedule_fires::ScheduleFireStore;
 pub use secrets::SecretStore;
-pub use sessions::{SessionRecord, SessionStore};
+pub use sessions::{SessionKind, SessionRecord, SessionStore};
 pub use skills_state::{SkillSource, SkillState, SkillStateStore};
 pub use store::CompanyStore;
 pub use tasks::{TaskRecord, TaskStore};
@@ -50,8 +63,14 @@ pub use tools::ToolProvider;
 pub use types::*;
 pub use usage::{SampleKind, UsageMeter, UsageSample};
 pub use users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore, normalize_email};
-pub use workflow_runner::{WorkflowRun, WorkflowRunner};
-pub use workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
+pub use workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+};
+pub use workflow_runner::{
+    DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowRun, WorkflowRunContext,
+    WorkflowRunNodeRow, WorkflowRunner,
+};
+pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 #[cfg(test)]
 mod test {
@@ -84,6 +103,9 @@ mod test {
         _users: &dyn crate::ports::users::UserStore,
         _sessions: &dyn crate::ports::sessions::SessionStore,
         _login_codes: &dyn crate::ports::login_codes::LoginCodeStore,
+        _runs: &dyn crate::ports::runs::RunStore,
+        _workflow_revisions: &dyn crate::ports::workflow_revisions::WorkflowRevisionStore,
+        _schedule_fires: &dyn crate::ports::schedule_fires::ScheduleFireStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
     ) {
     }

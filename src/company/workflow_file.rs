@@ -4,6 +4,15 @@
 //! canvas and referenced by `[workflows].enabled` in the manifest. This module
 //! parses those files into a validated [`WorkflowFile`], reporting every problem
 //! at once in prosumer language, matching [`super::manifest`].
+//!
+//! A `trigger` node may carry a `schedule`: a standard 5-field cron expression,
+//! **always interpreted in UTC**, in the same dialect as the manifest's
+//! `[[schedule]]` entries. It is validated here with
+//! [`CronExpr`](crate::runtime::cron::CronExpr) and driven at runtime by
+//! [`WorkflowScheduler`](crate::runtime::workflow_scheduler::WorkflowScheduler),
+//! so a saved schedule actually fires instead of sitting in prose. No other node
+//! kind may carry one, and a graph may carry at most one scheduled trigger — a
+//! schedule says when the whole workflow runs, so two would double-run it.
 
 use std::path::{Path, PathBuf};
 
@@ -30,6 +39,13 @@ pub const WORKFLOW_NODE_KINDS: &[&str] = &[
     "output_parser",
     "sub_workflow",
 ];
+
+/// The destination kinds an `output` node may route its report to.
+///
+/// Deliberately closed: each kind has its own server-side resolution and its
+/// own policy gate (see [`crate::workflows::delivery`]), so a new kind is a
+/// deliberate addition, never a free-form string an author can invent.
+pub const WORKFLOW_DESTINATION_KINDS: &[&str] = &["owner", "email", "channel"];
 
 /// A node kind in a workflow graph.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -116,6 +132,30 @@ pub struct WorkflowFile {
     pub edges: Vec<WorkflowEdgeDef>,
 }
 
+impl WorkflowFile {
+    /// The cron this graph fires on, if any — the first `trigger` node carrying
+    /// a `schedule`.
+    ///
+    /// This is the single definition of "is this workflow automatic", shared by
+    /// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler), which uses
+    /// it to decide what to fire, and by the disarm rule in `workflow_create.rs`,
+    /// which uses it to decide what must not fire unreviewed. Two copies of this
+    /// predicate that disagreed would mean a workflow the host considers manual
+    /// and the scheduler considers armed — silently the exact hole issue #276
+    /// exists to close.
+    ///
+    /// Reads the **trigger** only. A `schedule` on any other node kind is inert
+    /// (validation permits the field on the node struct; only a trigger's is
+    /// load-bearing), so honouring one elsewhere would arm a workflow the canvas
+    /// does not show as scheduled.
+    pub fn trigger_schedule(&self) -> Option<&str> {
+        self.nodes
+            .iter()
+            .find(|node| node.kind == WorkflowNodeKind::Trigger && node.schedule.is_some())
+            .and_then(|node| node.schedule.as_deref())
+    }
+}
+
 /// A single node in a workflow graph.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WorkflowNodeDef {
@@ -129,12 +169,23 @@ pub struct WorkflowNodeDef {
     pub summary: Option<String>,
     /// The roster agent id — only meaningful on `agent` nodes.
     pub agent: Option<String>,
+    /// A standard 5-field cron expression saying *when* this workflow starts on
+    /// its own — only meaningful on `trigger` nodes, and always **UTC**.
+    ///
+    /// Same dialect as the manifest's `[[schedule]]` crons: it is parsed by
+    /// [`CronExpr`](crate::runtime::cron::CronExpr) at validation, so a
+    /// malformed expression is rejected with the parser's own prosumer message
+    /// rather than being persisted as inert prose. `None` (the default) means
+    /// the workflow only runs when something else starts it — an operator
+    /// clicking Run, the REST run route, or another workflow.
+    pub schedule: Option<String>,
     /// Free-form, kind-specific node configuration ([`tool_call`] slug/args,
     /// [`http_request`] descriptor, …). Layered under the derived defaults and
     /// the first-class fields below by [`translate`](crate::workflows::translate)
     /// before it reaches the engine. Reserved keys (`on_error` / `retry` /
-    /// `requires_approval`, plus `agent_ref` on `agent` nodes) are rejected at
-    /// validation so they cannot silently shadow a first-class field.
+    /// `requires_approval` / `schedule`, plus `agent_ref` on `agent` nodes) are
+    /// rejected at validation so they cannot silently shadow a first-class
+    /// field.
     ///
     /// [`tool_call`]: WorkflowNodeKind::ToolCall
     /// [`http_request`]: WorkflowNodeKind::HttpRequest
@@ -149,6 +200,42 @@ pub struct WorkflowNodeDef {
     /// When `true`, the node pauses awaiting operator approval before it runs —
     /// the engine surfaces it on `WorkflowRun.pending_approvals`.
     pub requires_approval: Option<bool>,
+    /// Where this node's report is delivered once the run finishes — `output`
+    /// nodes only. `None` (every legacy graph) keeps the pre-#170 behaviour: the
+    /// value surfaces in the run-result drawer and goes nowhere else.
+    pub destination: Option<WorkflowDestinationDef>,
+}
+
+/// Where an `output` node's report goes when the run completes.
+///
+/// **The engine never sees this.** Delivery executes host-side, after
+/// `tinyflows::engine::run` returns, in
+/// [`deliver_outputs`](crate::workflows::delivery::deliver_outputs) — so this is
+/// not engine config and must not live in [`WorkflowNodeDef::config`], where it
+/// would be an inert key silently riding into the engine graph. It is first-class
+/// model data for the same reason [`WorkflowRetryDef`] is: the console and
+/// validation see exactly one shape.
+///
+/// Each `kind` carries a different target contract, enforced by
+/// [`validate`]:
+///
+/// | `kind`    | `target`                      | Who it reaches |
+/// |-----------|-------------------------------|----------------|
+/// | `owner`   | must be **absent**            | the company's active Admin users, else the operator channel |
+/// | `email`   | required, must contain `@`    | that address — **only** if the company grants `email` and the recipient is an established thread |
+/// | `channel` | required, a wired channel id  | that [`ChannelAdapter`](crate::ports::ChannelAdapter) |
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct WorkflowDestinationDef {
+    /// One of [`WORKFLOW_DESTINATION_KINDS`].
+    /// `#[serde(default)]` like every other field on the raw shapes: an omitted
+    /// `kind` becomes a prosumer-language validation problem rather than a raw
+    /// serde trace out of the TOML parser or the create route.
+    #[serde(default)]
+    pub kind: String,
+    /// The recipient address (`email`) or channel id (`channel`). Absent for
+    /// `owner`, which the host resolves from the company's own directory.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
 }
 
 /// A node's typed retry policy. Mirrors the free-form `retry.*` keys the
@@ -212,6 +299,10 @@ pub(crate) struct RawNode {
     pub(crate) summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) agent: Option<String>,
+    /// The trigger node's 5-field UTC cron. Declared before `config` so the
+    /// rendered TOML keeps every scalar above the `[node.config]` table.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schedule: Option<String>,
     /// Free-form node config, read as a TOML value (not `serde_json`) so the
     /// `Serialize` half — used by the workflow creator's
     /// [`render_workflow`] round-trip — stays representable in TOML (TOML has no
@@ -225,6 +316,10 @@ pub(crate) struct RawNode {
     pub(crate) retry: Option<WorkflowRetryDef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) requires_approval: Option<bool>,
+    /// Kept LAST in the struct: `toml::to_string` refuses to emit a scalar after
+    /// a table, so a table-valued field must not be followed by a scalar one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<WorkflowDestinationDef>,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -248,6 +343,22 @@ pub(crate) fn render_workflow(raw: &RawWorkflow) -> Result<String> {
     toml::to_string(raw).map_err(|err| OpenCompanyError::DataParse {
         path: PathBuf::from(format!("{}.toml", raw.id)),
         message: err.to_string(),
+    })
+}
+
+/// Parses stored workflow TOML back into an editable [`RawWorkflow`] draft — the
+/// inverse of [`render_workflow`], and the seam a rollback (issue #274) uses to
+/// re-feed a captured revision through the ordinary update path.
+///
+/// `RawWorkflow` is the same serde shape both directions (it is what
+/// [`render_workflow`] emits and what [`parse_workflow`] validates), so a body
+/// that was persisted through the create/update path round-trips here verbatim.
+/// A parse failure is an [`InvalidRequest`](OpenCompanyError::InvalidRequest)
+/// (400) rather than the 500 a malformed on-disk file gets, because the only
+/// caller feeds it straight back into the validating update path.
+pub(crate) fn raw_workflow_from_toml(toml_src: &str) -> Result<RawWorkflow> {
+    toml::from_str(toml_src).map_err(|err| {
+        OpenCompanyError::InvalidRequest(format!("workflow revision is unreadable: {err}"))
     })
 }
 
@@ -286,6 +397,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 name: node.name,
                 summary: node.summary,
                 agent: node.agent,
+                schedule: node.schedule,
                 // Validation rejects TOML's non-finite floats before this
                 // conversion because JSON cannot represent them.
                 config: node.config.map(|value| {
@@ -295,6 +407,7 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
                 on_error: node.on_error,
                 retry: node.retry,
                 requires_approval: node.requires_approval,
+                destination: node.destination,
             })
             .collect(),
         edges: raw
@@ -374,6 +487,98 @@ pub fn list_source_workflows(source_dir: Option<&Path>) -> Vec<WorkflowFile> {
     files
 }
 
+/// Loads one workflow graph by id from the **union** of a company's two graph
+/// sources: the version-controlled seed file (`source_dir/workflows/<id>.toml`)
+/// and the record's runtime-authored [`OverlayWorkflow`] bodies.
+///
+/// This is the single read path for "give me graph `<id>`" — the REST
+/// `GET …/workflows/{wid}` and run routes, the GraphQL resolver, the
+/// orchestrator's `run_workflow` tool, and the `sub_workflow` resolver all go
+/// through it, so they can never disagree about which graphs exist.
+///
+/// **The seed file wins on an id collision.** An overlay body with the same id
+/// as a committed file is shadowed, not destroyed — it stays on the record and
+/// resurfaces if the file goes away. This matches the manifest-first convention
+/// [`CompanyRecord::effective_desk_members`](crate::ports::types::CompanyRecord::effective_desk_members)
+/// already uses: the version-controlled definition is authoritative.
+///
+/// `Ok(None)` means neither source has that id — the caller's clean 404. An
+/// `Err` means the body that *was* found is malformed (the same error a
+/// hand-authored file would give).
+pub fn load_workflow_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+    id: &str,
+) -> Result<Option<WorkflowFile>> {
+    if let Some(dir) = source_dir {
+        let path = dir.join("workflows").join(format!("{id}.toml"));
+        // Only load ids that exist on disk, so a missing file falls through to
+        // the overlay rather than becoming a `DataRead` error.
+        if path.is_file() {
+            let ids = [id.to_string()];
+            return load_company_workflows(dir, &ids).map(|mut files| files.pop());
+        }
+    }
+
+    let Some(overlay) = overlays.iter().find(|w| w.id == id) else {
+        return Ok(None);
+    };
+    // Re-label parse/validation errors with the id, matching how the on-disk
+    // loader re-labels them with the real path.
+    let labelled = PathBuf::from(format!("{id}.toml"));
+    match parse_workflow(&overlay.toml) {
+        Ok(workflow) => Ok(Some(workflow)),
+        Err(OpenCompanyError::DataInvalid { problems, .. }) => Err(OpenCompanyError::DataInvalid {
+            path: labelled,
+            problems,
+        }),
+        Err(OpenCompanyError::DataParse { message, .. }) => Err(OpenCompanyError::DataParse {
+            path: labelled,
+            message,
+        }),
+        Err(other) => Err(other),
+    }
+}
+
+/// Every workflow graph a company has, from the **union** of its seed
+/// `workflows/*.toml` files and its runtime-authored
+/// [`OverlayWorkflow`](crate::ports::types::OverlayWorkflow) bodies.
+///
+/// The seed scan comes first (in stable id order, via
+/// [`list_source_workflows`]), then overlay graphs the scan did not already
+/// yield, in stable id order — so a seed file **wins** over an overlay of the
+/// same id, the same precedence [`load_workflow_union`] applies. A malformed
+/// overlay body skips only itself (logged), the same tolerance the seed scan
+/// has, so one bad graph never hides the rest.
+pub fn list_workflows_union(
+    source_dir: Option<&Path>,
+    overlays: &[crate::ports::types::OverlayWorkflow],
+) -> Vec<WorkflowFile> {
+    let mut files = list_source_workflows(source_dir);
+    let mut seen: std::collections::HashSet<String> = files.iter().map(|f| f.id.clone()).collect();
+
+    let mut extra: Vec<&crate::ports::types::OverlayWorkflow> = overlays
+        .iter()
+        .filter(|overlay| !seen.contains(&overlay.id))
+        .collect();
+    extra.sort_by(|a, b| a.id.cmp(&b.id));
+
+    for overlay in extra {
+        // Two overlay entries with the same id can only happen on a corrupted
+        // record; keep the first and skip the rest rather than double-listing.
+        if !seen.insert(overlay.id.clone()) {
+            continue;
+        }
+        match parse_workflow(&overlay.toml) {
+            Ok(file) => files.push(file),
+            Err(err) => {
+                tracing::warn!(workflow = %overlay.id, error = %err, "skipping malformed saved workflow")
+            }
+        }
+    }
+    files
+}
+
 /// Collects every validation problem in prosumer language. Empty means valid.
 fn validate(raw: &RawWorkflow) -> Vec<String> {
     let mut problems = Vec::new();
@@ -397,6 +602,18 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
     // case — it must NOT be caught by the `error`-label ⇔ `on_error = "route"`
     // coupling check in the edge pass.
     let mut switch_nodes = std::collections::HashSet::new();
+    // Ids of every `condition` node, collected the same way as `switch_nodes`.
+    // Both are the branch kinds that can steer a run OUT of a loop, so the
+    // inescapable-cycle check below treats them alike: an SCC with no edge
+    // leaving it from a condition/switch is a trap the engine can never exit.
+    let mut condition_nodes = std::collections::HashSet::new();
+    // Ids of every `trigger` node (the graph's entry points), in file order.
+    // The reachability check below does a BFS from all of them.
+    let mut trigger_ids: Vec<&str> = Vec::new();
+    // Ids of every `trigger` node carrying a `schedule`. More than one is
+    // rejected below: the graph is ONE workflow, so two schedules on it would
+    // double-run it on any minute both matched.
+    let mut scheduled_triggers: Vec<&str> = Vec::new();
     for (index, node) in raw.nodes.iter().enumerate() {
         let label = if node.id.trim().is_empty() {
             format!("node #{}", index + 1)
@@ -415,7 +632,12 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
         let kind = WorkflowNodeKind::parse(&node.kind);
         match kind {
-            Some(WorkflowNodeKind::Trigger) => trigger_count += 1,
+            Some(WorkflowNodeKind::Trigger) => {
+                trigger_count += 1;
+                if !node.id.trim().is_empty() {
+                    trigger_ids.push(node.id.as_str());
+                }
+            }
             Some(kind) => {
                 if kind != WorkflowNodeKind::Agent && node.agent.is_some() {
                     problems.push(format!(
@@ -433,6 +655,39 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
         if kind == Some(WorkflowNodeKind::Switch) && !node.id.trim().is_empty() {
             switch_nodes.insert(node.id.as_str());
+        }
+        if kind == Some(WorkflowNodeKind::Condition) && !node.id.trim().is_empty() {
+            condition_nodes.insert(node.id.as_str());
+        }
+
+        // `schedule` says *when* the workflow starts, so it is trigger-only —
+        // anywhere else it would sit inert and mislead (the same footgun the
+        // stray-`agent` check above prevents). On a trigger it must be a real
+        // 5-field cron: the workflow scheduler parses it with the same
+        // `CronExpr` the manifest `[[schedule]]` crons use, so an expression
+        // that cannot fire is rejected here rather than silently never firing.
+        if let Some(schedule) = node.schedule.as_deref() {
+            match kind {
+                Some(WorkflowNodeKind::Trigger) => {
+                    if let Err(err) = crate::runtime::cron::CronExpr::parse(schedule) {
+                        problems.push(format!(
+                            "{label} has a `schedule` that is not a valid cron — {err}. Times are UTC."
+                        ));
+                    }
+                    // Counted even when the cron is malformed, so a graph with
+                    // two bad schedules reports both problems at once.
+                    if !node.id.trim().is_empty() {
+                        scheduled_triggers.push(node.id.as_str());
+                    }
+                }
+                Some(kind) => problems.push(format!(
+                    "{label} sets `schedule` but is a `{}` node — only `trigger` nodes carry a schedule.",
+                    kind.as_str()
+                )),
+                // The unknown-kind problem is already reported above; do not
+                // pile a second, confusing message onto the same node.
+                None => {}
+            }
         }
 
         if node.config.as_ref().is_some_and(contains_non_finite_float) {
@@ -509,12 +764,66 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
             }
         }
 
+        // `destination` routes an `output` node's report to a person or a
+        // channel after the run finishes. Only `output` nodes report back, and
+        // each kind has its own target contract — an author who gets this wrong
+        // must hear about it here, not discover a silently undelivered report.
+        if let Some(destination) = &node.destination {
+            if kind != Some(WorkflowNodeKind::Output) {
+                problems.push(format!(
+                    "{label} sets `destination` but is a `{}` node — only `output` nodes route a report.",
+                    node.kind
+                ));
+            }
+            let target = destination.target.as_deref().map(str::trim).unwrap_or("");
+            match destination.kind.trim() {
+                "owner" => {
+                    if !target.is_empty() {
+                        problems.push(format!(
+                            "{label} sets a `target` on an `owner` destination — the owner is resolved from the company's own admins, so leave it out."
+                        ));
+                    }
+                }
+                "email" => {
+                    if !target.contains('@') {
+                        problems.push(format!(
+                            "{label} has an `email` destination whose `target` `{target}` is not an email address — give the recipient's full address."
+                        ));
+                    }
+                }
+                "channel" => {
+                    if target.is_empty() {
+                        problems.push(format!(
+                            "{label} has a `channel` destination with no `target` — name the channel to post the report to."
+                        ));
+                    }
+                }
+                "" => problems.push(format!(
+                    "{label} has a `destination` that names no `kind` — use one of {}.",
+                    WORKFLOW_DESTINATION_KINDS.join(", ")
+                )),
+                other => problems.push(format!(
+                    "{label} has an unknown `destination.kind` `{other}` — use one of {}.",
+                    WORKFLOW_DESTINATION_KINDS.join(", ")
+                )),
+            }
+        }
+
         // Reserved config keys: the first-class fields above are written into
         // the engine config LAST, so a `config` entry naming one would be
-        // silently ignored — reject it as a footgun instead. `agent_ref` is
+        // silently ignored — reject it as a footgun instead. `destination` is
+        // reserved for a different reason: it is never engine config at all
+        // (delivery runs host-side), so a `config.destination` would ride into
+        // the engine graph as an inert key and deliver nothing. `agent_ref` is
         // reserved on `agent` nodes (translation binds it from `agent`).
         if let Some(toml::Value::Table(table)) = &node.config {
-            for reserved in ["on_error", "retry", "requires_approval"] {
+            for reserved in [
+                "on_error",
+                "retry",
+                "requires_approval",
+                "schedule",
+                "destination",
+            ] {
                 if table.contains_key(reserved) {
                     problems.push(format!(
                         "{label} puts `{reserved}` inside `config` — set it as a first-class node field, not in `config`."
@@ -531,6 +840,22 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
 
     if trigger_count == 0 {
         problems.push("a workflow needs at least one `trigger` node to say what starts it.".into());
+    }
+
+    // At most ONE scheduled trigger. Several triggers are fine — a graph may be
+    // startable several ways — but a schedule says when the whole workflow runs,
+    // so two of them would run it twice on any minute both matched. Rejecting is
+    // better than picking one: silently honoring the first would drop a schedule
+    // the operator saved, with nothing anywhere to say so.
+    if scheduled_triggers.len() > 1 {
+        let names: Vec<String> = scheduled_triggers
+            .iter()
+            .map(|id| format!("`{id}`"))
+            .collect();
+        problems.push(format!(
+            "nodes {} each set a `schedule` — a workflow may carry at most one scheduled trigger, or it would run twice on the same minute.",
+            names.join(", ")
+        ));
     }
 
     // Edges: endpoints must reference existing nodes; no self-loops. An
@@ -590,6 +915,168 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
         }
     }
 
+    // --- Graph traversal: inescapable cycles + reachability -----------------
+    //
+    // Everything above checks a node or an edge in isolation. These two checks
+    // are about the SHAPE of the whole graph, so they run last, over a directed
+    // graph built only from edges whose BOTH endpoints resolve to real nodes —
+    // an unresolved endpoint already produced its own problem above, and a
+    // self-loop already did too, so neither cascades a second, confusing message
+    // here. A branch label (`yes` / `error` / a switch case) is an ordinary
+    // directed edge for traversal; it steers WHICH way the run goes, not whether
+    // the edge exists.
+    let mut node_ids: Vec<&str> = Vec::new();
+    let mut index_of: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for node in &raw.nodes {
+        let id = node.id.as_str();
+        if id.trim().is_empty() {
+            continue;
+        }
+        // First occurrence wins, mirroring `seen`; a duplicate id is one vertex.
+        index_of.entry(id).or_insert_with(|| {
+            node_ids.push(id);
+            node_ids.len() - 1
+        });
+    }
+    let node_count = node_ids.len();
+    let mut adjacency: Vec<Vec<usize>> = vec![Vec::new(); node_count];
+    for edge in &raw.edges {
+        if let (Some(&from), Some(&to)) = (
+            index_of.get(edge.from.as_str()),
+            index_of.get(edge.to.as_str()),
+        ) {
+            adjacency[from].push(to);
+        }
+    }
+
+    // Tarjan's strongly-connected-components, iteratively (a recursive DFS could
+    // blow the stack on a pathological hand-authored graph). `scc_of[v]` is the
+    // component index of node `v`; nodes in the same component are mutually
+    // reachable — i.e. they form a cycle.
+    let mut scc_of = vec![usize::MAX; node_count];
+    let mut disc = vec![usize::MAX; node_count];
+    let mut low = vec![0usize; node_count];
+    let mut on_stack = vec![false; node_count];
+    let mut tarjan_stack: Vec<usize> = Vec::new();
+    let mut next_disc = 0usize;
+    let mut scc_count = 0usize;
+    for start in 0..node_count {
+        if disc[start] != usize::MAX {
+            continue;
+        }
+        let mut call_stack: Vec<(usize, usize)> = vec![(start, 0)];
+        while let Some(&(v, child)) = call_stack.last() {
+            if child == 0 {
+                disc[v] = next_disc;
+                low[v] = next_disc;
+                next_disc += 1;
+                tarjan_stack.push(v);
+                on_stack[v] = true;
+            }
+            if child < adjacency[v].len() {
+                let w = adjacency[v][child];
+                call_stack.last_mut().unwrap().1 += 1;
+                if disc[w] == usize::MAX {
+                    call_stack.push((w, 0));
+                } else if on_stack[w] {
+                    low[v] = low[v].min(disc[w]);
+                }
+            } else {
+                if low[v] == disc[v] {
+                    loop {
+                        let w = tarjan_stack.pop().unwrap();
+                        on_stack[w] = false;
+                        scc_of[w] = scc_count;
+                        if w == v {
+                            break;
+                        }
+                    }
+                    scc_count += 1;
+                }
+                call_stack.pop();
+                if let Some(&(parent, _)) = call_stack.last() {
+                    low[parent] = low[parent].min(low[v]);
+                }
+            }
+        }
+    }
+
+    // Inescapable-cycle check. A cycle is FINE as long as the run can choose to
+    // leave it — that is what a guarded retry loop is (a `condition`/`switch`
+    // inside the loop with a branch that exits it). So for every SCC bigger than
+    // one node, require at least one `condition`/`switch` member with an edge
+    // that leaves the SCC. An SCC with no such exit is a trap: once the run
+    // enters, every path leads back in, and it never terminates.
+    let mut members: Vec<Vec<usize>> = vec![Vec::new(); scc_count];
+    for v in 0..node_count {
+        members[scc_of[v]].push(v); // ascending v == file order
+    }
+    for component in &members {
+        if component.len() < 2 {
+            continue;
+        }
+        let scc = scc_of[component[0]];
+        let has_exit = component.iter().any(|&v| {
+            (condition_nodes.contains(node_ids[v]) || switch_nodes.contains(node_ids[v]))
+                && adjacency[v].iter().any(|&w| scc_of[w] != scc)
+        });
+        if !has_exit {
+            let names: Vec<String> = component
+                .iter()
+                .map(|&v| format!("`{}`", node_ids[v]))
+                .collect();
+            problems.push(format!(
+                "nodes {} form a loop with no conditional way out — add a `condition`/`switch` branch that leaves the loop, or remove an edge.",
+                names.join(", ")
+            ));
+        }
+    }
+
+    // Reachability check. Every node must sit on some path from a `trigger`, or
+    // the engine will never execute it. SKIPPED entirely when no trigger
+    // contributed a usable entry id — either there are no triggers, or every
+    // trigger failed id validation (empty id). In both cases the real problem
+    // ("needs at least one trigger" / "missing an `id`") already fired above, and
+    // without a seed EVERY node is trivially unreachable, so reporting all of them
+    // would just bury that problem in noise. Gate on `trigger_ids` (the entries
+    // the BFS can actually seed from), NOT the raw `trigger_count`, so an id-less
+    // trigger doesn't clear the count yet seed nothing.
+    if !trigger_ids.is_empty() {
+        let mut reached = vec![false; node_count];
+        let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+        for tid in &trigger_ids {
+            if let Some(&i) = index_of.get(tid)
+                && !reached[i]
+            {
+                reached[i] = true;
+                queue.push_back(i);
+            }
+        }
+        while let Some(v) = queue.pop_front() {
+            for &w in &adjacency[v] {
+                if !reached[w] {
+                    reached[w] = true;
+                    queue.push_back(w);
+                }
+            }
+        }
+        let unreached: Vec<String> = (0..node_count)
+            .filter(|&v| !reached[v])
+            .map(|v| format!("`{}`", node_ids[v]))
+            .collect();
+        if !unreached.is_empty() {
+            let (subject, tail) = if unreached.len() == 1 {
+                ("node", "it")
+            } else {
+                ("nodes", "them")
+            };
+            problems.push(format!(
+                "{subject} {} cannot be reached from any `trigger` — connect an edge that leads to {tail}, or remove {tail}.",
+                unreached.join(", ")
+            ));
+        }
+    }
+
     problems
 }
 
@@ -620,10 +1107,12 @@ mod tests {
                     name: "Start".to_string(),
                     summary: None,
                     agent: None,
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
                 RawNode {
                     id: "worker".to_string(),
@@ -631,10 +1120,12 @@ mod tests {
                     name: "Worker".to_string(),
                     summary: Some("Does the thing.".to_string()),
                     agent: Some("ceo".to_string()),
+                    schedule: None,
                     config: None,
                     on_error: None,
                     retry: None,
                     requires_approval: None,
+                    destination: None,
                 },
             ],
             edges: vec![RawEdge {
@@ -668,10 +1159,12 @@ mod tests {
                 name: "Only".to_string(),
                 summary: None,
                 agent: None,
+                schedule: None,
                 config: None,
                 on_error: None,
                 retry: None,
                 requires_approval: None,
+                destination: None,
             }],
             edges: vec![],
         };
@@ -832,6 +1325,9 @@ mod tests {
             [node.config.args]
             filename = "out.csv"
             data = "[]"
+            [[edge]]
+            from = "start"
+            to = "call"
         "#;
         let file = parse_workflow(src).expect("config parses");
         let call = file.nodes.iter().find(|n| n.id == "call").unwrap();
@@ -876,6 +1372,9 @@ mod tests {
             max_attempts = 3
             backoff_ms = 100
             backoff = "exponential"
+            [[edge]]
+            from = "start"
+            to = "call"
         "#;
         let file = parse_workflow(src).expect("parses");
         let call = file.nodes.iter().find(|n| n.id == "call").unwrap();
@@ -1092,6 +1591,21 @@ mod tests {
             id = "op"
             kind = "output_parser"
             name = "Parse"
+            [[edge]]
+            from = "start"
+            to = "sw"
+            [[edge]]
+            from = "sw"
+            to = "mg"
+            [[edge]]
+            from = "mg"
+            to = "so"
+            [[edge]]
+            from = "so"
+            to = "tf"
+            [[edge]]
+            from = "tf"
+            to = "op"
         "#;
         let file = parse_workflow(src).expect("new kinds parse");
         let kind = |id: &str| file.nodes.iter().find(|n| n.id == id).unwrap().kind;
@@ -1259,6 +1773,228 @@ mod tests {
         );
     }
 
+    // --- G15: inescapable cycles + reachability (issue #540) ----------------
+
+    /// A bare two-node cycle with no branch to leave it is a trap: once the run
+    /// reaches `a` it loops `a → b → a` forever. Rejected, naming both nodes.
+    /// (Negative control for the cycle check: delete the SCC-exit check and this
+    /// graph — which has no condition/switch at all — would wrongly pass.)
+    #[test]
+    fn multi_node_cycle_with_no_exit_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "a"
+            kind = "agent"
+            name = "A"
+            agent = "ceo"
+            [[node]]
+            id = "b"
+            kind = "agent"
+            name = "B"
+            agent = "ceo"
+            [[edge]]
+            from = "start"
+            to = "a"
+            [[edge]]
+            from = "a"
+            to = "b"
+            [[edge]]
+            from = "b"
+            to = "a"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("form a loop"), "{message}");
+        assert!(message.contains("`a`"), "{message}");
+        assert!(message.contains("`b`"), "{message}");
+    }
+
+    /// A miniature of the shipped `game_build_pipeline` shape: a `condition`
+    /// guards the loop, with a `pass` branch that leaves it and a `fail` branch
+    /// that loops back. That is a legal bounded retry — it must parse clean.
+    #[test]
+    fn condition_guarded_loop_is_valid() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "work"
+            kind = "agent"
+            name = "Work"
+            agent = "ceo"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Good enough?"
+            [[node]]
+            id = "done"
+            kind = "output"
+            name = "Ship"
+            [[edge]]
+            from = "start"
+            to = "work"
+            [[edge]]
+            from = "work"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "done"
+            label = "pass"
+            [[edge]]
+            from = "gate"
+            to = "work"
+            label = "fail"
+        "#;
+        assert!(
+            parse_workflow(src).is_ok(),
+            "a condition-guarded retry loop must stay valid"
+        );
+    }
+
+    /// The shipped guarded-retry preset itself must stay valid — its loop
+    /// (`gameplay → assets → balance → qa → gate → gameplay`) is escapable
+    /// because `gate` is a `condition` whose `pass` branch leaves the loop.
+    #[test]
+    fn the_shipped_guarded_loop_preset_is_valid() {
+        const GAME: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/companies/agentic_game_studio/workflows/game_build_pipeline.toml"
+        ));
+        parse_workflow(GAME).expect("the game-studio guarded loop is valid");
+    }
+
+    /// A cycle that DOES contain a `condition`, but whose only edges all stay
+    /// inside the loop, is still inescapable — a branch that never leaves the SCC
+    /// buys nothing. (Negative control: the exit test, not merely "contains a
+    /// condition", is what this asserts.)
+    #[test]
+    fn inescapable_cycle_containing_condition_with_no_exit_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "a"
+            kind = "agent"
+            name = "A"
+            agent = "ceo"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [[edge]]
+            from = "start"
+            to = "a"
+            [[edge]]
+            from = "a"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "a"
+            label = "again"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(err.to_string().contains("form a loop"), "{err}");
+    }
+
+    /// A node no edge ever reaches from the trigger would never execute. It is
+    /// rejected, naming the orphan. (Negative control for reachability.)
+    #[test]
+    fn unreachable_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "reached"
+            kind = "output"
+            name = "Reached"
+            [[node]]
+            id = "orphan"
+            kind = "output"
+            name = "Orphan"
+            [[edge]]
+            from = "start"
+            to = "reached"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("cannot be reached"), "{message}");
+        assert!(message.contains("`orphan`"), "{message}");
+        // The reached node must NOT be named — only the genuine orphan.
+        assert!(!message.contains("`reached`"), "{message}");
+    }
+
+    /// With no trigger at all, the reachability check stays silent: the
+    /// "needs at least one trigger" problem is the real one, and flagging every
+    /// node as unreachable on top of it would just be noise.
+    #[test]
+    fn no_trigger_skips_reachability_noise() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "only"
+            kind = "output"
+            name = "Only"
+            [[node]]
+            id = "other"
+            kind = "output"
+            name = "Other"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("trigger"), "{message}");
+        assert!(
+            !message.contains("cannot be reached"),
+            "reachability must be skipped with no trigger: {message}"
+        );
+    }
+
+    /// A trigger with an EMPTY id already fails id-validation, and it seeds no
+    /// entry into the reachability BFS. The gate keys off `trigger_ids` (usable
+    /// entries), not the raw trigger count, so the run's one valid node is NOT
+    /// piled with a bogus "cannot be reached" on top of the real "missing an
+    /// `id`" problem. (Regression, #540.)
+    #[test]
+    fn empty_id_trigger_skips_reachability_noise() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = ""
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "work"
+            kind = "output"
+            name = "Work"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("missing an `id`"), "{message}");
+        assert!(
+            !message.contains("cannot be reached"),
+            "an id-less trigger must not spawn reachability noise: {message}"
+        );
+    }
+
     #[test]
     fn legacy_files_without_new_fields_parse_unchanged() {
         // A graph authored before the P1 fields existed: every new field is None.
@@ -1276,5 +2012,831 @@ mod tests {
         assert!(start.on_error.is_none());
         assert!(start.retry.is_none());
         assert!(start.requires_approval.is_none());
+        assert!(start.destination.is_none());
+    }
+
+    // --- Output destination (issue #170) ------------------------------------
+
+    /// A graph with one `output` node carrying `destination` of `kind`, plus an
+    /// optional `target` line.
+    fn with_destination(kind: &str, target: Option<&str>) -> String {
+        let target_line = target
+            .map(|t| format!("target = \"{t}\"\n"))
+            .unwrap_or_default();
+        format!(
+            r#"
+id = "wf"
+name = "WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Report back"
+[node.destination]
+kind = "{kind}"
+{target_line}
+[[edge]]
+from = "start"
+to = "done"
+"#
+        )
+    }
+
+    /// Each of the three destination kinds parses onto the first-class field
+    /// with its target contract intact.
+    #[test]
+    fn output_destinations_parse_for_every_kind() {
+        let owner = parse_workflow(&with_destination("owner", None)).expect("owner parses");
+        let dest = owner.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "owner");
+        assert_eq!(dest.target, None);
+
+        let email = parse_workflow(&with_destination("email", Some("ada@example.com")))
+            .expect("email parses");
+        let dest = email.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "email");
+        assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
+
+        let channel =
+            parse_workflow(&with_destination("channel", Some("operator"))).expect("channel parses");
+        let dest = channel.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "channel");
+        assert_eq!(dest.target.as_deref(), Some("operator"));
+    }
+
+    #[test]
+    fn unknown_destination_kind_is_rejected() {
+        let err = parse_workflow(&with_destination("carrier_pigeon", Some("x"))).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("unknown `destination.kind`"), "{message}");
+        // The message names what IS supported, not just what isn't.
+        assert!(message.contains("owner"), "{message}");
+    }
+
+    /// An `email` destination MUST name an address. This is the validation half
+    /// of the security boundary: a workflow cannot mail "somebody" — the
+    /// recipient is pinned in the graph, where a reviewer can see it.
+    #[test]
+    fn email_destination_without_an_address_is_rejected() {
+        let err = parse_workflow(&with_destination("email", Some("ada"))).unwrap_err();
+        assert!(err.to_string().contains("not an email address"), "{err}");
+        let err = parse_workflow(&with_destination("email", None)).unwrap_err();
+        assert!(err.to_string().contains("not an email address"), "{err}");
+    }
+
+    #[test]
+    fn channel_destination_without_a_target_is_rejected() {
+        let err = parse_workflow(&with_destination("channel", None)).unwrap_err();
+        assert!(err.to_string().contains("no `target`"), "{err}");
+    }
+
+    /// `owner` resolves server-side, so a target on it is a mistake worth
+    /// naming — otherwise an author writes an address there and quietly gets
+    /// the admins instead.
+    #[test]
+    fn owner_destination_with_a_target_is_rejected() {
+        let err = parse_workflow(&with_destination("owner", Some("ada@example.com"))).unwrap_err();
+        assert!(err.to_string().contains("`owner` destination"), "{err}");
+    }
+
+    /// Only `output` nodes report back, so a `destination` anywhere else is a
+    /// silent no-op waiting to happen.
+    #[test]
+    fn destination_on_a_non_output_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            [node.destination]
+            kind = "owner"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("only `output` nodes route a report"),
+            "{err}"
+        );
+    }
+
+    /// `destination` inside `config` would ride into the engine graph as an
+    /// inert key and deliver nothing — reject it like the other reserved keys.
+    #[test]
+    fn destination_inside_config_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "done"
+            kind = "output"
+            name = "Done"
+            [node.config]
+            destination = "owner"
+            [[edge]]
+            from = "start"
+            to = "done"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("destination"), "{message}");
+        assert!(message.contains("inside `config`"), "{message}");
+    }
+
+    /// A destination-bearing graph renders back to TOML and re-parses to the
+    /// same model — the create route's persist path depends on this.
+    #[test]
+    fn destination_round_trips_through_render_and_parse() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "done".to_string(),
+                    kind: "output".to_string(),
+                    name: "Report".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: Some(WorkflowDestinationDef {
+                        kind: "email".to_string(),
+                        target: Some("ada@example.com".to_string()),
+                    }),
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "done".to_string(),
+                label: None,
+            }],
+        };
+        let toml_src = render_workflow(&raw).expect("renders");
+        let file = parse_workflow(&toml_src).expect("re-parses");
+        let dest = file.nodes[1].destination.as_ref().expect("present");
+        assert_eq!(dest.kind, "email");
+        assert_eq!(dest.target.as_deref(), Some("ada@example.com"));
+    }
+
+    /// A legacy graph (no `destination` anywhere) renders byte-identically to
+    /// what it rendered before the field existed — `skip_serializing_if` is what
+    /// keeps an unchanged file from churning on every re-save.
+    #[test]
+    fn a_graph_without_a_destination_renders_no_destination_key() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![RawNode {
+                id: "start".to_string(),
+                kind: "trigger".to_string(),
+                name: "Start".to_string(),
+                summary: None,
+                agent: None,
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                destination: None,
+            }],
+            edges: Vec::new(),
+        };
+        let toml_src = render_workflow(&raw).expect("renders");
+        assert!(!toml_src.contains("destination"), "{toml_src}");
+    }
+
+    // --- trigger schedule (issue #169) --------------------------------------
+
+    /// A trigger's `schedule` survives the render → parse round trip the create
+    /// endpoint runs, and lands on the parsed node.
+    #[test]
+    fn trigger_schedule_round_trips_render_and_parse() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: Some("0 * * * *".to_string()),
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "done".to_string(),
+                    kind: "output".to_string(),
+                    name: "Done".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "done".to_string(),
+                label: None,
+            }],
+        };
+        let toml_src = render_workflow(&raw).expect("renders");
+        let file = parse_workflow(&toml_src).expect("re-parses");
+        let start = file.nodes.iter().find(|n| n.id == "start").unwrap();
+        assert_eq!(start.schedule.as_deref(), Some("0 * * * *"));
+        let done = file.nodes.iter().find(|n| n.id == "done").unwrap();
+        assert!(done.schedule.is_none());
+    }
+
+    /// A trigger schedule parses from hand-authored TOML too, including the
+    /// named-weekday dialect the manifest `[[schedule]]` crons already accept.
+    #[test]
+    fn trigger_schedule_parses_from_toml() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            schedule = "0 9 * * MON"
+        "#;
+        let file = parse_workflow(src).expect("parses");
+        assert_eq!(file.nodes[0].schedule.as_deref(), Some("0 9 * * MON"));
+    }
+
+    /// `schedule` says when the *workflow* starts, so it is trigger-only.
+    #[test]
+    fn schedule_on_a_non_trigger_node_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "worker"
+            kind = "agent"
+            name = "Worker"
+            agent = "ceo"
+            schedule = "0 * * * *"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("only `trigger` nodes carry a schedule"),
+            "{message}"
+        );
+    }
+
+    /// A malformed cron is rejected at validation with the parser's own
+    /// message, so it can never be persisted as an expression that never fires.
+    #[test]
+    fn invalid_trigger_schedule_cron_is_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            schedule = "every hour"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not a valid cron"), "{message}");
+        assert!(message.contains("needs 5 fields"), "{message}");
+        assert!(message.contains("UTC"), "{message}");
+
+        // An out-of-range field is caught by the same parser.
+        let out_of_range = src.replace("every hour", "0 99 * * *");
+        let err = parse_workflow(&out_of_range).unwrap_err();
+        assert!(err.to_string().contains("not a valid cron"), "{err}");
+    }
+
+    /// Two scheduled triggers would double-run the workflow, and honoring only
+    /// the first would silently drop a schedule the operator saved — so the
+    /// graph is rejected, naming both offenders.
+    #[test]
+    fn two_scheduled_triggers_are_rejected() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "nightly"
+            kind = "trigger"
+            name = "Nightly"
+            schedule = "0 2 * * *"
+            [[node]]
+            id = "hourly"
+            kind = "trigger"
+            name = "Hourly"
+            schedule = "0 * * * *"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(
+            message.contains("at most one scheduled trigger"),
+            "{message}"
+        );
+        assert!(message.contains("`nightly`"), "{message}");
+        assert!(message.contains("`hourly`"), "{message}");
+    }
+
+    /// The at-most-one rule counts *schedules*, not triggers: a graph may still
+    /// have several triggers, and one of them may be scheduled.
+    #[test]
+    fn multiple_triggers_are_still_allowed_when_at_most_one_is_scheduled() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "manual"
+            kind = "trigger"
+            name = "Manual"
+            [[node]]
+            id = "webhook"
+            kind = "trigger"
+            name = "Webhook"
+            [[node]]
+            id = "nightly"
+            kind = "trigger"
+            name = "Nightly"
+            schedule = "0 2 * * *"
+        "#;
+        let file = parse_workflow(src).expect("several triggers stay legal");
+        assert_eq!(file.nodes.len(), 3);
+        let scheduled: Vec<&str> = file
+            .nodes
+            .iter()
+            .filter(|n| n.schedule.is_some())
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(scheduled, vec!["nightly"]);
+
+        // And with no schedules at all, unchanged from before this rule.
+        let bare = src.replace("schedule = \"0 2 * * *\"", "");
+        assert!(parse_workflow(&bare).is_ok());
+    }
+
+    /// Two *malformed* schedules report the bad crons AND the at-most-one
+    /// problem together, matching the module's report-everything-at-once
+    /// contract.
+    #[test]
+    fn two_bad_schedules_report_every_problem_at_once() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "a"
+            kind = "trigger"
+            name = "A"
+            schedule = "nightly"
+            [[node]]
+            id = "b"
+            kind = "trigger"
+            name = "B"
+            schedule = "hourly"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("not a valid cron"), "{message}");
+        assert!(
+            message.contains("at most one scheduled trigger"),
+            "{message}"
+        );
+    }
+
+    /// `config.schedule` would be silently ignored (the first-class field wins),
+    /// so it is a reserved key like the other first-class node fields.
+    #[test]
+    fn config_schedule_is_rejected_as_a_reserved_key() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [node.config]
+            schedule = "0 * * * *"
+        "#;
+        let err = parse_workflow(src).unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("`schedule` inside `config`"), "{message}");
+    }
+
+    /// A graph authored before `schedule` existed parses with the field unset
+    /// and re-renders byte-identically — the field is skipped when `None`, so
+    /// adding it rewrites nothing on disk.
+    #[test]
+    fn legacy_graph_without_schedule_re_renders_byte_identically() {
+        let raw = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: Some("Legacy.".to_string()),
+            nodes: vec![RawNode {
+                id: "start".to_string(),
+                kind: "trigger".to_string(),
+                name: "Start".to_string(),
+                summary: Some("Kicks off.".to_string()),
+                agent: None,
+                schedule: None,
+                config: None,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                destination: None,
+            }],
+            edges: Vec::new(),
+        };
+        let first = render_workflow(&raw).expect("renders");
+        assert!(
+            !first.contains("schedule"),
+            "an unset schedule must not be written: {first}"
+        );
+
+        let file = parse_workflow(&first).expect("parses");
+        assert!(file.nodes[0].schedule.is_none());
+
+        // Re-render the parsed graph through the same shape: byte-identical.
+        let round_tripped = RawWorkflow {
+            id: file.id.clone(),
+            name: file.name.clone(),
+            description: file.description.clone(),
+            nodes: file
+                .nodes
+                .iter()
+                .map(|n| RawNode {
+                    id: n.id.clone(),
+                    kind: n.kind.as_str().to_string(),
+                    name: n.name.clone(),
+                    summary: n.summary.clone(),
+                    agent: n.agent.clone(),
+                    schedule: n.schedule.clone(),
+                    config: None,
+                    on_error: n.on_error.clone(),
+                    retry: n.retry.clone(),
+                    requires_approval: n.requires_approval,
+                    destination: n.destination.clone(),
+                })
+                .collect(),
+            edges: Vec::new(),
+        };
+        assert_eq!(render_workflow(&round_tripped).expect("re-renders"), first);
+    }
+
+    // --- seed ∪ overlay union (issue #168) ----------------------------------
+
+    use crate::ports::types::OverlayWorkflow;
+
+    /// A minimal valid graph body with the given id and display name.
+    fn body(id: &str, name: &str) -> String {
+        format!(
+            r#"
+id = "{id}"
+name = "{name}"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "done"
+"#
+        )
+    }
+
+    fn overlay(id: &str, name: &str) -> OverlayWorkflow {
+        OverlayWorkflow {
+            id: id.to_string(),
+            toml: body(id, name),
+        }
+    }
+
+    /// Writes a seed graph to `<dir>/workflows/<id>.toml`.
+    fn seed(dir: &Path, id: &str, name: &str) {
+        let workflows = dir.join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join(format!("{id}.toml")), body(id, name)).unwrap();
+    }
+
+    /// The hosted shape: no source directory at all, so the overlay is the only
+    /// source. This is the read half of the #168 fix.
+    #[test]
+    fn load_union_falls_back_to_the_overlay_with_no_source_dir() {
+        let overlays = vec![overlay("hosted", "Hosted flow")];
+        let file = load_workflow_union(None, &overlays, "hosted")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(file.id, "hosted");
+        assert_eq!(file.name, "Hosted flow");
+        assert_eq!(file.nodes.len(), 2);
+    }
+
+    /// A source directory that simply has no file for the id also falls through.
+    #[test]
+    fn load_union_falls_back_when_the_seed_file_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "other", "Other");
+        let overlays = vec![overlay("mine", "Mine")];
+        let file = load_workflow_union(Some(dir.path()), &overlays, "mine")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(file.name, "Mine");
+    }
+
+    /// Documented precedence: the committed seed file wins over an overlay body
+    /// with the same id. The overlay is shadowed, not destroyed.
+    #[test]
+    fn load_union_prefers_the_seed_file_on_an_id_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "dup", "From seed");
+        let overlays = vec![overlay("dup", "From overlay")];
+        let file = load_workflow_union(Some(dir.path()), &overlays, "dup")
+            .expect("loads")
+            .expect("present");
+        assert_eq!(file.name, "From seed");
+    }
+
+    /// An id neither source has is `Ok(None)` — the caller's clean 404, not an
+    /// error.
+    #[test]
+    fn load_union_of_an_unknown_id_is_none() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "known", "Known");
+        assert!(
+            load_workflow_union(Some(dir.path()), &[], "ghost")
+                .expect("no error")
+                .is_none()
+        );
+        assert!(
+            load_workflow_union(None, &[], "ghost")
+                .expect("no error")
+                .is_none()
+        );
+    }
+
+    /// A malformed overlay body surfaces as an error labelled with its id — the
+    /// same shape a malformed on-disk file gets.
+    #[test]
+    fn load_union_of_a_malformed_overlay_is_an_error() {
+        let overlays = vec![OverlayWorkflow {
+            id: "broken".to_string(),
+            toml: "id = \"broken\"\nname = \"Broken\"\n".to_string(),
+        }];
+        let err = load_workflow_union(None, &overlays, "broken").unwrap_err();
+        assert!(err.to_string().contains("trigger"), "{err}");
+        assert!(err.to_string().contains("broken.toml"), "{err}");
+    }
+
+    /// The list union dedupes by id with the seed winning, and keeps a stable
+    /// order (seed scan first, then overlays by id).
+    #[test]
+    fn list_union_dedupes_with_source_winning() {
+        let dir = tempfile::tempdir().unwrap();
+        seed(dir.path(), "dup", "From seed");
+        seed(dir.path(), "aaa", "Seed A");
+        let overlays = vec![
+            overlay("zzz", "Overlay Z"),
+            overlay("dup", "From overlay"),
+            overlay("mmm", "Overlay M"),
+        ];
+        let files = list_workflows_union(Some(dir.path()), &overlays);
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["aaa", "dup", "mmm", "zzz"]);
+        let dup = files.iter().find(|f| f.id == "dup").unwrap();
+        assert_eq!(dup.name, "From seed", "the seed file must win");
+    }
+
+    /// With no source directory, the list is exactly the overlay set.
+    #[test]
+    fn list_union_with_no_source_dir_is_the_overlay_set() {
+        let overlays = vec![overlay("b", "B"), overlay("a", "A")];
+        let files = list_workflows_union(None, &overlays);
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["a", "b"]);
+    }
+
+    /// One malformed overlay skips only itself — the same tolerance the seed
+    /// scan has, so a single bad graph never empties the picker.
+    #[test]
+    fn list_union_skips_a_malformed_overlay() {
+        let overlays = vec![
+            overlay("good", "Good"),
+            OverlayWorkflow {
+                id: "bad".to_string(),
+                toml: "id = \"bad\"\nname =".to_string(),
+            },
+        ];
+        let files = list_workflows_union(None, &overlays);
+        let ids: Vec<&str> = files.iter().map(|f| f.id.as_str()).collect();
+        assert_eq!(ids, vec!["good"]);
+    }
+
+    // -----------------------------------------------------------------------
+    // Console drift guard (issue #260)
+    // -----------------------------------------------------------------------
+    //
+    // The console pre-flights the destination and schedule rules client-side so
+    // a wrong target is caught without a round trip. That is worth keeping — it
+    // is the difference between instant feedback and a save that bounces — but
+    // it makes one rule live in two hand-written places, free to drift. Issue
+    // #260 reports the drift that already happened: two different messages for
+    // the same rule.
+    //
+    // These tests are the coupling. Each shared fragment is asserted TWICE —
+    // once against this module's live `validate()` output, so a server rewording
+    // fails here, and once against the console source, so a console rewording
+    // fails here too. Neither side can be reworded alone.
+    //
+    // This is a tripwire, not a proof. The fragment only has to APPEAR in the
+    // console source, so a stale copy left in a comment would false-pass, and
+    // nothing here checks that the console's rule FIRES in the same cases the
+    // host's does. What it does buy is that the specific failure #260 describes
+    // — one side reworded, the other silently asserting the old contract — can
+    // no longer happen quietly. Closing the rest means option 3 from the issue:
+    // the host exposing the destination contract as data.
+
+    /// The console's workflow creator, read at compile time so a file move is a
+    /// build error naming the path rather than a silently-skipped test.
+    const CONSOLE_DIALOG: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/frontend/src/views/WorkflowCreateDialog.tsx"
+    ));
+    const CONSOLE_DIALOG_PATH: &str = "frontend/src/views/WorkflowCreateDialog.tsx";
+
+    /// The console's workflow API module, which declares the picker's
+    /// destination kinds.
+    const CONSOLE_API: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/frontend/src/api/workflows.ts"
+    ));
+    const CONSOLE_API_PATH: &str = "frontend/src/api/workflows.ts";
+
+    /// How an `email` destination with a non-address target ends, on both sides.
+    const EMAIL_TARGET_TAIL: &str = "is not an email address — give the recipient's full address.";
+    /// How a `channel` destination with no target ends, on both sides.
+    const CHANNEL_TARGET_TAIL: &str = "name the channel to post the report to.";
+
+    /// A graph that trips both destination target rules at once.
+    const BAD_DESTINATIONS: &str = r#"
+        id = "wf"
+        name = "WF"
+
+        [[node]]
+        id = "start"
+        kind = "trigger"
+        name = "Start"
+
+        [[node]]
+        id = "mailer"
+        kind = "output"
+        name = "Mailer"
+        [node.destination]
+        kind = "email"
+        target = "nope"
+
+        [[node]]
+        id = "poster"
+        kind = "output"
+        name = "Poster"
+        [node.destination]
+        kind = "channel"
+    "#;
+
+    #[test]
+    fn destination_messages_match_the_console() {
+        let raw: RawWorkflow = toml::from_str(BAD_DESTINATIONS).expect("the fixture is valid TOML");
+        let problems = validate(&raw).join("\n");
+
+        for tail in [EMAIL_TARGET_TAIL, CHANNEL_TARGET_TAIL] {
+            assert!(
+                problems.contains(tail),
+                "the host stopped saying `{tail}` — if that rewording is deliberate, \
+                 update this const AND the matching message in {CONSOLE_DIALOG_PATH}, \
+                 so an author who trips the pre-flight and an author who trips the 400 \
+                 are still told the same thing.\nhost said:\n{problems}"
+            );
+            assert!(
+                CONSOLE_DIALOG.contains(tail),
+                "{CONSOLE_DIALOG_PATH} no longer says `{tail}` — the console's \
+                 client-side pre-flight has drifted from the host's rule (issue #260). \
+                 Reword both sides together, or drop the pre-flight and surface the \
+                 host's message on the failed save."
+            );
+        }
+    }
+
+    /// The picker's destination kinds, extracted from the console's own
+    /// `DESTINATION_KINDS` block. A kind added on one side alone is either a
+    /// picker option the host rejects or one the host accepts and the author
+    /// can never choose.
+    #[test]
+    fn destination_kinds_match_the_console() {
+        let start = CONSOLE_API.find("export const DESTINATION_KINDS").unwrap_or_else(|| {
+            panic!("`DESTINATION_KINDS` is gone from {CONSOLE_API_PATH} — it is what this test reads")
+        });
+        // Slice from the array opener, NOT from the declaration: the type
+        // annotation in between ends `WorkflowDestination["kind"];`, which
+        // contains a literal `"];` and would close the block before the first
+        // entry.
+        let block = &CONSOLE_API[start..];
+        let open = block.find("= [").unwrap_or_else(|| {
+            panic!("`DESTINATION_KINDS` in {CONSOLE_API_PATH} is no longer an array literal")
+        });
+        let block = &block[open..];
+        let end = block
+            .find("];")
+            .unwrap_or_else(|| panic!("`DESTINATION_KINDS` in {CONSOLE_API_PATH} has no `];`"));
+        let block = &block[..end];
+
+        // Scan for `value: "…"` entries. The type annotation on the same
+        // declaration carries a bare `value:` with no string, so keying on the
+        // opening quote is what keeps it out.
+        let needle = "value: \"";
+        let mut console = std::collections::BTreeSet::new();
+        let mut rest = block;
+        while let Some(at) = rest.find(needle) {
+            rest = &rest[at + needle.len()..];
+            let close = rest
+                .find('"')
+                .unwrap_or_else(|| panic!("unterminated `value:` in {CONSOLE_API_PATH}"));
+            console.insert(&rest[..close]);
+            rest = &rest[close..];
+        }
+
+        let host: std::collections::BTreeSet<&str> =
+            WORKFLOW_DESTINATION_KINDS.iter().copied().collect();
+        assert_eq!(
+            console, host,
+            "the console's DESTINATION_KINDS picker ({CONSOLE_API_PATH}) and the host's \
+             WORKFLOW_DESTINATION_KINDS disagree — one side offers a kind the other \
+             does not know (issue #260)"
+        );
+    }
+
+    /// The console's `looksLikeCron` pre-flight counts whitespace-separated
+    /// fields and accepts exactly five, so it is only correct while the host's
+    /// parser draws the line in the same place. Relaxing the host to accept a
+    /// 6-field (seconds) expression without touching the console would make the
+    /// console reject input the host now takes — the drift direction #260 says
+    /// bites, because the console is the stricter side by construction.
+    #[test]
+    fn cron_arity_matches_the_console_preflight() {
+        use crate::runtime::cron::CronExpr;
+        assert!(CronExpr::parse("0 9 * * MON").is_ok(), "5 fields");
+        assert!(CronExpr::parse("0 9 * *").is_err(), "4 fields");
+        assert!(CronExpr::parse("0 0 9 * * MON").is_err(), "6 fields");
+        assert!(
+            CONSOLE_DIALOG.contains("function looksLikeCron"),
+            "{CONSOLE_DIALOG_PATH} no longer defines `looksLikeCron` — this test \
+             exists to pin the arity that helper assumes"
+        );
     }
 }

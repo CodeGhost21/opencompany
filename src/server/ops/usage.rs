@@ -11,10 +11,15 @@
 //! Data maturity: token/cost samples only populate on a harness
 //! (`openhuman`-feature) build via `src/harness/cost.rs`. The offline build has
 //! no cost hook, so the meter is empty and the series is (correctly) zero-filled
-//! — that is the true value, not a stub. OAuth-call samples
-//! ([`SampleKind::OauthCall`](crate::ports::usage::SampleKind)) are not yet
-//! emitted anywhere, so `byProvider` / `oauthCalls` read zero until the Phase 2
-//! emit work lands.
+//! — that is the true value, not a stub.
+//!
+//! The same holds for OAuth-call samples
+//! ([`SampleKind::OauthCall`](crate::ports::usage::SampleKind)): they are now
+//! emitted per completed connected-tool call (see
+//! [`metering::oauth`](crate::metering::oauth)), but only a `composio`-feature
+//! build wires a connected-tool surface at all — so on a default build
+//! `byProvider` / `oauthCalls` still read zero, and that zero is now the honest
+//! answer ("no connected tools in this build") rather than a missing hook.
 
 use axum::Json;
 use axum::Router;
@@ -68,7 +73,8 @@ struct UsageDto {
     series: Vec<UsagePoint>,
     /// Tokens per teammate (desk), highest first.
     by_agent: Vec<AgentTokens>,
-    /// OAuth calls per provider, highest first (empty until Phase 2 emit).
+    /// OAuth calls per provider, highest first. Empty on a build with no
+    /// connected-tool surface compiled in — see the module docs.
     by_provider: Vec<ProviderCalls>,
     /// Window totals.
     totals: UsageTotals,
@@ -128,8 +134,11 @@ mod tests {
     use crate::store::FsCompanyStore;
     use crate::{AppConfig, AppState};
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-usage-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-usage-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {
@@ -147,6 +156,10 @@ mod tests {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();
@@ -182,7 +195,8 @@ mod tests {
     /// An empty meter zero-fills the series to the range length and totals zero.
     #[tokio::test]
     async fn empty_meter_projects_a_zero_filled_series() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
@@ -196,15 +210,14 @@ mod tests {
         assert_eq!(dto["totals"]["connections"], 0);
         assert!(dto["byAgent"].as_array().unwrap().is_empty(), "{dto}");
         assert!(dto["byProvider"].as_array().unwrap().is_empty(), "{dto}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// A couple of recorded samples project the expected DTO: totals sum, the
     /// series carries the day's tokens, and `byAgent` resolves the roster role.
     #[tokio::test]
     async fn recorded_samples_project_totals_series_and_by_desk() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
@@ -229,6 +242,7 @@ mod tests {
                         cached_input_tokens: 0,
                         cost_usd: 0.25,
                         kind: SampleKind::Inference,
+                        run_id: None,
                     },
                 )
                 .await
@@ -257,14 +271,64 @@ mod tests {
         assert_eq!(by_agent.len(), 1, "{dto}");
         assert_eq!(by_agent[0]["name"], "Chief Executive");
         assert_eq!(by_agent[0]["tokens"], 165.0);
+    }
 
-        std::fs::remove_dir_all(&home).ok();
+    /// Metered web searches (issue #238) reach the console read: they count in
+    /// their own `searchCalls` field and their cost rolls into the window
+    /// total, while leaving the connected-accounts numbers alone.
+    ///
+    /// That last clause is the point. A search is a priced call on the managed
+    /// platform, not a third-party account the company connected, so folding it
+    /// into `oauthCalls` / `byProvider` (whose row count **is** `connections`)
+    /// would report an integration the operator never set up.
+    #[tokio::test]
+    async fn search_calls_surface_separately_from_connected_accounts() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_manifest(
+            &home,
+            "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief Executive\"\n",
+        )
+        .await;
+
+        let id = CompanyId::new("acme");
+        let runtime = state.registry().get(&id).unwrap();
+        let now = crate::ports::now_millis();
+        for _ in 0..3 {
+            runtime
+                .usage()
+                .record(
+                    &id,
+                    &crate::metering::search_call_sample("ceo", "Exa", 0.01, now),
+                )
+                .await
+                .unwrap();
+        }
+
+        let (status, dto) = get_usage(&state, "?range=7d").await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(dto["totals"]["searchCalls"], 3, "{dto}");
+        assert!(
+            (dto["totals"]["costUsd"].as_f64().unwrap() - 0.03).abs() < 1e-9,
+            "search cost must roll into the window total: {dto}"
+        );
+        assert_eq!(
+            dto["totals"]["connections"], 0,
+            "a search is not a connected account: {dto}"
+        );
+        assert_eq!(dto["totals"]["oauthCalls"], 0, "{dto}");
+        assert!(dto["byProvider"].as_array().unwrap().is_empty(), "{dto}");
+        // And no tokens, so the teammate chart stays a token chart.
+        assert_eq!(dto["totals"]["tokens"], 0.0, "{dto}");
+        assert!(dto["byAgent"].as_array().unwrap().is_empty(), "{dto}");
     }
 
     /// An absent / unknown `?range=` defaults to the 30-day window.
     #[tokio::test]
     async fn range_defaults_to_thirty_days() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_manifest(
             &home,
             "[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n",
@@ -275,7 +339,5 @@ mod tests {
         assert_eq!(dto["series"].as_array().unwrap().len(), 30, "{dto}");
         let (_, dto_bad) = get_usage(&state, "?range=nonsense").await;
         assert_eq!(dto_bad["series"].as_array().unwrap().len(), 30, "{dto_bad}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

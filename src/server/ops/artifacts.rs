@@ -1,0 +1,340 @@
+//! Versioned task artifacts (#187) — the Task Detail **Artifacts** tab.
+//!
+//! Routes, under both scope forms:
+//!
+//! | Route | Purpose |
+//! | ----- | ------- |
+//! | `GET …/tasks/{task_id}/artifacts` | one task's artifacts, newest first |
+//! | `GET …/artifacts/{artifact_id}` | one artifact + its full version history |
+//! | `POST …/artifacts` | open an artifact with its first version |
+//! | `POST …/artifacts/{artifact_id}/versions` | append a version — the human edit |
+//! | `GET …/artifacts/{artifact_id}/diff` | a diff between two versions |
+//!
+//! The append route is the interesting one: an operator's pre-approval edit is
+//! recorded as a **new version by a different author**, never as a mutation of
+//! the agent's. That is what makes "the agent wrote X, the operator shipped Y"
+//! answerable afterwards — and it is why `PATCH`-a-version deliberately does
+//! not exist. Editing a stored version in place would destroy the one datum
+//! this whole port is for.
+
+use axum::extract::{Path, Query};
+use axum::http::StatusCode;
+use axum::routing::{get, post};
+use axum::{Json, Router};
+use serde::{Deserialize, Serialize};
+
+use crate::AppState;
+use crate::error::OpenCompanyError;
+use crate::ports::artifacts::{
+    ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactVersion,
+};
+use crate::ports::workspace::WorkspaceOrigin;
+use crate::ports::{generate_id, now_millis};
+use crate::server::error::ApiError;
+use crate::server::ops::{ScopedCompany, scoped};
+
+/// The note stamped on a version created through the append route when the
+/// caller supplies none. Kept as a constant so the console can recognise it.
+///
+/// `pub(crate)` since issue #552: the workspace `PUT` route now records an
+/// operator's edit of a *published* note as a version too, and it has to say
+/// the same thing this route does — the console recognises the wording, and two
+/// spellings of one event would show up as two different kinds of edit.
+pub(crate) const OPERATOR_EDIT_NOTE: &str = "operator edit before approval";
+
+/// Builds the artifact route fragment.
+pub fn router() -> Router<AppState> {
+    scoped("/tasks/{task_id}/artifacts", get(list_for_task))
+        .merge(scoped("/artifacts", post(create_artifact)))
+        // Registered before the dynamic `{artifact_id}` routes for the same
+        // reason `/tasks/inflight` is: a static segment must not be shadowed by
+        // an id. Axum prefers the static segment, and no artifact id collides
+        // with these words in practice, but the ordering is kept explicit.
+        .merge(scoped(
+            "/artifacts/{artifact_id}",
+            get(get_artifact).delete(delete_artifact),
+        ))
+        .merge(scoped(
+            "/artifacts/{artifact_id}/versions",
+            post(append_version),
+        ))
+        .merge(scoped("/artifacts/{artifact_id}/diff", get(diff_artifact)))
+}
+
+/// The `{task_id}` path segment.
+#[derive(Debug, Deserialize)]
+struct TaskPath {
+    task_id: String,
+}
+
+/// The `{artifact_id}` path segment.
+#[derive(Debug, Deserialize)]
+struct ArtifactPath {
+    artifact_id: String,
+}
+
+/// The create body. `kind` defaults to `text`.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateArtifact {
+    task_id: String,
+    title: String,
+    body: String,
+    #[serde(default)]
+    kind: Option<ArtifactKind>,
+    /// The agent that produced it. Defaults to `"agent"` when unattributed.
+    #[serde(default)]
+    author_id: Option<String>,
+}
+
+/// The append-a-version body.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AppendVersion {
+    body: String,
+    /// Who wrote it. Defaults to `operator` — the append route exists for the
+    /// human edit, so an unattributed append is a human one.
+    #[serde(default)]
+    author: Option<ArtifactAuthor>,
+    #[serde(default)]
+    author_id: Option<String>,
+    #[serde(default)]
+    note: Option<String>,
+}
+
+/// `?from=&to=` on the diff route. Both optional — see [`diff_artifact`].
+#[derive(Debug, Deserialize)]
+struct DiffQuery {
+    #[serde(default)]
+    from: Option<u32>,
+    #[serde(default)]
+    to: Option<u32>,
+}
+
+/// An artifact as the console renders it: the record plus the derived
+/// human-edit diff, so the Artifacts tab needs one call rather than two.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ArtifactView {
+    #[serde(flatten)]
+    pub(crate) artifact: ArtifactRecord,
+    /// The agent→operator diff, when a human has edited. Omitted otherwise, so
+    /// an unedited artifact carries no empty scaffolding.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) human_edit_diff: Option<ArtifactDiff>,
+}
+
+impl From<ArtifactRecord> for ArtifactView {
+    fn from(artifact: ArtifactRecord) -> Self {
+        Self {
+            human_edit_diff: artifact.human_edit_diff(),
+            artifact,
+        }
+    }
+}
+
+/// `GET …/tasks/{task_id}/artifacts` — one task's artifacts, newest first.
+async fn list_for_task(
+    company: ScopedCompany,
+    Path(TaskPath { task_id }): Path<TaskPath>,
+) -> Result<Json<Vec<ArtifactView>>, ApiError> {
+    Ok(Json(artifacts_for_task(&company, &task_id).await?))
+}
+
+/// One task's artifacts as the Artifacts tab receives them, newest first.
+///
+/// Shared with the export document (issue #352) for the same reason
+/// [`assemble_detail`](super::tasks::assemble_detail) is: the exported record
+/// must show what the tab shows, and the way to guarantee that is to hand both
+/// the same value rather than to keep two reads honest by review.
+pub(crate) async fn artifacts_for_task(
+    company: &ScopedCompany,
+    task_id: &str,
+) -> Result<Vec<ArtifactView>, ApiError> {
+    let rows = company
+        .runtime
+        .artifacts()
+        .list(company.id(), Some(task_id))
+        .await?;
+    Ok(rows.into_iter().map(ArtifactView::from).collect())
+}
+
+/// `GET …/artifacts/{artifact_id}` — one artifact with its full history.
+async fn get_artifact(
+    company: ScopedCompany,
+    Path(ArtifactPath { artifact_id }): Path<ArtifactPath>,
+) -> Result<Json<ArtifactView>, ApiError> {
+    Ok(Json(load(&company, &artifact_id).await?.into()))
+}
+
+/// `POST …/artifacts` — open an artifact with its first, agent-authored version.
+async fn create_artifact(
+    company: ScopedCompany,
+    Json(body): Json<CreateArtifact>,
+) -> Result<(StatusCode, Json<ArtifactView>), ApiError> {
+    let record = ArtifactRecord::new(
+        generate_id(),
+        body.task_id,
+        body.title,
+        body.kind.unwrap_or(ArtifactKind::Text),
+        body.body,
+        body.author_id.unwrap_or_else(|| "agent".to_string()),
+        now_millis(),
+    );
+    company
+        .runtime
+        .artifacts()
+        .upsert(company.id(), &record)
+        .await?;
+    Ok((StatusCode::CREATED, Json(record.into())))
+}
+
+/// `POST …/artifacts/{artifact_id}/versions` — append a revision.
+///
+/// This is how a human edit is captured. The prior version is left untouched,
+/// so the diff between them stays computable forever; there is deliberately no
+/// route that rewrites a stored version.
+///
+/// # The node follows the chain (issue #552)
+///
+/// When the artifact is a *published* deliverable it also lives as a node in
+/// the shared workspace tree, and that node holds the current body. Appending
+/// here without updating it would leave the operator and every agent reading a
+/// draft the version history has already superseded — the same divergence from
+/// the other direction, and just as invisible.
+///
+/// Chain first, node second, matching the workspace `PUT`: the chain is
+/// authoritative, so a node that could not be updated is a stale projection
+/// that heals on the next write, and it must never fail the request that
+/// already recorded the version. A mirror failure therefore warns and returns
+/// the appended version.
+async fn append_version(
+    company: ScopedCompany,
+    Path(ArtifactPath { artifact_id }): Path<ArtifactPath>,
+    Json(body): Json<AppendVersion>,
+) -> Result<Json<ArtifactView>, ApiError> {
+    let mut record = load(&company, &artifact_id).await?;
+    let author = body.author.unwrap_or(ArtifactAuthor::Operator);
+    let author_id = body.author_id.unwrap_or_else(|| match author {
+        ArtifactAuthor::Operator => "operator".to_string(),
+        ArtifactAuthor::Agent => "agent".to_string(),
+    });
+    let note = body.note.or_else(|| match author {
+        ArtifactAuthor::Operator => Some(OPERATOR_EDIT_NOTE.to_string()),
+        ArtifactAuthor::Agent => None,
+    });
+    // Read from the version this one supersedes, before the push: the appended
+    // version has no node of its own until it inherits this one.
+    let mirror_target = record.workspace_node_id().map(str::to_string);
+    let origin = match author {
+        ArtifactAuthor::Operator => WorkspaceOrigin::Operator,
+        ArtifactAuthor::Agent => WorkspaceOrigin::Agent {
+            id: author_id.clone(),
+        },
+    };
+    let mirrored_body = body.body.clone();
+    record.push_version(body.body, author, author_id, now_millis(), note);
+    if let Some(node_id) = &mirror_target {
+        // Carried onto the new version, or the *next* append's lookup finds no
+        // node and mirroring silently stops after one hop.
+        record.stamp_workspace_node(node_id);
+    }
+    company
+        .runtime
+        .artifacts()
+        .upsert(company.id(), &record)
+        .await?;
+
+    if let Some(node_id) = mirror_target
+        && let Err(err) = company
+            .runtime
+            .workspace()
+            .write(company.id(), &node_id, &mirrored_body, origin)
+            .await
+    {
+        tracing::warn!(
+            artifact = %artifact_id,
+            node = %node_id,
+            error = %err,
+            "[artifacts] appended a version but could not update its workspace note; the note is \
+             stale until the next write on either surface"
+        );
+    }
+    Ok(Json(record.into()))
+}
+
+/// `GET …/artifacts/{artifact_id}/diff?from=&to=` — diff two revisions.
+///
+/// With neither bound supplied this answers the question the tab actually asks
+/// — *what did the human change?* — by returning the agent→operator diff. A
+/// caller that wants a specific pair passes both; passing one is a 400 rather
+/// than a guess, because "diff v2 against something I picked for you" is not a
+/// question anyone asked.
+async fn diff_artifact(
+    company: ScopedCompany,
+    Path(ArtifactPath { artifact_id }): Path<ArtifactPath>,
+    Query(q): Query<DiffQuery>,
+) -> Result<Json<ArtifactDiff>, ApiError> {
+    let record = load(&company, &artifact_id).await?;
+    match (q.from, q.to) {
+        (None, None) => record.human_edit_diff().map(Json).ok_or_else(|| {
+            ApiError(OpenCompanyError::InvalidRequest(format!(
+                "artifact {artifact_id} has no operator edit to diff; pass ?from=&to="
+            )))
+        }),
+        (Some(from), Some(to)) => {
+            let from_v = version(&record, from, &artifact_id)?;
+            let to_v = version(&record, to, &artifact_id)?;
+            Ok(Json(ArtifactDiff::between(from_v, to_v)))
+        }
+        _ => Err(ApiError(OpenCompanyError::InvalidRequest(
+            "pass both `from` and `to`, or neither for the human-edit diff".to_string(),
+        ))),
+    }
+}
+
+/// `DELETE …/artifacts/{artifact_id}`.
+async fn delete_artifact(
+    company: ScopedCompany,
+    Path(ArtifactPath { artifact_id }): Path<ArtifactPath>,
+) -> Result<StatusCode, ApiError> {
+    if company
+        .runtime
+        .artifacts()
+        .delete(company.id(), &artifact_id)
+        .await?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(ApiError(OpenCompanyError::NotFound(format!(
+            "artifact {artifact_id}"
+        ))))
+    }
+}
+
+/// Loads an artifact or 404s, so every handler reports a missing id the same way.
+async fn load(company: &ScopedCompany, artifact_id: &str) -> Result<ArtifactRecord, ApiError> {
+    company
+        .runtime
+        .artifacts()
+        .get(company.id(), artifact_id)
+        .await?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::NotFound(format!(
+                "artifact {artifact_id}"
+            )))
+        })
+}
+
+/// Resolves a version number, or 400s naming the one that does not exist.
+fn version<'a>(
+    record: &'a ArtifactRecord,
+    version: u32,
+    artifact_id: &str,
+) -> Result<&'a ArtifactVersion, ApiError> {
+    record.version(version).ok_or_else(|| {
+        ApiError(OpenCompanyError::InvalidRequest(format!(
+            "artifact {artifact_id} has no version {version}"
+        )))
+    })
+}

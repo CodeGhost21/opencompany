@@ -20,7 +20,9 @@ The builder seams are wired to OpenCompany's own ports:
   for offline tests.
 - **Approval policy** → `harness::policy::ApprovalPolicy` maps `[policy].mode`
   onto openhuman's `ToolPolicy`; the security-tier words
-  (readonly/supervised/full) line up 1:1.
+  (readonly/supervised/full) line up 1:1. See
+  [approval parking](#approval-parking) for how a gated call reaches the
+  operator.
 - **Tools / skills** → injected from the company's manifest grants.
 
 See [`docs/modules/runtime/README.md`](../runtime/README.md) for `HarnessPool`
@@ -32,21 +34,54 @@ for the full integration contract.
 `harness::brain::HarnessBrain` implements the `Brain` cognition port over a
 `HarnessPool`: each operator message runs one openhuman agent turn and returns
 the agent's reply, in place of the offline `EchoBrain`'s `"You said: …"`. A
-company routes through it when the `RuntimeBuilder` has a harness pool
-(`with_harness`) and no explicit brain — brain precedence is `with_brain` >
-harness > hosted/echo. The `opencompany` binary's `attach_harness` resolves the
-managed default from the environment (below).
+company routes through it when the `RuntimeBuilder` has both a harness pool
+(`with_harness`) and any inference source that resolves at build time, and no
+explicit brain — brain precedence is `with_brain` > harness > hosted/echo. The
+`opencompany` binary's `attach_harness` resolves the managed default from the
+environment (below).
 
-Whether a company *has* inference configured is decided per cycle, not at boot
-(issue #585). The builder wraps the harness brain and the hosted/echo fallback in
-a `runtime::deferred::DeferredBrain`, which re-resolves the effective config —
-console runtime override > manifest `[inference]` > managed env default — on
-every `run_cycle` and dispatches to the harness when one resolves and to the
-fallback when none does. That is what lets an admin set the company's key in the
-console on a tenant that booted with no credential at all and have agents think
-on the next cycle, with no container restart. Before this the decision was frozen
-at `RuntimeBuilder::build`, and since a runtime is built once and cached in the
-`CompanyRegistry`, a console-set key was unreachable until a restart.
+Which brain a company runs is chosen once, when its runtime is built. A company
+that resolved **no** inference source at boot is on the offline echo brain and
+stays there for as long as that runtime lives, no matter what the console saves
+afterwards — a company runtime is built once and cached in the
+`CompanyRegistry`. That transition is reported honestly as `restartRequired`
+(issue #266) and cleared by rebuilding the runtime in place (issue #290, see
+[`docs/spec/runtime/rebuild.md`](../../spec/runtime/rebuild.md)) rather than by
+a process restart.
+
+Everything *after* that first transition is live: once a company is on the
+harness path, `TenantProvider` re-resolves the effective config — console
+runtime override > manifest `[inference]` > managed env default — on every turn,
+so a provider switch or key rotation reaches agents on the next turn with no
+rebuild at all.
+
+## Approval parking
+
+openhuman resolves a `ToolPolicyDecision::RequireApproval` **inline**: it blocks
+the tool call and feeds the model a refusal, then lets the turn continue. That
+refusal used to be the only trace a gated call left — nothing was written to
+OpenCompany's `ApprovalGate` or its journal, so the operator's Approvals page
+stayed empty however many tools an agent parked (issue #172).
+
+The two halves are now joined:
+
+1. `ApprovalPolicy::check` projects every `RequireApproval` onto an `Effect`
+   (`effect_for` — the tool name becomes the effect `kind`, the arguments become
+   the payload) and pushes it onto the shared `ApprovalRequestQueue` carried on
+   `HarnessDeps`. Duplicates (a model re-trying the same blocked call) collapse.
+2. `HarnessBrain::run_cycle` clears that queue before its turns and drains it
+   after, parking each request through `CycleHost::park_effect` — capped at
+   `MAX_APPROVAL_REQUESTS_PER_TURN`.
+
+`park_effect` is deliberately **not** `emit_effect`: the verdict was already
+reached inside the turn, and re-evaluating it against the coarser `ApprovalGate`
+taxonomy would `Allow` (and so "execute" as a no-op) anything in the `Other`
+group — which is most gated tool calls — making the request vanish again.
+
+**Not yet wired: resume-after-approval.** Because openhuman resolves the decision
+inline, approving a parked tool call records the verdict and clears the queue but
+does not re-dispatch the tool; the operator re-asks. Suspending and resuming a
+call inside openhuman's session loop is separate work.
 
 ## Inference config (environment)
 
@@ -67,8 +102,7 @@ through the console (`PUT …/inference` with `key`, stored under the
 `inference/key` secret), wins over both env names — including on the `managed`
 provider, where only the credential changes and the platform endpoint is kept.
 Clearing it (`PUT …/inference` with `key: ""`, the console's **Remove key**)
-falls back to the env credential rather than 401ing. See
-`docs/modules/runtime/README.md` for the resolution order in full.
+falls back to the env credential rather than 401ing.
 
 ## Cost metering
 
@@ -85,8 +119,13 @@ offline provider that reports no usage yields a zero turn, which writes nothing.
 ## `src/openhuman/` — legacy JSON-RPC path (behind `openhuman-rpc`)
 
 The former out-of-process seam is retained for one release and then removed.
-`src/openhuman/` still hosts the launcher (`opencompany open-human --dry-run`
-shells out through Cargo to the vendored checkout) and the JSON-RPC adapters —
+`src/openhuman/` still hosts the launcher (`opencompany open-human
+[--mode core|desktop] [--release] [--dry-run]` — Core shells out through Cargo
+to `openhuman-core`, Desktop calls `cargo tauri dev`/`build` directly and ports
+OpenHuman's `dev:app`/`dev:wry`/`macos:build:release`/`tauri:build:ui` preflight
+into Rust: vendored CEF-aware `tauri-cli` install, `CEF_PATH`, `.env` load
+(seeded from `.env.example` only in Desktop mode when absent), and macOS
+keychain + signing) and the JSON-RPC adapters —
 `rpc.rs` (the `OpenHumanRpc` transport trait + `MockOpenHumanRpc`),
 `http_client.rs` (the `reqwest` client behind `openhuman-rpc`), `tools.rs`
 (`OpenHumanToolProvider`, catalog filtered by manifest grants, ungranted calls

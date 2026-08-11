@@ -129,11 +129,30 @@ pub enum OpenCompanyError {
     #[error("company is {0}")]
     LifecycleConflict(String),
 
+    /// A side-effecting effect was refused because the company's emergency stop
+    /// is engaged (issue #86).
+    ///
+    /// Distinct from [`LifecycleConflict`](Self::LifecycleConflict), which is a
+    /// *durable* lifecycle state: this vetoes new side-effecting work while the
+    /// switch is down and clears the moment it is released. `EffectGroup::Other`
+    /// (chat) stays exempt, exactly as in `ApprovalGate::evaluate`.
+    #[error("emergency stop is engaged: {0}")]
+    EmergencyStop(String),
+
     /// A write conflicts with a durable invariant that is not a lifecycle state
     /// (e.g. uninstalling a built-in skill, or deleting a manifest-defined
     /// agent). Renders as `409 Conflict`.
     #[error("conflict: {0}")]
     Conflict(String),
+
+    /// The company's runtime is quiescing for a swap (issue #290): it has
+    /// stopped accepting new cycles while the one in flight drains, and a
+    /// successor is being built. Distinct from
+    /// [`LifecycleConflict`](Self::LifecycleConflict), which is a *durable*
+    /// state an operator chose; this one clears itself within a turn, so it
+    /// renders as `503 Service Unavailable` and the caller should retry.
+    #[error("company {0} is being rebuilt; retry shortly")]
+    Quiescing(String),
 
     /// A request was malformed or internally inconsistent (e.g. an approval
     /// resolution that pairs a `deny` verdict with an amended payload).
@@ -176,6 +195,17 @@ pub enum OpenCompanyError {
         /// A human-readable description of the failure.
         message: String,
     },
+
+    /// A spawned background task the caller was waiting on panicked or was
+    /// aborted, so its result never arrived (issue #383).
+    ///
+    /// Distinct from a failure *inside* that work, which reports itself through
+    /// its own variant. This one means the work's outcome is unknown — the
+    /// caller's wait ended without an answer. On the approval path the verdict
+    /// it settled is already durable regardless; only the follow-up cycle is
+    /// unaccounted for.
+    #[error("background work did not complete: {0}")]
+    BackgroundTask(String),
 
     /// A port method has no implementation in the current build.
     #[error("port not implemented: {0}")]
@@ -236,12 +266,15 @@ impl OpenCompanyError {
             Self::ToolNotGranted(_) => "tool_not_granted".to_string(),
             Self::BudgetExceeded(_) => "budget_exceeded".to_string(),
             Self::LifecycleConflict(_) => "lifecycle_conflict".to_string(),
+            Self::EmergencyStop(_) => "emergency_stop".to_string(),
             Self::Conflict(_) => "conflict".to_string(),
+            Self::Quiescing(_) => "quiescing".to_string(),
             Self::InvalidRequest(_) => "invalid_request".to_string(),
             Self::Config(_) => "config_error".to_string(),
             Self::Orchestration { code, .. } => code.clone(),
             Self::Tinyplace { code, .. } => format!("tinyplace_{code}"),
             Self::TinyHumans { code, .. } => format!("tinyhumans_{code}"),
+            Self::BackgroundTask(_) => "background_task".to_string(),
             Self::Unimplemented(_) => "unimplemented".to_string(),
             #[cfg(feature = "openhuman")]
             Self::Harness(_) => "harness_error".to_string(),

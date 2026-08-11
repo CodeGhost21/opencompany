@@ -8,9 +8,39 @@ system sits behind a port trait.
 
 Supporting docs:
 
-- [ports.md](ports.md) — the port trait contracts (normative)
+- [ports.md](ports.md) — the port trait contracts (normative): the index over
+  the five files below, plus the runtime assembly and the default
+  implementation of each port
+  - [ports-cognition.md](ports-cognition.md) — `Brain`, `CycleHost`,
+    `ChannelAdapter` and the `TurnStep` activity trace
+  - [ports-state.md](ports-state.md) — `CompanyStore`, `EventLog`,
+    `MemoryStore`, `ContextStore`, `SecretStore`, and the identity trio
+  - [ports-effects.md](ports-effects.md) — `ToolProvider`, `AgentEconomy`,
+    `ApprovalGate`
+  - [ports-console.md](ports-console.md) — the WS3 console-surface stores
+  - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
+    trace, and who writes it
+- [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
+  the run/task/approval correlation rules a journal reader folds on
+  - [workflow-events.md](workflow-events.md) — the workflow-run progress
+    brackets (`WorkflowRunStarted` / `WorkflowNodeStarted` /
+    `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
+    interrupted-run sweep, and operator stop/cancel semantics (issues
+    #371/#382/#383/#398)
+- [artifacts.md](artifacts.md) — what makes something a deliverable: the
+  explicit-publish rule, `(task, source)` identity, body caps and reference
+  bodies, and the single follow-up nudge
 - [manifest.md](manifest.md) — `company.toml` schema
 - [lifecycle.md](lifecycle.md) — company state machine and durability
+- [planning.md](planning.md) — the board's Planning station: one tool-less model
+  call per card, the host-gathered evidence pack, the prerequisite verdict
+  taxonomy, and the no-run/no-lock concurrency argument
+- [workflow-build.md](workflow-build.md) — the plan → workflow bridge: a
+  `workflow`-deliverable card builds a proposed graph that lands In Review for
+  approval before it exists, then apply/reject; host-authority conversion and
+  the one authoring path
+- [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →
+  hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — HTTP routes and auth
 - [config.md](config.md) — configuration and the one-key story
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,

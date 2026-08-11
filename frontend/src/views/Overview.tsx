@@ -1,181 +1,243 @@
-import { Activity, ArrowRight, Flag, MessagesSquare, ShieldCheck } from "lucide-react";
+import { lazy, Suspense, useEffect, useMemo, useState } from "react";
+import { TriangleAlert } from "lucide-react";
 
+import { listPeople, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardDescription,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
-import { StatusPill } from "@/components/status-pill";
-import type { CompanyFeed } from "@/hooks/use-company";
-import { approvalSummary, lifecycle, money, timeAgo } from "@/lib/language";
-import type { View } from "@/components/app-shell";
+import { discoverMcpTools, listMcpServers } from "@/api/mcp";
+import { listMemory, type MemoryEntry } from "@/api/memory";
+import { listSkills, type Skill } from "@/api/skills";
+import { listTasks, type Task } from "@/api/tasks";
+import { ApiError, type DeskDto, type McpServer, type McpToolInfo } from "@/api/types";
+import { fromDto, starterTeam, type TeamMember } from "@/lib/team";
+import { adapt, buildMemoryGraph } from "./overview/kg/adapter";
+import { buildKnowledgeGraph } from "./overview/kg/model";
+import { ownedBy } from "./overview/pulse";
+
+// The graph carries the force simulation and every detail card with it. Its own
+// chunk means a cold load paints the frame before the physics arrives.
+const KnowledgeGraph = lazy(() =>
+  import("./overview/kg/KnowledgeGraph").then((m) => ({ default: m.KnowledgeGraph })),
+);
 
 interface Props {
-  feed: CompanyFeed;
   client: OpenCompanyClient;
   company: string | null;
-  onNavigate: (view: View) => void;
-  onFlag: () => void;
 }
 
-/** The landing surface: a calm summary of where the company stands. */
-export function Overview({ feed, onNavigate, onFlag }: Props) {
-  const { status, approvals, now } = feed;
-  const state = lifecycle(status.lifecycle);
-  const pending = status.pending_approvals;
+/** Everything the graph is drawn from, fetched once per company. */
+interface Sources {
+  tasks: Task[];
+  team: TeamMember[];
+  /**
+   * The company's desks — ring 1 (issue #486).
+   *
+   * Best-effort like every other source here. A host that cannot serve them
+   * draws a graph with no pillars, which is the same picture as a company that
+   * declares no desks. The org chart treats a failed `/desks` as a hard error
+   * because desks *are* that page; here they are one ring of five, and failing
+   * the whole graph over them would take the real rings down with them.
+   */
+  desks: DeskDto[];
+  people: Person[];
+  skills: Skill[];
+  memories: MemoryEntry[];
+  servers: McpServer[];
+  /** Server **name** → the tools it advertises. `name` is this API's server key. */
+  toolsByServer: Record<string, McpToolInfo[]>;
+  /**
+   * The MCP read failed for a reason that is not "this host has no MCP".
+   *
+   * Kept apart from an empty `servers` on purpose. A company with no tool
+   * servers and a company whose tool servers we could not reach draw the same
+   * toolless graph, and only one of those is a true statement about the
+   * company — collapsing them is how an outage comes to look like an empty
+   * configuration. The notice below is the difference.
+   */
+  mcpUnreadable: boolean;
+}
 
-  return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="mx-auto w-full max-w-5xl space-y-6 px-4 py-6">
-        {/* Greeting */}
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div className="space-y-1">
-            <h2 className="text-2xl font-semibold tracking-tight">{status.name}</h2>
-            <p className="text-sm text-muted-foreground">
-              Here&apos;s where your company stands right now.
-            </p>
-          </div>
-          <StatusPill lifecycle={status.lifecycle} />
-        </div>
+const EMPTY: Sources = {
+  tasks: [],
+  team: starterTeam(),
+  desks: [],
+  people: [],
+  skills: [],
+  memories: [],
+  servers: [],
+  toolsByServer: {},
+  mcpUnreadable: false,
+};
 
-        {/* Stat cards */}
-        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
-          <StatCard
-            icon={Activity}
-            label="Status"
-            value={state.label}
-            hint={
-              state.tone === "live"
-                ? "Running and handling work."
-                : state.tone === "stopped"
-                  ? "Not currently working."
-                  : "Getting things in order."
-            }
-          />
-          <StatCard
-            icon={ShieldCheck}
-            label="Needs approval"
-            value={String(pending)}
-            hint={pending === 0 ? "Nothing waiting on you." : "Waiting for your sign-off."}
-            action={pending > 0 ? { label: "Review", onClick: () => onNavigate("approvals") } : undefined}
-          />
-          <StatCard
-            icon={MessagesSquare}
-            label="Conversation"
-            value="Open"
-            hint="Ask for an update or hand off a task."
-            action={{ label: "Open", onClick: () => onNavigate("conversation") }}
-          />
-        </div>
+/**
+ * Whether a server is worth asking for its tool list.
+ *
+ * Tool discovery opens a live connection to the remote server, so this skips
+ * the ones already known not to answer: disabled, or last probed as broken /
+ * missing its credential. A server never probed is asked once — we cannot know
+ * it works without trying, and refusing to ask would leave a working server's
+ * tools off the graph forever.
+ */
+function worthAsking(server: McpServer): boolean {
+  if (!server.enabled) return false;
+  const status = server.health?.status;
+  return status !== "error" && status !== "needs_config";
+}
 
-        {/* Pending approvals preview */}
-        <Card>
-          <CardHeader className="flex-row items-center justify-between space-y-0">
-            <div className="space-y-1">
-              <CardTitle className="text-base">Approvals</CardTitle>
-              <CardDescription>The few things parked for your decision.</CardDescription>
-            </div>
-            {pending > 0 && <Badge variant="secondary">{pending}</Badge>}
-          </CardHeader>
-          <CardContent>
-            {approvals.length === 0 ? (
-              <div className="flex items-center gap-3 rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
-                <ShieldCheck className="size-4 text-emerald-500" />
-                All clear — nothing needs your approval.
-              </div>
-            ) : (
-              <ul className="divide-y">
-                {approvals.slice(0, 4).map((a) => (
-                  <li key={a.id} className="flex items-center gap-3 py-2.5 first:pt-0 last:pb-0">
-                    <span className="min-w-0 flex-1 truncate text-sm">{approvalSummary(a)}</span>
-                    <span className="shrink-0 text-xs text-muted-foreground">
-                      {a.amount_usd != null && (
-                        <span className="font-medium text-foreground">{money(a.amount_usd)} · </span>
-                      )}
-                      {timeAgo(a.at_millis, now)}
-                    </span>
-                  </li>
-                ))}
-              </ul>
-            )}
-          </CardContent>
-          {approvals.length > 0 && (
-            <CardContent className="pt-0">
-              <Button variant="outline" size="sm" className="w-full" onClick={() => onNavigate("approvals")}>
-                Review all approvals <ArrowRight className="size-4" />
-              </Button>
-            </CardContent>
-          )}
-        </Card>
+/**
+ * The command centre: the company's knowledge graph, and nothing else.
+ *
+ * The page is the graph — no header, no strip, no top bar (the shell hides its
+ * own for this view). The company sits at the core, its desks are the pillars,
+ * the jobs hang off each pillar, the teammate who does each job sits above it,
+ * and their tools are the outer ring.
+ *
+ * The pillars are **declared**: they are the company's own desks (issue #486),
+ * not the keyword-matched guess that used to stand there. What is still derived
+ * is the tool assignments and the workflow templates — there is no per-agent
+ * tool list and no flow API. See `DERIVED_NOTICE` in `kg/adapter.ts`; it is the
+ * standing caveat on what remains.
+ */
+export function Overview({ client, company }: Props) {
+  const [sources, setSources] = useState<Sources>(EMPTY);
 
-        {/* Quick actions */}
-        <div className="grid gap-3 sm:grid-cols-3" data-tour="overview-quickactions">
-          <QuickAction icon={MessagesSquare} label="Talk to your company" onClick={() => onNavigate("conversation")} />
-          <QuickAction icon={ShieldCheck} label="Review approvals" onClick={() => onNavigate("approvals")} />
-          <QuickAction icon={Flag} label="Flag something" onClick={onFlag} />
-        </div>
-      </div>
-    </div>
+  useEffect(() => {
+    let live = true;
+    void (async () => {
+      const [tasks, roster, desks, people, skills, memories, mcp] = await Promise.all([
+        listTasks(client, company).catch(() => [] as Task[]),
+        client.listTeam(company).catch(() => null),
+        // Ring 1 (issue #486). Best-effort: see `Sources.desks`.
+        client.listDesks(company).catch(() => [] as DeskDto[]),
+        // Only an admin may list people; a member just gets no humans on the
+        // graph, which is the right amount of information for them to have.
+        listPeople(client, company).catch(() => [] as Person[]),
+        listSkills(client, company).catch(() => [] as Skill[]),
+        // The company's real durable memory (issue #36). A host without the
+        // surface draws no constellation rather than a seeded one — the graph
+        // must never claim the company remembers something it doesn't.
+        listMemory(client, company).catch(() => [] as MemoryEntry[]),
+        // `.../mcp/servers` answers with a bare array of servers. It used to be
+        // read through a client helper that promised a `{ servers }` wrapper no
+        // host has ever sent, so `mcp.servers` was `undefined` and filtering it
+        // threw — on every host that mounts the route, which is all of them
+        // (issue #407). The wrapper only looked survivable because the failure
+        // path handed back a hand-built `{ servers: [] }`: the tab rendered
+        // exactly when MCP was unreachable, and threw when it worked.
+        listMcpServers(client, company).then(
+          (servers) => ({ servers: servers ?? [], unreadable: false }),
+          (error: unknown) => ({
+            servers: [] as McpServer[],
+            // A host with no MCP surface answers 404. That is a company with no
+            // tool servers — a fact, not a failure, and not worth a warning.
+            // Anything else (offline, 5xx, a body we couldn't parse) means we
+            // genuinely do not know, which is what the notice says.
+            unreadable: !(error instanceof ApiError && error.status === 404),
+          }),
+        ),
+      ]);
+      if (!live) return;
+
+      const toolLists = await Promise.all(
+        mcp.servers.filter(worthAsking).map((s) =>
+          discoverMcpTools(client, company, s.name)
+            .then((tools) => [s.name, tools ?? []] as const)
+            // A host built without the MCP client answers `not_wired`, and a
+            // server can simply be down. Neither is worth failing the graph
+            // over: that server contributes no tools and the rest still draw.
+            .catch(() => [s.name, [] as McpToolInfo[]] as const),
+        ),
+      );
+      if (!live) return;
+
+      setSources({
+        tasks,
+        team: roster?.length ? roster.map(fromDto) : starterTeam(),
+        desks,
+        people,
+        skills,
+        memories,
+        servers: mcp.servers,
+        toolsByServer: Object.fromEntries(toolLists),
+        mcpUnreadable: mcp.unreadable,
+      });
+    })();
+    return () => {
+      live = false;
+    };
+  }, [client, company]);
+
+  const adapted = useMemo(
+    () =>
+      adapt({
+        members: sources.team,
+        desks: sources.desks,
+        tasks: sources.tasks,
+        people: sources.people,
+        skills: sources.skills,
+        servers: sources.servers,
+        toolsByServer: sources.toolsByServer,
+        ownedBy,
+      }),
+    [sources],
   );
-}
 
-function StatCard({
-  icon: Icon,
-  label,
-  value,
-  hint,
-  action,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  value: string;
-  hint: string;
-  action?: { label: string; onClick: () => void };
-}) {
-  return (
-    <Card>
-      <CardContent className="space-y-3 py-5">
-        <div className="flex items-center justify-between">
-          <span className="text-sm font-medium text-muted-foreground">{label}</span>
-          <Icon className="size-4 text-muted-foreground" />
-        </div>
-        <div className="text-2xl font-semibold tracking-tight">{value}</div>
-        <div className="flex items-center justify-between gap-2">
-          <p className="text-xs text-muted-foreground">{hint}</p>
-          {action && (
-            <Button variant="ghost" size="sm" className="-mr-2 h-7 shrink-0 px-2" onClick={action.onClick}>
-              {action.label} <ArrowRight className="size-3.5" />
-            </Button>
-          )}
-        </div>
-      </CardContent>
-    </Card>
+  const graph = useMemo(
+    () =>
+      buildKnowledgeGraph(
+        adapted.agents,
+        adapted.departments,
+        adapted.people,
+        adapted.tasks,
+        adapted.workflows,
+      ),
+    [adapted],
   );
-}
 
-function QuickAction({
-  icon: Icon,
-  label,
-  onClick,
-}: {
-  icon: React.ComponentType<{ className?: string }>;
-  label: string;
-  onClick: () => void;
-}) {
+  const memoryGraph = useMemo(() => buildMemoryGraph(sources.memories), [sources.memories]);
+
   return (
-    <button
-      onClick={onClick}
-      className="flex items-center gap-3 rounded-xl border bg-card p-4 text-left text-sm font-medium shadow-sm transition-colors hover:bg-accent hover:text-accent-foreground"
+    // The whole viewport: the shell hides its top bar for this view, so there
+    // is nothing above to subtract.
+    <div
+      className="oc-kg relative h-svh min-h-0 w-full min-w-0 overflow-hidden"
+      // The guided tour's Overview stop anchors here. It used to spotlight the
+      // quick-action row this page had before it became the graph; the graph is
+      // the page now, so the graph is what gets spotlighted.
+      data-tour="overview-graph"
     >
-      <span className="flex size-9 items-center justify-center rounded-lg bg-muted">
-        <Icon className="size-4" />
-      </span>
-      {label}
-    </button>
+      {/* An unreadable MCP surface and a company with no tool servers draw the
+          same toolless graph. Saying which one this is turns "this company has
+          no tools" from an assertion the page cannot support into a question
+          the operator knows to go and check. */}
+      {sources.mcpUnreadable && (
+        <p
+          role="status"
+          className="pointer-events-none absolute left-1/2 top-3 z-10 flex max-w-[calc(100%-1.5rem)] -translate-x-1/2 items-center gap-1.5 rounded-md border bg-background/90 px-2.5 py-1.5 text-xs text-muted-foreground shadow-sm backdrop-blur"
+        >
+          <TriangleAlert className="size-3.5 shrink-0" aria-hidden />
+          <span className="min-w-0 truncate">
+            Couldn&apos;t read this company&apos;s MCP tool servers — tools may be missing from
+            the graph.
+          </span>
+        </p>
+      )}
+      <Suspense
+        fallback={
+          <div className="grid h-full place-items-center text-sm text-muted-foreground">
+            Drawing the graph…
+          </div>
+        }
+      >
+        <KnowledgeGraph
+          graph={graph}
+          agents={adapted.agents}
+          departments={adapted.departments}
+          people={adapted.people}
+          tasks={adapted.tasks}
+          memory={memoryGraph}
+          toolLabels={adapted.toolLabels}
+        />
+      </Suspense>
+    </div>
   );
 }

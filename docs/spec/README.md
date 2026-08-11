@@ -78,11 +78,20 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [company-brain/approvals.md](company-brain/approvals.md) | Checkpoints and the approval model |
 | [company-brain/memory.md](company-brain/memory.md) | Long-term memory and retention |
 | [runtime/README.md](runtime/README.md) | Kernel architecture and crate layout |
-| [runtime/ports.md](runtime/ports.md) | Port trait contracts (normative) |
+| [runtime/ports.md](runtime/ports.md) | Port trait contracts (normative) — index, assembly, defaults |
+| [runtime/ports-cognition.md](runtime/ports-cognition.md) | `Brain`, `CycleHost`, `ChannelAdapter`, `TurnStep` |
+| [runtime/ports-state.md](runtime/ports-state.md) | `CompanyStore`, `EventLog`, memory/context, secrets, identity |
+| [runtime/ports-effects.md](runtime/ports-effects.md) | `ToolProvider`, `AgentEconomy`, `ApprovalGate` |
+| [runtime/ports-console.md](runtime/ports-console.md) | The WS3 console-surface stores |
+| [runtime/ports-runs.md](runtime/ports-runs.md) | `RunStore`: attempts and their traces |
+| [runtime/events.md](runtime/events.md) | `CompanyEvent` vocabulary + journal correlation rules |
 | [runtime/manifest.md](runtime/manifest.md) | `company.toml` schema, `agents.toml` compatibility |
 | [runtime/lifecycle.md](runtime/lifecycle.md) | Company state machine and durability |
+| [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/api.md](runtime/api.md) | HTTP surface and auth model |
 | [runtime/config.md](runtime/config.md) | Configuration and the one-key story |
+| [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
+| [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |
 | [company-as-agent/identity.md](company-as-agent/identity.md) | Wallet, handle, Agent Card |
 | [company-as-agent/commerce.md](company-as-agent/commerce.md) | Selling, hiring, delegated signers, ledger |

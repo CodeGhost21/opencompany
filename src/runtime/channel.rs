@@ -73,6 +73,8 @@ mod test {
         assert_eq!(channel.channel_id(), "operator");
         channel
             .send(OutboundMessage {
+                message_id: None,
+                task_id: None,
                 channel: "operator".into(),
                 text: "hello".into(),
                 steps: Vec::new(),

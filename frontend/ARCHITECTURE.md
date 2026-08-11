@@ -47,7 +47,7 @@ declarative, version-controlled data the endpoints should read:
 | Path | Parsed today? | Feeds |
 |---|---|---|
 | `company.toml` `[company]`, `[[agent]]` | ✅ manifest | identity, Team roster |
-| `company.toml` `[[group_chat]]` | ✅ manifest | Conversation threads (desks) |
+| `company.toml` `[[group_chat]]` | ✅ manifest | Company org chart (desks), Chat channels |
 | `company.toml` `[[connection]]` | ✅ manifest | Connections priorities (intent, no secrets) |
 | `company.toml` `[workflows].enabled` | ✅ manifest | which Workflows are on |
 | `workflows/<id>.toml` | ✅ parsed (WS1) | Workflow graph (nodes/edges) |
@@ -90,8 +90,9 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
 
 ### Team — `src/views/TeamView.tsx`
 - Shows the agent roster (name, role, description); operator can add/remove.
-- **Source:** ✅ real — `Company.team` (GraphQL) merges the manifest `[[agent]]`
-  roster with operator overlays; `POST/DELETE …/team` and
+- **Source:** ✅ real — `Company.team` (GraphQL) and `GET …/team` (REST, what the
+  console calls) merge the manifest `[[agent]]` roster with operator overlays and
+  tag each teammate's `inboxEnabled`; `POST/DELETE …/team` and
   `PUT …/team/{id}/inbox` (REST) write the overlay.
 - **Note:** overlay teammates are **roster-only in v1** — they show in the
   roster and get an inbox, but no harness agent is built for them yet.
@@ -102,17 +103,59 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   desks from `[[group_chat]]` and page their history; send uses the `chat`
   endpoint. Desk-scoped routing of replies is single-responder in v1 (the full
   desk-member handler is WS3).
+- **Console:** desk management lives on the **Company** org chart
+  (`src/views/company/`) as of issue #311. The flat Desks screen that #302
+  unmounted is gone rather than restored — see that section below.
 
-### Inbox — `src/views/InboxView.tsx`, `src/lib/inbox.ts`
+### Company (org chart) — `src/views/company/`, `src/lib/org.ts`
+- A three-level tree of the company's declared structure: **company → desk →
+  seat**. Creating a desk, deleting an operator-created one, adding and removing
+  members, and changing a desk's lead all happen here.
+- **Source:** ✅ real — `GET …/desks` (with `overlayCreated` / `overlayMembers`
+  carrying provenance), `GET …/team` for who fills a seat, `GET …/users` for the
+  humans, `GET /api/v1/companies/{id}` for the company's name. Writes are the
+  five desk routes: `POST …/desks`, `DELETE …/desks/{id}`,
+  `POST …/desks/{id}/members`, `DELETE …/desks/{id}/members/{agent}` and
+  `PUT …/desks/{id}/order`.
+- **The three-level cap is structural, not enforced.** No desk can name a parent
+  desk — the host's `GroupChat` and `OverlayDesk` have no such field — so a
+  fourth level is unrepresentable rather than rejected. `lib/org.ts` derives the
+  tree; nothing validates its depth, for the same reason nothing validates that
+  a string is a string. This is what issue #311 means by "a new reader over
+  existing data, not a data change".
+- **The lead is a position, never a flag.** `DeskDto.members[0]` is the host's
+  routing target, so changing the lead is a `PUT …/order` that moves somebody to
+  the front. There is no set-lead call and the console must not invent one.
+- **Provenance decides which controls exist.** The host refuses to delete a
+  blueprint desk or remove a blueprint member at runtime, so the chart offers
+  neither — a control that always fails is worse than no control.
+- **Not on a desk / People** are listed *beside* the tree, not inside it.
+  Neither has a position the company declares, and inventing one would be the
+  same mistake the Overview graph documents about its own derived departments.
+
+### Inbox — `src/views/InboxView.tsx`, `src/api/inbox.ts`
 - Per-agent email inbox; enabled via a Team toggle.
-- **Source:** ✅ real — `Company.inboxes` (GraphQL, `InboxStore`-backed) lists
-  enabled inboxes and pages messages; `POST …/inboxes/{key}/read` marks read and
-  `PUT …/team/{id}/inbox` toggles an inbox. Inbound mail arrives via the
-  HMAC-signed `POST …/inboxes/ingest` webhook. Real send/receive depends on
-  Domain/SMTP (below).
+- **Console:** not listed in the sidebar as of issue #302 — hidden, not retired.
+  Every endpoint below is unchanged and still serving; only the operator entry
+  point is gone. The Team toggle that enables an inbox stays where it was.
+- **Source:** ✅ real — `client.listInboxes()` (`GET …/inboxes`) lists every inbox
+  with its unread count and `client.inboxMessages()`
+  (`GET …/inboxes/{key}/messages`) reads one teammate's mail, both
+  `InboxStore`-backed REST twins of the `Company.inboxes` GraphQL resolver (the
+  console ships no GraphQL client). `client.markInboxRead()`
+  (`POST …/inboxes/{key}/read`) marks read and `setInboxEnabled`
+  (`PUT …/team/{id}/inbox`) toggles an inbox. Inbound mail arrives via the
+  HMAC-signed `POST …/inboxes/ingest` webhook and the IMAP poller, which file
+  into the same store. Real send/receive depends on Domain/SMTP (below).
+- **Note:** inboxes are keyed by **agent id**, the same key the ingest webhook
+  files mail under. Nothing is seeded or cached client-side — an inbox with no
+  mail renders empty (issue #173 replaced a localStorage fixture that showed the
+  same four invented emails for every teammate).
 
 ### Tasks (Kanban) — `src/views/TasksView.tsx`, `src/lib/tasks-sample.ts`
-- Columns Backlog/In progress/In review/Done; drag to move; priority + assignee.
+- Columns To-do/Planning/In progress/Paused/In review/Done; drag to move. New work
+  enters through one prompt box on To-do (issue #301); priority + assignee are
+  edited on the card afterwards.
 - **Source:** ✅ real — `Company.tasks` (GraphQL, `TaskStore`-backed) reads the
   board; `POST …/tasks`, `PATCH`/`DELETE …/tasks/{id}` (REST) write it.
 
@@ -132,8 +175,11 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   `PATCH`/`DELETE …/workspace/{id}`. New companies seed from
   `companies/<name>/workspace/**` on first use.
 
-### Memory — `src/views/MemoryView.tsx`, `src/lib/memory.ts`
+### Memory (Brain) — `src/views/MemoryView.tsx`, `src/lib/memory.ts`
 - Durable facts (fact/preference/person/project/reference); search + add/delete.
+- **Console:** not listed in the sidebar as of issue #302 — hidden, not retired.
+  The endpoints below are unchanged and agents keep reading and writing memory;
+  only the operator-facing Brain tab is gone.
 - **Source:** ✅ real — `Company.memory` (GraphQL, `FactStore`-backed, with
   query/kind filters); `POST …/memory` adds and `DELETE …/memory/{id}` deletes
   (deletion journals `MemoryFactDeleted` to the EventLog).
@@ -153,6 +199,9 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
 
 ### Finances — `src/views/FinancesView.tsx`, `src/lib/finance-sample.ts`
 - Wallet balance, revenue, spend vs budget, spend-by-category, transactions.
+- **Console:** not listed in the sidebar as of issue #302 — hidden, not retired.
+  The `Company.finances` projection below is unchanged; only the operator entry
+  point is gone.
 - **Source:** ✅ real — `Company.finances` (GraphQL) projects the ledger +
   `[budget]` + optional economy wallet balance (balance, budget vs spend,
   revenue, byCategory, transactions). **Caveat:** the inference-cost component
@@ -183,8 +232,9 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
 The console's models are the response contract. Keep host payloads aligned with:
 
 - `src/api/types.ts` — `CompanyStatus`, `ApprovalSummary`, `ChatResponse`,
-  `FeedbackResponse`, `TeamMemberDto`, `ConnectionState`, `ConnectionStart`.
-- `src/lib/threads.ts` `Thread`/`ThreadContact`, `src/lib/inbox.ts` `EmailMessage`,
+  `FeedbackResponse`, `TeamMemberDto`, `InboxDto`, `InboxMessageDto`,
+  `ConnectionState`, `ConnectionStart`.
+- `src/lib/threads.ts` `Thread`/`ThreadContact`,
   `src/lib/tasks-sample.ts` `TaskCard`, `src/lib/skills.ts` `InstalledSkill`,
   `src/lib/workspace.ts` `FsNode`, `src/lib/memory.ts` `MemoryEntry`,
   `src/lib/usage-sample.ts` `UsageData`, `src/lib/finance-sample.ts` `FinanceData`,

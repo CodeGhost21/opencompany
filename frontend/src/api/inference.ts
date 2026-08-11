@@ -18,6 +18,23 @@ export type InferenceProvider = "managed" | "openrouter" | "openai_compatible" |
 /** Where the effective config came from — drives the source badge. */
 export type InferenceSource = "managed" | "default" | "manifest" | "runtime";
 
+/**
+ * The cognition path the company actually booted onto. Config resolving to a
+ * provider does not guarantee `harness`: a build without the harness, or a
+ * config that fails to resolve at boot, falls back to `hosted`/`echo`.
+ */
+export type CognitionPath = "harness" | "hosted" | "sidecar" | "echo" | "custom" | "test";
+
+/**
+ * Where that path's inference usage is metered (issue #174):
+ * - `perTurn` — the harness meters each agent turn from real provider totals.
+ * - `perCycle` — the runtime meters what the cycle reports (hosted Medulla reads
+ *   it off the `orch:usage` wire frame), so zero means the upstream reported
+ *   nothing.
+ * - `none` — no model runs on this path, so a zero Usage reading is the truth.
+ */
+export type UsageMetering = "perTurn" | "perCycle" | "none";
+
 /** The company's effective inference status. Never carries the credential. */
 export interface InferenceStatus {
   /** Provider kind. */
@@ -32,6 +49,24 @@ export interface InferenceStatus {
   source: InferenceSource;
   /** Whether an outbound key is stored — never the key itself. */
   keyConfigured: boolean;
+  /** The cognition path this company is running on. */
+  cognition: CognitionPath;
+  /** Where this path's inference usage is metered. */
+  usageMetering: UsageMetering;
+  /**
+   * Whether a stored config resolves but the *running* brain predates it, so
+   * only a restart puts it to work (issue #266).
+   *
+   * Which brain a company runs is decided once, when the company is built. A
+   * company that started with no inference source is on the offline echo brain
+   * with an unwired workflow runner, and saving a credential afterwards changes
+   * neither — so "agents use it on their next turn" is false for exactly that
+   * transition, which is also the first one a new operator makes.
+   *
+   * `false` covers both "already live" and "a restart would not help either"
+   * (this host has no harness path at all) — tell those apart with `cognition`.
+   */
+  restartRequired: boolean;
 }
 
 /** The set-provider body. `key` is write-only (never returned). */

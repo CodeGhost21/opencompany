@@ -30,7 +30,67 @@ use crate::ports::types::CompanyEvent;
 use crate::runtime::cron::{CivilTime, CronExpr};
 
 /// Milliseconds in one minute.
-const MINUTE_MS: u64 = 60_000;
+pub(crate) const MINUTE_MS: u64 = 60_000;
+
+/// How far back a restart catch-up (issue #241) will reach to make up a single
+/// missed fire: seven days, in minutes.
+///
+/// Bounded on purpose. Buzz's `scheduled_workflow_fires` never replays a missed
+/// fire at all; unbounded replay would stampede token-burning cycles after a
+/// long outage. One catch-up per schedule per boot, within this window, is the
+/// middle path — it fixes the headline "a weekly run fell during the deploy and
+/// vanished" defect without turning a fortnight of downtime into a fortnight of
+/// backlog.
+pub const CATCHUP_WINDOW_MINUTES: u64 = 7 * 24 * 60;
+
+/// How old a claim row must be before the maintenance tick prunes it: fourteen
+/// days, in minutes.
+///
+/// Deliberately **larger** than [`CATCHUP_WINDOW_MINUTES`] and documented right
+/// beside it: the catch-up anchor is the newest claimed minute, and it may be up
+/// to a catch-up window old. Pruning at a cutoff inside that window could delete
+/// the anchor out from under a booting replica, re-arming a fire that already
+/// happened. Keeping the cutoff strictly past the window makes that impossible
+/// by construction. A `* * * * *` schedule writes 1440 rows a day, so the prune
+/// is what bounds growth.
+pub const PRUNE_CUTOFF_MINUTES: u64 = 14 * 24 * 60;
+
+// Compile-time guarantee of the retention invariant: the prune cutoff must sit
+// strictly outside the catch-up window, or a prune could delete the anchor a
+// booting replica still needs. Enforced here so a future edit to either constant
+// that violated it would fail the build, not a test.
+const _: () = assert!(PRUNE_CUTOFF_MINUTES > CATCHUP_WINDOW_MINUTES);
+
+/// The single catch-up instant to fire for a schedule at boot, or `None`.
+///
+/// The one place the "fire at most one missed occurrence" rule lives, shared by
+/// both schedulers so they cannot drift. Given the schedule's matcher, the
+/// `anchor` (the newest minute it is known to have fired, from
+/// [`latest_fire`](crate::ports::ScheduleFireStore::latest_fire)), the current
+/// `now_minute`, and a `window`:
+///
+/// * **No anchor** (`None`, a fresh install) yields `None`: a schedule that has
+///   never fired has nothing to make up.
+/// * Otherwise the answer is the most recent occurrence strictly between the
+///   anchor and now — `anchor < missed < now_minute` — within `window` minutes,
+///   or `None` when the last occurrence was already the anchor (nothing was
+///   missed) or falls outside the window.
+///
+/// It returns the *original* scheduled minute, so a caller claims the fire at
+/// that minute and simultaneously-booting replicas still race one row.
+pub fn missed_instant(
+    expr: &CronExpr,
+    anchor: Option<u64>,
+    now_minute: u64,
+    window: u64,
+) -> Option<u64> {
+    let anchor = anchor?;
+    // The most recent match strictly before now, bounded by the window.
+    let missed = expr.prev_match_before(now_minute, window)?;
+    // Only a match *after* the anchor was actually missed; one at or before it
+    // was already fired (the anchor is the last claimed minute).
+    (missed > anchor).then_some(missed)
+}
 
 /// A source of the current wall-clock time, in unix epoch milliseconds.
 ///
@@ -82,11 +142,46 @@ struct ParsedSchedule {
     expr: CronExpr,
     cron: String,
     prompt: String,
+    /// Restart-stable, content-derived identity for the durable fire claim
+    /// (issue #241). See [`manifest_schedule_id`].
+    id: String,
+}
+
+/// The durable [`ScheduleFireStore`](crate::ports::ScheduleFireStore) identity
+/// for a manifest `[[schedule]]`: `"manifest-"` plus the first 16 hex chars of
+/// `sha256(cron + "\n" + prompt)`.
+///
+/// Content-derived rather than the schedule's Vec index, which is what the
+/// in-memory dedup keyed on before #241 — reordering the manifest silently
+/// reassigned a schedule's identity and could double-fire or drop one. Two
+/// schedules with the same `(cron, prompt)` now collapse to one id, so they
+/// share one fire per minute; that is a deliberate, documented behaviour change
+/// (a manifest that wants two truly distinct fires must differ in cron or
+/// prompt). The `\n` separator keeps `("a", "bc")` and `("ab", "c")` distinct.
+/// The `manifest-` prefix (a hyphen, never a colon) stays readable in a log line
+/// and path-safe for the fs backend.
+pub(crate) fn manifest_schedule_id(cron: &str, prompt: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(cron.as_bytes());
+    hasher.update(b"\n");
+    hasher.update(prompt.as_bytes());
+    let digest = hasher.finalize();
+    let mut hex = String::with_capacity(16);
+    for byte in digest.iter().take(8) {
+        use std::fmt::Write;
+        let _ = write!(hex, "{byte:02x}");
+    }
+    format!("manifest-{hex}")
 }
 
 /// Drives the cron schedules of a single [`CompanyRuntime`].
 pub struct CompanyScheduler {
     runtime: Arc<CompanyRuntime>,
+    /// When set, the runtime to drive is looked up here every tick so a runtime
+    /// swap (issue #290) reaches cron instead of leaving it on the replaced
+    /// instance. `None` keeps the boot snapshot.
+    registry: Option<crate::runtime::CompanyRegistry>,
     schedules: Vec<ParsedSchedule>,
     clock: Arc<dyn Clock>,
     /// Per-schedule last-fired epoch minute, so a schedule fires at most once per
@@ -111,14 +206,47 @@ impl CompanyScheduler {
                 expr: CronExpr::parse(&schedule.cron)?,
                 cron: schedule.cron.clone(),
                 prompt: schedule.prompt.clone(),
+                // Computed once, here, so identity is stable for the life of the
+                // scheduler and independent of the schedule's position in the
+                // manifest.
+                id: manifest_schedule_id(&schedule.cron, &schedule.prompt),
             });
         }
         Ok(Self {
             runtime,
+            registry: None,
             schedules: parsed,
             clock,
             last_fired: HashMap::new(),
         })
+    }
+
+    /// Issue #290: re-read `registry` for this company on every tick, instead of
+    /// driving the `Arc<CompanyRuntime>` snapshotted at boot.
+    ///
+    /// Without this, a runtime swap never reaches this loop: it keeps driving the
+    /// replaced runtime — which, after a rebuild, is the offline echo brain the
+    /// rebuild existed to get rid of, and is quiesced besides, so every tick
+    /// fails. [`WorkflowScheduler`](crate::runtime::WorkflowScheduler) already
+    /// reads the registry per tick; this is that pattern, opted into by the boot
+    /// path so existing callers and tests keep the snapshot behaviour.
+    ///
+    /// The boot snapshot stays as the fallback: a company removed from the
+    /// registry (archive) is not a reason to start driving nothing at all
+    /// silently — `ensure_running` already rejects an archived company, and that
+    /// is the check with the right error.
+    pub fn following(mut self, registry: crate::runtime::CompanyRegistry) -> Self {
+        self.registry = Some(registry);
+        self
+    }
+
+    /// The runtime to drive this tick: whatever is registered now, else the
+    /// snapshot taken at construction.
+    fn runtime(&self) -> Arc<CompanyRuntime> {
+        self.registry
+            .as_ref()
+            .and_then(|registry| registry.get(self.runtime.id()))
+            .unwrap_or_else(|| self.runtime.clone())
     }
 
     /// Whether this scheduler has any schedules to drive.
@@ -136,14 +264,16 @@ impl CompanyScheduler {
         if self.schedules.is_empty() {
             return Ok(0);
         }
+        let runtime = self.runtime();
         // Skip firing for a company that is not accepting work.
-        if self.runtime.ensure_running().await.is_err() {
+        if runtime.ensure_running().await.is_err() {
             return Ok(0);
         }
 
         let now = self.clock.now_millis();
         let minute = now / MINUTE_MS;
         let civil = CivilTime::from_unix_millis(now);
+        let store = runtime.schedule_fires().clone();
 
         let mut fired = 0;
         for (idx, schedule) in self.schedules.iter().enumerate() {
@@ -151,24 +281,145 @@ impl CompanyScheduler {
                 continue;
             }
             if self.last_fired.get(&idx) == Some(&minute) {
-                continue; // already fired this minute
+                continue; // already fired this minute (cheap in-process first pass)
             }
+            // The in-process map is only a first-pass filter; the durable claim
+            // below is the authority. Set it before the claim so a transiently
+            // failing store is not re-hit on every tick within this minute.
             self.last_fired.insert(idx, minute);
-            self.runtime
-                .run_cycle(vec![CompanyEvent::ScheduleFired {
-                    cron: schedule.cron.clone(),
-                    prompt: schedule.prompt.clone(),
-                }])
-                .await?;
-            fired += 1;
+            match store.claim_fire(runtime.id(), &schedule.id, minute).await {
+                // Won the claim: this is the one process/replica that fires.
+                Ok(true) => {
+                    runtime
+                        .run_cycle(vec![CompanyEvent::ScheduleFired {
+                            cron: schedule.cron.clone(),
+                            prompt: schedule.prompt.clone(),
+                        }])
+                        .await?;
+                    fired += 1;
+                }
+                // A peer — another replica, or this process before a restart —
+                // already claimed this minute. Skip with ZERO side effects.
+                Ok(false) => {}
+                // Fail closed: a claim store that cannot answer must not fire
+                // unclaimed, or it reintroduces the cross-replica double-fire
+                // this claim exists to prevent. Skip this minute and warn.
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        schedule = %schedule.id,
+                        %err,
+                        "scheduler: could not claim a fire; skipping this minute (fail closed)"
+                    );
+                }
+            }
+        }
+        Ok(fired)
+    }
+
+    /// Fires at most one missed occurrence per schedule at boot (issue #241).
+    ///
+    /// The restart half of the durability fix: a schedule whose fire instant fell
+    /// while the process was down would otherwise be dropped with nothing to say
+    /// so. For each schedule this reads the [`latest_fire`] anchor, asks
+    /// [`missed_instant`] for the single most-recent missed occurrence inside the
+    /// catch-up window, and claims it **at its original minute** — so two replicas
+    /// booting at once still race one claim and only one fires it. A fresh install
+    /// (no anchor) makes up nothing. A claim-store read failure fails closed
+    /// (skip), for the same reason [`tick`](Self::tick) does.
+    ///
+    /// Run once, from [`spawn`](Self::spawn), before the steady-state loop.
+    ///
+    /// [`latest_fire`]: crate::ports::ScheduleFireStore::latest_fire
+    pub async fn catch_up(&self) -> Result<usize> {
+        if self.schedules.is_empty() {
+            return Ok(0);
+        }
+        let runtime = self.runtime();
+        if runtime.ensure_running().await.is_err() {
+            return Ok(0);
+        }
+        let now_minute = self.clock.now_millis() / MINUTE_MS;
+        let store = runtime.schedule_fires().clone();
+        let mut fired = 0;
+        for schedule in &self.schedules {
+            let anchor = match store.latest_fire(runtime.id(), &schedule.id).await {
+                Ok(anchor) => anchor,
+                Err(err) => {
+                    tracing::warn!(
+                        company = %runtime.id(),
+                        schedule = %schedule.id,
+                        %err,
+                        "scheduler: could not read catch-up anchor; skipping catch-up (fail closed)"
+                    );
+                    continue;
+                }
+            };
+            let Some(missed) =
+                missed_instant(&schedule.expr, anchor, now_minute, CATCHUP_WINDOW_MINUTES)
+            else {
+                continue;
+            };
+            match store.claim_fire(runtime.id(), &schedule.id, missed).await {
+                Ok(true) => {
+                    runtime
+                        .run_cycle(vec![CompanyEvent::ScheduleFired {
+                            cron: schedule.cron.clone(),
+                            prompt: schedule.prompt.clone(),
+                        }])
+                        .await?;
+                    fired += 1;
+                    tracing::info!(
+                        company = %runtime.id(),
+                        schedule = %schedule.id,
+                        missed_minute = missed,
+                        "scheduler: fired one catch-up for a schedule missed during downtime"
+                    );
+                }
+                // A simultaneously-booting replica claimed the catch-up first.
+                Ok(false) => {}
+                Err(err) => tracing::warn!(
+                    company = %runtime.id(),
+                    schedule = %schedule.id,
+                    %err,
+                    "scheduler: could not claim catch-up fire; skipping (fail closed)"
+                ),
+            }
         }
         Ok(fired)
     }
 
     /// Runs the per-tick maintenance that rides the same minute boundary as
-    /// scheduled fires: sweep parked approvals past their TTL to a default-deny.
+    /// scheduled fires: sweep parked approvals past their TTL to a default-deny,
+    /// then sweep single-use grants the agent never redeemed (issue #243).
+    ///
+    /// The grant sweep's ids are deliberately not folded into the return value —
+    /// callers read it as "approvals that expired", and a grant expiry is a
+    /// different event with a different meaning (the operator DID approve; the
+    /// agent simply never acted). It announces itself on the operator channel
+    /// instead.
     pub async fn tick_maintenance(&self) -> Result<Vec<crate::ports::types::ApprovalId>> {
-        self.runtime.sweep_expired_approvals().await
+        let runtime = self.runtime();
+        let expired = runtime.sweep_expired_approvals().await?;
+        runtime.sweep_expired_grants().await?;
+        // Issue #241: bound the fire-claim log's growth on the same tick. The
+        // cutoff sits a full week past the catch-up window (PRUNE_CUTOFF_MINUTES
+        // > CATCHUP_WINDOW_MINUTES), so an anchor a booting replica still needs
+        // is never eligible. Best-effort — a prune failure must not abort the
+        // approval sweeps it shares a tick with.
+        let cutoff = (self.clock.now_millis() / MINUTE_MS).saturating_sub(PRUNE_CUTOFF_MINUTES);
+        if let Err(err) = runtime
+            .schedule_fires()
+            .prune_fires_before(runtime.id(), cutoff)
+            .await
+        {
+            tracing::warn!(
+                company = %runtime.id(),
+                %err,
+                "scheduler: pruning old fire claims failed"
+            );
+        }
+        Ok(expired)
     }
 
     /// Spawns a background task that ticks on every minute boundary until
@@ -176,10 +427,27 @@ impl CompanyScheduler {
     /// shared `shutdown` so the scheduler stops cleanly when the server does.
     pub fn spawn(mut self, shutdown: Arc<Notify>) -> JoinHandle<()> {
         tokio::spawn(async move {
+            // Issue #241: make up at most one missed fire per schedule that fell
+            // during downtime, BEFORE entering the steady-state loop, so a weekly
+            // run whose instant landed inside the last deploy still happens.
+            if let Err(err) = self.catch_up().await {
+                tracing::warn!(company = %self.runtime.id(), %err, "scheduled catch-up failed");
+            }
+            // The `Notified` future is built ONCE and pinned across iterations,
+            // not rebuilt inside the `select!`. Boot signals with
+            // `notify_waiters()`, which wakes only the waiters registered at
+            // that instant — a future created fresh each iteration is not
+            // registered while `tick` is running, so a shutdown arriving
+            // mid-tick would be dropped and the scheduler would sleep another
+            // full minute before noticing. Polled once here, this one stays
+            // registered, and a notification delivered during `tick` is
+            // latched: the next `select!` sees it immediately.
+            let notified = shutdown.notified();
+            tokio::pin!(notified);
             loop {
                 let sleep_ms = millis_to_next_minute(self.clock.now_millis());
                 tokio::select! {
-                    _ = shutdown.notified() => break,
+                    _ = &mut notified => break,
                     _ = tokio::time::sleep(Duration::from_millis(sleep_ms)) => {
                         if let Err(err) = self.tick().await {
                             tracing::warn!(company = %self.runtime.id(), %err, "scheduled cycle failed");
@@ -196,7 +464,10 @@ impl CompanyScheduler {
 
 /// Milliseconds from `now` to the next whole-minute boundary (always `>= 1` so
 /// the spawn loop never busy-spins on an exact boundary).
-fn millis_to_next_minute(now: u64) -> u64 {
+///
+/// Shared with [`WorkflowScheduler`](super::workflow_scheduler::WorkflowScheduler)
+/// so both minute-boundary loops wake on the same tick.
+pub(crate) fn millis_to_next_minute(now: u64) -> u64 {
     let into_minute = now % MINUTE_MS;
     MINUTE_MS - into_minute
 }
@@ -216,8 +487,11 @@ mod test {
     use crate::runtime::RuntimeBuilder;
     use crate::runtime::cron::CivilTime;
 
-    fn tmp_home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("opencompany-sched-{}", crate::ports::generate_id()))
+    fn tmp_home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-sched-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest(policy_mode: &str) -> CompanyManifest {
@@ -269,6 +543,8 @@ mod test {
             for event in &req.events {
                 if let CompanyEvent::ScheduleFired { prompt, .. } = event {
                     responses.push(OutboundMessage {
+                        message_id: None,
+                        task_id: None,
                         channel: "operator".into(),
                         text: format!("scheduled: {prompt}"),
                         steps: Vec::new(),
@@ -306,7 +582,8 @@ mod test {
 
     #[tokio::test]
     async fn fires_once_per_matching_minute_and_dedupes() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let manifest = scheduled_manifest();
         let schedules = manifest.schedules.clone();
         let rt = Arc::new(
@@ -324,16 +601,21 @@ mod test {
         assert_eq!(scheduler.tick().await.unwrap(), 1);
 
         // A ScheduleFired event landed in the log and the brain answered.
+        //
+        // Filtered rather than counted: since issue #327 boot's workspace
+        // scaffold journals a `WorkspaceChanged` per reserved root, so the log
+        // is not empty before the tick. This test is about the cron firing
+        // once, which is a question about `ScheduleFired` entries specifically.
         let events = rt
             .events
             .read_from(rt.id(), EventSeq::new(0), 10)
             .await
             .unwrap();
-        assert_eq!(events.len(), 1);
-        assert!(matches!(
-            events[0].event,
-            CompanyEvent::ScheduleFired { .. }
-        ));
+        let fired: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e.event, CompanyEvent::ScheduleFired { .. }))
+            .collect();
+        assert_eq!(fired.len(), 1);
 
         // A second tick within the same minute does not re-fire (dedupe).
         clock.advance(30_000);
@@ -352,13 +634,111 @@ mod test {
             .read_from(rt.id(), EventSeq::new(0), 10)
             .await
             .unwrap();
-        assert_eq!(events.len(), 2);
-        tokio::fs::remove_dir_all(&home).await.ok();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.event, CompanyEvent::ScheduleFired { .. }))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn following_the_registry_reaches_a_rebuilt_runtime() {
+        // Issue #290. The cron scheduler snapshots an `Arc<CompanyRuntime>` at
+        // boot, so before this it kept driving a runtime that had been replaced
+        // — and a replaced runtime is quiesced, so every fire failed. "Scheduled
+        // workflows never fire" is one of the two surfaces #266 was reported
+        // against, which makes this the half of a rebuild that is easiest to
+        // ship broken.
+        use crate::runtime::CompanyRegistry;
+
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let outgoing = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let id = outgoing.id().clone();
+        let registry = CompanyRegistry::new();
+        registry.insert(id.clone(), outgoing.clone());
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = CompanyScheduler::new(outgoing.clone(), &schedules, clock.clone())
+            .unwrap()
+            .following(registry.clone());
+
+        // Stand in for a rebuild: quiesce the snapshotted runtime and register a
+        // successor over the same home.
+        outgoing.quiesce().await;
+        let successor = Arc::new(
+            RuntimeBuilder::new(home.clone(), scheduled_manifest())
+                .with_id(id.clone())
+                .with_brain(Arc::new(ScheduleBrain))
+                .with_handover(outgoing.handover())
+                .build()
+                .await
+                .unwrap(),
+        );
+        registry.insert(id.clone(), successor.clone());
+
+        // The fire lands, which it could not have done against the quiesced
+        // runtime the scheduler was built with.
+        assert_eq!(scheduler.tick().await.unwrap(), 1);
+        let events = successor
+            .events()
+            .read_from(&id, EventSeq::new(0), 10)
+            .await
+            .unwrap();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e.event, CompanyEvent::ScheduleFired { .. })),
+            "the successor ran the scheduled cycle",
+        );
+    }
+
+    #[tokio::test]
+    async fn without_following_a_scheduler_drives_its_snapshot() {
+        // The opt-in is real: an un-followed scheduler still drives the runtime
+        // it was handed, which is what every existing caller and test relies on.
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        rt.quiesce().await;
+
+        // No registry to consult, so the quiesced snapshot is what it tries, and
+        // the refusal surfaces rather than being silently swallowed.
+        let err = scheduler
+            .tick()
+            .await
+            .expect_err("a quiesced snapshot refuses the cycle");
+        assert!(
+            matches!(err, crate::error::OpenCompanyError::Quiescing(_)),
+            "{err}"
+        );
     }
 
     #[tokio::test]
     async fn non_matching_minute_never_fires() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let manifest = scheduled_manifest();
         let schedules = manifest.schedules.clone();
         let rt = Arc::new(
@@ -372,12 +752,12 @@ mod test {
         let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
         let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
         assert_eq!(scheduler.tick().await.unwrap(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn empty_schedule_set_is_a_noop() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = Arc::new(
             RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
                 .await
@@ -387,12 +767,12 @@ mod test {
         let mut scheduler = CompanyScheduler::new(rt, &[], clock).unwrap();
         assert!(scheduler.is_empty());
         assert_eq!(scheduler.tick().await.unwrap(), 0);
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[tokio::test]
     async fn tick_maintenance_expires_parked_approval() {
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         // A brain that parks a Sign effect so there is something to expire.
         struct ParkBrain;
         #[async_trait]
@@ -411,6 +791,8 @@ mod test {
                             established_thread: false,
                             first_time_counterparty: false,
                             payload: serde_json::Value::Null,
+                            agent: None,
+                            run_id: None,
                         })
                         .await?;
                     }
@@ -447,7 +829,6 @@ mod test {
         let expired = scheduler.tick_maintenance().await.unwrap();
         assert_eq!(expired.len(), 1);
         assert!(rt.pending_approvals().is_empty());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     fn scheduled_manifest_supervised() -> CompanyManifest {
@@ -469,6 +850,84 @@ mod test {
         toml::from_str(toml_src).expect("parse manifest")
     }
 
+    /// A brain that parks inside its first cycle until released, so a test can
+    /// deliver a shutdown while a tick is provably in flight.
+    struct BlockingBrain {
+        started: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+        release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    }
+
+    #[async_trait]
+    impl Brain for BlockingBrain {
+        async fn run_cycle(&self, req: CycleRequest, _host: &dyn CycleHost) -> Result<CycleResult> {
+            if let Some(tx) = self.started.lock().expect("started lock").take() {
+                let _ = tx.send(());
+            }
+            // Taken out of the mutex first so no guard is held across the await.
+            let release = self.release.lock().expect("release lock").take();
+            if let Some(rx) = release {
+                let _ = rx.await;
+            }
+            Ok(CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: vec![CompressedTrace::now(&req.cycle_id, "blocking")],
+                ledger_deltas: Vec::new(),
+                token_usage: TokenUsage::default(),
+            })
+        }
+    }
+
+    /// A shutdown delivered *while a tick is running* must still stop the loop.
+    ///
+    /// Boot signals with `notify_waiters()`, which wakes only the waiters
+    /// registered at that instant. A `spawn` that rebuilds `shutdown.notified()`
+    /// inside the `select!` has no waiter registered while `tick` runs — the
+    /// signal is dropped and the loop sleeps to the next minute boundary before
+    /// noticing it was asked to stop.
+    ///
+    /// The assertion is loop termination, not elapsed time: the clock is parked
+    /// 1ms before a minute boundary so the loop's sleep is 1ms, meaning a
+    /// scheduler that missed the signal keeps ticking (and never joins) while a
+    /// correct one exits on its very next iteration with nothing left to await.
+    /// The 5s bound only caps how long the failing case takes to report.
+    #[tokio::test]
+    async fn shutdown_during_a_tick_stops_the_loop() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home.clone(), manifest)
+                .with_brain(Arc::new(BlockingBrain {
+                    started: std::sync::Mutex::new(Some(started_tx)),
+                    release: std::sync::Mutex::new(Some(release_rx)),
+                }))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        // Monday 2026-07-13 09:00:59.999 UTC: the schedule matches this civil
+        // minute, and `millis_to_next_minute` is therefore 1ms.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0) + MINUTE_MS - 1));
+        let scheduler = CompanyScheduler::new(rt, &schedules, clock).unwrap();
+        let shutdown = Arc::new(Notify::new());
+        let handle = scheduler.spawn(shutdown.clone());
+
+        // Signal shutdown only once the cycle is provably in flight, then let
+        // that cycle finish.
+        started_rx.await.expect("tick started");
+        shutdown.notify_waiters();
+        release_tx.send(()).expect("release the in-flight cycle");
+
+        tokio::time::timeout(Duration::from_secs(5), handle)
+            .await
+            .expect("scheduler kept running after a shutdown delivered mid-tick")
+            .expect("scheduler task panicked");
+    }
+
     #[tokio::test]
     async fn bad_cron_fails_construction() {
         // A scheduler over an unparsable cron surfaces the error at construction.
@@ -476,7 +935,8 @@ mod test {
             cron: "not a cron".into(),
             prompt: "x".into(),
         }];
-        let home = tmp_home();
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
         let rt = Arc::new(
             RuntimeBuilder::fs_defaults(home.clone(), manifest("full"))
                 .await
@@ -484,7 +944,6 @@ mod test {
         );
         let clock = Arc::new(FakeClock::new(0));
         assert!(CompanyScheduler::new(rt, &bad, clock).is_err());
-        tokio::fs::remove_dir_all(&home).await.ok();
     }
 
     #[test]
@@ -493,5 +952,234 @@ mod test {
         assert_eq!(millis_to_next_minute(1), MINUTE_MS - 1);
         assert_eq!(millis_to_next_minute(MINUTE_MS - 1), 1);
         assert_eq!(millis_to_next_minute(MINUTE_MS), MINUTE_MS);
+    }
+
+    // --- issue #241: durable claims + restart catch-up ---------------------
+
+    use crate::error::OpenCompanyError;
+    use crate::ports::schedule_fires::ScheduleFireStore;
+    use crate::ports::types::CompanyId;
+
+    /// ScheduleFired events actually written to a runtime's log. A claim loser,
+    /// and a fail-closed skip, must leave this at whatever it was — the "zero
+    /// side effects" invariant, read from the durable trail.
+    async fn fired_count(rt: &CompanyRuntime) -> usize {
+        rt.events
+            .read_from(rt.id(), EventSeq::new(0), 1024)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.event, CompanyEvent::ScheduleFired { .. }))
+            .count()
+    }
+
+    /// A claim store whose every method errors, for the fail-closed path.
+    struct ErroringFires;
+
+    #[async_trait]
+    impl ScheduleFireStore for ErroringFires {
+        async fn claim_fire(&self, _c: &CompanyId, _s: &str, _m: u64) -> Result<bool> {
+            Err(OpenCompanyError::Store("claim store is down".into()))
+        }
+        async fn latest_fire(&self, _c: &CompanyId, _s: &str) -> Result<Option<u64>> {
+            Err(OpenCompanyError::Store("claim store is down".into()))
+        }
+        async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
+            Err(OpenCompanyError::Store("claim store is down".into()))
+        }
+    }
+
+    #[test]
+    fn manifest_schedule_id_is_stable_and_order_independent() {
+        let a = manifest_schedule_id("0 9 * * MON", "standup");
+        let b = manifest_schedule_id("0 9 * * MON", "standup");
+        assert_eq!(a, b, "same (cron, prompt) → same id, whatever the position");
+        assert!(a.starts_with("manifest-"), "{a}");
+        // A different prompt or cron is a different schedule.
+        assert_ne!(a, manifest_schedule_id("0 9 * * MON", "other"));
+        assert_ne!(a, manifest_schedule_id("0 10 * * MON", "standup"));
+        // The `\n` separator keeps ("a","bc") and ("ab","c") distinct.
+        assert_ne!(
+            manifest_schedule_id("a", "bc"),
+            manifest_schedule_id("ab", "c")
+        );
+    }
+
+    #[test]
+    fn missed_instant_rules() {
+        let expr = CronExpr::parse("0 9 * * MON").unwrap();
+        let minute = |ms: u64| ms / MINUTE_MS;
+        let m0 = minute(millis_at(2026, 7, 6, 9, 0)); // a Monday 09:00
+        let m2 = minute(millis_at(2026, 7, 20, 9, 0)); // two Mondays later
+        let now = minute(millis_at(2026, 7, 20, 9, 5)); // just after m2
+
+        // Fresh install (no anchor) makes up nothing.
+        assert_eq!(
+            missed_instant(&expr, None, now, CATCHUP_WINDOW_MINUTES),
+            None
+        );
+        // Downtime spanning the two intervening Mondays, anchor at m0 → exactly
+        // the MOST RECENT missed one (m2), never the older intermediates.
+        assert_eq!(
+            missed_instant(&expr, Some(m0), now, CATCHUP_WINDOW_MINUTES),
+            Some(m2)
+        );
+        // Anchor already at the most recent match → nothing was missed.
+        assert_eq!(
+            missed_instant(&expr, Some(m2), now, CATCHUP_WINDOW_MINUTES),
+            None
+        );
+        // Beyond the window: too small a window cannot reach even m2.
+        assert_eq!(missed_instant(&expr, Some(m0), now, 1), None);
+    }
+
+    /// Two independent schedulers over one durable store — a second replica, or a
+    /// restarted process — fire exactly once between them, and the loser writes
+    /// nothing.
+    #[tokio::test]
+    async fn two_schedulers_over_one_store_fire_once() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut a = CompanyScheduler::new(rt.clone(), &schedules, clock.clone()).unwrap();
+        let mut b = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        let first = a.tick().await.unwrap();
+        let second = b.tick().await.unwrap();
+        assert_eq!(first + second, 1, "exactly one replica fires the minute");
+        assert_eq!(
+            fired_count(&rt).await,
+            1,
+            "the loser leaves no ScheduleFired behind"
+        );
+    }
+
+    /// A claim store that errors fails **closed**: the fire is skipped, not fired
+    /// unclaimed, so the double-fire the claim prevents cannot sneak back in.
+    #[tokio::test]
+    async fn a_failing_claim_store_fires_nothing() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .with_schedule_fires(Arc::new(ErroringFires))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        assert_eq!(scheduler.tick().await.unwrap(), 0, "fail-closed: no fire");
+        assert_eq!(fired_count(&rt).await, 0);
+    }
+
+    /// Downtime spanning several occurrences produces exactly one catch-up (the
+    /// most recent), and a second boot finds it already claimed.
+    #[tokio::test]
+    async fn catch_up_fires_one_missed_instant_then_none_left() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        // Anchor at the oldest of three Mondays; "now" just after the newest.
+        let sid = manifest_schedule_id("0 9 * * MON", "weekly standup");
+        let anchor = millis_at(2026, 7, 6, 9, 0) / MINUTE_MS;
+        assert!(
+            rt.schedule_fires()
+                .claim_fire(rt.id(), &sid, anchor)
+                .await
+                .unwrap()
+        );
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
+        let scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        assert_eq!(
+            scheduler.catch_up().await.unwrap(),
+            1,
+            "one catch-up for the most recent missed Monday"
+        );
+        assert_eq!(fired_count(&rt).await, 1);
+        // The catch-up claimed the ORIGINAL minute, so the anchor advanced to it.
+        assert_eq!(
+            rt.schedule_fires()
+                .latest_fire(rt.id(), &sid)
+                .await
+                .unwrap(),
+            Some(millis_at(2026, 7, 20, 9, 0) / MINUTE_MS)
+        );
+        // Idempotent: a second boot finds the catch-up already made.
+        assert_eq!(scheduler.catch_up().await.unwrap(), 0);
+        assert_eq!(fired_count(&rt).await, 1);
+    }
+
+    /// A fresh install — no anchor row anywhere — makes up nothing at boot.
+    #[tokio::test]
+    async fn catch_up_on_a_fresh_install_fires_nothing() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
+        let scheduler = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+        assert_eq!(scheduler.catch_up().await.unwrap(), 0);
+        assert_eq!(fired_count(&rt).await, 0);
+    }
+
+    /// Two replicas booting at once race the catch-up claim: one fires it, the
+    /// other loses.
+    #[tokio::test]
+    async fn racing_catch_up_fires_once() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let manifest = scheduled_manifest();
+        let schedules = manifest.schedules.clone();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home, manifest)
+                .with_brain(Arc::new(ScheduleBrain))
+                .build()
+                .await
+                .unwrap(),
+        );
+        let sid = manifest_schedule_id("0 9 * * MON", "weekly standup");
+        let anchor = millis_at(2026, 7, 6, 9, 0) / MINUTE_MS;
+        rt.schedule_fires()
+            .claim_fire(rt.id(), &sid, anchor)
+            .await
+            .unwrap();
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 20, 9, 5)));
+        let a = CompanyScheduler::new(rt.clone(), &schedules, clock.clone()).unwrap();
+        let b = CompanyScheduler::new(rt.clone(), &schedules, clock).unwrap();
+
+        let fa = a.catch_up().await.unwrap();
+        let fb = b.catch_up().await.unwrap();
+        assert_eq!(fa + fb, 1, "only one booting replica fires the catch-up");
+        assert_eq!(fired_count(&rt).await, 1);
     }
 }

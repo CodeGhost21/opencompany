@@ -10,18 +10,24 @@
 //! echoed — the read shape carries only a `keyConfigured` bool.
 //!
 //! A runtime switch takes effect on the agents' **next turn** with no restart:
-//! the per-tenant provider re-resolves this config every turn, and (issue #585)
-//! a `DeferredBrain` re-decides every cycle whether the company has cognition at
-//! all — so this holds even for a tenant that booted with no credential of any
-//! kind, which is the deployment where the company's own key is the only one.
+//! the per-tenant provider re-resolves this config every turn — *once the
+//! company is already on the harness cognition path*. Which brain a company runs
+//! is chosen once, at build time, so a company that resolved **no** inference
+//! source at boot is on the offline echo brain until its runtime is rebuilt in
+//! place (issue #290) or the process restarts. That transition is reported as
+//! [`InferenceStatusDto::restart_required`] rather than papered over with a
+//! "next turn" promise the runtime cannot keep (issue #266).
 //!
-//! Setting the key on the `managed` provider is the ordinary case, not a BYOK
-//! edge: it keeps the platform endpoint and swaps only the credential, so the
-//! company pays for its own agents on the TinyHumans brain.
+//! Setting the key on the `managed` provider is an ordinary case, not a BYOK
+//! edge (issue #585): it keeps the platform endpoint and swaps only the
+//! credential, so the company pays for its own agents on the TinyHumans brain.
+//! `resolve_endpoint` has always preferred a stored key over the env default
+//! here; what was missing was anywhere for an admin to type one.
 
 use std::collections::BTreeMap;
 
 use axum::Router;
+use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, response::Response};
 use serde::{Deserialize, Serialize};
@@ -34,14 +40,32 @@ use crate::company::inference::{
 };
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::UsageMetering;
 use crate::server::error::ApiError;
-use crate::server::ops::{ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, ScopedCompany, scoped};
 
-/// The reminder attached to every mutating response: a per-tenant provider
-/// re-resolves its config each turn, so a switch reaches agents on the next
-/// turn with no restart.
+/// The reminder attached to a mutating response that the running brain can act
+/// on: a per-tenant provider re-resolves its config each turn, so a switch
+/// reaches agents on the next turn with no restart.
 const SWITCH_NOTE: &str =
     "Agents use the new inference provider on their next turn — no restart needed.";
+
+/// The reminder attached instead when [`restart_pending`] holds — the save
+/// landed, but the running brain predates it (issue #266). Says the thing the
+/// operator has to do, and names the two surfaces that stay broken until they do
+/// it, because "agents still echo" and "scheduled workflows never fire" are how
+/// this is actually noticed.
+const RESTART_NOTE: &str = "Saved — but this company started with no inference source, so it is \
+     running the offline echo brain and its workflow runner is unwired. The brain is chosen at \
+     startup: restart the company for agents to think with this provider and for scheduled \
+     workflows to fire.";
+
+/// The reminder attached when [`restart_pending`] held and the runtime was
+/// rebuilt in place to clear it (issue #290). The restart the operator was
+/// previously told to perform has already happened, for this company only.
+const REBUILT_NOTE: &str = "Saved, and this company's runtime was rebuilt so the new provider is \
+     live now. Agents think with it from their next turn and scheduled workflows fire again — no \
+     restart needed.";
 
 /// Builds the inference management route fragment.
 pub fn router() -> Router<AppState> {
@@ -70,6 +94,28 @@ struct InferenceStatusDto {
     source: String,
     /// Whether an outbound credential is stored — never the credential itself.
     key_configured: bool,
+    /// The cognition path this company actually booted onto: `harness` (live
+    /// local inference), `hosted` (Medulla), `sidecar`, `echo` (offline — no
+    /// inference at all), or `custom`.
+    ///
+    /// Config resolving to a provider does **not** guarantee the harness path: a
+    /// build without the `openhuman` feature, or a config that fails to resolve at
+    /// boot, silently falls back to the hosted/echo brain. Reporting what the
+    /// runtime actually holds is the only honest answer (issue #174).
+    cognition: String,
+    /// Where this path's inference usage is metered: `perTurn` (the harness meters
+    /// each turn), `perCycle` (the runtime meters what the cycle reports), or
+    /// `none` (nothing to meter — the echo path runs no model, so a zero Usage
+    /// reading is the truth rather than a missing hook).
+    usage_metering: UsageMetering,
+    /// Whether a stored inference config resolves but the **running** brain
+    /// predates it, so only a restart puts it to work (issue #266).
+    ///
+    /// See [`restart_pending`] for the exact predicate. `false` covers both "the
+    /// config is already live" and "no restart would help either" — the console
+    /// tells the second apart from `cognition` on its own, and this flag never
+    /// promises a restart that would change nothing.
+    restart_required: bool,
 }
 
 /// A mutating response: the resulting status plus the switch reminder.
@@ -110,6 +156,109 @@ fn source_label(source: InferenceSource) -> &'static str {
     }
 }
 
+/// Whether the harness cognition path is reachable on this host at all: the
+/// `openhuman` feature compiled in **and** a harness pool attached at boot.
+///
+/// Without both, no restart can move this company off the echo/hosted brain, so
+/// telling the operator to restart would just be a second false promise. The
+/// pool is attached whenever the serve path ran `attach_harness`, independently
+/// of which brain arm won — which is exactly the "this host could have run the
+/// harness, and didn't" signal we need.
+#[cfg(feature = "openhuman")]
+fn harness_reachable(runtime: &CompanyRuntime) -> bool {
+    runtime.harness().is_some()
+}
+
+#[cfg(not(feature = "openhuman"))]
+fn harness_reachable(_runtime: &CompanyRuntime) -> bool {
+    false
+}
+
+/// Whether a saved inference config is stranded behind a boot-time decision.
+///
+/// Brain selection happens once, in `RuntimeBuilder::build`: a company whose
+/// inference resolved to nothing at boot gets the offline echo brain **and** an
+/// unwired workflow runner, and a later credential write reaches neither. The
+/// per-tenant provider does re-resolve every turn, so swapping a model or
+/// rotating a key on a company already on the harness path is genuinely live —
+/// this is only about the not-configured → configured transition (issue #266).
+///
+/// True requires all three:
+/// 1. a tenant config resolves *now* (the same predicate `build` tests),
+/// 2. the company is **not** on the harness path, and
+/// 3. the harness path is reachable here, so a restart would actually change it.
+fn restart_pending(runtime: &CompanyRuntime, configured: bool) -> bool {
+    configured
+        && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
+        && harness_reachable(runtime)
+}
+
+/// The three distinct reasons a company's `workflow_runner()` is `None`. All
+/// three look identical from `workflow_runner() == None`, but the operator's
+/// next step differs for each, so the run route classifies before answering
+/// (issues #266, #514).
+pub(crate) enum RunnerGap {
+    /// A saved inference config is stranded behind a boot-time decision: a
+    /// restart would rebuild the runner from it. → `restart_required` (issue
+    /// #266).
+    RestartPending,
+    /// Nothing is configured, but this host *could* run the harness — so the
+    /// operator has to configure an inference source first (which triggers
+    /// #290's rebuild-in-place). → `inference_required` (issue #514).
+    InferenceRequired,
+    /// This build/deployment genuinely has no workflow execution, or no restart
+    /// or config here would produce one (default build, resolve error, or a
+    /// company already on the harness path). → `not_wired`.
+    NotWired,
+}
+
+/// Classifies *why* a company has no workflow runner, resolving inference from
+/// scratch in one manifest read/resolve pass.
+///
+/// The workflow-run route uses it to pick between three responses a bare
+/// `workflow_runner() == None` cannot tell apart (issues #266, #514):
+///
+/// - [`RunnerGap::RestartPending`] — a config resolves *now*, the company is off
+///   the harness path, and the harness is reachable here, so a restart would
+///   wire the runner (the same predicate `build` tests, via [`restart_pending`]).
+/// - [`RunnerGap::InferenceRequired`] — nothing resolves, but the harness is
+///   reachable and the company is off the harness path, so *configuring* an
+///   inference source is what wires the runner. Telling this operator the
+///   deployment is "not wired" is a lie: the deployment is fine; the company
+///   just has no brain yet.
+/// - [`RunnerGap::NotWired`] — everything else: the default build with no
+///   harness, a resolve error (a config we cannot read is not evidence a restart
+///   or a save would help — the #266 doctrine), or a company already on the
+///   harness path.
+pub(crate) async fn runner_gap_for(runtime: &CompanyRuntime) -> RunnerGap {
+    let Ok(manifest) = manifest_inference(runtime).await else {
+        return RunnerGap::NotWired;
+    };
+    // A resolve *error* is not the same as a clean resolve to nothing. `Err`
+    // means the config could not be read at all — which the #266 doctrine says
+    // is not evidence that a restart or a save would help, so it degrades to
+    // `NotWired`. Only `Ok(None)` — inference resolved, and nothing is set — can
+    // make configuring inference the honest next step. Folding the two together
+    // (the old `is_ok_and`) would tell an operator whose config we cannot read
+    // to "configure inference", a 409 promising a fix that may not exist.
+    let (configured, resolved_to_nothing) =
+        match resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref()).await {
+            Ok(Some(_)) => (true, false),
+            Ok(None) => (false, true),
+            Err(_) => (false, false),
+        };
+    if restart_pending(runtime, configured) {
+        return RunnerGap::RestartPending;
+    }
+    if resolved_to_nothing
+        && harness_reachable(runtime)
+        && runtime.cognition().path != crate::ports::brain::HARNESS_PATH
+    {
+        return RunnerGap::InferenceRequired;
+    }
+    RunnerGap::NotWired
+}
+
 /// Resolves the effective status DTO. The ops layer resolves *tenant* config
 /// only (no env default), so a company with nothing configured reports the
 /// managed default rather than a synthesized env decl.
@@ -118,6 +267,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
     let decl = resolve_effective(runtime.id(), &manifest, None, runtime.secrets().as_ref())
         .await
         .map_err(ApiError)?;
+    // What the company actually booted onto, not what the config implies.
+    let cognition = runtime.cognition();
+    let restart_required = restart_pending(runtime, decl.is_some());
     Ok(match decl {
         Some(d) => InferenceStatusDto {
             provider: d.provider.clone(),
@@ -126,6 +278,9 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
             models: d.models.clone(),
             source: source_label(d.source).to_string(),
             key_configured: d.key_configured(),
+            cognition: cognition.path.to_string(),
+            usage_metering: cognition.metering,
+            restart_required,
         },
         None => InferenceStatusDto {
             provider: "managed".to_string(),
@@ -134,6 +289,13 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<InferenceStatusDto
             models: BTreeMap::new(),
             source: "managed".to_string(),
             key_configured: false,
+            cognition: cognition.path.to_string(),
+            usage_metering: cognition.metering,
+            // `decl` is `None`, so `restart_pending` is `false` here by
+            // construction — nothing tenant-specific is configured to be
+            // stranded. Threaded rather than hardcoded so the two arms cannot
+            // drift apart.
+            restart_required,
         },
     })
 }
@@ -145,8 +307,15 @@ async fn get_status(company: ScopedCompany) -> Result<Json<InferenceStatusDto>, 
 
 /// `PUT …/inference` — set (or replace) the runtime provider override, and
 /// optionally rotate the write-only outbound credential.
+///
+/// Requires authority over the company (issue #403). This route sets the base
+/// URL every agent's prompts and completions travel to, and the key they are
+/// billed against; deciding that is deciding how the company thinks. `POST
+/// …/inference/test` stays open — it probes the config as already stored,
+/// naming no destination of its own.
 async fn set_config(
-    company: ScopedCompany,
+    State(state): State<AppState>,
+    company: AdminScopedCompany,
     Json(body): Json<SetInference>,
 ) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
@@ -178,9 +347,51 @@ async fn set_config(
             .map_err(ApiError)?;
     }
 
+    let status = effective_status(runtime).await?;
+    // Issue #290: the not-configured → configured transition is the one a save
+    // alone cannot deliver, because the brain was chosen at build time. Rather
+    // than telling the operator to restart a container they may have no access
+    // to, rebuild this company's runtime in place and re-read the status from
+    // the successor.
+    if status.restart_required {
+        match crate::runtime::rebuild_company(&state, runtime.id()).await {
+            Ok(successor) => {
+                let status = effective_status(successor.as_ref()).await?;
+                return Ok(Json(MutationResponse {
+                    // Read off the *successor*, so a rebuild that somehow landed
+                    // on the same brain still reports honestly rather than
+                    // claiming a success the runtime cannot back up.
+                    note: if status.restart_required {
+                        RESTART_NOTE
+                    } else {
+                        REBUILT_NOTE
+                    }
+                    .to_string(),
+                    status,
+                }));
+            }
+            Err(err) => {
+                // The save landed and the company is still running its old
+                // brain, which is exactly what RESTART_NOTE describes. Falling
+                // through is therefore the honest answer, not a swallowed error.
+                tracing::warn!(
+                    company = %runtime.id(),
+                    error = %err,
+                    "inference saved but the runtime could not be rebuilt; a restart is still required",
+                );
+            }
+        }
+    }
     Ok(Json(MutationResponse {
-        status: effective_status(runtime).await?,
-        note: SWITCH_NOTE.to_string(),
+        // The note follows the *resulting* status, so the response can never
+        // promise "next turn" to a company whose brain cannot honour it.
+        note: if status.restart_required {
+            RESTART_NOTE
+        } else {
+            SWITCH_NOTE
+        }
+        .to_string(),
+        status,
     }))
 }
 
@@ -188,7 +399,9 @@ async fn set_config(
 /// manifest `[inference]` (or the managed default). The stored credential is
 /// left in place (harmless for the managed default; still resolves for a
 /// manifest provider) — clear it explicitly with `PUT { key: "" }`.
-async fn revert_config(company: ScopedCompany) -> Result<Json<MutationResponse>, ApiError> {
+/// Requires authority over the company (issue #403) — same reasoning as the
+/// set: reverting decides which model the company thinks with.
+async fn revert_config(company: AdminScopedCompany) -> Result<Json<MutationResponse>, ApiError> {
     let runtime = company.runtime.as_ref();
     clear_runtime_config(runtime.id(), runtime.secrets().as_ref())
         .await
@@ -273,8 +486,11 @@ mod tests {
 
     const TOKEN: &str = "sk-super-secret-inference-token-XYZ";
 
-    fn home() -> std::path::PathBuf {
-        std::env::temp_dir().join(format!("oc-inference-{}", crate::ports::generate_id()))
+    fn home() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("oc-inference-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     fn manifest() -> CompanyManifest {
@@ -295,6 +511,10 @@ mod tests {
                 overlay_desk_members: Vec::new(),
                 overlay_desk_order: Vec::new(),
                 overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
             })
             .await
             .unwrap();
@@ -340,7 +560,8 @@ mod tests {
 
     #[tokio::test]
     async fn status_defaults_to_managed_then_switches_to_runtime() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         // A company with no manifest/runtime inference reports the managed default.
@@ -381,13 +602,12 @@ mod tests {
         assert_eq!(dto["source"], "runtime");
         assert_eq!(dto["keyConfigured"], true);
         assert!(!raw.contains(TOKEN), "GET status leaked the token: {raw}");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn revert_clears_the_runtime_override() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         send(
@@ -402,8 +622,6 @@ mod tests {
         assert_eq!(status, StatusCode::OK);
         assert_eq!(resp["status"]["provider"], "managed");
         assert_eq!(resp["status"]["source"], "managed");
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     /// Issue #585: the company's key on the *managed* brain — set, rotate, and
@@ -412,7 +630,8 @@ mod tests {
     #[tokio::test]
     async fn managed_key_can_be_set_rotated_and_cleared() {
         const ROTATED: &str = "sk-rotated-inference-token-ABC";
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         // Set: the company pays for its own agents on the platform endpoint.
@@ -464,13 +683,12 @@ mod tests {
         for token in [TOKEN, ROTATED] {
             assert!(!raw.contains(token), "GET leaked a token: {raw}");
         }
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn invalid_provider_config_is_rejected() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         // Ollama requires a base_url.
@@ -489,13 +707,12 @@ mod tests {
                 .contains("base_url"),
             "{err}"
         );
-
-        std::fs::remove_dir_all(&home).ok();
     }
 
     #[tokio::test]
     async fn key_never_leaks_across_any_response() {
-        let home = home();
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home).await;
 
         let (_, _, put_raw) = send(
@@ -513,7 +730,495 @@ mod tests {
         for raw in [put_raw, get_raw, test_raw] {
             assert!(!raw.contains(TOKEN), "a response leaked the token: {raw}");
         }
+    }
 
-        std::fs::remove_dir_all(&home).ok();
+    // --- Issue #266: a save the running brain cannot honour --------------------
+
+    /// On a host with no harness reachable, a saved config is *never* "restart
+    /// pending" — the echo brain is where this build ends up no matter how many
+    /// times it is restarted, and telling the operator otherwise would send them
+    /// bouncing a process for nothing.
+    ///
+    /// This is the default build, so it is also the guard that keeps the flag
+    /// from firing on every self-hosted instance that simply has no local
+    /// inference compiled in.
+    #[tokio::test]
+    async fn a_save_is_not_restart_pending_when_no_restart_would_help() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, resp, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        // The config landed...
+        assert_eq!(resp["status"]["source"], "runtime");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        // ...and the runtime is on the echo brain, but no harness is reachable
+        // here, so there is nothing a restart would change.
+        assert_eq!(resp["status"]["cognition"], "echo");
+        assert_eq!(resp["status"]["restartRequired"], false);
+        assert!(
+            resp["note"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("no restart needed"),
+            "{}",
+            resp["note"]
+        );
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["restartRequired"], false);
+    }
+
+    /// A company with nothing configured has nothing stranded, so the flag is
+    /// off even before any save.
+    #[tokio::test]
+    async fn an_unconfigured_company_is_not_restart_pending() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["source"], "managed");
+        assert_eq!(dto["restartRequired"], false);
+    }
+
+    /// Issue #266, reproduced at the route: a company built with a harness pool
+    /// but **no** inference source boots onto the echo brain with an unwired
+    /// workflow runner. Storing a credential afterwards updates the secret store
+    /// and nothing else — the brain is chosen in `RuntimeBuilder::build` and this
+    /// one already ran.
+    ///
+    /// So the save must report `restartRequired`, the note must say restart
+    /// rather than "next turn", and `POST …/workflows/{id}/run` must stop
+    /// claiming the deployment lacks workflow execution when what it lacks is a
+    /// restart.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn configuring_inference_after_boot_reports_restart_required() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+
+        // Build the company the way the serve path does — with a harness pool
+        // attached — but with no inference source of any kind. That is the boot
+        // this issue is about.
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        // The bug's precondition, asserted rather than assumed: the harness was
+        // available and the company still landed on the offline brain.
+        assert_eq!(
+            runtime.cognition().path,
+            "echo",
+            "expected the no-inference boot to select the echo brain"
+        );
+        assert!(
+            runtime.workflow_runner().is_none(),
+            "expected the no-inference boot to leave the workflow runner unwired"
+        );
+
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        // Configure inference, exactly as the console does.
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": "https://stub.invalid/v1",
+                "key": TOKEN,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(resp["status"]["source"], "runtime");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        // The config resolves now; the running brain still does not know it.
+        assert_eq!(resp["status"]["cognition"], "echo");
+        assert_eq!(resp["status"]["restartRequired"], true, "{raw}");
+
+        let note = resp["note"].as_str().unwrap_or_default();
+        assert!(note.contains("restart"), "note must say restart: {note}");
+        assert!(
+            !note.contains("next turn"),
+            "note must not promise the next turn: {note}"
+        );
+        assert!(!raw.contains(TOKEN), "PUT response leaked the token: {raw}");
+
+        // The flag is a property of the runtime, not of the mutation, so a plain
+        // read reports it too — this is what keeps the warning on screen after
+        // the toast is gone.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["restartRequired"], true);
+
+        // Second surface: the run route no longer blames the deployment.
+        let (status, err, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(err["code"], "restart_required");
+        assert!(
+            err["error"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Restart"),
+            "{err}"
+        );
+
+        // Reverting to managed un-strands the company: there is no longer a
+        // saved config waiting on a restart, so the flag clears.
+        let (_, resp, _) = send(&state, "DELETE", "/api/v1/company/inference", None).await;
+        assert_eq!(resp["status"]["restartRequired"], false);
+
+        // #514: ...and with nothing pending BUT the harness reachable here,
+        // the run route no longer 404s "no workflow execution" — it names the
+        // real dead end, that this company never configured inference. (Before
+        // #514 this asserted 404 `not_wired`; that was the third, unhandled
+        // cause the console read as a permanent gap and degraded to read-only.)
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "inference_required");
+    }
+
+    /// A brain standing in for the one a rebuild puts a configured company on,
+    /// so the route's behaviour is pinned without constructing a real harness
+    /// brain (which would resolve MCP servers, Composio and an agent roster
+    /// inside a unit test).
+    ///
+    /// Only its [`Cognition`](crate::ports::Cognition) matters here: reporting
+    /// the harness path is exactly what makes `restart_pending` false, which is
+    /// the observable the console reads.
+    #[cfg(feature = "openhuman")]
+    struct RebuiltBrain;
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait::async_trait]
+    impl crate::ports::brain::Brain for RebuiltBrain {
+        async fn run_cycle(
+            &self,
+            _req: crate::ports::types::CycleRequest,
+            _host: &dyn crate::ports::brain::CycleHost,
+        ) -> crate::Result<crate::ports::types::CycleResult> {
+            Ok(crate::ports::types::CycleResult {
+                channel_responses: Vec::new(),
+                new_traces: Vec::new(),
+                ledger_deltas: Vec::new(),
+                token_usage: crate::ports::types::TokenUsage::default(),
+            })
+        }
+
+        fn cognition(&self) -> crate::ports::Cognition {
+            crate::ports::Cognition {
+                path: crate::ports::brain::HARNESS_PATH,
+                // A stub brain meters per turn and reports zero usage, so
+                // nothing is double-counted (see `Brain::cognition`).
+                provider: "stub",
+                metering: crate::ports::UsageMetering::PerTurn,
+            }
+        }
+    }
+
+    /// A rebuilder that runs the real builder over the real handover, and puts
+    /// the successor on a brain that reports the harness path — the shape a live
+    /// rebuild produces once inference resolves.
+    #[cfg(feature = "openhuman")]
+    struct StubRebuilder {
+        home: std::path::PathBuf,
+    }
+
+    #[cfg(feature = "openhuman")]
+    #[async_trait::async_trait]
+    impl crate::runtime::RuntimeRebuilder for StubRebuilder {
+        async fn rebuild(
+            &self,
+            _state: &AppState,
+            request: crate::runtime::RebuildRequest,
+        ) -> crate::Result<crate::company::runtime::CompanyRuntime> {
+            RuntimeBuilder::new(self.home.clone(), request.manifest)
+                .with_id(request.id)
+                .with_harness(std::sync::Arc::new(crate::harness::HarnessPool::new()))
+                .with_brain(std::sync::Arc::new(RebuiltBrain))
+                .with_handover(request.handover)
+                .build()
+                .await
+        }
+    }
+
+    /// Issue #290, the half #266 did not ship: with a rebuilder wired, the save
+    /// that *would* have set `restartRequired` rebuilds the company instead, and
+    /// the response reports the successor rather than the runtime that is being
+    /// replaced.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn configuring_inference_after_boot_rebuilds_instead_of_asking_for_a_restart() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(runtime.cognition().path, "echo");
+
+        let outgoing = std::sync::Arc::new(runtime);
+        let state = AppState::new(AppConfig::default())
+            .with_rebuilder(std::sync::Arc::new(StubRebuilder { home: home.clone() }));
+        state.registry().insert(id.clone(), outgoing.clone());
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        let (status, resp, raw) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({
+                "provider": "openai_compatible",
+                "baseUrl": "https://stub.invalid/v1",
+                "key": TOKEN,
+            })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        // The save landed, and the company is no longer stranded behind a boot
+        // decision: it reports the live cognition path, not "restart me".
+        assert_eq!(resp["status"]["source"], "runtime");
+        assert_eq!(resp["status"]["keyConfigured"], true);
+        assert_eq!(resp["status"]["cognition"], "harness", "{raw}");
+        assert_eq!(resp["status"]["restartRequired"], false, "{raw}");
+        let note = resp["note"].as_str().unwrap_or_default();
+        assert!(!note.contains("restart the company"), "{note}");
+        assert!(!raw.contains(TOKEN), "PUT response leaked the token: {raw}");
+
+        // The registry really was swapped, and the replaced runtime is left
+        // quiesced so nothing still holding it keeps driving a dead company.
+        let registered = state.registry().get(&id).expect("still registered");
+        assert!(!std::sync::Arc::ptr_eq(&registered, &outgoing));
+        assert!(outgoing.is_quiesced());
+        assert!(!registered.is_quiesced());
+
+        // A plain read agrees: the banner clears itself rather than needing the
+        // console to remember what the mutation said.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["restartRequired"], false);
+        assert_eq!(dto["cognition"], "harness");
+    }
+
+    /// Issue #514, case (c): a company built with a harness pool that never
+    /// configured any inference source. `workflow_runner()` is `None` — but not
+    /// because the deployment lacks execution (the harness is right here) and
+    /// not because a saved config is stranded behind a boot decision (nothing
+    /// was ever saved). The run route must name the real dead end:
+    /// `inference_required` (409), pointing the operator at Settings — NOT the
+    /// `not_wired` 404 the console reads as a permanent gap and degrades to a
+    /// read-only view on.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn running_a_workflow_with_no_inference_configured_asks_to_configure_inference() {
+        use crate::harness::HarnessPool;
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .build()
+            .await
+            .unwrap();
+        // Precondition (case c): the harness was reachable, nothing is
+        // configured, and the company still landed with no runner — the exact
+        // shape that used to 404 `not_wired`.
+        assert_eq!(runtime.cognition().path, "echo");
+        assert!(runtime.workflow_runner().is_none());
+
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+
+        // Nothing configured — the status read agrees.
+        let (_, dto, _) = send(&state, "GET", "/api/v1/company/inference", None).await;
+        assert_eq!(dto["source"], "managed");
+        assert_eq!(dto["restartRequired"], false);
+
+        // The run route names the fix instead of blaming the deployment.
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT, "{raw}");
+        assert_eq!(err["code"], "inference_required");
+        let msg = err["error"].as_str().unwrap_or_default();
+        assert!(
+            msg.contains("inference"),
+            "message must name inference: {msg}"
+        );
+        assert!(
+            msg.contains("Settings"),
+            "message must point at Settings: {msg}"
+        );
+        assert!(
+            !msg.contains("not wired"),
+            "message must not say 'not wired': {msg}"
+        );
+        assert!(
+            !msg.contains("deployment"),
+            "message must not blame the deployment: {msg}"
+        );
+
+        // The dead end left nothing behind — run history is still empty.
+        let (status, runs, raw) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
+        assert_eq!(status, StatusCode::OK, "{raw}");
+        assert_eq!(runs.as_array().map(Vec::len), Some(0), "{runs}");
+    }
+
+    /// Issue #514 (review): a config that cannot be *read* is not evidence to
+    /// tell the operator to configure inference. When `resolve_effective`
+    /// returns `Err` — the secret store is unreachable — the classifier must
+    /// degrade to `NotWired` (404), never `inference_required` (409), even with
+    /// a harness right here. A 409 would promise a fix ("configure inference")
+    /// that a resolve *failure* gives no reason to expect; the #266 doctrine is
+    /// that an unreadable config is not evidence a save would help. Guards the
+    /// `Err(_) => (false, false)` arm of `runner_gap_for` against a regression
+    /// back to the old `is_ok_and`, which folded `Err` into "not configured".
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_resolve_error_stays_not_wired_even_with_a_harness() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::SecretValue;
+
+        struct FailingSecrets;
+        #[async_trait::async_trait]
+        impl crate::ports::SecretStore for FailingSecrets {
+            async fn get(&self, _c: &CompanyId, _key: &str) -> crate::Result<Option<SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store(
+                    "secret store unreachable".into(),
+                ))
+            }
+            async fn set(&self, _c: &CompanyId, _key: &str, _v: SecretValue) -> crate::Result<()> {
+                Ok(())
+            }
+        }
+
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .with_harness(std::sync::Arc::new(HarnessPool::new()))
+            .with_secrets(std::sync::Arc::new(FailingSecrets))
+            .build()
+            .await
+            .unwrap();
+        assert!(runtime.workflow_runner().is_none());
+
+        // The classifier degrades an unreadable config to NotWired...
+        assert!(
+            matches!(
+                super::runner_gap_for(&runtime).await,
+                super::RunnerGap::NotWired
+            ),
+            "a resolve error must classify as NotWired, not InferenceRequired",
+        );
+
+        // ...and the run route answers 404 `not_wired`, not 409 `inference_required`.
+        let state = AppState::new(AppConfig::default());
+        state.registry().insert(id, std::sync::Arc::new(runtime));
+        crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
+    }
+
+    /// Issue #514 negative control: on the default build (no `openhuman`
+    /// feature, so no harness is reachable), an unconfigured company still gets
+    /// the honest `not_wired` 404. The `inference_required` arm must NOT fire
+    /// where configuring inference would be a false promise — there is no
+    /// harness here to run it, so a restart or a save changes nothing.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn running_a_workflow_on_the_default_build_stays_not_wired() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
+    }
+
+    /// Issue #514 negative control: a company that *has* configured inference
+    /// but runs on a build with no harness reachable still gets `not_wired`.
+    /// Neither the `restart_pending` arm (no harness → a restart changes
+    /// nothing) nor the `inference_required` arm (a config is already present)
+    /// applies.
+    #[cfg(not(feature = "openhuman"))]
+    #[tokio::test]
+    async fn running_a_workflow_configured_without_a_harness_stays_not_wired() {
+        let home_dir = home();
+        let home = home_dir.path().to_path_buf();
+        let state = state_with_company(&home).await;
+
+        let (status, _, _) = send(
+            &state,
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openrouter", "key": TOKEN })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let (status, err, raw) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workflows/daily/run",
+            Some(json!({})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::NOT_FOUND, "{raw}");
+        assert_eq!(err["code"], "not_wired");
     }
 }

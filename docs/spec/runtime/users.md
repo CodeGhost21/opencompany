@@ -18,6 +18,14 @@ This is distinct from, and weaker than, the machine credentials in
 | Bootstrap | The manifest's `[users] admins` list |
 | Roles | `admin` (may invite and administer) / `member` |
 
+An `admin` is also what the write plane means by authority over the company: the
+routes that decide what the company reaches the world as — its Composio and
+provider connections, its inference provider and key, its mail identity, its
+Telegram bot, its MCP servers — require one. See
+[the write plane](../../modules/server/authority.md)
+for the table and the reasoning. A `member` reads those surfaces but does not
+change them.
+
 ## Storage
 
 Three ports, all keyed by `CompanyId` like every other:
@@ -95,6 +103,47 @@ Manifest admins appear in the invite list as synthetic `manifest:` entries.
 Revoking one is refused: the manifest would re-grant it on the next login, so
 succeeding would be a lie.
 
+## Bootstrap: `OPENCOMPANY_ADMIN_EMAIL`
+
+A company the *platform* provisions has an empty `[users] admins`. The person
+who asked for it is recorded on the control plane's tenant row, which the
+manifest never sees — so nobody is eligible, and there is no operator token to
+send the first invite with. The company is unreachable by the human who created
+it (issue #321).
+
+The deployment therefore may name **one** more standing admin through the
+environment:
+
+```sh
+OPENCOMPANY_ADMIN_EMAIL=ada@example.com
+```
+
+It is the same grant as a manifest entry, not a second kind of one:
+
+- listing the address makes it *eligible*; only redeeming a link mints the user,
+  as an `admin`
+- unsetting it stops future bootstrapping and does not delete an account it
+  already created
+- it is normalized with the same `normalize_email`, so case and surrounding
+  whitespace do not matter
+- unset, empty, and whitespace-only are one behaviour — no grant at all. The
+  platform renders the variable for every tenant, so a tenant with no recorded
+  creator must be indistinguishable from a deployment predating the variable.
+
+It admits exactly that address. It is **not** "trust whoever the platform says
+owns this instance": the root of trust stays with what the company is
+configured with, never with an assertion made at sign-in time.
+
+The address appears in the invite list as a synthetic `platform:` entry, and
+revoking it is refused the same way — the error points at the variable rather
+than at `[users].admins`. An address named in both places renders once, as
+`manifest:`: that is the grant that outlives the deployment's variable.
+
+**Recovery for a company already provisioned with an empty admin list**: set the
+variable on the instance and restart it. The workload reads it at boot, and
+eligibility is evaluated per login rather than cached, so the next link request
+from that address succeeds.
+
 ## Routes
 
 Login routes are **unauthenticated by construction** (`PublicCompany`), because
@@ -153,6 +202,72 @@ Policy is length-only (12–512 characters, counted as characters), with no
 composition rules: NIST SP 800-63B recommends against them, as they produce
 `Password1!` and buy no entropy.
 
+## Two carriers, one session
+
+A browser presents its session as the `oc_session_<company>` cookie. A
+non-browser client cannot: `SameSite=Lax` means the browser never sends a cookie
+cross-site, and a desktop webview is cross-site with every server it talks to.
+Allow-listing an origin does not help — the cookie is simply never sent.
+
+Such a client presents the same session in the `x-opencompany-session` header,
+valued `<company>.<token>`. The company travels *inside* the value because a
+header has no name to carry it, and the GraphQL handler's company argument lives
+in the request body where extractors cannot reach it — the cookie solves that
+with its name, and the header has to solve it too.
+
+One session, two envelopes: same token, same TTL, same revocation, resolving to
+the same principal through `authenticate_session`. Adding a carrier must never
+add a second, weaker check beside it, which is why carrier selection and
+authentication are separate functions.
+
+Not a CSRF regression. A cross-site HTML form cannot set a request header at
+all, and a cross-site `fetch` that sets a custom one is preflighted, which CORS
+answers for allow-listed origins only. The header is the stricter carrier — it
+is never attached ambiently the way a cookie is.
+
+**Nothing issues one to a browser.** A session token reaches a browser only as
+`Set-Cookie`, where `HttpOnly` keeps it away from JavaScript. Device pairing is
+the intended issuer for clients that need the header form.
+
+## Device pairing
+
+A **device** is not a second credential system: it is a `SessionRecord` with
+`SessionKind::Device`, a label, and a year-long TTL. That is deliberate over a
+separate storage port — `delete_for_user` is what suspension and admin reset
+call, and a separate device table would be a second thing every one of those
+paths must remember to clear. The failure mode of forgetting is a suspended user
+whose desktop keeps working.
+
+The flow runs the opposite way to OAuth's device flow, which removes a problem
+rather than solving it:
+
+1. A **signed-in** human asks for a pairing code (`POST …/devices`).
+   Authentication has already happened; nothing is pending approval.
+2. They paste it into the desktop client.
+3. The client redeems it (`POST …/devices/claim`) and receives a session token
+   exactly once.
+
+One secret instead of two, no polling, and the code is only ever shown to
+someone already authenticated — where the device-flow variant shows it to an
+anonymous starter.
+
+Pairing codes and login codes share `LoginCodeStore` and are kept apart by
+hashing under a domain prefix rather than by a flag: they are different
+keyspaces, not one keyspace with a check someone could forget.
+
+A paired device **cannot mint a pairing code**. Otherwise one compromised
+desktop could quietly enrol further machines that survive revoking it, and
+revocation would stop being a lever.
+
+Routes: `GET/POST …/devices`, `POST …/devices/claim`, `DELETE …/devices/{id}`.
+Listing and revocation are scoped to the caller's own devices by querying
+`list_for_user`, so another user's id is simply not found.
+
+Every claim failure — unknown, expired, already redeemed, suspended user,
+removed user — returns one indistinguishable response. The route is reachable
+without any credential, and separating them would tell an anonymous caller which
+codes once existed and which accounts are live.
+
 ## Revocation
 
 The user record is re-read on **every** authenticated request, so suspending or
@@ -194,10 +309,14 @@ can send mail never echoes it.
 
 ## Abuse and exposure
 
-- **Resend throttle**: one link per address per minute. A throttled request
-  returns the same `202` as a sent one (or the throttle is itself a membership
-  oracle) and leaves the live code alone (or anyone could invalidate a victim's
-  link on demand).
+- **Resend throttle**: one *mailed* link per address per minute. A throttled
+  request returns the same `202` as a sent one (or the throttle is itself a
+  membership oracle) and leaves the live code alone (or anyone could invalidate
+  a victim's link on demand). It does not apply where the code is echoed rather
+  than mailed — a loopback-only bind with no transport wired. There is no
+  mailbox to spare there, only the plaintext's hash is stored (so a throttled
+  answer cannot re-echo the live code), and throttling would lock the sole local
+  sign-in path for a minute after every use.
 - **Login codes are never echoed** from a host that is reachable from anywhere
   else. `dev_code` appears only on a loopback-only bind with no mail
   transport. A routable host with broken mail lets nobody in rather than

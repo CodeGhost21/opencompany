@@ -26,11 +26,29 @@ live cognition is gated.
 | Variable | Purpose |
 | --- | --- |
 | `OPENCOMPANY_COMPANY` | The company to load (used by container images). |
-| `OPENCOMPANY_BIND` | Bind address; the platform harness injects `0.0.0.0:8080`. |
-| `OPENCOMPANY_DATA_DIR` | Where durable state lives; defaults to a local folder. |
+| `OPENCOMPANY_BIND` | Bind address; the platform harness injects `0.0.0.0:8080`. See [bind precedence](#bind-precedence). |
+| `OPENCOMPANY_DATA_DIR` | Where durable state lives; defaults to a local folder. Set it to run two hosts side by side without them sharing one company store. The `--home` flag overrides it for company bundles only — the shared workspace directories still follow this variable, so isolating two hosts with `--home` alone only half-works. |
 | `OPENCOMPANY_PUBLIC_URL` | The externally reachable URL, used for discovery. |
 
 The CLI mirrors several of these as flags — see the [CLI reference](cli.md).
+
+### Bind precedence
+
+Where a flag and a variable name the same thing, the flag wins. For the
+listener address:
+
+```text
+serve --bind  ⟵  OPENCOMPANY_BIND  ⟵  config.toml `bind`  ⟵  127.0.0.1:8080
+```
+
+A blank `OPENCOMPANY_BIND` counts as unset and falls through. `serve` prints
+the address and the layer that supplied it on startup — `listening on
+0.0.0.0:8080 (from OPENCOMPANY_BIND)` — and an address that cannot be bound
+aborts boot naming that address rather than quietly reverting to the default.
+
+The default is loopback; a wildcard bind happens only when a flag, variable,
+or config entry asks for one. Full details in the
+[configuration spec](../../docs/spec/runtime/config.md).
 
 ## Inference: managed or bring-your-own (BYOK)
 
@@ -78,6 +96,25 @@ Both optional and off by default:
 
 Requires the `tinyplace` feature and `serve --discoverable` to reach the
 network — see [The tiny.place economy](../overview/tiny-place.md).
+
+## Channels: Telegram
+
+Setup is a bot token and nothing else. Create a bot with @BotFather and paste
+its token under **Connections → Channels**; the host collects messages by
+long-polling Telegram (`getUpdates`), which dials *out*, so it works on
+localhost, behind NAT, and on any self-hosted box with no public URL. Needs the
+`telegram` feature for the outbound transport.
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENCOMPANY_TELEGRAM_POLL_SECONDS` | Long-poll hold and idle back-off; default `30`. |
+
+An inbound **webhook** is an optional fast-path for a publicly reachable host:
+set `OPENCOMPANY_PUBLIC_URL` to a public **https** URL and the console offers a
+webhook URL plus a secret to register with. Without one there is nothing to
+offer — Telegram cannot deliver to a private address — so the console shows no
+webhook at all, rather than a URL that silently never fires. Polling stands down
+on its own while a webhook is registered.
 
 ## Inspect what's set
 

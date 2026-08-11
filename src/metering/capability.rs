@@ -81,6 +81,17 @@ pub struct CapabilityPlan {
     /// Gateable namespace → tokens allowed per period. `u64::MAX` is effectively
     /// unlimited.
     pub budgets: BTreeMap<String, u64>,
+    /// Plan-level **total token ceiling** for the period (issue #188), or `None`
+    /// when no ceiling is set.
+    ///
+    /// The `budgets` map is a **soft** gate — it only trims *which* exec tool
+    /// families a turn may reach; an exhausted namespace's tools drop off the
+    /// roster but the turn still runs on intrinsic tools and burns model tokens.
+    /// This is the **hard** gate: once the tenant's total period spend reaches
+    /// this value, dispatch is refused outright (no model call) until the period
+    /// resets. Carried from the manifest `[plan].total_tokens`; the built-in
+    /// named tiers leave it `None` (a manifest overlays it explicitly).
+    pub total_budget: Option<u64>,
 }
 
 impl CapabilityPlan {
@@ -102,6 +113,7 @@ impl CapabilityPlan {
             None => CapabilityPlan {
                 period: BudgetPeriod::Daily,
                 budgets: BTreeMap::new(),
+                total_budget: None,
             },
         };
         // The manifest `period` field is authoritative for the window (defaults
@@ -112,7 +124,33 @@ impl CapabilityPlan {
         for (namespace, tokens) in &plan.token_budgets {
             resolved.budgets.insert(namespace.clone(), *tokens);
         }
+        // The plan-level total ceiling (issue #188) is a manifest-only overlay —
+        // the built-in tiers carry none, so `total_tokens` is authoritative when
+        // present and leaves the hard gate off when absent.
+        resolved.total_budget = plan.total_tokens;
         Some(resolved)
+    }
+
+    /// Whether the tenant's total period `spent` has reached the plan-level token
+    /// ceiling (issue #188). `false` when no ceiling is configured (the hard gate
+    /// is off) or when spend is still under it. The boundary is `>=`, matching the
+    /// per-namespace [`denied_namespaces`](Self::denied_namespaces) exhaustion so
+    /// the total gate trips exactly when a namespace budget equal to it would.
+    pub fn total_exhausted(&self, spent: u64) -> bool {
+        self.total_budget.is_some_and(|cap| spent >= cap)
+    }
+
+    /// The plan-level total-budget status row for the console read surface (issue
+    /// #188), or `None` when no total ceiling is configured. Mirrors
+    /// [`TierBudgetStatus`] but describes the whole-period ceiling, not one
+    /// namespace.
+    pub fn total_status(&self, spent: u64) -> Option<TotalBudgetStatus> {
+        self.total_budget.map(|budget| TotalBudgetStatus {
+            budget,
+            spent,
+            remaining: budget.saturating_sub(spent),
+            exhausted: spent >= budget,
+        })
     }
 
     /// The gateable namespaces this plan denies at `spent` tokens: every gateable
@@ -153,11 +191,17 @@ impl CapabilityPlan {
 /// * `starter` — `shell` + `code` at 200k tokens/day.
 /// * `pro` — `shell` + `code` + `web` at 1M tokens/day.
 /// * `unlimited` — every gateable namespace at `u64::MAX` (effectively
-///   uncapped), including the real-money `media` tier (issue #109) and the
-///   per-tenant `composio` tier (issue #110). `media` / `composio` are absent
-///   from `free` / `starter` / `pro`, so those tiers deny them outright unless
-///   the manifest opts in with an explicit `token_budgets = { media = N }` /
-///   `{ composio = N }`.
+///   uncapped), including the real-money `media` tier (issue #109), the
+///   per-tenant `composio` tier (issue #110) and the metered `search` tier
+///   (issue #238). Those three are absent from `free` / `starter` / `pro`, so
+///   those tiers deny them outright unless the manifest opts in with an explicit
+///   `token_budgets = { media = N }` / `{ composio = N }` / `{ search = N }`.
+///
+/// Note what a `search` *token* budget does and does not do: it sheds the tool
+/// once the company's period **token** spend crosses the threshold, which is a
+/// blunt cross-subsidy gate. The real ceiling on search spend is the per-company
+/// **daily call cap** (`[tools].search_daily_calls`), because a search costs
+/// money per call and no tokens at all.
 ///
 /// Every built-in is daily; the manifest `[plan].period` can widen the window.
 pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
@@ -176,6 +220,7 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             ("subagent", u64::MAX),
             ("media", u64::MAX),
             ("composio", u64::MAX),
+            ("search", u64::MAX),
         ],
         _ => return None,
     };
@@ -185,16 +230,29 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             .iter()
             .map(|(ns, tokens)| ((*ns).to_string(), *tokens))
             .collect(),
+        // The plan-level total ceiling (issue #188) is opt-in via the manifest
+        // `[plan].total_tokens` overlay only — a named tier never sets it.
+        total_budget: None,
     })
 }
 
-/// Total inference tokens (input + output) across a sample window. OAuth-call
-/// samples carry no token spend and are ignored, so a tool-heavy turn never
-/// inflates the token budget.
+/// Total model tokens (input + output) across a sample window — every kind that
+/// actually moves tokens.
+///
+/// [`SampleKind::OauthCall`] carries no token spend and
+/// [`SampleKind::SearchCall`] is a priced request rather than a completion, so
+/// neither can inflate the token budget; a tool-heavy turn is not a token-heavy
+/// one.
+///
+/// [`SampleKind::PlanningCall`] **is** counted (issue #337). A planning pass is
+/// a real completion against the tenant's own inference budget; it is only
+/// filed under a different kind because it belongs to the company rather than
+/// to a teammate. Excluding it would leave a company able to plan indefinitely
+/// after crossing the tier ceiling that is supposed to have stopped it.
 pub fn tokens_in(samples: &[UsageSample]) -> u64 {
     samples
         .iter()
-        .filter(|s| s.kind == SampleKind::Inference)
+        .filter(|s| matches!(s.kind, SampleKind::Inference | SampleKind::PlanningCall))
         .map(|s| s.input_tokens.saturating_add(s.output_tokens))
         .fold(0u64, |acc, t| acc.saturating_add(t))
 }
@@ -217,6 +275,24 @@ pub struct TierBudgetStatus {
     pub exhausted: bool,
 }
 
+/// The plan-level total-budget status for the console read surface (issue #188).
+///
+/// Unlike [`TierBudgetStatus`] — a per-namespace **soft** gate that only trims a
+/// tool family — `exhausted` here means the tenant has crossed the **hard**
+/// ceiling and the harness will refuse to dispatch further turns this period.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TotalBudgetStatus {
+    /// The total token ceiling for the period.
+    pub budget: u64,
+    /// The tenant's total period spend.
+    pub spent: u64,
+    /// `budget - spent`, saturating at zero.
+    pub remaining: u64,
+    /// Whether spend has reached the ceiling (`spent >= budget`) — dispatch is
+    /// refused until the period resets.
+    pub exhausted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -232,6 +308,7 @@ mod tests {
             cached_input_tokens: 0,
             cost_usd: 0.0,
             kind: SampleKind::Inference,
+            run_id: None,
         }
     }
 
@@ -245,6 +322,7 @@ mod tests {
             cached_input_tokens: 0,
             cost_usd: 0.0,
             kind: SampleKind::OauthCall,
+            run_id: None,
         }
     }
 
@@ -293,6 +371,26 @@ mod tests {
     #[test]
     fn tokens_in_empty_is_zero() {
         assert_eq!(tokens_in(&[]), 0);
+    }
+
+    /// Issue #337: a planning pass spends the tenant's inference budget just as
+    /// a teammate's turn does, so it counts toward the tier ceiling. Without
+    /// this a company could keep planning after the budget that was supposed to
+    /// stop it had been exhausted — the tokens are spent either way, and a
+    /// ceiling that only some completions respect is not a ceiling.
+    #[test]
+    fn tokens_in_counts_planning_passes() {
+        let planning = UsageSample {
+            kind: SampleKind::PlanningCall,
+            agent: crate::metering::UNATTRIBUTED_AGENT.into(),
+            ..inference_sample(300, 100)
+        };
+        assert_eq!(tokens_in(std::slice::from_ref(&planning)), 400);
+        // And it adds to a teammate's, rather than replacing or shadowing it.
+        assert_eq!(
+            tokens_in(&[inference_sample(100, 50), planning, oauth_sample()]),
+            550
+        );
     }
 
     // --- exhaustion / denial ------------------------------------------------
@@ -389,6 +487,31 @@ mod tests {
         }
     }
 
+    /// The metered `search` tier (issue #238) follows media/composio: uncapped
+    /// under `unlimited`, denied by every other built-in tier unless the
+    /// manifest opts in with `token_budgets = { search = N }`. Every search is
+    /// a priced request, so a company should not inherit one from a tier it
+    /// chose for its token allowance.
+    #[test]
+    fn search_tier_is_unlimited_only_and_denied_elsewhere() {
+        assert!(
+            !plan_named("unlimited")
+                .unwrap()
+                .denied_namespaces(0)
+                .contains("search"),
+            "unlimited grants search"
+        );
+        for tier in ["free", "starter", "pro"] {
+            assert!(
+                plan_named(tier)
+                    .unwrap()
+                    .denied_namespaces(0)
+                    .contains("search"),
+                "{tier} must deny the metered search tier by default"
+            );
+        }
+    }
+
     /// A manifest can opt a non-`unlimited` plan into `composio` with an explicit
     /// token budget; exhausting that budget drops exactly `composio`.
     #[test]
@@ -399,6 +522,7 @@ mod tests {
             name: Some("starter".into()),
             period: "daily".into(),
             token_budgets,
+            total_tokens: None,
         })
         .unwrap();
         // Under budget: composio granted, shell/code still granted.
@@ -459,6 +583,7 @@ mod tests {
             name: Some("starter".into()),
             period: "daily".into(),
             token_budgets: BTreeMap::new(),
+            total_tokens: None,
         };
         let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
         assert_eq!(resolved.period, BudgetPeriod::Daily);
@@ -476,6 +601,7 @@ mod tests {
             name: Some("starter".into()),
             period: "monthly".into(),
             token_budgets,
+            total_tokens: None,
         };
         let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
         assert_eq!(resolved.period, BudgetPeriod::Monthly, "period field wins");
@@ -492,9 +618,89 @@ mod tests {
             name: None,
             period: "daily".into(),
             token_budgets,
+            total_tokens: None,
         };
         let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
         assert_eq!(resolved.budgets.len(), 1);
         assert_eq!(resolved.budgets.get("shell"), Some(&500));
+    }
+
+    // --- total budget (issue #188) ------------------------------------------
+
+    #[test]
+    fn total_exhausted_none_budget_is_never_exhausted() {
+        let plan = plan_named("starter").unwrap();
+        assert!(plan.total_budget.is_none(), "named tiers carry no total");
+        assert!(!plan.total_exhausted(0));
+        assert!(!plan.total_exhausted(u64::MAX));
+    }
+
+    #[test]
+    fn total_exhausted_trips_at_the_ge_boundary() {
+        let mut plan = plan_named("free").unwrap();
+        plan.total_budget = Some(1_000);
+        assert!(!plan.total_exhausted(999), "under budget runs");
+        assert!(plan.total_exhausted(1_000), ">= boundary refuses");
+        assert!(plan.total_exhausted(1_001), "over budget refuses");
+    }
+
+    #[test]
+    fn total_exhausted_zero_budget_refuses_from_the_first_token() {
+        let mut plan = plan_named("free").unwrap();
+        plan.total_budget = Some(0);
+        assert!(
+            plan.total_exhausted(0),
+            "a zero ceiling refuses immediately"
+        );
+    }
+
+    #[test]
+    fn total_status_none_when_no_ceiling() {
+        let plan = plan_named("pro").unwrap();
+        assert!(plan.total_status(0).is_none());
+    }
+
+    #[test]
+    fn total_status_reports_budget_spend_remaining_and_exhaustion() {
+        let mut plan = plan_named("free").unwrap();
+        plan.total_budget = Some(1_000);
+        let under = plan.total_status(400).unwrap();
+        assert_eq!(under.budget, 1_000);
+        assert_eq!(under.spent, 400);
+        assert_eq!(under.remaining, 600);
+        assert!(!under.exhausted);
+        // At/over the ceiling: remaining saturates at zero and exhausted flips.
+        let over = plan.total_status(1_500).unwrap();
+        assert_eq!(over.remaining, 0);
+        assert!(over.exhausted);
+    }
+
+    #[test]
+    fn from_manifest_carries_total_tokens_and_named_tier_leaves_it_none() {
+        // A bare total-only plan: no name, no per-namespace budgets.
+        let plan = Plan {
+            name: None,
+            period: "daily".into(),
+            token_budgets: BTreeMap::new(),
+            total_tokens: Some(5_000),
+        };
+        let resolved = CapabilityPlan::from_manifest(&plan).unwrap();
+        assert_eq!(resolved.total_budget, Some(5_000));
+        assert!(resolved.budgets.is_empty(), "no per-namespace gate");
+
+        // A named tier with an explicit total overlay carries the ceiling too.
+        let overlaid = CapabilityPlan::from_manifest(&Plan {
+            name: Some("starter".into()),
+            period: "daily".into(),
+            token_budgets: BTreeMap::new(),
+            total_tokens: Some(9_000),
+        })
+        .unwrap();
+        assert_eq!(overlaid.total_budget, Some(9_000));
+        assert_eq!(overlaid.budgets.get("shell"), Some(&200_000));
+
+        // A named tier with no overlay leaves the total gate off.
+        let plain = plan_named("starter").unwrap();
+        assert!(plain.total_budget.is_none());
     }
 }

@@ -27,7 +27,7 @@ use super::{
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyId;
 use crate::ports::types::TurnStep;
-use crate::server::chat_history::{self, MessageView, Viewer};
+use crate::server::chat_history::{self, MessageView, ReactionView, Viewer};
 
 /// The aggregation-root handle over one company. See the module docs.
 pub struct CompanyGql {
@@ -139,7 +139,9 @@ impl CompanyGql {
         memory_facts::resolve(&self.runtime, query, kind, first, offset).await
     }
 
-    /// The enabled workflows, as one-line summaries.
+    /// The company's saved workflows, as one-line summaries — seed graphs and
+    /// runtime-authored ones alike. Each carries an `enabled` flag reporting
+    /// manifest membership; listing is not gated on it.
     async fn workflows(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<WorkflowSummaryGql>> {
         workflows::resolve_summaries(ctx, &self.runtime).await
     }
@@ -181,6 +183,33 @@ impl CompanyGql {
     async fn smtp(&self) -> async_graphql::Result<SmtpStatusGql> {
         connections::resolve_smtp(&self.runtime).await
     }
+
+    /// The source-template provenance recorded at launch: the stable template
+    /// id (directory slug) and, when known, its version. Null for a company
+    /// provisioned from a raw manifest body rather than a template.
+    async fn provenance(&self) -> async_graphql::Result<Option<TemplateProvenanceGql>> {
+        let Some(record) = self.runtime.store().load(&self.id).await? else {
+            return Ok(None);
+        };
+        Ok(record.template_provenance.map(|p| TemplateProvenanceGql {
+            source_id: p.source_id,
+            version: p.version,
+            path: p.path,
+        }))
+    }
+}
+
+/// The source-template provenance of a company: where its manifest was seeded
+/// from. Mirrors [`TemplateProvenance`](crate::ports::types::TemplateProvenance).
+#[derive(SimpleObject)]
+#[graphql(name = "TemplateProvenance")]
+pub struct TemplateProvenanceGql {
+    /// The template's stable identifier — the source directory slug.
+    pub source_id: String,
+    /// The template's version, when the source exposes one.
+    pub version: Option<String>,
+    /// The source directory path the company was launched from, when recorded.
+    pub path: Option<String>,
 }
 
 impl CompanyGql {
@@ -199,24 +228,71 @@ impl CompanyGql {
             .collect();
         let enabled = |id: &str| inbox_enabled.get(id).copied().unwrap_or(false);
 
+        // Issue #304 — mirrored from the REST `list_team` deliberately: the two
+        // reads of the same roster must not drift, so the cap columns are
+        // resolved here by the same rule (one meter read, only when somebody is
+        // capped; spend paired with the cap).
+        // Issue #343: the scan is over EFFECTIVE caps across the whole roster
+        // (manifest agents plus overlay teammates), because a console override
+        // can cap somebody the manifest never did — including a teammate the
+        // manifest does not contain at all.
+        let any_capped = record
+            .manifest
+            .agents
+            .iter()
+            .map(|agent| &agent.id)
+            .chain(record.overlay_agents.iter().map(|agent| &agent.id))
+            .any(|id| record.effective_budget(id).is_some());
+        let spend_today = if any_capped {
+            let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
+            Some(self.runtime.usage().query(&self.id, since).await?)
+        } else {
+            None
+        };
+        let spent = |id: &str| {
+            spend_today
+                .as_ref()
+                .map(|samples| crate::metering::usd_spent_by_agent(samples, id))
+        };
+
+        // Issue #343: caps and their attribution resolve through the record for
+        // BOTH arms, exactly as the REST handler does — an overlay teammate is
+        // no longer hardcoded uncapped.
+        let row = |id: &str, name: Option<String>, role: String, description: Option<String>| {
+            let cap = record.effective_budget(id);
+            let attribution = record.budget_override(id);
+            TeamMemberGql {
+                id: ID(id.to_string()),
+                name,
+                role,
+                description,
+                inbox_enabled: enabled(id),
+                budget_usd_daily: cap,
+                spent_today_usd: cap.and_then(|_| spent(id)),
+                budget_set_by: attribution.map(|entry| entry.set_by.id.clone()),
+                budget_set_at_millis: attribution.map(|entry| entry.at_millis as f64),
+            }
+        };
         let mut out: Vec<TeamMemberGql> = record
             .manifest
             .agents
             .iter()
-            .map(|agent| TeamMemberGql {
-                id: ID(agent.id.clone()),
-                name: None,
-                role: agent.role.clone(),
-                description: agent.description.clone(),
-                inbox_enabled: enabled(&agent.id),
+            .map(|agent| {
+                row(
+                    &agent.id,
+                    None,
+                    agent.role.clone(),
+                    agent.description.clone(),
+                )
             })
             .collect();
-        out.extend(record.overlay_agents.iter().map(|agent| TeamMemberGql {
-            id: ID(agent.id.clone()),
-            name: Some(agent.name.clone()),
-            role: agent.role.clone(),
-            description: agent.description.clone(),
-            inbox_enabled: enabled(&agent.id),
+        out.extend(record.overlay_agents.iter().map(|agent| {
+            row(
+                &agent.id,
+                Some(agent.name.clone()),
+                agent.role.clone(),
+                agent.description.clone(),
+            )
         }));
         Ok(out)
     }
@@ -281,6 +357,24 @@ pub struct TeamMemberGql {
     pub description: Option<String>,
     /// Whether this teammate has an enabled inbox.
     pub inbox_enabled: bool,
+    /// This teammate's daily spend cap in force (issue #304), or null when it
+    /// has none. Null-vs-set is the capped/uncapped distinction — `0` would
+    /// mean "capped at nothing".
+    ///
+    /// Since #343 this is the **effective** cap: an operator override set from
+    /// the console when one is stored, the manifest value otherwise.
+    pub budget_usd_daily: Option<f64>,
+    /// What this teammate has spent since 00:00 UTC; non-null only alongside a
+    /// cap.
+    pub spent_today_usd: Option<f64>,
+    /// The user id of the admin who last set this teammate's cap from the
+    /// console (issue #343); null when no override is stored. Non-null even
+    /// when the override *removed* the cap, which is how "nobody capped this"
+    /// is told from "an admin uncapped this".
+    pub budget_set_by: Option<String>,
+    /// When that cap was set (epoch millis). `Float` round-trips the full u64
+    /// range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
+    pub budget_set_at_millis: Option<f64>,
 }
 
 /// Internal desk projection shared between `chats` and `chat`.
@@ -381,6 +475,44 @@ pub struct MessageGql {
     /// transcript renders the same timeline the REST route returns (issue #65
     /// parity). Empty for operator messages and tool-less replies.
     pub steps: Vec<MessageStepGql>,
+    /// The board card this reply is about (issue #246): the card the turn
+    /// opened, or the dispatched card it ran for (#185). Projected from the
+    /// same [`MessageView`] field the REST route reads, so the two surfaces
+    /// agree on which messages carry a card. Null on operator messages and on
+    /// every reply journaled before the field existed.
+    pub task_id: Option<ID>,
+    /// The message this one replies to (issue #364) — a thread reply rather
+    /// than a new line in the channel. Null for a message posted straight into
+    /// the channel, which is every message journaled before threads were
+    /// persisted. Same [`MessageView`] field the REST route reads, so the two
+    /// surfaces cannot disagree about the shape of a thread.
+    pub parent_id: Option<ID>,
+    /// Who reacted to this message with what (issue #364), one row per person
+    /// per emoji. Empty when nobody has.
+    pub reactions: Vec<MessageReactionGql>,
+}
+
+/// One person's reaction on a history message (issue #364). GraphQL mirror of
+/// the REST `reactions` array, so the two surfaces carry the same rows.
+#[derive(SimpleObject)]
+#[graphql(name = "MessageReaction")]
+pub struct MessageReactionGql {
+    /// The emoji.
+    pub emoji: String,
+    /// Who reacted, as a display label — never a raw user id.
+    pub by: String,
+    /// Whether the reading viewer is the one who reacted.
+    pub mine: bool,
+}
+
+impl From<ReactionView> for MessageReactionGql {
+    fn from(view: ReactionView) -> Self {
+        MessageReactionGql {
+            emoji: view.emoji,
+            by: view.by_label,
+            mine: view.mine,
+        }
+    }
 }
 
 /// One scrubbed step in a reply's processing timeline. GraphQL mirror of the
@@ -427,6 +559,13 @@ impl From<MessageView> for MessageGql {
             at_millis: view.at_millis,
             mine: view.mine,
             steps: view.steps.into_iter().map(MessageStepGql::from).collect(),
+            task_id: view.task_id.map(ID),
+            parent_id: view.parent_id.map(ID),
+            reactions: view
+                .reactions
+                .into_iter()
+                .map(MessageReactionGql::from)
+                .collect(),
         }
     }
 }

@@ -8,6 +8,8 @@
 //! - sessions → `user-sessions.json`, login codes → `login-codes.json`
 //!   (credential material: token/code *hashes* only, never plaintext)
 //! - facts → `facts.jsonl` (last-write-wins per id, rewritten on mutate)
+//! - runs → `runs.jsonl` (last-write-wins per id) + `run-steps.jsonl`
+//!   (append-only trace, last-write-wins per `(run_id, step_seq)`)
 //! - usage → `usage.jsonl` (append-only samples)
 //! - skills → `skills.json` (operator deltas)
 //! - workspace → real folders + Markdown files under `workspace/`, indexed by
@@ -21,17 +23,25 @@ use async_trait::async_trait;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
+use crate::ports::artifacts::{ArtifactRecord, ArtifactStore};
 use crate::ports::facts::{FactKind, FactRecord, FactStore};
 use crate::ports::login_codes::{LoginCodeRecord, LoginCodeStore};
 use crate::ports::now_millis;
+use crate::ports::runs::{
+    NewRun, RunFilter, RunRecord, RunStatus, RunStepRecord, RunStore, sort_newest_first,
+};
 use crate::ports::sessions::{SessionRecord, SessionStore};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
 use crate::ports::tasks::{TaskRecord, TaskStore};
 use crate::ports::types::CompanyId;
 use crate::ports::usage::{UsageMeter, UsageSample, retention_cutoff};
 use crate::ports::users::{InviteRecord, UserRecord, UserStore};
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
-use crate::store::fs::{PathLocks, append_line, io_err, read_jsonl, read_optional, write_atomic};
+use crate::ports::workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+    sort_newest_first as sort_revisions_newest_first,
+};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+use crate::store::fs::{append_line, io_err, path_lock, read_jsonl, read_optional, write_atomic};
 use crate::store::paths::Bundle;
 
 /// One filesystem store implementing every WS3 console port over a company
@@ -40,16 +50,12 @@ use crate::store::paths::Bundle;
 #[derive(Clone)]
 pub struct FsOps {
     root: PathBuf,
-    locks: PathLocks,
 }
 
 impl FsOps {
     /// Creates an ops store rooted at `root` (the OpenCompany home).
     pub fn new(root: impl Into<PathBuf>) -> Self {
-        Self {
-            root: root.into(),
-            locks: PathLocks::default(),
-        }
+        Self { root: root.into() }
     }
 
     fn bundle(&self, id: &CompanyId) -> Bundle {
@@ -73,7 +79,7 @@ impl TaskStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.tasks_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut tasks = load_json_vec::<TaskRecord>(&path).await?;
         match tasks.iter_mut().find(|t| t.id == task.id) {
@@ -85,7 +91,7 @@ impl TaskStore for FsOps {
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).tasks_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut tasks = load_json_vec::<TaskRecord>(&path).await?;
         let before = tasks.len();
@@ -130,7 +136,7 @@ impl UserStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.users_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut users = load_json_vec::<UserRecord>(&path).await?;
         // Email is unique per company: a second id holding one address would
@@ -154,7 +160,7 @@ impl UserStore for FsOps {
 
     async fn delete_user(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).users_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut users = load_json_vec::<UserRecord>(&path).await?;
         let before = users.len();
@@ -187,7 +193,7 @@ impl UserStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.user_invites_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut invites = load_json_vec::<InviteRecord>(&path).await?;
         if invites
@@ -208,7 +214,7 @@ impl UserStore for FsOps {
 
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).user_invites_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut invites = load_json_vec::<InviteRecord>(&path).await?;
         let before = invites.len();
@@ -231,7 +237,7 @@ impl SessionStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.user_sessions_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut sessions = load_json_vec::<SessionRecord>(&path).await?;
         // A repeated token hash would mean the CSPRNG repeated (or a caller
@@ -269,7 +275,7 @@ impl SessionStore for FsOps {
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).user_sessions_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut sessions = load_json_vec::<SessionRecord>(&path).await?;
         let before = sessions.len();
@@ -283,7 +289,7 @@ impl SessionStore for FsOps {
 
     async fn delete_for_user(&self, company: &CompanyId, user_id: &str) -> Result<u64> {
         let path = self.bundle(company).user_sessions_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut sessions = load_json_vec::<SessionRecord>(&path).await?;
         let before = sessions.len();
@@ -297,7 +303,7 @@ impl SessionStore for FsOps {
 
     async fn purge_expired(&self, company: &CompanyId, now_millis: u64) -> Result<u64> {
         let path = self.bundle(company).user_sessions_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut sessions = load_json_vec::<SessionRecord>(&path).await?;
         let before = sessions.len();
@@ -320,7 +326,7 @@ impl LoginCodeStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.login_codes_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut codes = load_json_vec::<LoginCodeRecord>(&path).await?;
         codes.push(code.clone());
@@ -351,7 +357,7 @@ impl LoginCodeStore for FsOps {
         // on one code cannot both mint a session. This holds within a process;
         // the fs backend is single-process by construction (one bundle, one
         // host), which is the same assumption every other fs store makes.
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut codes = load_json_vec::<LoginCodeRecord>(&path).await?;
         let Some(code) = codes
@@ -368,7 +374,7 @@ impl LoginCodeStore for FsOps {
 
     async fn delete_for_email(&self, company: &CompanyId, email: &str) -> Result<u64> {
         let path = self.bundle(company).login_codes_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut codes = load_json_vec::<LoginCodeRecord>(&path).await?;
         let before = codes.len();
@@ -382,7 +388,7 @@ impl LoginCodeStore for FsOps {
 
     async fn purge_expired(&self, company: &CompanyId, now_millis: u64) -> Result<u64> {
         let path = self.bundle(company).login_codes_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut codes = load_json_vec::<LoginCodeRecord>(&path).await?;
         let before = codes.len();
@@ -425,7 +431,7 @@ impl FactStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.facts_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut facts = dedup_latest(read_jsonl::<FactRecord>(&path).await?);
         match facts.iter_mut().find(|f| f.id == fact.id) {
@@ -437,7 +443,7 @@ impl FactStore for FsOps {
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).facts_jsonl();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut facts = dedup_latest(read_jsonl::<FactRecord>(&path).await?);
         let before = facts.len();
@@ -447,6 +453,396 @@ impl FactStore for FsOps {
         }
         rewrite_jsonl(&path, &facts).await?;
         Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ArtifactStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl ArtifactStore for FsOps {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        task_id: Option<&str>,
+    ) -> Result<Vec<ArtifactRecord>> {
+        let mut artifacts = dedup_latest(
+            read_jsonl::<ArtifactRecord>(&self.bundle(company).artifacts_jsonl()).await?,
+        );
+        if let Some(task_id) = task_id {
+            artifacts.retain(|a| a.task_id == task_id);
+        }
+        artifacts.sort_by_key(|a| std::cmp::Reverse(a.updated_at_millis));
+        Ok(artifacts)
+    }
+
+    async fn get(&self, company: &CompanyId, id: &str) -> Result<Option<ArtifactRecord>> {
+        let artifacts = dedup_latest(
+            read_jsonl::<ArtifactRecord>(&self.bundle(company).artifacts_jsonl()).await?,
+        );
+        Ok(artifacts.into_iter().find(|a| a.id == id))
+    }
+
+    async fn upsert(&self, company: &CompanyId, artifact: &ArtifactRecord) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.artifacts_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut artifacts = dedup_latest(read_jsonl::<ArtifactRecord>(&path).await?);
+        match artifacts.iter_mut().find(|a| a.id == artifact.id) {
+            Some(existing) => *existing = artifact.clone(),
+            None => artifacts.push(artifact.clone()),
+        }
+        rewrite_jsonl(&path, &artifacts).await
+    }
+
+    async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+        let path = self.bundle(company).artifacts_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut artifacts = dedup_latest(read_jsonl::<ArtifactRecord>(&path).await?);
+        let before = artifacts.len();
+        artifacts.retain(|a| a.id != id);
+        if artifacts.len() == before {
+            return Ok(false);
+        }
+        rewrite_jsonl(&path, &artifacts).await?;
+        Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WorkflowRevisionStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl WorkflowRevisionStore for FsOps {
+    async fn push_revision(
+        &self,
+        company: &CompanyId,
+        revision: &WorkflowRevisionRecord,
+    ) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.workflow_revisions_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut all = read_jsonl::<WorkflowRevisionRecord>(&path).await?;
+        all.push(revision.clone());
+        // Prune-to-cap for THIS workflow only, inside the lock so a reader never
+        // sees a 21-deep ring. Other workflows' snapshots are untouched.
+        prune_workflow_revisions(&mut all, &revision.workflow_id);
+        rewrite_jsonl(&path, &all).await
+    }
+
+    async fn list_revisions(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Result<Vec<WorkflowRevisionRecord>> {
+        let mut revs =
+            read_jsonl::<WorkflowRevisionRecord>(&self.bundle(company).workflow_revisions_jsonl())
+                .await?;
+        revs.retain(|r| r.workflow_id == workflow_id);
+        sort_revisions_newest_first(&mut revs);
+        Ok(revs)
+    }
+
+    async fn get_revision(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<WorkflowRevisionRecord>> {
+        let revs =
+            read_jsonl::<WorkflowRevisionRecord>(&self.bundle(company).workflow_revisions_jsonl())
+                .await?;
+        Ok(revs
+            .into_iter()
+            .find(|r| r.workflow_id == workflow_id && r.id == revision_id))
+    }
+
+    async fn delete_revisions(&self, company: &CompanyId, workflow_id: &str) -> Result<u64> {
+        let path = self.bundle(company).workflow_revisions_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut revs = read_jsonl::<WorkflowRevisionRecord>(&path).await?;
+        let before = revs.len();
+        revs.retain(|r| r.workflow_id != workflow_id);
+        let removed = (before - revs.len()) as u64;
+        if removed > 0 {
+            rewrite_jsonl(&path, &revs).await?;
+        }
+        Ok(removed)
+    }
+}
+
+/// Trims `all` so the workflow named by `workflow_id` keeps at most
+/// [`MAX_WORKFLOW_REVISIONS`] of its newest snapshots, leaving every other
+/// workflow's rows in place and in their original file order.
+fn prune_workflow_revisions(all: &mut Vec<WorkflowRevisionRecord>, workflow_id: &str) {
+    let mut mine: Vec<WorkflowRevisionRecord> = all
+        .iter()
+        .filter(|r| r.workflow_id == workflow_id)
+        .cloned()
+        .collect();
+    if mine.len() <= MAX_WORKFLOW_REVISIONS {
+        return;
+    }
+    sort_revisions_newest_first(&mut mine);
+    let keep: HashSet<String> = mine
+        .into_iter()
+        .take(MAX_WORKFLOW_REVISIONS)
+        .map(|r| r.id)
+        .collect();
+    all.retain(|r| r.workflow_id != workflow_id || keep.contains(&r.id));
+}
+
+// ---------------------------------------------------------------------------
+// RunStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl RunStore for FsOps {
+    async fn create_run(&self, company: &CompanyId, spec: NewRun) -> Result<RunRecord> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.runs_jsonl();
+        // The per-path lock is what makes read-max-then-write atomic. It is
+        // process-local — the documented fs-backend assumption everywhere in
+        // this file — which is why the port's `create_run` contract calls the
+        // filesystem ordinal best-effort rather than transactional.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut runs = dedup_latest(read_jsonl::<RunRecord>(&path).await?);
+        if runs.iter().any(|r| r.id == spec.id) {
+            return Err(OpenCompanyError::Conflict(format!(
+                "run '{}' already exists",
+                spec.id
+            )));
+        }
+        let attempt = runs
+            .iter()
+            .filter(|r| r.task_id == spec.task_id)
+            .map(|r| r.attempt)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let run = RunRecord {
+            id: spec.id,
+            company: company.clone(),
+            task_id: spec.task_id,
+            agent_id: spec.agent_id,
+            attempt,
+            status: RunStatus::Pending,
+            trigger_event_seq: None,
+            created_at_millis: now_millis(),
+            started_at_millis: None,
+            finished_at_millis: None,
+            error: None,
+            usage: Default::default(),
+            step_count: 0,
+        };
+        runs.push(run.clone());
+        rewrite_jsonl(&path, &runs).await?;
+        Ok(run)
+    }
+
+    async fn get_run(&self, company: &CompanyId, id: &str) -> Result<Option<RunRecord>> {
+        let runs = dedup_latest(read_jsonl::<RunRecord>(&self.bundle(company).runs_jsonl()).await?);
+        Ok(runs.into_iter().find(|r| r.id == id))
+    }
+
+    async fn put_run(&self, company: &CompanyId, run: &RunRecord) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.runs_jsonl();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut runs = dedup_latest(read_jsonl::<RunRecord>(&path).await?);
+        match runs.iter_mut().find(|r| r.id == run.id) {
+            Some(existing) => *existing = run.clone(),
+            None => runs.push(run.clone()),
+        }
+        rewrite_jsonl(&path, &runs).await
+    }
+
+    async fn list_runs(&self, company: &CompanyId, filter: &RunFilter) -> Result<Vec<RunRecord>> {
+        let mut runs =
+            dedup_latest(read_jsonl::<RunRecord>(&self.bundle(company).runs_jsonl()).await?);
+        runs.retain(|r| filter.matches(r));
+        sort_newest_first(&mut runs);
+        if let Some(limit) = filter.limit {
+            runs.truncate(limit);
+        }
+        Ok(runs)
+    }
+
+    async fn append_run_step(&self, company: &CompanyId, step: &RunStepRecord) -> Result<()> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.run_steps_jsonl();
+        let line = serde_json::to_string(step)?;
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        // A genuine append: the trace only ever grows, and a replayed
+        // `(run_id, step_seq)` is folded out at read time rather than by
+        // rewriting the whole file per step.
+        append_line(&path, &line).await
+    }
+
+    async fn list_run_steps(
+        &self,
+        company: &CompanyId,
+        run_id: &str,
+    ) -> Result<Vec<RunStepRecord>> {
+        let steps = read_jsonl::<RunStepRecord>(&self.bundle(company).run_steps_jsonl()).await?;
+        Ok(dedup_steps(steps, run_id))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+//
+// Function-local imports keep this a pure append to a file edited concurrently
+// on other branches (#274, #596).
+
+/// The filesystem-safe directory component for `schedule_id`: its lowercase-hex
+/// SHA-256. Hashing means an id the store did not mint (a `workflow-<id>` whose
+/// `<id>` a console author chose) can never become a path component — the rule
+/// [`Bundle::runs_jsonl`] documents for run ids.
+fn hashed_schedule_component(schedule_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(schedule_id.as_bytes());
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write;
+        // Infallible: writing to a String never fails.
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
+}
+
+#[async_trait]
+impl crate::ports::schedule_fires::ScheduleFireStore for FsOps {
+    async fn claim_fire(
+        &self,
+        company: &CompanyId,
+        schedule_id: &str,
+        minute: u64,
+    ) -> Result<bool> {
+        let dir = self
+            .bundle(company)
+            .schedule_fires_dir()
+            .join(hashed_schedule_component(schedule_id));
+        let marker = dir.join(minute.to_string());
+        // `create_new` is `O_EXCL`: the OS refuses to open the file if it
+        // already exists, so the *first* caller to reach an unclaimed minute is
+        // the only one whose open succeeds. That is the whole claim — no lock,
+        // no read-then-write window. Single-node only: `O_EXCL` is not
+        // trustworthy on NFS, which is why the hosted path runs mongodb.
+        let claimed_at = now_millis();
+        tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            if let Err(e) = std::fs::create_dir_all(&dir) {
+                return Err(io_err(&dir, e));
+            }
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&marker)
+            {
+                Ok(mut file) => {
+                    // The claimed-at stamp is debug only, never part of the key;
+                    // a write failure here does not un-claim the instant, so it
+                    // is deliberately not propagated as a lost claim.
+                    let _ = file.write_all(claimed_at.to_string().as_bytes());
+                    Ok(true)
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(false),
+                Err(e) => Err(io_err(&marker, e)),
+            }
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
+
+    async fn latest_fire(&self, company: &CompanyId, schedule_id: &str) -> Result<Option<u64>> {
+        let dir = self
+            .bundle(company)
+            .schedule_fires_dir()
+            .join(hashed_schedule_component(schedule_id));
+        tokio::task::spawn_blocking(move || {
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // No directory means the schedule has never fired — the fresh
+                // install case, which is "no anchor", not an error.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(e) => return Err(io_err(&dir, e)),
+            };
+            let mut max: Option<u64> = None;
+            for entry in entries {
+                let entry = entry.map_err(|e| io_err(&dir, e))?;
+                // A marker filename that does not parse as a minute is not one of
+                // ours; skip it rather than failing the read.
+                if let Some(minute) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u64>().ok())
+                {
+                    max = Some(max.map_or(minute, |m| m.max(minute)));
+                }
+            }
+            Ok(max)
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
+
+    async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize> {
+        let root = self.bundle(company).schedule_fires_dir();
+        tokio::task::spawn_blocking(move || {
+            let schedules = match std::fs::read_dir(&root) {
+                Ok(entries) => entries,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(io_err(&root, e)),
+            };
+            let mut removed = 0usize;
+            for schedule in schedules {
+                let schedule_dir = schedule.map_err(|e| io_err(&root, e))?.path();
+                let markers = match std::fs::read_dir(&schedule_dir) {
+                    Ok(entries) => entries,
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                    Err(e) => return Err(io_err(&schedule_dir, e)),
+                };
+                for marker in markers {
+                    let marker = marker.map_err(|e| io_err(&schedule_dir, e))?;
+                    let Some(minute) = marker
+                        .file_name()
+                        .to_str()
+                        .and_then(|name| name.parse::<u64>().ok())
+                    else {
+                        continue;
+                    };
+                    if minute < cutoff_minute {
+                        let path = marker.path();
+                        match std::fs::remove_file(&path) {
+                            Ok(()) => removed += 1,
+                            // A racing prune already removed it — not our removal
+                            // to count, but not an error either.
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                            Err(e) => return Err(io_err(&path, e)),
+                        }
+                    }
+                }
+            }
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
     }
 }
 
@@ -461,7 +857,7 @@ impl UsageMeter for FsOps {
         bundle.ensure_dirs().await?;
         let path = bundle.usage_jsonl();
         let line = serde_json::to_string(sample)?;
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         append_line(&path, &line).await?;
         // Retention: compact `usage.jsonl` in place when it holds samples older
@@ -505,7 +901,7 @@ impl SkillStateStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.skills_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut states = load_json_vec::<SkillState>(&path).await?;
         match states.iter_mut().find(|s| s.slug == state.slug) {
@@ -517,7 +913,7 @@ impl SkillStateStore for FsOps {
 
     async fn remove(&self, company: &CompanyId, slug: &str) -> Result<bool> {
         let path = self.bundle(company).skills_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut states = load_json_vec::<SkillState>(&path).await?;
         let before = states.len();
@@ -555,9 +951,15 @@ impl WorkspaceStore for FsOps {
         Ok(Some((node, content)))
     }
 
-    async fn write(&self, company: &CompanyId, id: &str, content: &str) -> Result<WorkspaceNode> {
+    async fn write(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        content: &str,
+        author: WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
         let path = self.bundle(company).workspace_index_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut index = self.load_index(company).await?;
         let node = index
@@ -569,6 +971,9 @@ impl WorkspaceStore for FsOps {
             ));
         }
         node.updated_at_millis = now_millis();
+        // Authorship rides the same stamp as the timestamp: "when the body last
+        // changed" and "who changed it" are one fact and must never drift apart.
+        node.updated_by = author;
         let node = node.clone();
         let file = self.physical_path(company, &index, id)?;
         if let Some(parent) = file.parent() {
@@ -593,7 +998,7 @@ impl WorkspaceStore for FsOps {
         let bundle = self.bundle(company);
         bundle.ensure_dirs().await?;
         let path = bundle.workspace_index_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut index = self.load_index(company).await?;
         if index.contains_key(&node.id) {
@@ -650,7 +1055,7 @@ impl WorkspaceStore for FsOps {
             reject_unsafe_name(name)?;
         }
         let path = self.bundle(company).workspace_index_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut index = self.load_index(company).await?;
         if !index.contains_key(id) {
@@ -703,7 +1108,7 @@ impl WorkspaceStore for FsOps {
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).workspace_index_json();
-        let lock = self.locks.get(&path);
+        let lock = path_lock(&path);
         let _guard = lock.lock().await;
         let mut index = self.load_index(company).await?;
         if !index.contains_key(id) {
@@ -833,15 +1238,63 @@ where
     Ok(serde_json::from_str(&contents)?)
 }
 
-/// Keeps the last record per id (last-write-wins), preserving first-seen order.
-fn dedup_latest(records: Vec<FactRecord>) -> Vec<FactRecord> {
-    let mut order: Vec<String> = Vec::new();
-    let mut by_id: HashMap<String, FactRecord> = HashMap::new();
-    for record in records {
-        if !by_id.contains_key(&record.id) {
-            order.push(record.id.clone());
+/// Something a JSONL log keys its last-write-wins dedupe on.
+///
+/// Kept as a trait rather than a closure so [`dedup_latest`] reads identically
+/// at every call site; the two implementors below are the only record types
+/// stored in an id-keyed JSONL log.
+trait HasId {
+    fn record_id(&self) -> &str;
+}
+
+impl HasId for FactRecord {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl HasId for ArtifactRecord {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+impl HasId for RunRecord {
+    fn record_id(&self) -> &str {
+        &self.id
+    }
+}
+
+/// Folds a raw `run-steps.jsonl` read down to one run's trace: the last record
+/// per `step_seq`, oldest first.
+///
+/// Steps are appended, never rewritten, so a replayed append leaves two lines
+/// with the same `(run_id, step_seq)`. Keeping the later one makes an append
+/// idempotent — the same guarantee the sqlite and MongoDB backends get from
+/// their composite primary key.
+fn dedup_steps(steps: Vec<RunStepRecord>, run_id: &str) -> Vec<RunStepRecord> {
+    let mut by_seq: HashMap<u32, RunStepRecord> = HashMap::new();
+    for step in steps {
+        if step.run_id != run_id {
+            continue;
         }
-        by_id.insert(record.id.clone(), record);
+        by_seq.insert(step.step_seq, step);
+    }
+    let mut out: Vec<RunStepRecord> = by_seq.into_values().collect();
+    out.sort_by_key(|s| s.step_seq);
+    out
+}
+
+/// Keeps the last record per id (last-write-wins), preserving first-seen order.
+fn dedup_latest<T: HasId>(records: Vec<T>) -> Vec<T> {
+    let mut order: Vec<String> = Vec::new();
+    let mut by_id: HashMap<String, T> = HashMap::new();
+    for record in records {
+        let id = record.record_id().to_string();
+        if !by_id.contains_key(&id) {
+            order.push(id.clone());
+        }
+        by_id.insert(id, record);
     }
     order
         .into_iter()
@@ -871,76 +1324,136 @@ mod test {
     use crate::store::conformance;
     use std::sync::Arc;
 
-    fn tmp_root() -> PathBuf {
-        std::env::temp_dir().join(format!("opencompany-fsops-{}", crate::ports::generate_id()))
+    fn tmp_root() -> tempfile::TempDir {
+        tempfile::Builder::new()
+            .prefix("opencompany-fsops-")
+            .tempdir()
+            .expect("tempdir")
     }
 
     #[tokio::test]
     async fn conformance_task_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_task_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_user_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_user_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_session_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_session_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_login_code_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_login_code_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_fact_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_fact_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
+        conformance::assert_artifact_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_run_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_workflow_revision_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workflow_revision_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_run_reaper() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_run_reaper(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_schedule_fire_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_schedule_fire_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    /// A fresh `FsOps` over the same root sees a prior instance's claims (issue
+    /// #241): the durable record is on disk, so the anchor survives the process
+    /// restart that motivated the whole port. Proves the fs backend's marker
+    /// files are read back, not just written.
+    #[tokio::test]
+    async fn schedule_fire_claim_survives_a_new_fsops_over_the_same_root() {
+        use crate::ports::schedule_fires::ScheduleFireStore;
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let company = crate::ports::types::CompanyId::new("acme");
+
+        let first = FsOps::new(&root);
+        assert!(first.claim_fire(&company, "workflow-x", 42).await.unwrap());
+
+        // A brand-new store over the same root — the shape a restart produces.
+        let second = FsOps::new(&root);
+        assert!(
+            !second.claim_fire(&company, "workflow-x", 42).await.unwrap(),
+            "a restart must see the earlier claim and lose the repeat"
+        );
+        assert_eq!(
+            second.latest_fire(&company, "workflow-x").await.unwrap(),
+            Some(42),
+            "the anchor is durable across a new instance"
+        );
     }
 
     #[tokio::test]
     async fn conformance_usage_meter() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_usage_meter(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_usage_retention() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_usage_retention(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_skill_state_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_skill_state_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn conformance_workspace_store() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         conformance::assert_workspace_store(Arc::new(FsOps::new(&root))).await;
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 
     #[tokio::test]
     async fn workspace_files_land_on_disk_under_folders() {
-        let root = tmp_root();
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
         let ops = FsOps::new(&root);
         let company = CompanyId::new("acme");
         let now = now_millis();
@@ -955,6 +1468,8 @@ mod test {
                 kind: NodeKind::Folder,
                 parent_id: None,
                 updated_at_millis: now,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
             },
             None,
         )
@@ -969,6 +1484,8 @@ mod test {
                 kind: NodeKind::File,
                 parent_id: Some("f1".into()),
                 updated_at_millis: now,
+                created_by: WorkspaceOrigin::Operator,
+                updated_by: WorkspaceOrigin::Operator,
             },
             Some("# Voice"),
         )
@@ -986,6 +1503,5 @@ mod test {
         assert!(!tokio::fs::try_exists(&disk).await.unwrap());
 
         let _ = (FactKind::Fact, SkillSource::Company, SampleKind::Inference);
-        tokio::fs::remove_dir_all(&root).await.ok();
     }
 }

@@ -9,10 +9,23 @@
 //! [`name()`](openhuman_core::openhuman::tools::Tool::name). A `tool_call` node's
 //! `slug` selects one by name.
 //!
+//! It also wires the metered `search` family (`web_search`) — the discovery tool
+//! the `web` namespace never had (`web_fetch` / `http_request` / `curl` only read
+//! a URL the agent already has) — on the same two gates the agent builder uses
+//! ([`crate::harness::build::build_agent`]): an **explicit** `search` grant
+//! (`grants_search_explicit`; the catch-all `*` never confers it, because each
+//! call is a priced managed request) AND a managed search backend on the deps.
+//! Granted-but-uncredentialed wires nothing and warns, so `web_search` degrades
+//! gracefully when no managed credential is configured (fail-closed).
+//!
 //! Every invocation is **fail-closed**: the slug's grant namespace (via
 //! [`toolbelt::namespace_of`]) must be covered by the company's `[tools].allow`
 //! globs — reusing the exact grant-intersection rule an agent's exec tools use
-//! ([`crate::harness::build::grants_cover`]) — before the tool is even looked up.
+//! ([`crate::harness::build::grants_cover`]) — before the tool is even looked
+//! up. The one exception is the priced `search` namespace, which requires an
+//! **explicit** `search` grant (`grants_search_explicit`) rather than glob
+//! coverage, so `*` never buys a managed search call and the invoke-time gate
+//! matches construction.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -27,10 +40,27 @@ use oh::security::SecurityPolicy;
 use oh::tools::{Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
+use crate::harness::search::{SearchBackend, SearchMetering};
 use crate::harness::toolbelt::{self, CapabilityFilter};
 
-/// A [`ToolInvoker`] over the Cell A toolbelt, scoped to a per-company workflow
-/// workspace and gated by the company's `[tools].allow` grants.
+/// The grant namespaces a workflow `tool_call` can actually reach — the exec
+/// belt (`shell` / `code` / `web`) plus the metered `search` family, exactly what
+/// [`WorkflowToolInvoker::new`] wires.
+///
+/// It is deliberately a STRICT subset of
+/// [`GATEABLE_NAMESPACES`](crate::company::GATEABLE_NAMESPACES): `media` and
+/// `composio` map to a namespace via [`toolbelt::namespace_of`] but are
+/// agent-turn tool families this invoker never builds, and `subagent` is not a
+/// toolbelt tool at all. A slug in one of those namespaces would pass
+/// [`invoke`](WorkflowToolInvoker::invoke)'s grant gate and then ALWAYS miss the
+/// tool lookup. Author-time validation (`validate_tool_call_node`) rejects any
+/// slug whose namespace falls outside this set, so a save can't green-light a
+/// slug the run would always fail to look up — keep the two in lockstep.
+pub(crate) const WORKFLOW_TOOL_NAMESPACES: [&str; 4] = ["shell", "code", "web", "search"];
+
+/// A [`ToolInvoker`] over the Cell A toolbelt (plus the metered `search` family),
+/// scoped to a per-company workflow workspace and gated by the company's
+/// `[tools].allow` grants.
 pub struct WorkflowToolInvoker {
     /// The wired toolbelt tools, indexed by runtime `name()` (== the node slug).
     tools: HashMap<String, Arc<dyn Tool>>,
@@ -48,6 +78,8 @@ impl WorkflowToolInvoker {
         web_allowed_domains: Vec<String>,
         grants: Vec<String>,
         filter: &CapabilityFilter,
+        search: Option<&SearchBackend>,
+        search_metering: SearchMetering,
     ) -> Self {
         // Mirror `build_agent`: do not initialize a tool family (or its audit
         // state) unless the company's grants can invoke that namespace.
@@ -70,6 +102,30 @@ impl WorkflowToolInvoker {
                 workspace,
             ));
         }
+        // Metered web search (issue #238) — mirror `build_agent`'s two-gate
+        // wiring exactly: an EXPLICIT `search` grant (`grants_search_explicit`;
+        // the catch-all `*` never confers it, because each call is a priced
+        // managed request) AND a managed search backend on the deps. Granted-but-
+        // uncredentialed wires nothing and warns, so `web_search` degrades
+        // gracefully when no managed credential is configured (fail-closed).
+        if crate::company::grants_search_explicit(&grants) {
+            match search {
+                Some(backend) => {
+                    tools.extend(crate::harness::search::search_tools(
+                        backend,
+                        search_metering,
+                    ));
+                }
+                None => tracing::warn!(
+                    "[workflow] company explicitly grants `search` but no managed search backend \
+                     is configured; web_search NOT wired (fail-closed)"
+                ),
+            }
+        }
+        // The namespaces wired above (shell / code / web / search) are the
+        // canonical [`WORKFLOW_TOOL_NAMESPACES`] set author-time validation gates
+        // tool_call slugs against — a family added here must be added there too.
+        //
         // Apply the capability-tier filter (identity in production) just as the
         // agent builder does, so the workflow surface never exceeds the agent one.
         let tools = toolbelt::filter_by_capabilities(tools, filter);
@@ -93,19 +149,25 @@ impl ToolInvoker for WorkflowToolInvoker {
     /// real connection is a documented follow-on.
     async fn invoke(&self, slug: &str, args: Value, _conn: Option<&str>) -> TfResult<Value> {
         // FAIL-CLOSED grant check FIRST, before any lookup or execution.
-        match toolbelt::namespace_of(slug) {
-            Some(namespace) if crate::harness::build::grants_cover(&self.grants, namespace) => {}
-            Some(namespace) => {
-                return Err(EngineError::Capability(format!(
-                    "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's \
-                     [tools].allow"
-                )));
-            }
-            None => {
-                return Err(EngineError::Capability(format!(
-                    "tool_call '{slug}' is not a wired workflow tool"
-                )));
-            }
+        let Some(namespace) = toolbelt::namespace_of(slug) else {
+            return Err(EngineError::Capability(format!(
+                "tool_call '{slug}' is not a wired workflow tool"
+            )));
+        };
+        // The priced `search` namespace needs an EXPLICIT `search` grant — the
+        // catch-all `*` must never confer a managed search call — so this gate
+        // matches the construction gate in `new` (and `build::build_agent`).
+        // Every other namespace uses the ordinary grant-glob intersection.
+        let granted = if namespace == "search" {
+            crate::company::grants_search_explicit(&self.grants)
+        } else {
+            crate::harness::build::grants_cover(&self.grants, namespace)
+        };
+        if !granted {
+            return Err(EngineError::Capability(format!(
+                "tool_call '{slug}' (namespace '{namespace}') is not granted by this company's \
+                 [tools].allow"
+            )));
         }
 
         let tool = self.tools.get(slug).ok_or_else(|| {
@@ -192,6 +254,33 @@ mod tests {
     }
 
     #[test]
+    fn the_search_namespace_requires_an_explicit_grant_not_a_wildcard() {
+        use tinyflows::caps::ToolInvoker;
+        // `*` covers ordinary namespaces but must NOT confer the priced `search`
+        // family — the invoke-time gate mirrors construction (build.rs).
+        let wildcard = WorkflowToolInvoker {
+            tools: HashMap::new(),
+            grants: vec!["*".to_string()],
+        };
+        let denied = tokio_test_block_on(wildcard.invoke("web_search", json!({}), None));
+        assert!(
+            matches!(denied, Err(EngineError::Capability(ref m)) if m.contains("not granted")),
+            "{denied:?}"
+        );
+        // An explicit `search` grant passes the gate; the empty tool map then
+        // fails the lookup with a different, later error.
+        let granted = WorkflowToolInvoker {
+            tools: HashMap::new(),
+            grants: vec!["search".to_string()],
+        };
+        let looked_up = tokio_test_block_on(granted.invoke("web_search", json!({}), None));
+        assert!(
+            matches!(looked_up, Err(EngineError::Capability(ref m)) if m.contains("not available")),
+            "{looked_up:?}"
+        );
+    }
+
+    #[test]
     fn construction_only_initializes_granted_tool_families() {
         let dir = tempfile::tempdir().unwrap();
         let security = Arc::new(toolbelt::exec_security(
@@ -205,6 +294,8 @@ mod tests {
             Vec::new(),
             Vec::new(),
             &CapabilityFilter::AllowAll,
+            None,
+            test_metering(),
         );
         assert!(none.tools.is_empty());
 
@@ -214,11 +305,73 @@ mod tests {
             Vec::new(),
             vec!["code.*".to_string()],
             &CapabilityFilter::AllowAll,
+            None,
+            test_metering(),
         );
         assert!(code.tools.contains_key("apply_patch"));
         assert!(code.tools.contains_key("csv_export"));
         assert!(!code.tools.contains_key("shell"));
         assert!(!code.tools.contains_key("web_fetch"));
+    }
+
+    #[test]
+    fn search_wires_only_with_an_explicit_grant_and_a_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let security = Arc::new(toolbelt::exec_security(
+            dir.path(),
+            crate::harness::policy::PolicyMode::Supervised,
+        ));
+        let backend = SearchBackend::new(
+            "https://api.example.test".to_string(),
+            crate::company::credentials::Credential::from_value("managed"),
+            5,
+        );
+
+        // Explicit `search` grant + a backend → the metered `web_search` is wired.
+        let wired = WorkflowToolInvoker::new(
+            security.clone(),
+            dir.path(),
+            Vec::new(),
+            vec!["search".to_string()],
+            &CapabilityFilter::AllowAll,
+            Some(&backend),
+            test_metering(),
+        );
+        assert!(wired.tools.contains_key("web_search"));
+
+        // The catch-all `*` must NOT confer the priced search family.
+        let wildcard = WorkflowToolInvoker::new(
+            security.clone(),
+            dir.path(),
+            Vec::new(),
+            vec!["*".to_string()],
+            &CapabilityFilter::AllowAll,
+            Some(&backend),
+            test_metering(),
+        );
+        assert!(!wildcard.tools.contains_key("web_search"));
+
+        // Granted but uncredentialed wires nothing (fail-closed) rather than panicking.
+        let uncredentialed = WorkflowToolInvoker::new(
+            security,
+            dir.path(),
+            Vec::new(),
+            vec!["search".to_string()],
+            &CapabilityFilter::AllowAll,
+            None,
+            test_metering(),
+        );
+        assert!(!uncredentialed.tools.contains_key("web_search"));
+    }
+
+    /// A throwaway [`SearchMetering`] for the construction tests — the tool is
+    /// never executed here, so the company/agent/meter values are inert.
+    fn test_metering() -> SearchMetering {
+        SearchMetering {
+            company: crate::ports::types::CompanyId::new("test"),
+            agent: "workflow:test".to_string(),
+            meter: None,
+        }
     }
 
     /// Minimal blocking bridge so the fail-closed checks (which never touch the

@@ -21,6 +21,16 @@ pub const BUILTIN_UNINSTALL: &str =
 pub const MANIFEST_TEAMMATE_DELETE: &str =
     "This teammate is part of your company's blueprint and can't be removed here.";
 
+/// Error shown when a write tries to edit a teammate defined in the manifest
+/// (issue #264). Says where the edit belongs, because the answer is not "you
+/// may not" but "not from here" — the blueprint is version-controlled, and the
+/// one thing the console can change on such a teammate is its daily budget,
+/// which is stored as an override rather than as a rewrite.
+pub const MANIFEST_TEAMMATE_EDIT: &str = concat!(
+    "This teammate is part of your company's blueprint. ",
+    "Edit it in company.toml and redeploy; its daily budget can still be changed here.",
+);
+
 /// Error shown when a write tries to remove a desk member defined in the
 /// manifest (only operator-added members can be removed at runtime).
 pub const MANIFEST_DESK_MEMBER_DELETE: &str =
@@ -37,10 +47,8 @@ pub const WORKSPACE_CYCLE: &str = "You can't move a folder into itself.";
 /// Error shown when a custom skill is missing its required fields.
 pub const SKILL_FIELDS_REQUIRED: &str = "A skill needs a name and a description.";
 
-/// Error shown when creating a workflow on a deployment with no writable
-/// company source directory (hosted/platform mode without one provisioned).
-pub const WORKFLOW_NEEDS_SOURCE_DIR: &str =
-    "Workflow creation needs a company source directory, and this deployment doesn't have one yet.";
+/// Error shown when an install names a slug the shared skill library lacks.
+pub const SKILL_NOT_IN_REGISTRY: &str = "That skill isn't in the registry.";
 
 /// Error shown when a workflow id is not safe to use as a filename.
 pub const WORKFLOW_ID_INVALID: &str =

@@ -79,7 +79,15 @@ fn unauthorized() -> Response {
 }
 
 /// Requires a live session whose user is an admin of this company.
-async fn require_admin(
+///
+/// Shared beyond this module (issue #343: the team budget writes) so "who may
+/// administer this company" is decided in exactly one place. Note what it
+/// resolves through: [`current_user`] yields a principal only for a **human**
+/// session, so a platform/tenant bearer — a machine credential — is not an
+/// admin here and is refused as unauthenticated. That is the same "no operator
+/// break-glass" doctrine this module's header states, and it is what makes the
+/// attribution recorded by callers a real person rather than a token.
+pub(crate) async fn require_admin(
     headers: &HeaderMap,
     state: &AppState,
     runtime: &CompanyRuntime,
@@ -165,7 +173,7 @@ async fn list_invites(
         .list_users(runtime.id())
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    let synthetic = manifest_admin_invites(&runtime, now)
+    let synthetic = manifest_admin_invites(state.config(), &runtime, now)
         .await
         .map_err(|e| ApiError(e).into_response())?;
     for invite in synthetic {
@@ -241,12 +249,21 @@ async fn revoke_invite(
     let runtime = company.runtime.clone();
     require_admin(&headers, &state, &runtime).await?;
     let invite_id = params.get("invite_id").cloned().unwrap_or_default();
-    // A manifest admin has no stored invite; revoking it would be a lie, since
-    // the manifest would re-grant on the next login.
+    // A bootstrapped admin has no stored invite; revoking it would be a lie,
+    // since its source would re-grant on the next login. The two sources are
+    // withdrawn in different places, so say which one this row came from.
     if invite_id.starts_with("manifest:") {
         return Err(ApiError(OpenCompanyError::InvalidRequest(
             "this admin comes from the company manifest; remove them from \
              [users].admins there instead"
+                .to_string(),
+        ))
+        .into_response());
+    }
+    if invite_id.starts_with("platform:") {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "this admin comes from the deployment's OPENCOMPANY_ADMIN_EMAIL; \
+             unset it there instead"
                 .to_string(),
         ))
         .into_response());

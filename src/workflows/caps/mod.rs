@@ -12,8 +12,9 @@
 //!   [`OcMemory`](crate::harness::memory), approval policy, and cost metering.
 //! * **tool_call** ([`WorkflowToolInvoker`](tools::WorkflowToolInvoker)) — a
 //!   `tool_call` node executes a real Cell A toolbelt tool (`shell` / `code` /
-//!   `web`) scoped to a dedicated per-company workflow workspace, fail-closed on
-//!   the company's `[tools].allow` grants.
+//!   `web`, plus the metered `search` family behind an explicit `search` grant)
+//!   scoped to a dedicated per-company workflow workspace, fail-closed on the
+//!   company's `[tools].allow` grants.
 //! * **http_request** ([`GuardedHttpClient`](http::GuardedHttpClient)) — an
 //!   `http_request` node routes through OpenHuman's `HttpRequestTool` so every
 //!   request (and redirect) passes the upstream `url_guard` SSRF check.
@@ -26,17 +27,26 @@
 //!
 //! * **sub_workflow** ([`StoreWorkflowResolver`](resolver::StoreWorkflowResolver))
 //!   — a `sub_workflow` node referencing a child by `workflow_id` resolves it
-//!   from the company's on-disk `workflows/` directory (full validation + a
-//!   static cycle guard), when a source directory is wired
-//!   ([`HarnessDeps::workflow_source_dir`](crate::harness::HarnessDeps)). A
-//!   platform-provisioned tenant with no source directory keeps the
-//!   [`UnwiredResolver`] stub.
+//!   from the union of the company's seed `workflows/` directory
+//!   ([`HarnessDeps::workflow_source_dir`](crate::harness::HarnessDeps)) and the
+//!   record's runtime-authored graph bodies (full validation + a static cycle
+//!   guard). A platform-provisioned tenant has no source directory, so every
+//!   child it owns resolves from the record.
 //!
 //! Still **not wired**: the bare-completion `LlmProvider` fallback and `code`
 //! nodes. They are explicit stubs that return a clear capability error rather
 //! than a silent no-op, so a workflow that reaches one fails loudly; a workflow
 //! that never reaches one is unaffected.
+//!
+//! Also not wired, and for a different reason: **memory**, which tinyflows 0.6
+//! added with the #499 pin bump. The other two are unbuilt; this one is
+//! *undecided*. A `MemoryProvider` would give a workflow read and **write**
+//! access to agent memory, and which scopes a workflow may touch has not been
+//! settled — so it is left `None` until it is, and
+//! [`the_memory_capability_is_left_unwired_on_purpose`](tests) pins that so the
+//! answer has to be given rather than defaulted into.
 
+mod dry_run;
 mod http;
 mod resolver;
 mod state;
@@ -47,10 +57,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_json::{Value, json};
 use tinyflows::caps::{
-    AgentRunner, Capabilities, CodeLanguage, CodeRunner, LlmProvider, StateStore, WorkflowResolver,
+    AgentRunner, Capabilities, CodeLanguage, CodeRunner, HttpClient, LlmProvider, StateStore,
+    ToolInvoker, WorkflowResolver,
 };
 use tinyflows::error::{EngineError, Result as TfResult};
-use tinyflows::model::WorkflowGraph;
 
 use crate::harness::policy::PolicyMode;
 use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
@@ -59,7 +69,19 @@ use crate::ports::types::{CompanyId, CompanyRecord};
 use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
+pub(crate) use self::tools::WORKFLOW_TOOL_NAMESPACES;
 use self::tools::WorkflowToolInvoker;
+
+/// The four effectful capability slots [`build_capabilities`] chooses by mode:
+/// `tool_call`, `http_request`, `state`, and the optional `agent` runner. The
+/// dry and live branches each build one of these; the read-only `resolver` and
+/// the always-stub `llm`/`code`/`memory` slots are assembled outside it.
+type EffectSlots = (
+    Arc<dyn ToolInvoker>,
+    Arc<dyn HttpClient>,
+    Arc<dyn StateStore>,
+    Option<Arc<dyn AgentRunner>>,
+);
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
 ///
@@ -74,82 +96,156 @@ use self::tools::WorkflowToolInvoker;
 ///
 /// `pool`/`deps` are shared with the rest of the harness surface — the roster the
 /// agent nodes address is the one already resident in `pool`.
+///
+/// `run_request` is the operator's topic for this run (issue #154), threaded to
+/// the agent capability so every agent node's turn message carries what was
+/// actually asked, not just the node's authored instruction.
+///
+/// `dry_run` (issue #542) selects the **mode**, one assembly point so the two
+/// bundles cannot drift. When `true`, every *effectful* slot is a stub from
+/// [`dry_run`]: the agent echoes with no inference, `tool_call` keeps its
+/// fail-closed grant check but executes nothing, `http_request` sends nothing,
+/// and `state` is [`NoopState`] rather than the durable
+/// [`CompanyStateStore`](state::CompanyStateStore). The read-only `resolver`
+/// stays real in both modes, so a `sub_workflow` child runs under this same
+/// bundle and a dry run propagates into it. The per-run workspace, exec-security
+/// policy and search backend are not built at all for a dry run — nothing needs
+/// them. Because every effect is stubbed, a future node kind cannot reach a real
+/// effect through a dry bundle: the engine only calls what is on the bundle.
 pub async fn build_capabilities(
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
+    run_request: Option<String>,
+    dry_run: bool,
 ) -> Capabilities {
     let company = record.id.clone();
     let mode = PolicyMode::parse(&record.manifest.policy.mode);
-    let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
-    if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
-        tracing::warn!(
-            company = %company,
-            workspace = %workflow_ws.display(),
-            %err,
-            "workflow: could not create the per-run workspace"
-        );
-    }
-
-    // ONE exec-security policy shared by the tool_call toolbelt and the
-    // http_request client, sandboxed to the workflow workspace with the
-    // company's autonomy tier — exactly the shape a roster agent's exec tools get.
-    let exec_security = Arc::new(toolbelt::exec_security(&workflow_ws, mode));
-    let web_allowed_domains = record.manifest.tools.web_allowed_domains.clone();
     let grants = record.manifest.tools.allow.clone();
 
-    let tools = WorkflowToolInvoker::new(
-        exec_security.clone(),
-        &workflow_ws,
-        web_allowed_domains.clone(),
-        grants,
-        &deps.capabilities,
-    );
-    let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
+    // sub_workflow-by-id resolves children from the union of the company's seed
+    // `workflows/` directory and the record's runtime-authored bodies — so a
+    // platform tenant with no source dir still resolves the workflows it
+    // created (issue #168). Read before `deps` may move into the agent runner.
+    // REAL in both modes: it is a read, and a dry sub_workflow child runs under
+    // this same (dry) bundle, so dry propagates rather than stopping here.
+    let resolver: Arc<dyn WorkflowResolver> = Arc::new(StoreWorkflowResolver::new(
+        deps.workflow_source_dir.clone(),
+        deps.store.clone(),
+        company.clone(),
+        workflow_id.to_string(),
+    ));
 
-    // Durable run state over the per-company secret store, namespaced by
-    // workflow id. `None` (default/tests) keeps the inert no-op with a warning —
-    // no node OpenCompany emits reads state in P1, so this never blocks a run.
-    let state: Arc<dyn StateStore> = match &deps.secrets {
-        Some(secrets) => Arc::new(CompanyStateStore::new(
-            secrets.clone(),
-            company.clone(),
-            workflow_id.to_string(),
-        )),
-        None => {
+    // The four effectful slots, chosen by mode at this one point.
+    let (tools, http, state, agent): EffectSlots = if dry_run {
+        // DRY: stub every effect. No workspace mkdir, no exec-security, no pool
+        // routing, no secret store. The grant check is KEPT (pure) so an
+        // ungranted `tool_call` refuses identically; state is the inert no-op so
+        // a dry run cannot persist either.
+        tracing::debug!(
+            company = %company,
+            workflow = workflow_id,
+            "workflow: building DRY capability bundle — no real effects will run"
+        );
+        (
+            Arc::new(dry_run::DryRunTools::new(grants)),
+            Arc::new(dry_run::DryRunHttp),
+            Arc::new(NoopState),
+            Some(Arc::new(dry_run::DryRunAgent)),
+        )
+    } else {
+        let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
+        if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
             tracing::warn!(
                 company = %company,
-                workflow = workflow_id,
-                "workflow: no secret store wired; run state is a no-op (deliberate — no P1 node uses it)"
+                workspace = %workflow_ws.display(),
+                %err,
+                "workflow: could not create the per-run workspace"
             );
-            Arc::new(NoopState)
         }
-    };
 
-    // sub_workflow-by-id resolves children from the company's on-disk
-    // `workflows/` directory when a source dir is wired; a platform tenant with
-    // none keeps the loud stub. Read before `deps` moves into the agent runner.
-    let resolver: Arc<dyn WorkflowResolver> = match &deps.workflow_source_dir {
-        Some(source_dir) => Arc::new(StoreWorkflowResolver::new(
-            source_dir.clone(),
-            workflow_id.to_string(),
-        )),
-        None => Arc::new(UnwiredResolver),
+        // ONE exec-security policy shared by the tool_call toolbelt and the
+        // http_request client, sandboxed to the workflow workspace with the
+        // company's autonomy tier — exactly the shape a roster agent's exec
+        // tools get.
+        let exec_security = Arc::new(toolbelt::exec_security(&workflow_ws, mode));
+        let web_allowed_domains = record.manifest.tools.web_allowed_domains.clone();
+
+        // The metered `search` family is threaded through the invoker the same
+        // way `build_agent` wires it onto a roster agent — explicit `search`
+        // grant + managed backend, fail-closed. Read `deps.search` / `deps.meter`
+        // here, before `deps` moves into `HarnessAgentRunner` below. The agent
+        // label names the run so a search sample is attributed to the workflow,
+        // not a chat turn.
+        let search_metering = crate::harness::search::SearchMetering {
+            company: company.clone(),
+            agent: format!("workflow:{workflow_id}"),
+            meter: deps.meter.clone(),
+        };
+        let tools = WorkflowToolInvoker::new(
+            exec_security.clone(),
+            &workflow_ws,
+            web_allowed_domains.clone(),
+            grants,
+            &deps.capabilities,
+            deps.search.as_ref(),
+            search_metering,
+        );
+        let http = GuardedHttpClient::new(exec_security, web_allowed_domains);
+
+        // Durable run state over the per-company secret store, namespaced by
+        // workflow id. `None` (default/tests) keeps the inert no-op with a
+        // warning — no node OpenCompany emits reads state in P1, so this never
+        // blocks a run.
+        let state: Arc<dyn StateStore> = match &deps.secrets {
+            Some(secrets) => Arc::new(CompanyStateStore::new(
+                secrets.clone(),
+                company.clone(),
+                workflow_id.to_string(),
+            )),
+            None => {
+                tracing::warn!(
+                    company = %company,
+                    workflow = workflow_id,
+                    "workflow: no secret store wired; run state is a no-op (deliberate — no P1 node uses it)"
+                );
+                Arc::new(NoopState)
+            }
+        };
+
+        // `deps` moves in last — the borrows above (`deps.capabilities`,
+        // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`)
+        // are all done by here.
+        let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
+            pool,
+            deps,
+            company.clone(),
+            run_id.to_string(),
+            run_request,
+        ));
+        (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
 
     Capabilities {
         llm: Arc::new(UnwiredLlm),
-        tools: Arc::new(tools),
-        http: Arc::new(http),
+        tools,
+        http,
         code: Arc::new(UnwiredCode),
         state,
         resolver,
-        // `deps` moves in last — the borrows above (`deps.capabilities`,
-        // `deps.secrets`, `deps.workspace_root`, `deps.workflow_source_dir`) are
-        // all done by here.
-        agent: Some(Arc::new(HarnessAgentRunner::new(pool, deps, company))),
+        agent,
+        // New in tinyflows 0.6, which arrived with the #499 pin bump. Left
+        // unwired deliberately rather than pointed at the company's context
+        // store: a `memory` node would then read and WRITE agent memory on
+        // behalf of a workflow, and which scopes a workflow may touch is a
+        // policy question this repo has not answered — `remember`/`forget`
+        // especially. `None` fails such a node at run time with a capability
+        // error, which is the honest answer until that decision is made, and
+        // no company manifest can currently produce one (`NodeKind` has no
+        // `memory` variant on our side).
+        memory: None,
     }
 }
 
@@ -187,19 +283,186 @@ fn hex_segment(value: &str) -> String {
 /// teammate id. This extracts the turn message from the request and runs it
 /// through [`HarnessPool::run`], which meters the turn's cost through `deps` — so
 /// a workflow step and a chat turn account identically.
+///
+/// # It claims neither the publish queue nor the delegation queue — on purpose
+///
+/// A node's turn carries the whole toolbelt, so an orchestrator-tier `agent_ref`
+/// can reach `review_task`, `assign_task`, `spawn_task` and `delegate_to_desk`,
+/// and a granted one can reach `publish_artifact`. Nothing here drains either
+/// queue: a workflow run has no board card behind it and no conversation to
+/// surface a delegation's answer into — the same absence that makes
+/// [`park_gated_calls`](HarnessAgentRunner::park_gated_calls) record approvals
+/// explicitly unlinked.
+///
+/// So this path takes **no claim**, and that is the decision rather than an
+/// omission. What the agent gets is an honest in-turn refusal it can report —
+/// *"the card was NOT reviewed"* — instead of what it got before #453: a
+/// success receipt saying the card had moved to done, followed by the next
+/// turn's `clear()` destroying the delegation. Silent destruction replaced by a
+/// visible refusal.
+///
+/// Wiring a drain here would be a real feature (a workflow node that can move
+/// the board), and it is deliberately not this issue: it needs a decision about
+/// which card a node's `spawn_task` parents to and where a hand-off's reply
+/// goes. Until then, refusing is the truthful answer. Mirrors how this path
+/// already takes no [`PublishClaim`](crate::harness::publish::PublishClaim).
 pub struct HarnessAgentRunner {
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
     company: CompanyId,
+    /// The run these agent nodes belong to (issue #395), stamped onto every
+    /// approval this node's turn parks so the Approvals page can say which
+    /// workflow run is waiting on the operator.
+    run_id: String,
+    /// What the operator asked for on this run (issue #154), when they supplied
+    /// it. A node's `prompt` is authored into the graph and is the same on every
+    /// run, so without this the run's topic never reaches the teammate doing the
+    /// work — the agent would run, find no subject, and ask for one.
+    run_request: Option<String>,
 }
 
 impl HarnessAgentRunner {
-    /// Builds a runner over an already-populated pool for `company`.
-    pub fn new(pool: Arc<HarnessPool>, deps: HarnessDeps, company: CompanyId) -> Self {
+    /// Builds a runner over an already-populated pool for `company`, carrying
+    /// the run's id (issue #395) and the operator's run request (issue #154)
+    /// when one was supplied.
+    pub fn new(
+        pool: Arc<HarnessPool>,
+        deps: HarnessDeps,
+        company: CompanyId,
+        run_id: String,
+        run_request: Option<String>,
+    ) -> Self {
         Self {
             pool,
             deps,
             company,
+            run_id,
+            run_request,
+        }
+    }
+
+    /// Parks every approval-gated tool call this node's turn just recorded
+    /// (issue #395) — the drain the workflow path never had.
+    ///
+    /// # The hole this closes
+    ///
+    /// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) is installed
+    /// pool-wide on every roster agent with the shared
+    /// [`ApprovalRequestQueue`](crate::harness::policy::ApprovalRequestQueue),
+    /// so a gated tool call inside a workflow agent node **was** recorded. But
+    /// the only drain in the codebase is
+    /// [`park_approval_requests`](crate::harness::HarnessBrain), which lives
+    /// inside `run_cycle` and needs a
+    /// [`CycleHost`](crate::ports::brain::CycleHost). This path —
+    /// `run_agent` → [`HarnessPool::run_background`] → `run_inner` — never goes
+    /// near a cycle, so nothing drained, and the next chat cycle's
+    /// [`clear`](crate::harness::policy::ApprovalRequestQueue::clear) threw the
+    /// request away. The queue's own doc names this case. The leak was
+    /// prevented; the parking was never added. That is why the Approvals page
+    /// stayed "All clear" through a run an operator watched get gated.
+    ///
+    /// # Boundary, not drain
+    ///
+    /// `from` is taken *before* the turn, and only the tail above it is claimed
+    /// — see
+    /// [`take_from`](crate::harness::policy::ApprovalRequestQueue::take_from).
+    /// The queue is shared with whatever chat cycle happens to be running, and
+    /// `drain` would take that cycle's entries and clear the rest.
+    ///
+    /// This narrows the shared-queue race to a turn-sized window; it does not
+    /// eliminate it. If a chat turn pushes *while* this node's turn is running,
+    /// its request lands above the boundary and is parked here — with this
+    /// run's id stamped on it. The real fix is a per-run queue, which means
+    /// re-plumbing `ApprovalPolicy` installation out of `build_roster`; that is
+    /// deliberately out of scope for #395. The failure mode is a mis-attributed
+    /// `run_id` on a card that is otherwise correct and decidable, which is
+    /// strictly better than the request vanishing.
+    ///
+    /// # Never fails the node
+    ///
+    /// A park that errors is logged per entry and the loop continues. The turn
+    /// already happened, the model was already told it was refused, and failing
+    /// the node here would discard a completed turn's work over a queue write.
+    /// Same stance `park_approval_requests` takes, for the same reason.
+    ///
+    /// # A run cancelled mid-turn parks nothing, deliberately
+    ///
+    /// Stopping a run drops the engine future *mid-await* (issue #383), which
+    /// takes this call with it — so a call the policy had already gated stays on
+    /// the shared queue and the next chat cycle's `clear` discards it. That is
+    /// the intended outcome, not a residual leak: an operator who stopped a run
+    /// is not asking to be asked about the work they stopped. It is the same
+    /// judgement `cancelled_run` makes in reporting no `pending_approvals`, and
+    /// the same one `park_pending_gates` makes in skipping a cancelled run.
+    async fn park_gated_calls(&self, from: usize) {
+        let queue = &self.deps.approval_requests;
+        // Issue #242's stamp, applied at the boundary the run owns: this is
+        // where an approval learns which workflow run is waiting on it.
+        queue.stamp_run(from, &self.run_id);
+        let requests = queue.take_from(from);
+        if requests.is_empty() {
+            return;
+        }
+
+        let Some(parking) = self
+            .deps
+            .delivery
+            .as_ref()
+            .and_then(|delivery| delivery.parking.as_ref())
+        else {
+            // Loud: these requests are already off the queue and are the only
+            // trace of calls the operator will never be asked about.
+            tracing::error!(
+                company = %self.company,
+                run_id = %self.run_id,
+                requests = requests.len(),
+                "workflow agent node: gated tool calls could NOT be parked — this runtime has \
+                 no approvals queue wired; the operator will not be asked about them"
+            );
+            return;
+        };
+
+        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        if requests.len() > cap {
+            // Bounded exactly as the cycle drain is: a model that keeps
+            // re-trying a blocked tool must not be able to flood the queue.
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                discarded = requests.len() - cap,
+                "workflow agent node: more gated tool calls than one turn may park; the excess \
+                 was discarded"
+            );
+        }
+        for request in requests.into_iter().take(cap) {
+            // The delivery precedent: a workflow run has no board card behind it
+            // and no conversation to raise the request in, so it is recorded
+            // explicitly unlinked (#333) and stays Approvals-page-only (#379).
+            match parking
+                .park_and_journal(
+                    &self.company,
+                    request.effect,
+                    crate::runtime::journal::TaskLink::Unlinked,
+                    None,
+                )
+                .await
+            {
+                Ok(approval_id) => tracing::info!(
+                    company = %self.company,
+                    run_id = %self.run_id,
+                    tool = %request.tool,
+                    approval_id = %approval_id,
+                    "workflow agent node: parked a gated tool call for operator approval"
+                ),
+                Err(err) => tracing::error!(
+                    company = %self.company,
+                    run_id = %self.run_id,
+                    tool = %request.tool,
+                    %err,
+                    "workflow agent node: failed to park a gated tool call; the operator will \
+                     not be asked about it"
+                ),
+            }
         }
     }
 }
@@ -212,16 +475,27 @@ impl AgentRunner for HarnessAgentRunner {
         request: Value,
         _conn: Option<&str>,
     ) -> TfResult<Value> {
-        let message = message_from_request(&request);
+        let message =
+            compose_turn_message(&message_from_request(&request), self.run_request.as_deref());
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
             "workflow agent node: routing to harness pool"
         );
+        // Issue #395: where this turn's own approval requests begin, taken
+        // BEFORE the turn so the queue's append-only property makes it a valid
+        // entitlement boundary.
+        let from = self.deps.approval_requests.queued();
         let outcome = self
             .pool
             .run_background(&self.company, agent_ref, &message, &self.deps)
-            .await
+            .await;
+        // Drained on BOTH arms, deliberately. A turn that errored may still have
+        // had a tool call gated before it failed, and that request is just as
+        // real — leaving it on the queue hands it to the next chat cycle's
+        // `clear()`, which is the exact disappearance this issue is about.
+        self.park_gated_calls(from).await;
+        let outcome = outcome
             .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
         // reply as `text` so a downstream `=item.text` binding resolves. A
@@ -241,6 +515,54 @@ fn message_from_request(request: &Value) -> String {
         }
     }
     request.to_string()
+}
+
+/// Combines a node's authored instruction with the operator's run request
+/// (issue #154).
+///
+/// A node's `prompt` is baked into the graph, so it is identical on every run —
+/// it says *what this step does*, never *what was asked this time*. Before this,
+/// the run's topic stopped at the trigger node and the agent had no subject to
+/// work on, which is what made a run end with the agent asking the operator for
+/// a topic they had no field to supply.
+///
+/// The instruction stays first so the node's job still leads; the request is
+/// appended under a labelled heading so a teammate can tell the standing
+/// instruction from this run's subject. A blank or whitespace-only request is
+/// treated as absent, leaving the message byte-identical to the previous
+/// behaviour — runs that supply no topic are unchanged.
+fn compose_turn_message(instruction: &str, run_request: Option<&str>) -> String {
+    let request = run_request.map(str::trim).filter(|r| !r.is_empty());
+    match request {
+        Some(request) => {
+            let instruction = instruction.trim();
+            if instruction.is_empty() {
+                return request.to_string();
+            }
+            format!("{instruction}\n\nRequest for this run:\n{request}")
+        }
+        None => instruction.to_string(),
+    }
+}
+
+/// Extracts a human-readable run request from the trigger input (issue #154).
+///
+/// The console posts `{"request": "…"}`, but the run endpoint accepts an
+/// arbitrary JSON trigger payload, so this also accepts a bare string and the
+/// nearby key spellings a hand-written call or an older client may use. Anything
+/// else (an object with no recognised key, a number, `null`) yields `None` and
+/// the run proceeds exactly as it did before — the topic is an addition, not a
+/// new requirement.
+pub(super) fn run_request_text(input: &Value) -> Option<String> {
+    let text = match input {
+        Value::String(s) => s.as_str(),
+        Value::Object(_) => ["request", "input", "topic", "message", "text"]
+            .iter()
+            .find_map(|key| input.get(*key).and_then(Value::as_str))?,
+        _ => return None,
+    };
+    let trimmed = text.trim();
+    (!trimmed.is_empty()).then_some(trimmed.to_string())
 }
 
 /// The bare-completion fallback. An `agent` node with no `agent_ref` would land
@@ -272,22 +594,6 @@ impl CodeRunner for UnwiredCode {
     }
 }
 
-/// The `sub_workflow`-by-id fallback for a deployment with no source directory
-/// (platform-provisioned mode): there is nowhere on disk to resolve a child
-/// graph from, so a reached `sub_workflow` node fails loudly rather than
-/// silently. A deployment WITH a source directory uses
-/// [`StoreWorkflowResolver`](resolver::StoreWorkflowResolver) instead.
-struct UnwiredResolver;
-
-#[async_trait]
-impl WorkflowResolver for UnwiredResolver {
-    async fn resolve(&self, workflow_id: &str) -> TfResult<WorkflowGraph> {
-        Err(EngineError::Capability(format!(
-            "sub_workflow reference '{workflow_id}' is not supported for company workflows"
-        )))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -300,6 +606,93 @@ mod tests {
         );
         assert_eq!(message_from_request(&json!({ "input": "I" })), "I");
         assert_eq!(message_from_request(&json!({ "message": "M" })), "M");
+    }
+
+    // ── Issue #154: the operator's run request reaches the agent ──
+
+    #[test]
+    fn run_request_is_appended_under_a_labelled_heading() {
+        let out = compose_turn_message("Draft the launch post.", Some("dark mode for iOS"));
+        // The node's standing instruction still leads.
+        assert!(out.starts_with("Draft the launch post."), "{out}");
+        // …and this run's subject is distinguishable from it.
+        assert!(out.contains("Request for this run:"), "{out}");
+        assert!(out.contains("dark mode for iOS"), "{out}");
+    }
+
+    #[test]
+    fn a_run_with_no_request_is_byte_identical_to_the_old_message() {
+        // The guarantee that makes this safe to land: runs that supply no topic
+        // must behave exactly as they did before.
+        for empty in [None, Some(""), Some("   "), Some("\n\t ")] {
+            assert_eq!(
+                compose_turn_message("Draft the launch post.", empty),
+                "Draft the launch post.",
+                "empty request {empty:?} must not alter the message"
+            );
+        }
+    }
+
+    #[test]
+    fn a_request_with_no_instruction_stands_on_its_own() {
+        // No dangling heading when the node carries no usable instruction.
+        assert_eq!(
+            compose_turn_message("", Some("ship dark mode")),
+            "ship dark mode"
+        );
+        assert_eq!(
+            compose_turn_message("   ", Some("ship dark mode")),
+            "ship dark mode"
+        );
+    }
+
+    #[test]
+    fn run_request_text_reads_the_console_payload_and_a_bare_string() {
+        assert_eq!(
+            run_request_text(&json!({ "request": "dark mode" })).as_deref(),
+            Some("dark mode")
+        );
+        assert_eq!(
+            run_request_text(&json!("dark mode")).as_deref(),
+            Some("dark mode")
+        );
+        // Tolerated spellings from a hand-written call or an older client.
+        for key in ["input", "topic", "message", "text"] {
+            let mut payload = serde_json::Map::new();
+            payload.insert(key.to_string(), json!("dark mode"));
+            assert_eq!(
+                run_request_text(&Value::Object(payload)).as_deref(),
+                Some("dark mode"),
+                "key {key} should be accepted"
+            );
+        }
+        // Trimmed.
+        assert_eq!(
+            run_request_text(&json!({ "request": "  dark mode  " })).as_deref(),
+            Some("dark mode")
+        );
+    }
+
+    #[test]
+    fn run_request_text_is_none_for_payloads_that_carry_no_topic() {
+        // These are the shapes an existing caller already sends — none may start
+        // injecting a topic into agent messages.
+        for payload in [
+            json!({}),
+            json!(null),
+            json!(42),
+            json!({ "request": "" }),
+            json!({ "request": "   " }),
+            json!({ "unrelated": "value" }),
+            json!({ "request": 7 }),
+            json!(["dark mode"]),
+        ] {
+            assert_eq!(
+                run_request_text(&payload),
+                None,
+                "payload {payload} must carry no topic"
+            );
+        }
     }
 
     #[test]
@@ -322,6 +715,115 @@ mod tests {
         assert_eq!(
             first.file_name().and_then(|part| part.to_str()),
             Some("workspace")
+        );
+    }
+
+    /// Issue #499. tinyflows 0.6 added `Capabilities::memory`, and this pins the
+    /// answer we gave it.
+    ///
+    /// `None` is a decision, not an omission — see the comment at the field. A
+    /// `MemoryProvider` here would let a workflow read and *write* agent memory
+    /// (`remember`/`forget` are on the trait), and which scopes a workflow may
+    /// touch is a policy question this repo has not answered. Until it is,
+    /// unwired is the honest state: a `memory` node fails with a capability
+    /// error rather than quietly writing somewhere nobody authorised.
+    ///
+    /// So this test is here to make wiring it a *deliberate* act. Whoever
+    /// changes it has to change this line too, which is where they will find the
+    /// question they need to answer first.
+    #[tokio::test]
+    async fn the_memory_capability_is_left_unwired_on_purpose() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // No endpoint is spawned: `build_capabilities` assembles a struct of
+        // handles and never calls the provider, so a base URL that answers
+        // nothing is sufficient and keeps this off the network.
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        let caps = build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            "wf",
+            "run:1",
+            None,
+            false,
+        )
+        .await;
+
+        assert!(
+            caps.memory.is_none(),
+            "wiring `Capabilities::memory` gives workflows read AND write access \
+             to agent memory — settle which scopes a workflow may touch before \
+             changing this, and say so at the field"
+        );
+        // The neighbouring optional capability IS wired, so this is a statement
+        // about `memory` specifically rather than about the bundle being empty.
+        assert!(
+            caps.agent.is_some(),
+            "agent capability should still be wired"
+        );
+    }
+
+    /// Issue #542 — T9: a dry bundle wires the effect STUBS (agent / tools / http
+    /// all echo with the `dry_run` marker) and the inert `NoopState`, while the
+    /// read-only resolver stays real. Pinned behaviourally through the marker, so
+    /// a future refactor that quietly wired a real effect into a dry bundle fails
+    /// here.
+    #[tokio::test]
+    async fn a_dry_bundle_wires_stubs_and_noop_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let (deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        let caps = build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            "wf",
+            "run:1",
+            None,
+            true, // dry
+        )
+        .await;
+
+        // http: the stub echoes without sending, carrying the marker.
+        let http_out = caps
+            .http
+            .request(json!({ "url": "http://127.0.0.1:9/" }), None)
+            .await
+            .expect("dry http never fails");
+        assert_eq!(
+            http_out["dry_run"],
+            json!(true),
+            "http slot should be the dry stub"
+        );
+
+        // agent: the stub echoes with no pool routing.
+        let agent = caps.agent.as_ref().expect("agent stub is wired");
+        let agent_out = agent
+            .run_agent("ceo", json!({ "prompt": "hi" }), None)
+            .await
+            .expect("dry agent never fails");
+        assert_eq!(
+            agent_out["dry_run"],
+            json!(true),
+            "agent slot should be the dry stub"
+        );
+
+        // state: NoopState — a load reads None and a store is dropped.
+        assert_eq!(caps.state.load("k").await.expect("noop load"), None);
+        caps.state.store("k", json!(1)).await.expect("noop store");
+        assert_eq!(
+            caps.state.load("k").await.expect("noop load"),
+            None,
+            "dry state must be the inert NoopState, never durable"
         );
     }
 }

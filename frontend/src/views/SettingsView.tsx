@@ -23,11 +23,13 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { restartTour } from "@/tour/state";
+import { useLocalScope } from "@/connections/ConnectionContext";
 
 interface Props {
   client: OpenCompanyClient;
@@ -38,12 +40,18 @@ interface Props {
 
 /** Connection details, lifecycle controls, and the feedback entry point. */
 export function SettingsView({ client, company, feed, onFlag }: Props) {
+  // Which (connection, company) this subtree's browser-local state belongs to.
+  const scope = useLocalScope();
   const { status } = feed;
   const scoped = company ?? client.defaultCompany;
 
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+        {/* Pairing this machine. Renders nothing in a browser, where the
+            session cookie already works. */}
+        <DevicePairing />
+
         {/* Connection */}
         <Card>
           <CardHeader>
@@ -60,6 +68,18 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             <InfoRow label="Company">
               <span className="font-mono text-xs">{status.id}</span>
             </InfoRow>
+            {status.template_provenance ? (
+              <InfoRow label="Template">
+                <span className="text-sm">
+                  <span className="font-mono text-xs">
+                    {status.template_provenance.source_id}
+                  </span>
+                  {status.template_provenance.version
+                    ? ` (${status.template_provenance.version})`
+                    : ""}
+                </span>
+              </InfoRow>
+            ) : null}
             <InfoRow label="Mode">
               <span className="text-sm">
                 {client.isSingleCompany ? "Single-company" : "Multi-company (platform)"}
@@ -109,7 +129,7 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
             <Button
               variant="outline"
               onClick={() => {
-                restartTour(company);
+                restartTour(scope);
                 toast.success("Starting the product tour.");
               }}
             >

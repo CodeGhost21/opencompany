@@ -1,0 +1,64 @@
+# The desktop shell.
+#
+# ## A separate workspace, deliberately
+#
+# This crate is NOT a member of the host's workspace, and that is a decision
+# rather than an oversight. Adding it would make every root `cargo` invocation
+# resolve the whole Tauri dependency tree — `cargo metadata --locked` runs first
+# in CI, and `Cargo.lock` would carry several hundred entries the host never
+# compiles. Worse, any lane that widened to `--workspace` would need
+# `libwebkit2gtk`, `libsoup` and GTK installed on a runner that has none of
+# them, turning a desktop-only dependency into a hard requirement for checking
+# the server.
+#
+# The host stays a plain `path` dependency, so a change to it is picked up here
+# with no publishing step. The desktop gets its own CI lane when it ships.
+[workspace]
+
+[package]
+name = "opencompany-desktop"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
+description = "OpenCompany desktop shell: many hosts at once, and local ACP harnesses."
+publish = false
+
+[lib]
+# Tauri's mobile entry point wants a `cdylib`; the `rlib` is what the
+# integration tests link against. The proxy and embedded-server logic lives in
+# the library precisely so it can be tested without starting a webview.
+name = "opencompany_desktop_lib"
+crate-type = ["lib", "cdylib"]
+
+[[bin]]
+name = "opencompany-desktop"
+path = "src/main.rs"
+
+[dependencies]
+# The host, linked rather than spawned. `sqlite` is the desktop's backend;
+# `mongodb` is deliberately absent — a per-tenant cluster is a hosting concern.
+opencompany = { path = "..", default-features = false, features = ["sqlite", "platform-jwt", "oauth"] }
+
+tauri = { version = "2", features = [] }
+# The OS credential store, so a device session token never has to live in the
+# webview or on disk in the clear. Native backends only — the same set
+# `vendor/openhuman` uses, and for the same reason: a pure-Rust fallback would
+# mean a secret store that is not the platform's.
+keyring = { version = "3", features = ["apple-native", "windows-native", "linux-native"] }
+tauri-plugin-shell = "2"
+
+tokio = { version = "1", features = ["fs", "io-util", "macros", "process", "rt-multi-thread", "sync", "net"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
+futures-util = "0.3"
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dev-dependencies]
+tempfile = "3"

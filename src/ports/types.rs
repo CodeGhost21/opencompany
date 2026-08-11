@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::company::CompanyManifest;
 use crate::ports::ids::{generate_id, now_millis};
+use crate::ports::workflow_runner::DeliveryReport;
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -237,6 +238,21 @@ pub enum CompanyEvent {
         /// migrating.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         chat: Option<String>,
+        /// The message this one replies to, as that message's own sequence
+        /// position (issue #364) — what makes a thread reply survive a reload.
+        ///
+        /// A **parent id, not a thread object**: the console already folds a
+        /// transcript by parent, so a thread is exactly "the messages pointing
+        /// at this one". Recording it that way costs one optional field and
+        /// needs no lifecycle, no membership, and no second addressing scheme
+        /// beside `chat`, which stays the channel the whole thread lives in.
+        ///
+        /// `None` on a message posted straight into a channel — which is every
+        /// message journaled before this field existed, and correctly so: they
+        /// were never thread replies. Additive on exactly the `by` / `chat`
+        /// terms above, so no stored record migrates.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<EventSeq>,
     },
     /// An inbound webhook fired.
     WebhookReceived {
@@ -258,6 +274,41 @@ pub enum CompanyEvent {
         from: String,
         /// The task payload.
         task: serde_json::Value,
+    },
+    /// An effect was parked for the operator's sign-off (issue #379).
+    ///
+    /// The counterpart to [`ApprovalResolved`](Self::ApprovalResolved), and the
+    /// reason it exists: parking was journal-only, so a console learned about a
+    /// new request only when its feed next polled — far too late to raise the
+    /// request inside the conversation that produced it.
+    ///
+    /// **Deliberately thin.** An id, a dotted kind, and the thread it came from
+    /// — no payload, no asker. The parked effect's arguments are redacted and
+    /// bounded exactly once, in
+    /// [`pending_approvals`](crate::company::CompanyRuntime::pending_approvals),
+    /// and putting them on a durable event would open a second surface that has
+    /// to redact. A reader reacts to this by re-reading the approvals feed,
+    /// which is where the safe projection lives.
+    ApprovalParked {
+        /// The approval now awaiting the operator.
+        approval_id: ApprovalId,
+        /// The parked effect's dotted kind, e.g. `payment.send`. Enough for a
+        /// reader to decide whether it cares before it re-reads the feed.
+        ///
+        /// Named `effect_kind` rather than `kind` because `CompanyEvent` is
+        /// serialized internally-tagged **under `kind`** — a variant field of
+        /// that name collides with the tag and does not compile. The projected
+        /// SSE frame calls it `kind` regardless: that envelope discriminates on
+        /// `type`, so the short name is free there.
+        effect_kind: String,
+        /// The chat thread the parking cycle was answering — a desk id for a
+        /// channel, a roster agent id for a direct message.
+        ///
+        /// `None` when no conversation produced it (a workflow delivery, a
+        /// scheduler tick, an ambiguous batch), which is also every park
+        /// journaled before this existed. Omitted from the wire when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thread: Option<String>,
     },
     /// An operator resolved a parked approval.
     ApprovalResolved {
@@ -290,6 +341,31 @@ pub enum CompanyEvent {
         /// Who performed the transition.
         by: Actor,
     },
+    /// The governance kill switch was pulled or released (issue #86).
+    ///
+    /// Separate from [`LifecycleChanged`](Self::LifecycleChanged) because the
+    /// two states are orthogonal: emergency stop leaves `lifecycle` alone so
+    /// chat keeps working. Folding it into the lifecycle event would make the
+    /// audit trail claim a transition that never happened.
+    ///
+    /// The **durable state**, not just an audit line: the last such event in a
+    /// company's log is what the boot replay reads back to decide whether to
+    /// come up stopped. There is deliberately no `CompanyRecord` field beside
+    /// it, because a second copy of a safety flag is a second thing that can
+    /// disagree with the first.
+    ///
+    /// Written *after* the in-memory flag on engage and *before* it on release,
+    /// so whichever of the two writes lands alone leaves the company stopped.
+    /// See `CompanyRuntime::emergency_pause`.
+    EmergencyPauseChanged {
+        /// `true` when the stop was engaged, `false` when it was released.
+        engaged: bool,
+        /// The operator who did it.
+        by: Actor,
+        /// Their free-text note, when one was given.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     /// An agent replied in a desk/chat. Journaled by the harness/chat layer so
     /// the GraphQL `Chat.history` resolver (WS2c) can read replies back
     /// alongside the operator messages that prompted them.
@@ -310,12 +386,114 @@ pub enum CompanyEvent {
         /// scrubbed shape (see [`crate::harness::steps`]).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         steps: Vec<TurnStep>,
+        /// The board task this reply was produced by, when it came out of a
+        /// [`TaskDispatched`](Self::TaskDispatched) cycle rather than a chat
+        /// turn (issue #185).
+        ///
+        /// This is the correlation key the per-task timeline filters on: the
+        /// journal is company-scoped, so without it a dispatch's reply cannot
+        /// be told apart from every other desk reply in the log.
+        ///
+        /// `None` for an ordinary chat reply and for every event journaled
+        /// before this field existed. Additive in exactly the same way as
+        /// [`OperatorMessage`](Self::OperatorMessage)'s `by` / `chat`:
+        /// `#[serde(default)]` is what lets an already-persisted log load, and
+        /// `skip_serializing_if` is what keeps an untagged reply serializing
+        /// byte-for-byte as it did before this field existed, so no stored
+        /// record needs migrating.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
+        /// The message this reply belongs under, as that message's own sequence
+        /// position (issue #364).
+        ///
+        /// Set to the **operator message's** parent, not to the operator
+        /// message itself: a reply typed inside a thread and the answer it
+        /// draws are two halves of one exchange, and both belong under the row
+        /// the thread hangs off. Pointing the answer at the question would nest
+        /// a thread inside a thread, which the transcript has no way to render.
+        ///
+        /// `None` for a reply in the channel itself and for every reply
+        /// journaled before this field existed. Additive on the same terms as
+        /// `task_id` above.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parent: Option<EventSeq>,
+    },
+    /// A reaction was set or cleared on one chat message (issue #364).
+    ///
+    /// **Per-user rows, event-sourced.** A reaction is a fact about a person —
+    /// "who reacted" is most of what a reaction is for — so the durable record
+    /// is one line per person per emoji rather than a count, and the count is
+    /// derived on read. A count could not answer "did I already react?" for
+    /// anyone but the last writer, and a mutable tally on an append-only log
+    /// would have to be rewritten in place, which this log cannot do.
+    ///
+    /// `on` is explicit rather than implied-toggle so the write is
+    /// **idempotent**: a retried request, a double tap, or two consoles racing
+    /// converge on the state the caller asked for instead of flipping twice.
+    /// Folding keeps the last event per `(message, actor, emoji)`.
+    ReactionToggled {
+        /// The message reacted to, by its sequence position — the same id
+        /// `chat/history` returns for that message.
+        ///
+        /// Deliberately not validated as still-existing on read: the log is
+        /// append-only, so a message named here was real when the reaction was
+        /// made. A reaction whose message is not in the desk being read simply
+        /// folds into nothing.
+        message_seq: EventSeq,
+        /// The emoji, as the console sent it. Length-bounded and rejected for
+        /// control characters at the route, so a journal line can never carry a
+        /// blob or a newline dressed as a reaction.
+        emoji: String,
+        /// Whether the reaction is now set (`true`) or cleared (`false`).
+        on: bool,
+        /// Who reacted. `None` for a machine/platform credential, which has no
+        /// person behind it — read back as "operator", exactly as
+        /// `OperatorMessage`'s `by` is.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
     },
     /// The Operator deleted a durable memory fact. Journaled for the audit trail
     /// per the Operator-rights section of `docs/spec/company-brain/memory.md`.
     MemoryFactDeleted {
         /// The id of the deleted fact.
         fact_id: String,
+    },
+    /// An admin changed what this company's agents reach third parties through
+    /// (issue #403): the Composio credential the company presents, or a
+    /// provider connection authorized under it.
+    ///
+    /// Journaled for the audit trail, the same reason
+    /// [`MemoryFactDeleted`](Self::MemoryFactDeleted) is — a company's tool
+    /// access is one of the few things about it that can be changed without
+    /// leaving any other mark, so "how did we come to be connected through
+    /// *that* account" has to be answerable afterwards.
+    ///
+    /// **Deliberately carries no credential and no URL.** A journal line is
+    /// append-only, exported, and read by the operator projection; the token
+    /// is write-only over the whole API and does not stop being so here. A
+    /// stable wire word, an optional toolkit slug, and the person — nothing
+    /// else.
+    ToolAccessChanged {
+        /// What changed, as a stable wire word: `credential_set`,
+        /// `credential_cleared`, or `provider_authorization_started`.
+        ///
+        /// The last is deliberately *started*, not *completed*: Composio runs
+        /// the OAuth on its own side with no callback here, so all this host
+        /// witnesses is that an admin asked for a connect URL for that
+        /// toolkit. Naming it a completed connection would put a claim in the
+        /// audit trail that nothing verified.
+        change: String,
+        /// The toolkit slug for a provider authorization (`gmail`, `slack`, …).
+        /// `None` for a credential change, which is not per-provider.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        toolkit: Option<String>,
+        /// Who made the change. The routes that emit this require an admin
+        /// session, so in practice it is always `Some` and always a person;
+        /// the `Option` matches the
+        /// [`WorkflowCreated`](Self::WorkflowCreated) precedent and lets an
+        /// already-persisted log load unchanged.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
     },
     /// A board task was moved into `in_progress` and dispatched to its assignee
     /// for one agent turn on the embedded runtime. Journaled so the dispatch is
@@ -325,6 +503,27 @@ pub enum CompanyEvent {
     TaskDispatched {
         /// The id of the dispatched task card.
         task_id: String,
+        /// The [`RunRecord`](crate::ports::runs::RunRecord) this dispatch is an
+        /// attempt under (issue #242), minted at the dispatch choke point
+        /// *before* the cycle is spawned.
+        ///
+        /// Carrying it on the event is what makes the journal self-describing:
+        /// the run row and the durable log line name each other, so a reader
+        /// holding either one can find the other without re-deriving identity
+        /// from timestamps. It also keeps
+        /// [`Brain::run_cycle`](crate::ports::brain::Brain::run_cycle)'s
+        /// signature stable — the id rides the event the brain already reads
+        /// rather than a new argument every brain would have to thread.
+        ///
+        /// `None` for a dispatch whose run row could not be minted (record-keeping
+        /// never fails the work it records) and for every event journaled before
+        /// this field existed. Additive in exactly the way
+        /// [`AgentReply`](Self::AgentReply)'s `task_id` is: `#[serde(default)]`
+        /// lets an already-persisted log load, and `skip_serializing_if` keeps an
+        /// untagged dispatch serializing byte-for-byte as it did before, so no
+        /// stored record needs migrating.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     /// An agent's MCP tool call failed during a turn, journaled by the harness
     /// so the operator has an audit trail of which server/tool broke and why.
@@ -342,6 +541,16 @@ pub enum CompanyEvent {
         status: String,
         /// A short, scrubbed, operator-facing message.
         message: String,
+        /// The board task whose dispatch turn made the failing call, when the
+        /// failure happened inside a [`TaskDispatched`](Self::TaskDispatched)
+        /// cycle (issue #185). Lets a task's failed tool calls be filtered out
+        /// of the company-scoped journal onto its own timeline.
+        ///
+        /// `None` for a failure raised during a chat turn and for every event
+        /// journaled before this field existed. Same additive contract as
+        /// [`AgentReply`](Self::AgentReply)'s `task_id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_id: Option<String>,
     },
     /// A new workflow graph was authored and enabled (issue #112), from either
     /// the console `POST …/workflows` route or the orchestrator's
@@ -358,6 +567,80 @@ pub enum CompanyEvent {
         /// carries no attributed actor (the current create paths); kept as an
         /// `Option` so a future attributed create needs no migration, mirroring
         /// [`OperatorMessage`](Self::OperatorMessage)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// An existing workflow graph was replaced wholesale (issue #259), from the
+    /// console's `PUT …/workflows/{wid}` route. Journaled best-effort **after**
+    /// the new body is persisted, so it records a completed edit — a journal
+    /// failure never rolls the update back. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// **The graph body is deliberately NOT carried.** A company's journal is
+    /// one append-only log shared by chat, audit and run history, and it is read
+    /// by the operator SSE projection and wired to the inference sidecar — a
+    /// TOML body on it would put the graph's full contents (agent prompts,
+    /// destination addresses) somewhere none of those readers need it. The id
+    /// and name are what an audit reader needs; the body is read from the record.
+    WorkflowUpdated {
+        /// The edited workflow's id. Never changes across an update — a rename
+        /// through `PUT` is rejected, because the id keys the union read path,
+        /// the scheduler and the run history.
+        workflow_id: String,
+        /// The workflow's display name **after** the edit (the name may change
+        /// even though the id may not).
+        name: String,
+        /// Who edited it, when known. `None` from the current unattributed
+        /// surfaces; same forward-compatible shape as
+        /// [`WorkflowCreated`](Self::WorkflowCreated)'s `by`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A workflow graph was removed (issue #259), from the console's
+    /// `DELETE …/workflows/{wid}` route. Journaled best-effort **after** the
+    /// overlay body and the manifest-enabled id are both gone, so it records a
+    /// completed delete. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// Past [`WorkflowRunFinished`](Self::WorkflowRunFinished) entries for this
+    /// id are deliberately left in place — the journal is append-only, and what
+    /// a workflow *did* stays true after the workflow is gone. `GET
+    /// …/workflows/runs` keeps serving them.
+    WorkflowDeleted {
+        /// The removed workflow's id.
+        workflow_id: String,
+        /// Its display name at the moment it was removed, so a journal reader
+        /// need not resolve an id that no longer exists.
+        name: String,
+        /// Who removed it, when known. `None` from the current unattributed
+        /// surfaces.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A workflow was switched on or off (issue #276) — from the console's
+    /// `PUT …/workflows/{wid}/enabled` route, or from the disarm rule that
+    /// forces `false` when a create or an edit arms a schedule. Journaled
+    /// best-effort **after** the flag is persisted, so it records a completed
+    /// change. Additive, same contract as
+    /// [`WorkflowCreated`](Self::WorkflowCreated).
+    ///
+    /// **Only a real transition is journaled.** Toggling a workflow to the state
+    /// it already holds writes nothing, so this log answers "when did this stop
+    /// firing, and was it a person or the disarm rule" rather than counting
+    /// clicks.
+    WorkflowEnabledChanged {
+        /// The workflow's id.
+        workflow_id: String,
+        /// Its display name at the moment of the change, so an audit reader need
+        /// not resolve the id against a graph that may since have been edited.
+        name: String,
+        /// The state it moved **to**: `true` armed, `false` paused.
+        enabled: bool,
+        /// Why it moved. See [`WorkflowEnabledReason`].
+        reason: WorkflowEnabledReason,
+        /// Who changed it, when known. `None` from the current unattributed
+        /// surfaces, and always `None` for a [`Disarmed`](WorkflowEnabledReason::Disarmed)
+        /// entry — that one is the host's rule firing, not a person's decision.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
@@ -385,6 +668,634 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         by: Option<Actor>,
     },
+    /// A board card was written (issue #464) — opened, changed, or removed.
+    ///
+    /// The board's *announcement*, and the thing that was missing: every other
+    /// task event here describes a card that already exists
+    /// ([`TaskDispatched`](Self::TaskDispatched) fires on the `in_progress`
+    /// edge, [`DeskTaskCompleted`](Self::DeskTaskCompleted) on the settle), so
+    /// nothing said a card had come into being. A card opened from chat intake,
+    /// from a delegation, or from the publish drain left no trace on the feed at
+    /// all, and a console watching the board had nothing to react to.
+    ///
+    /// **Emitted from the store, not from the callers.** It is appended by the
+    /// [`BoardAnnouncer`](crate::runtime::BoardAnnouncer) decorator wrapping the
+    /// company's [`TaskStore`](crate::ports::tasks::TaskStore), which is the one
+    /// place every writer already passes through. Emitting it per call site
+    /// would have meant one arm per creation path — and the next path added
+    /// would silently have none, which is the shape of the bug this fixes.
+    ///
+    /// **A record, never a stimulus.** It is appended after the write it
+    /// describes and is never fed into a cycle; the cycle's own trigger
+    /// classification treats it as a pass-through, like every other record.
+    /// Announcing a write must not start work — a card that opened a cycle by
+    /// existing would re-enter this same store and announce again.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    TaskCardChanged {
+        /// The written card's id.
+        task_id: String,
+        /// What happened to it, as a stable wire word: `opened` (the write
+        /// brought the card into existence), `updated` (it changed an existing
+        /// one), or `removed` (it was deleted).
+        ///
+        /// A word rather than a `bool`, following
+        /// [`ToolAccessChanged`](Self::ToolAccessChanged)'s `change`: there are
+        /// three outcomes, not two, and a flag would have had to grow a second
+        /// one to say a card is gone.
+        change: String,
+        /// The column the card sits in after the write. `None` on a `removed`
+        /// card, which is no longer in one — omitted rather than an empty
+        /// string, so "gone" cannot be mistaken for a column whose id is blank.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        column: Option<String>,
+    },
+    /// A workspace node was written (issue #327) — created, changed, or
+    /// removed.
+    ///
+    /// [`TaskCardChanged`](Self::TaskCardChanged)'s counterpart for the note
+    /// tree, and missing for exactly the same reason: nothing on the feed said
+    /// the workspace had moved, so a console with the Workspace tab open saw an
+    /// agent's write only on a manual refresh or a window refocus. Now that
+    /// agents create notes (#551) and published deliverables land in the tree
+    /// (#552), that stale window is where most of the tree's activity happens.
+    ///
+    /// **Emitted from the store, not from the callers.** Appended by the
+    /// [`WorkspaceAnnouncer`](crate::runtime::WorkspaceAnnouncer) decorator
+    /// wrapping the company's
+    /// [`WorkspaceStore`](crate::ports::workspace::WorkspaceStore) — the one
+    /// place the seeder, the console routes, the agent tools and the publish
+    /// drain all pass through. An emit per call site is the shape of the bug:
+    /// correct only for the paths somebody remembered.
+    ///
+    /// **A record, never a stimulus.** Appended after the write it describes and
+    /// never fed into a cycle. A note that started work by existing would
+    /// re-enter this store and announce again.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    WorkspaceChanged {
+        /// The written node's id.
+        node_id: String,
+        /// What happened to it, as a stable wire word: `opened` (the write
+        /// brought the node into existence), `updated` (its body or its place
+        /// in the tree changed), or `removed` (it was deleted).
+        ///
+        /// The same three words [`TaskCardChanged`](Self::TaskCardChanged)
+        /// uses, deliberately — a console that already knows how to read one
+        /// change vocabulary should not have to learn a second.
+        change: String,
+    },
+    /// A dispatched board task finished its run (issue #185) — the terminal
+    /// anchor a per-task timeline ends on and a lineage rollup counts.
+    ///
+    /// Journaled by the harness at the end of a
+    /// [`TaskDispatched`](Self::TaskDispatched) cycle, **after** the card's
+    /// landing column has been persisted, so it always records a completed
+    /// run. "Completed" here means *the run stopped*, not *it succeeded*: a
+    /// cancelled, paused, or failed dispatch emits one too, and `column`
+    /// carries where the card actually landed. Without that, a timeline could
+    /// not distinguish "still running" from "finished badly".
+    ///
+    /// This issue only *adds* the event. #171's done-transition can consume
+    /// it; nothing here writes the board column off the back of it.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    DeskTaskCompleted {
+        /// The completed task card's id.
+        task_id: String,
+        /// The desk / agent that ran it — the resolved responder, not the
+        /// card's raw `assignee` (which may name nobody on the roster).
+        desk: String,
+        /// The run's operator-facing result text.
+        ///
+        /// This is the agent's own reply (or a short `dispatch failed: …` /
+        /// cancellation line), which is the same text already written into the
+        /// card's note — never raw tool output, arguments, or call ids.
+        output: String,
+        /// The board column the card landed in: `in_review` on a normal
+        /// finish, `todo` on a failure or cancellation, `paused` on a
+        /// pause. Lets a reader tell a successful run from a stopped one
+        /// without re-deriving it from `output`.
+        column: String,
+        /// The artifacts this run published (issue #244), by id — empty when it
+        /// published nothing, which is the common and entirely legitimate case.
+        ///
+        /// The terminal anchor is where a reader asks *"what did this task
+        /// produce?"*, and before #244 the only answer available was `output`,
+        /// which is the chat reply and not a deliverable. Carrying the ids here
+        /// means a card in a terminal column can link to what it actually made
+        /// without a second query against the artifact store.
+        ///
+        /// Additive: `#[serde(default)]` so every journal line written before
+        /// this field existed still replays, and skipped when empty so the
+        /// no-deliverable case adds nothing to the log.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifact_ids: Vec<String>,
+    },
+    /// A human posted to a task's discussion thread (issue #335).
+    ///
+    /// The per-task Discussion tab's whole backing store. A task discussion is
+    /// its *own* thread — not a filtered view of the company chat — but it is
+    /// not a second message store either: it lives in this journal, beside the
+    /// events the same task's timeline is folded from, so the two notions of
+    /// "something happened on this task" cannot drift apart. `GET
+    /// …/tasks/{task_id}` projects both out of one traversal.
+    ///
+    /// Operator-authored only in v1. Nothing dispatches an agent turn off the
+    /// back of it and no agent reads it: posting is a durable note on the card,
+    /// not a delegation surface. That is a product decision rather than a
+    /// technical limit — see `docs/modules/server/README.md` — and the wire
+    /// projections here reflect it: the text is deliberately never forwarded to
+    /// the inference sidecar or the SSE stream.
+    ///
+    /// Append-only, like every other variant: this event is never edited and
+    /// never removed. What #358 added is not a mutation of it but a *successor*
+    /// — see [`TaskDiscussionRedacted`](Self::TaskDiscussionRedacted) — so the
+    /// fact that something was said, by whom and when, stays in the record even
+    /// once its text stops being readable.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    TaskDiscussionPosted {
+        /// The board card the message belongs to.
+        task_id: String,
+        /// The message text, codepoint-capped at the route boundary
+        /// ([`MAX_DISCUSSION_CHARS`](crate::ports::tasks::MAX_DISCUSSION_CHARS)).
+        text: String,
+        /// Who posted, when a signed-in human is behind the request.
+        ///
+        /// `None` for a machine credential, which has no person to name and
+        /// reads back as "operator" — the same fallback
+        /// [`OperatorMessage`](Self::OperatorMessage)'s `by` takes, and the same
+        /// additive `skip_serializing_if` contract.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A discussion post's text was withdrawn (issue #358).
+    ///
+    /// ## Why this exists
+    ///
+    /// A task discussion is the one surface where a person types free prose
+    /// about work that is *blocked*, and the next thing pasted into a thread
+    /// like that is often the thing that unblocks it — a key, a token, a
+    /// customer record. #348's own fixture reads "blocked on the API key". Until
+    /// this event there was no way to take it back: no edit, no delete, no
+    /// tombstone, and because the journal is what export/import ships, the
+    /// message was not merely permanent but **portable**.
+    ///
+    /// ## Why a successor rather than a mutation
+    ///
+    /// The log is append-only and that property is load-bearing well beyond
+    /// this tab: no control alters a past event, sequence numbers are stable
+    /// ids that threads and reactions name, and import replays a bundle from
+    /// zero to reproduce them. Rewriting or dropping the post in place would
+    /// break all three. So the post stays exactly as journaled and this event
+    /// **supersedes** it: every reader folds the pair and shows the post's
+    /// existence, author and time with its text replaced.
+    ///
+    /// ## What it does NOT claim
+    ///
+    /// This is not an at-rest erasure of the original bytes on the instance
+    /// that holds them, and it must not be read as one — the append-only
+    /// property is precisely what forbids that. What it guarantees is that the
+    /// text stops being served by any read surface and stops leaving the
+    /// building: [`export`](crate::store::export) replaces the superseded text
+    /// before the bundle is written, so a round trip cannot resurrect it. A
+    /// leaked credential still has to be rotated; this stops the record of it
+    /// being readable by every member of the company and travelling with the
+    /// bundle.
+    ///
+    /// Scoped deliberately to the discussion. `OperatorMessage` has the same
+    /// shape of problem and is **not** covered here; see
+    /// `docs/modules/server/README.md` for why that is a separate decision
+    /// rather than an oversight.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    TaskDiscussionRedacted {
+        /// The card the superseded post belongs to. Carried so a fold that is
+        /// already filtering one task's journal can skip a tombstone for
+        /// another without resolving the post it names.
+        task_id: String,
+        /// The sequence position of the
+        /// [`TaskDiscussionPosted`](Self::TaskDiscussionPosted) this supersedes.
+        ///
+        /// Stable across export→import: a bundle replays from zero, so the
+        /// referenced position survives the round trip that carries both events.
+        seq: u64,
+        /// Who withdrew it, when a signed-in human is behind the request.
+        ///
+        /// Present for the same reason the post's `by` is: a message that
+        /// disappears with nobody's name on it is one a member can quietly
+        /// remove from a thread others were reading. `None` for a machine
+        /// credential, which reads back as "operator".
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        by: Option<Actor>,
+    },
+    /// A workflow run finished (issue #228) — the durable record of what a run
+    /// actually did, journaled from **both** entry points: the console's Run
+    /// button and the cron [`WorkflowScheduler`](crate::runtime::WorkflowScheduler).
+    ///
+    /// Before this, a run's outcome existed only in the moment. A manual run's
+    /// [`DeliveryReport`] rows lived in the console drawer until it was
+    /// dismissed; a scheduled run's reached only host stdout, which on a hosted
+    /// tenant is the platform team rather than the tenant's operator. Nothing
+    /// wrote a run outcome anywhere the console could read it back — so a report
+    /// that did not leave the building was unfindable an hour later.
+    ///
+    /// This is **not** [issue #242's `RunRecord`](crate::ports::types) and does
+    /// not replace it. That record is a *task-attempt* record minted at the task
+    /// dispatch choke point, keyed to a board task with an attempt ordinal. A
+    /// workflow run enters through a different port entirely
+    /// ([`WorkflowRunner::run`](crate::ports::WorkflowRunner::run)) and produces
+    /// host-side delivery rows per output node; it has no task and no attempt
+    /// ordinal to be keyed on.
+    ///
+    /// Journaled **best-effort, after** the run returns, so it always records a
+    /// finished run and an append failure never disturbs the run path.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes. Every optional/collection field carries
+    /// `#[serde(default)]` + `skip_serializing_if`, the same contract as
+    /// [`AgentReply`](Self::AgentReply)'s `task_id`, so a journal written before
+    /// this variant existed still loads and every already-persisted event stays
+    /// byte-identical.
+    WorkflowRunFinished {
+        /// The workflow graph that ran (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// Whether a cron schedule started this run rather than an operator.
+        /// The distinction is the point: a scheduled run is the
+        /// nobody-was-watching case this event exists for.
+        scheduled: bool,
+        /// A correlation id for the run — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) and per-node events
+        /// carry. Every current entry point mints one and populates it here;
+        /// kept `Option` so a legacy record written before entry points minted
+        /// one, and any future entry point with no id to give, need no
+        /// migration.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
+        /// One row per attempt to route a reached `output` node's report to its
+        /// destination — the same rows a manual run hands back in its HTTP
+        /// response. Empty for a graph that routes nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        deliveries: Vec<DeliveryReport>,
+        /// Node ids the run left waiting on a human approval.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        pending_approvals: Vec<String>,
+        /// The error that ended the run, when it failed outright rather than
+        /// finishing with rows.
+        ///
+        /// This is the field that closes the loudest hole: today a scheduled
+        /// run's `Err` arm only warns to host stdout, so **the worst outcome is
+        /// currently the quietest**. `None` on a run that completed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error: Option<String>,
+        /// Whether an operator stopped this run (issue #383) rather than it
+        /// finishing or failing.
+        ///
+        /// Deliberately **not** folded into [`error`](Self::WorkflowRunFinished):
+        /// a cancelled run carries no error at all, because nothing went wrong.
+        /// Three terminal readings now exist and each has to stay legible on its
+        /// own — a run that *failed* (an `error` naming a node), one
+        /// *interrupted by a host restart* (the boot sweep's synthetic error),
+        /// and one *stopped by an operator* (this flag, no error). Collapsing
+        /// any pair of them would put a deliberate stop in the failure count.
+        ///
+        /// Additive and replay-safe: `#[serde(default)]` decodes every row
+        /// written before #383 as `false`, and `skip_serializing_if` keeps a
+        /// non-cancelled run's line byte-identical to what it was.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        cancelled: bool,
+    },
+    /// A workflow run began (issue #371) — the opening bracket of a run's
+    /// per-node progress trail.
+    ///
+    /// Before this, a run reported once, at the end. Between pressing Run and
+    /// the drawer appearing there was no signal at all: a long run was
+    /// indistinguishable from a wedged one, and a run that died at the fourth of
+    /// six nodes said only that it died. This event and
+    /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) are the trail, and
+    /// they ride the journal rather than a side channel because the journal
+    /// already feeds the live operator SSE projection — **one append serves both
+    /// the live half and the durable half**, so a scheduled run nobody watched
+    /// reads back exactly as a watched one did.
+    ///
+    /// This is deliberately **not** [issue #242's `RunRecord`](Self::TaskDispatched).
+    /// That record keys to a board task with an attempt ordinal; a workflow run
+    /// has neither, and minting a synthetic task id to borrow the shape would
+    /// leak a lie into every `RunStore` consumer.
+    ///
+    /// [`run_id`](Self::WorkflowRunStarted::run_id) is **required** here (unlike
+    /// on `WorkflowRunFinished`, where it stays optional for the rows written
+    /// before entry points minted one). It is the correlation key: a run's node
+    /// events and its finished event share it, so the fold can group them and
+    /// the console can overlay one past run's states onto the canvas.
+    ///
+    /// Additive: old journals never carry it, and its presence changes how no
+    /// existing variant serializes.
+    WorkflowRunStarted {
+        /// The workflow graph that is running (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// The run's correlation id, minted by the entry point.
+        run_id: String,
+        /// Whether a cron schedule started this run rather than an operator.
+        scheduled: bool,
+    },
+    /// One non-trigger node of a workflow run began executing (issue #382),
+    /// reported by the engine's `RunObserver` immediately before the node's
+    /// first attempt.
+    ///
+    /// The opening bracket of a node the way
+    /// [`WorkflowNodeStarted`](Self::WorkflowNodeStarted)'s run-level sibling
+    /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) is the bracket of a run:
+    /// it turns "which node is executing right now" from a client-side guess
+    /// (derived from graph topology) into a fact the engine reports. It is
+    /// emitted on the **same** unbounded channel as this node's
+    /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) and always ahead of
+    /// it, so a reader folding the journal sees a node light up before it settles.
+    ///
+    /// **Structural ids only.** Unlike `WorkflowNodeFinished`, this carries no
+    /// status and no duration — the node has not run yet — and, like every event
+    /// on the progress trail, no node input. There is nothing here to scrub: a
+    /// node id is the whole payload, so the same operator-SSE / inference-sidecar
+    /// readers see only "node X of run R started".
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowNodeStarted {
+        /// The workflow graph that is running.
+        workflow_id: String,
+        /// The run this node belongs to — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) and
+        /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) carry.
+        run_id: String,
+        /// The graph node that just started executing.
+        node_id: String,
+    },
+    /// One non-trigger node of a workflow run finished (issue #371), reported by
+    /// the engine's `RunObserver` as the graph is walked.
+    ///
+    /// One event per node — roughly eight for a six-node graph, against the
+    /// dozens of steps a single chat turn emits — which is why the journal is
+    /// the right carrier at this volume rather than a dedicated store.
+    ///
+    /// **No node output and no error text ride this event.** That is the same
+    /// scrubbing stance the live turn-progress frames take: the journal is read
+    /// by the operator SSE projection and wired to the inference sidecar, and a
+    /// node's raw items are exactly the payload none of those readers need. The
+    /// run-level failure reason already lands on
+    /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished) — a tenant-scoped
+    /// surface — so nothing is lost by keeping this one structural.
+    ///
+    /// Each node's matching *started* bracket is
+    /// [`WorkflowNodeStarted`](Self::WorkflowNodeStarted) (issue #382), emitted
+    /// on the same channel just before the node's first attempt. Before #382 the
+    /// engine's `RunObserver` had only `on_step_finish`, so "currently executing"
+    /// had to be derived client-side from the graph topology the console holds;
+    /// the engine now reports the start directly, so that derivation is gone.
+    WorkflowNodeFinished {
+        /// The workflow graph that is running.
+        workflow_id: String,
+        /// The run this node belongs to — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) carries.
+        run_id: String,
+        /// The graph node that just finished.
+        node_id: String,
+        /// Whether the node succeeded or errored.
+        status: WorkflowNodeStatus,
+        /// Wall-clock duration of the node's execution, in milliseconds.
+        elapsed_ms: u64,
+    },
+    /// One `output` node's report actually left the process (issue #529) — the
+    /// durable record of a dispatch that the run's own
+    /// [`WorkflowRunFinished`](Self::WorkflowRunFinished) does not carry across a
+    /// crash.
+    ///
+    /// # The hole this closes
+    ///
+    /// A run's delivery rows live only on
+    /// [`WorkflowRunFinished::deliveries`](Self::WorkflowRunFinished), which is
+    /// journaled **after** the run returns. A crash, panic, or mid-graph failure
+    /// therefore orphans the side effect: the mail left the process, but the
+    /// boot sweep settles the run `FAILED` with no delivery record, and the
+    /// operator's re-run re-delivers every already-sent report to real people
+    /// (issue #438's ledger rides one approval lineage's trigger input and is not
+    /// persisted, so an independently re-run workflow re-delivers). This event is
+    /// written **write-behind, at dispatch** — immediately after each `Sent` send
+    /// and each `Pending` park — so a durable ledger of what already went out
+    /// survives a crash and a re-run can skip it. See
+    /// [`delivered_by_unsettled_runs`](crate::runtime::delivered_by_unsettled_runs).
+    ///
+    /// Write-behind, not write-ahead: a crash *between* the journal and the send
+    /// would silently suppress a report, which is worse than one duplicate. So
+    /// the record can only ever lag the send, never precede it.
+    ///
+    /// # Dedupe identity is `node`
+    ///
+    /// The fold keys on [`node`](Self::WorkflowReportDelivered::node) so it
+    /// unions cleanly with #438's
+    /// [`DeliveredReport`](crate::runtime::workflow_resume::DeliveredReport),
+    /// whose identity is also the node. An `owner` destination that fanned out to
+    /// several admins writes one line per recipient, so `target` differs across
+    /// lines for one node; per-recipient dedupe is a documented deferred limit,
+    /// exactly as #438's ledger is per node rather than per recipient.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowReportDelivered {
+        /// The workflow graph that delivered (its `workflows/<id>.toml` stem).
+        workflow_id: String,
+        /// The run that dispatched this report — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) carries.
+        run_id: String,
+        /// The `output` node whose report left the process. This is the dedupe
+        /// identity the fold and #438's ledger both key on.
+        node: String,
+        /// The destination kind as authored (`owner` / `email` / `channel`) — the
+        /// description beside the identity, so a reader sees *what* went where.
+        ///
+        /// Renamed to `destination_kind` on the wire: this enum is
+        /// internally-tagged under `kind`, so a field literally named `kind`
+        /// would collide with the tag and emit a duplicate key. The Rust name
+        /// stays `kind` to read the same as its
+        /// [`DeliveryReport`](crate::ports::DeliveryReport) and
+        /// [`DeliveredReport`](crate::runtime::workflow_resume::DeliveredReport)
+        /// siblings.
+        #[serde(rename = "destination_kind")]
+        kind: String,
+        /// The address or channel actually dispatched to. `None` only when a
+        /// destination named none; for `owner` this is the server-resolved
+        /// recipient, not something the graph named. Optional on the wire so a
+        /// line stays minimal when there is nothing to record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target: Option<String>,
+    },
+}
+
+impl CompanyEvent {
+    /// The variant's serialized discriminant — the same string that appears
+    /// under the internally-tagged `kind` field of a journal line.
+    ///
+    /// Written out rather than derived so the value is available without
+    /// serializing, and so a rename of the wire tag has to be made here too
+    /// instead of drifting silently.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::OperatorMessage { .. } => "OperatorMessage",
+            Self::WebhookReceived { .. } => "WebhookReceived",
+            Self::ScheduleFired { .. } => "ScheduleFired",
+            Self::A2aTaskReceived { .. } => "A2aTaskReceived",
+            Self::ApprovalParked { .. } => "ApprovalParked",
+            Self::ApprovalResolved { .. } => "ApprovalResolved",
+            Self::FeedbackFiled { .. } => "FeedbackFiled",
+            Self::PaymentReceived { .. } => "PaymentReceived",
+            Self::LifecycleChanged { .. } => "LifecycleChanged",
+            Self::AgentReply { .. } => "AgentReply",
+            Self::ReactionToggled { .. } => "ReactionToggled",
+            Self::MemoryFactDeleted { .. } => "MemoryFactDeleted",
+            Self::ToolAccessChanged { .. } => "ToolAccessChanged",
+            Self::TaskDispatched { .. } => "TaskDispatched",
+            Self::McpCallFailed { .. } => "McpCallFailed",
+            Self::WorkflowCreated { .. } => "WorkflowCreated",
+            Self::WorkflowUpdated { .. } => "WorkflowUpdated",
+            Self::WorkflowDeleted { .. } => "WorkflowDeleted",
+            Self::TaskSteered { .. } => "TaskSteered",
+            Self::TaskCardChanged { .. } => "TaskCardChanged",
+            Self::WorkspaceChanged { .. } => "WorkspaceChanged",
+            Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
+            Self::EmergencyPauseChanged { .. } => "EmergencyPauseChanged",
+            Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
+            Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
+            Self::WorkflowEnabledChanged { .. } => "WorkflowEnabledChanged",
+            Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
+            Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
+            Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
+            Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
+            Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
+        }
+    }
+
+    /// Whether a retention pass may ever discard this entry (issue #275).
+    ///
+    /// **Exhaustive on purpose — do not add a `_` arm.** A new event variant
+    /// must fail this match and make somebody choose, because the safe default
+    /// for an unclassified entry is to keep it forever, and a wildcard would
+    /// silently pick the other one.
+    ///
+    /// Only a handful of kinds are prunable, and each is high-volume machine
+    /// exhaust that no other entry addresses:
+    ///
+    /// - the four workflow-run progress kinds — `WorkflowRunStarted`,
+    ///   `WorkflowNodeStarted` (issue #382), `WorkflowNodeFinished` and
+    ///   `WorkflowRunFinished` — the growth the issue was filed for, left behind
+    ///   when #259 deletes a workflow, and
+    /// - `McpCallFailed`, a per-attempt tool failure whose durable meaning is
+    ///   already carried by the run outcome it belongs to.
+    ///
+    /// Everything else is permanent. `WebhookReceived` and `ScheduleFired` are
+    /// tempting — both are voluminous and machine-generated — but a webhook
+    /// body is the only record of what a counterparty actually sent, and a
+    /// schedule tick is the only evidence a cron fired at all. Both are
+    /// evidence, so both stay. Chat kinds stay for a second, harder reason:
+    /// `OperatorMessage`, `AgentReply` and `TaskDiscussionPosted` are addressed
+    /// by sequence from thread parents, reactions, and #358's redaction
+    /// tombstone, so pruning one dangles a pointer nothing can repair.
+    ///
+    /// And a third reason, sharper than either: **something still reads it.**
+    /// `WorkflowReportDelivered` is folded at boot by
+    /// `runtime::delivered_by_unsettled_runs` to learn what a crashed run
+    /// already sent. Pruning it re-delivers already-sent reports to real
+    /// people. When classifying a new variant, ask not only "is this evidence"
+    /// and "does anything point at it", but "does anything read it back".
+    pub fn retention_class(&self) -> crate::ports::events::RetentionClass {
+        use crate::ports::events::RetentionClass::{Permanent, Prunable};
+        match self {
+            Self::WorkflowRunStarted { .. }
+            | Self::WorkflowRunFinished { .. }
+            | Self::WorkflowNodeStarted { .. }
+            | Self::WorkflowNodeFinished { .. }
+            | Self::McpCallFailed { .. }
+            // Issue #327, and the one place this diverges from its sibling
+            // `TaskCardChanged` — which is Permanent — so the reasoning is
+            // spelled out rather than assumed.
+            //
+            // It passes all three of the tests the doc comment above sets. It
+            // is not evidence: the tree IS the record of what the workspace
+            // holds, and this frame carries no body, only "something moved".
+            // Nothing points at it: no entry is addressed by its sequence, the
+            // way a reaction or a redaction tombstone addresses a chat message.
+            // And nothing reads it back: no boot-time fold consults it, unlike
+            // `WorkflowReportDelivered`.
+            //
+            // What it is instead is high-volume machine exhaust — one frame per
+            // keystroke-debounced console save, per agent write, per seeded
+            // node at first boot — whose entire meaning is "re-read the tree",
+            // and which is worthless the moment the console has done so.
+            //
+            // `TaskCardChanged` stays Permanent because a board card's
+            // lifecycle is the company's work history. A note's revision
+            // history is not kept here at all: for a published deliverable it
+            // lives on the artifact chain (#552), and for an ordinary note it
+            // is not kept anywhere, which pruning this does not change.
+            | Self::WorkspaceChanged { .. } => Prunable,
+
+            Self::OperatorMessage { .. }
+            | Self::WebhookReceived { .. }
+            | Self::ScheduleFired { .. }
+            | Self::A2aTaskReceived { .. }
+            | Self::ApprovalParked { .. }
+            | Self::ApprovalResolved { .. }
+            | Self::FeedbackFiled { .. }
+            | Self::PaymentReceived { .. }
+            | Self::LifecycleChanged { .. }
+            | Self::AgentReply { .. }
+            | Self::ReactionToggled { .. }
+            | Self::MemoryFactDeleted { .. }
+            | Self::ToolAccessChanged { .. }
+            | Self::TaskDispatched { .. }
+            | Self::WorkflowCreated { .. }
+            | Self::WorkflowUpdated { .. }
+            | Self::WorkflowDeleted { .. }
+            | Self::TaskSteered { .. }
+            | Self::TaskCardChanged { .. }
+            | Self::DeskTaskCompleted { .. }
+            | Self::EmergencyPauseChanged { .. }
+            | Self::TaskDiscussionPosted { .. }
+            | Self::TaskDiscussionRedacted { .. }
+            // Issue #276: an arming change is an audit record of a decision —
+            // by an operator, or by the host's disarm rule. Permanent for the
+            // same reason its create/update/delete siblings above are: it is the
+            // only answer to "when did this stop firing, and who stopped it".
+            | Self::WorkflowEnabledChanged { .. }
+            // Issue #529: permanent, and this one is load-bearing rather than
+            // conventional. It is the durable ledger of reports that already
+            // left the process, written write-behind at dispatch so a re-run
+            // after a crash can skip them. Pruning it would not lose evidence —
+            // it would re-deliver already-sent reports to real people on the
+            // next re-run, which is the exact failure the variant exists to
+            // prevent. See its own docs.
+            | Self::WorkflowReportDelivered { .. } => Permanent,
+        }
+    }
+}
+
+/// How one workflow node's execution came out (issue #371).
+///
+/// A closed two-value set on purpose: it is the entire payload of
+/// [`CompanyEvent::WorkflowNodeFinished`] beyond the structural ids, and having
+/// no `String` arm is what guarantees, by construction, that a node's own error
+/// text cannot reach the journal or the wire through this event.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WorkflowNodeStatus {
+    /// The node executed and produced output.
+    Ok,
+    /// The node's executor errored (after any retries were exhausted).
+    Error,
 }
 
 /// A `CompanyEvent` durably appended to the log with its sequence and time.
@@ -427,6 +1338,24 @@ pub enum EffectGroup {
     Other,
 }
 
+/// The residual bucket. Named here rather than inferred, because for a while it
+/// silently meant two things at once — see
+/// [`Effect::may_be_granted_standing`].
+impl EffectGroup {
+    /// Is this the catch-all bucket, i.e. did the classifier find no particular
+    /// consequence to name on the operator's card?
+    ///
+    /// This answers the *labelling* question and nothing else. It used to double
+    /// as the standing-grant rule, which is what let `shell` and
+    /// `workspace_write` be handed over for a week: neither name contains a
+    /// consequence word, so both landed here, so both were grantable. That rule
+    /// now lives on [`Effect::may_be_granted_standing`], where it is decided by
+    /// what the tool can reach.
+    pub fn is_unclassified(&self) -> bool {
+        matches!(self, Self::Other)
+    }
+}
+
 /// A side effect the brain wants to perform, submitted to the approval gate.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Effect {
@@ -442,6 +1371,51 @@ pub struct Effect {
     pub first_time_counterparty: bool,
     /// Effect-specific payload.
     pub payload: serde_json::Value,
+    /// The roster agent whose **harness tool call** this effect was projected
+    /// from, when it was projected from one at all (issue #243).
+    ///
+    /// This is the discriminator between the two kinds of effect that reach the
+    /// same approval queue, and it exists because they need opposite treatment
+    /// on approval:
+    ///
+    /// * `None` — a *native* effect the runtime itself performs
+    ///   (`CycleHostImpl::send_email`, the workflow delivery path, a Medulla
+    ///   effect frame). Approving it means the runtime executes it, exactly as
+    ///   before this field existed.
+    /// * `Some(agent_id)` — an effect projected from a tool call openhuman
+    ///   already **blocked** inside an agent turn
+    ///   ([`ApprovalPolicy::effect_for`](crate::harness::policy::ApprovalPolicy::effect_for)).
+    ///   There is nothing for the runtime to execute: the real work is the tool,
+    ///   which only that agent can run. Approving it mints a single-use grant and
+    ///   re-dispatches the agent instead.
+    ///
+    /// Only `effect_for` ever stamps this, so `agent.is_some()` is exactly
+    /// "came from a harness tool call". Skipped when serializing and defaulted
+    /// when absent, so journal lines written before this field existed replay as
+    /// `None` — no grant, and the legacy re-ask behaviour — rather than failing
+    /// to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The task **attempt** ([`RunRecord`](crate::ports::runs::RunRecord)) whose
+    /// turn produced this effect, when it was produced inside one at all (issue
+    /// #242).
+    ///
+    /// This is the correlation an approval needs to be answerable *about a
+    /// run*: the approvals queue is company-wide, so without it "which attempt
+    /// is waiting on me?" cannot be asked, and an attempt cannot tell whether it
+    /// parked anything of its own.
+    ///
+    /// Stamped at the **dispatch** boundary, not in
+    /// [`ApprovalPolicy::effect_for`](crate::harness::policy::ApprovalPolicy::effect_for):
+    /// the policy is per-agent and outlives any one run, so it has no run
+    /// context to stamp. An effect a *chat* turn parked therefore stays `None`,
+    /// correctly — no attempt is waiting on it.
+    ///
+    /// Skipped when serializing and defaulted when absent, exactly like
+    /// [`agent`](Self::agent), so journal lines written before this field
+    /// existed replay as `None` rather than failing to parse.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
 }
 
 impl Effect {
@@ -468,6 +1442,44 @@ impl Effect {
     /// Whether the counterparty is new.
     pub fn is_first_time_counterparty(&self) -> bool {
         self.first_time_counterparty
+    }
+
+    /// May an operator turn this parked call into a **standing** permission —
+    /// one grant covering repeat calls until a deadline (issues #374, #444)?
+    ///
+    /// **This is the rule; it lives here so there is one of it.** Three places
+    /// enforce it — the mint path, the approval summary the card reads, and the
+    /// resolve route's 400 — and all three are in the default build, while the
+    /// tool policy that produced the effect compiles only under the `openhuman`
+    /// feature. So the rule cannot live in the policy, and expressing it twice
+    /// across that seam is the drift issue #444 is about.
+    ///
+    /// ## Why it is no longer `group == Other`
+    ///
+    /// `Other` is the bucket a tool falls into when the classifier finds no
+    /// consequence word in its name. Reading that as "safe to hand over for a
+    /// week" put the three broadest capabilities in the system on the grantable
+    /// side — running an arbitrary command, reaching an arbitrary address, and
+    /// overwriting the guidance the operator wrote — while a repository read
+    /// scoped to one connected account stayed off it. Nothing was malfunctioning;
+    /// the rule was measuring a name's vocabulary rather than what the tool can
+    /// do.
+    ///
+    /// It now asks [`consequence_of`](crate::policy::consequence_of), the same
+    /// declaration the parking side reads, using the two things an effect
+    /// already carries: [`kind`](Self::kind) is the tool name and
+    /// [`payload`](Self::payload) is the arguments it was called with. No new
+    /// field, so no journal line changes shape and no replayed effect answers
+    /// this differently from a live one.
+    ///
+    /// Arguments matter here, not just the tool: `composio_execute` carries
+    /// every Composio action under one name, so the same tool is grantable when
+    /// it is listing a repository's pull requests and per-call when it is
+    /// sending mail.
+    pub fn may_be_granted_standing(&self) -> bool {
+        crate::policy::consequence_of(&self.kind, &self.payload)
+            .standing
+            .is_grantable()
     }
 }
 
@@ -534,6 +1546,21 @@ pub struct ChunkMeta {
     pub label: String,
     /// The chunk's length in bytes.
     pub len: usize,
+    /// Epoch-millis when the chunk was stored (`0` for rows written before
+    /// backends started stamping, so old data reads as "unknown" rather than
+    /// as the epoch).
+    ///
+    /// This is what lets the Brain's "Last updated" stat move when agents write
+    /// memory — they write only through this port, never to the `FactStore`
+    /// (see `server::ops::memory::memory_stats`).
+    ///
+    /// Chunks are append-only and never rewritten, so this only ever moves for
+    /// a *new* chunk. Backends differ on a re-`put` of an identical body —
+    /// sqlite/mongo dedupe on the content address and keep the first write,
+    /// the fs index appends a second line — so read freshness as the max
+    /// across chunks rather than assuming one row per body.
+    #[serde(default)]
+    pub stored_at_millis: u64,
 }
 
 /// A single ledger movement.
@@ -549,13 +1576,46 @@ pub struct LedgerEntry {
     pub memo: String,
 }
 
-/// Token accounting for a cycle.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Token **and cost** accounting for a cycle — what the runtime meters onto the
+/// Usage surface after the brain returns.
+///
+/// The cost fields carry no `Eq` (they are `f64`), so this type is `PartialEq`
+/// only. Both are `#[serde(default)]` so a peer that predates them still
+/// decodes.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct TokenUsage {
     /// Input tokens consumed.
     pub input: u64,
     /// Output tokens produced.
     pub output: u64,
+    /// Input tokens served from the provider's KV cache.
+    #[serde(default)]
+    pub cached_input: u64,
+    /// Best-available USD cost for the cycle. Zero when the path reports tokens
+    /// but bills elsewhere (the managed `/openai/v1` passthrough echoes no USD).
+    #[serde(default)]
+    pub cost_usd: f64,
+}
+
+impl TokenUsage {
+    /// Whether the cycle moved no tokens and cost nothing — the guard that keeps
+    /// an idle or offline cycle from writing a meaningless usage sample.
+    ///
+    /// Includes [`Self::cached_input`]: a cache-served pass is real usage even
+    /// if a provider ever reported it without fresh input tokens.
+    pub fn is_zero(&self) -> bool {
+        self.input == 0 && self.output == 0 && self.cached_input == 0 && self.cost_usd == 0.0
+    }
+
+    /// Folds another total into this one — how a brain accumulates the usage of
+    /// several passes into one cycle total. Token counts saturate rather than
+    /// wrap so a bogus peer value can never underflow the meter.
+    pub fn fold(&mut self, other: &TokenUsage) {
+        self.input = self.input.saturating_add(other.input);
+        self.output = self.output.saturating_add(other.output);
+        self.cached_input = self.cached_input.saturating_add(other.cached_input);
+        self.cost_usd += other.cost_usd;
+    }
 }
 
 /// Everything the brain needs to run one cycle.
@@ -777,6 +1837,55 @@ pub struct OutboundMessage {
     /// (same `by`/`chat`/`McpCallFailed` additive precedent above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<ReplyTo>,
+    /// The board card this bubble's turn **opened**, when it opened one (issue
+    /// #246).
+    ///
+    /// A `spawn_task` used to surface nothing at all: the card appeared on the
+    /// board and the operator's reply said nothing about it, so there was no
+    /// way to tell a turn that opened work from one that only talked about it.
+    /// This is the correlation key that lets the console render a "card opened"
+    /// chip, and it is the value journaled onto
+    /// [`AgentReply::task_id`](CompanyEvent::AgentReply) so the chip survives a
+    /// transcript reload rather than existing only on the live response.
+    ///
+    /// **Only the first card of a multi-spawn turn.** The journal field it
+    /// feeds is a single optional id, and widening it to a list would break the
+    /// byte-identical round-trip every stored reply depends on. The claim it
+    /// makes — "this reply opened that card" — is therefore true but
+    /// incomplete, never false; the bubble's [`steps`](Self::steps) timeline
+    /// still shows every `spawn_task` call the turn made.
+    ///
+    /// Additive and non-secret: a card id, omitted on the wire when absent, so
+    /// every prior producer round-trips byte-identically (same `steps` /
+    /// `reply_to` precedent above).
+    ///
+    /// The wire name is pinned to `taskId` rather than inherited, because this
+    /// struct — unlike almost everything else the console reads — carries no
+    /// `rename_all`. The console sees the same card on three surfaces (this
+    /// POST response, the SSE `agent_reply` frame, and the `chat/history` DTO),
+    /// and the other two are camelCase; letting this one alone be `task_id`
+    /// would be a trap for whoever wires the next reader.
+    #[serde(default, rename = "taskId", skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The durable id this bubble was journaled under (issue #364) — the
+    /// sequence position of its `AgentReply`, which is the same id
+    /// `chat/history` returns for it on a later reload.
+    ///
+    /// The enabler for everything durable that references a message. Until this
+    /// existed a freshly-sent bubble had only a browser-minted counter id, so a
+    /// thread reply or a reaction made against it named something no other
+    /// reader — a reload, a second operator — could resolve.
+    ///
+    /// **Stamped by the chat route after journaling, not produced by a brain.**
+    /// A brain emits an answer; it does not know where the answer will land in
+    /// the log, and every non-chat delivery path (a channel send, a workflow
+    /// step) journals nothing at all and correctly leaves this `None`.
+    ///
+    /// Additive and omitted when absent, so an old console ignores it and a new
+    /// console reads its absence as "this host predates durable message ids"
+    /// and says so rather than offering an action that cannot persist.
+    #[serde(default, rename = "messageId", skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
 }
 
 /// One visible step in an agent turn's processing timeline, surfaced in the
@@ -800,15 +1909,106 @@ pub struct TurnStep {
     /// the tool's server-computed `display_label`, else its tool name — never
     /// from tool arguments or output.
     pub label: String,
-    /// An optional muted detail: whitelisted, scrubbed enrichment (e.g. an MCP
-    /// `server · tool`, a delegated desk, a task title) or a plain-language
-    /// failure cause. **Never** raw tool output or arguments.
+    /// **What the step was doing** — a compact rendering of the call's
+    /// arguments, passed through the *same* host-side redactor an approval card
+    /// uses ([`crate::runtime::approval_display`], issue #372) and then bounded.
+    ///
+    /// This is what makes two calls to the same tool tell apart (issue #411):
+    /// two workspace reads used to render identically because nothing about
+    /// *what* was read reached the operator.
+    ///
+    /// Before #411 this field doubled as the failure cause. That moved to
+    /// [`result`](Self::result), which is where "what came back" belongs;
+    /// already-persisted rows keep whatever string they hold and still render.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
+    /// **What came back** (issue #411).
+    ///
+    /// On success: a *summary* — the intrinsic tool's own OpenCompany-authored
+    /// output (bounded), or for every other tool a structural shape line
+    /// (`"12 items"`, `"2.4 kB"`) and never its content, because a remote body
+    /// is exactly what must not reach this surface.
+    ///
+    /// On a failure or a park: the plain-language cause in the failure's own
+    /// terms — the classifier's `cause_plain`, or the intrinsic tool's own
+    /// message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<String>,
+    /// The typed reason a step did not succeed (issue #411), so the console
+    /// renders a **known state** rather than parsing prose.
+    ///
+    /// `None` on a success, on a still-`Running` step, and on a step
+    /// [`AwaitingApproval`](TurnStepStatus::AwaitingApproval) — a park is not a
+    /// failure, and its status already says so.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure: Option<TurnStepFailure>,
+    /// The result was **cut** before the agent could read all of it (issue
+    /// #410).
+    ///
+    /// Carried as its own typed flag rather than buried in prose, because a
+    /// silently truncated result is a distinct, actionable state: the call
+    /// succeeded, and the answer is still incomplete. That combination is
+    /// invisible in a status word, which is precisely how #410 stayed hidden.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
     /// How long the step took in milliseconds, when known (tool calls report it;
     /// thinking/note steps do not).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elapsed_ms: Option<u64>,
+}
+
+/// `skip_serializing_if` for a `bool` that defaults to `false`, so a step that
+/// was not truncated serializes exactly as it did before the field existed and
+/// every stored row round-trips byte-identically.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+impl Default for TurnStep {
+    /// A blank tool-call step, so the several construction sites that fill only
+    /// the fields they know can say `..TurnStep::default()` instead of
+    /// restating every optional field. The `kind`/`status` here are
+    /// placeholders that every real caller overrides.
+    fn default() -> Self {
+        Self {
+            kind: TurnStepKind::ToolCall,
+            status: TurnStepStatus::Ok,
+            label: String::new(),
+            detail: None,
+            result: None,
+            failure: None,
+            truncated: false,
+            elapsed_ms: None,
+        }
+    }
+}
+
+impl TurnStepStatus {
+    /// Whether this status means the step **failed**.
+    ///
+    /// The one place the question is answered, so the console's "N failed"
+    /// count, the destructive tone and any host-side tally cannot disagree.
+    /// [`AwaitingApproval`](Self::AwaitingApproval) is deliberately **not** a
+    /// failure: it is work waiting on a person (issue #411).
+    pub fn is_failure(self) -> bool {
+        matches!(self, Self::Error)
+    }
+
+    /// The `snake_case` word this status serializes as.
+    ///
+    /// The live turn-stream frame carries its status as a `&'static str` rather
+    /// than as this enum (it is a dumb transport that models no harness types),
+    /// so it needs the word without a serde round-trip. Deriving it here means
+    /// the live frame and the persisted step cannot disagree about what to call
+    /// the same state.
+    pub fn wire_word(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Error => "error",
+            Self::Running => "running",
+            Self::AwaitingApproval => "awaiting_approval",
+        }
+    }
 }
 
 /// The kind of a [`TurnStep`], driving its icon in the timeline. Serialized in
@@ -826,7 +2026,7 @@ pub enum TurnStepKind {
 }
 
 /// How a [`TurnStep`] ended. Serialized in `snake_case` (`ok` / `error` /
-/// `running`).
+/// `running` / `awaiting_approval`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TurnStepStatus {
@@ -836,6 +2036,60 @@ pub enum TurnStepStatus {
     Error,
     /// Started but no completion was observed by the end of the turn.
     Running,
+    /// **Gated: waiting on a person** (issue #411).
+    ///
+    /// The approval policy refused the call inline and parked the projected
+    /// effect on the operator's queue. The turn genuinely could not continue —
+    /// but nothing *broke*, and counting it as a failure was the single most
+    /// misleading thing the timeline did: the one step an operator can act on
+    /// rendered as a crash.
+    ///
+    /// A distinct status rather than an [`Error`](Self::Error) carrying a
+    /// reason, because the "N failed" summary and the destructive tone both key
+    /// off the status word. A reason field would have left both still lying.
+    AwaitingApproval,
+}
+
+/// Why a [`TurnStep`] did not succeed, in the failure's own terms (issue #411).
+///
+/// The console renders a *known state* off this instead of pattern-matching the
+/// prose in [`TurnStep::result`] — a classifier keyed on a display string is the
+/// anti-pattern this exists to remove. The variants are a projection of
+/// OpenHuman's own `ToolFailureClass`, mapped in one exhaustive `match` in
+/// [`crate::harness::steps`], so a class added upstream is a compile error here
+/// rather than a silent fall-through to "something went wrong".
+///
+/// Deliberately **narrower** than the upstream class set: it is the vocabulary
+/// an operator can act on, not the vocabulary the classifier reasons in. The
+/// two connectivity classes (`ServiceUnavailable` / `ModelConnection`) collapse
+/// into [`Unavailable`](Self::Unavailable) because "wait, or check the link" is
+/// one action; the two refusal classes (`Denied` / `ApprovalExpired`) collapse
+/// into [`Declined`](Self::Declined) for the same reason.
+///
+/// Serialized in `snake_case`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TurnStepFailure {
+    /// A person refused the action, or the approval request expired before
+    /// anyone answered. Never retried on its own.
+    Declined,
+    /// The company's own safety settings refused the action outright.
+    BlockedByPolicy,
+    /// The credentials the call needed are missing, expired, or were rejected —
+    /// an unauthorized response. The fix is a reconnect, not a retry.
+    Unauthorized,
+    /// The host lacks an operating-system permission the call needed.
+    MissingPermission,
+    /// A program or application the call needed is not available.
+    MissingApp,
+    /// The call ran past its deadline and was stopped.
+    Timeout,
+    /// A service the call depends on — an upstream API, or the model provider —
+    /// could not be reached.
+    Unavailable,
+    /// Genuinely unclassified. The honest residue, and the *only* case that may
+    /// read as "something went wrong": every state above used to land here.
+    Failed,
 }
 
 // ---------------------------------------------------------------------------
@@ -871,6 +2125,31 @@ pub struct OverlayDeskMember {
     /// The teammate id added to the desk. Resolves to a manifest agent or an
     /// [`OverlayAgent`].
     pub agent_id: String,
+}
+
+/// Where a company's manifest was seeded from — the source template's stable
+/// identity, recorded once at launch and carried across rebuilds.
+///
+/// A company launched from a template directory (`serve --company
+/// companies/<slug>`) records the directory slug as its stable `source_id`; a
+/// company provisioned from a raw manifest body (`POST /api/v1/companies`)
+/// carries no provenance (`CompanyRecord::template_provenance` stays `None`) —
+/// provenance is never fabricated for a manifest that did not come from a
+/// template. The blueprint (`company.toml`) is never rewritten: provenance
+/// lives only on the record/overlay.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TemplateProvenance {
+    /// The template's stable identifier — the source directory slug (or a
+    /// canonical id where one exists). Stable across rebuilds and restarts.
+    pub source_id: String,
+    /// The template's version, when the source exposes one. `None` when the
+    /// template is unversioned.
+    #[serde(default)]
+    pub version: Option<String>,
+    /// The source directory path the company was launched from, when recorded.
+    /// Optional and informational; `source_id` is the durable stable key.
+    #[serde(default)]
+    pub path: Option<String>,
 }
 
 /// An operator-set explicit ordering (hierarchy) for one desk's effective
@@ -915,6 +2194,109 @@ pub struct OverlayDesk {
     pub members: Vec<String>,
 }
 
+/// A workflow graph body authored at runtime (the console's create dialog or
+/// the orchestrator's `create_workflow` tool) and persisted on the
+/// [`CompanyRecord`] rather than written into the company source tree.
+///
+/// The source tree (`companies/<name>/workflows/<id>.toml`) is the
+/// version-controlled seed and, in hosted mode, a **read-only** crate mount —
+/// writing a graph there fails with `EROFS` (issue #168). So a created graph
+/// lands here instead, next to the enabled id, and every reader unions the two
+/// sets (see [`load_workflow_union`](crate::company::load_workflow_union)).
+///
+/// The stored value is the **rendered TOML**, already validated at create time:
+/// readers re-parse it through
+/// [`parse_workflow`](crate::company::parse_workflow), so an overlay graph
+/// passes exactly the same validation an on-disk seed file does, with no second
+/// model shape to drift. Deliberately no `name` field — the name lives inside
+/// the TOML, one source of truth.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OverlayWorkflow {
+    /// The workflow id — what the seed file would be named (`<id>.toml`).
+    pub id: String,
+    /// The rendered, already-validated workflow graph TOML.
+    pub toml: String,
+}
+
+/// Why a workflow's armed state changed (issue #276). Serialized in
+/// `snake_case` (`operator` / `disarmed`).
+///
+/// The distinction is the point of journaling this at all: "an operator paused
+/// this" and "the host refused to arm a schedule nobody had reviewed" are
+/// different facts, and only the second one explains a workflow that never fired
+/// after it was created.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowEnabledReason {
+    /// An explicit `PUT …/workflows/{wid}/enabled`.
+    Operator,
+    /// The disarm rule fired: a create or an edit produced a trigger schedule
+    /// that had not been armed before, so the host wrote `false` rather than
+    /// letting an unreviewed cron go live. Only ever paired with
+    /// `enabled: false` — the rule has no arming direction.
+    Disarmed,
+}
+
+/// An operator-set daily spend cap for one teammate, persisted on the
+/// [`CompanyRecord`] so it wins over the manifest's `budget_usd_daily` without
+/// rewriting `company.toml` and without a redeploy (issue #343).
+///
+/// The manifest is a **boot snapshot** baked into the tenant image, so before
+/// this the shipped number was the only number. An entry here is the durable
+/// override the console writes; [`CompanyRecord::effective_budget`] is the one
+/// place the two are reconciled.
+///
+/// Three states, and keeping them apart is the point:
+///
+/// - **no entry** — the manifest value applies (the pre-#343 behaviour exactly);
+/// - **entry with `Some(x)`** — capped at `x`, including a legitimate `0.0`
+///   ("this teammate may not spend");
+/// - **entry with `None`** — explicitly **uncapped**, which beats a manifest cap.
+///   Without this state, clearing a cap on a manifest-capped teammate would be
+///   impossible: dropping the row would fall back to the very cap being cleared.
+///
+/// "Cleared" and "zero" are therefore different rows, never the same one.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BudgetOverride {
+    /// The teammate this caps — a manifest `[[agent]]` id or an
+    /// [`OverlayAgent`] id.
+    pub agent_id: String,
+    /// The cap in USD per UTC day, or `None` for "explicitly uncapped".
+    #[serde(default)]
+    pub budget_usd_daily: Option<f64>,
+    /// Who set it. Attribution is part of the acceptance: a cap that can be
+    /// raised anonymously is not much of a cap.
+    pub set_by: Actor,
+    /// When it was set (epoch millis).
+    pub at_millis: u64,
+}
+
+impl BudgetOverride {
+    /// The first `agent_id` appearing more than once in `entries`, if any.
+    ///
+    /// For validating a set of overrides this process did not write — an
+    /// imported bundle, principally. [`CompanyRecord::budget_override`] reads the
+    /// *first* match, so a second row for one teammate is not a harmless
+    /// duplicate: it makes the applied cap a function of serialization order.
+    /// The two rows can differ in cap *and* in attribution, so there is no
+    /// answer to pick — one choice over-restricts a teammate, the other hands
+    /// back an allowance an admin revoked, and both name someone in the console
+    /// who may not have set it. Callers reject rather than guess.
+    ///
+    /// Linear scan: an override set is one row per capped teammate, so it is
+    /// bounded by roster size.
+    pub fn duplicate_agent_id(entries: &[BudgetOverride]) -> Option<&str> {
+        let mut seen: Vec<&str> = Vec::with_capacity(entries.len());
+        for entry in entries {
+            if seen.contains(&entry.agent_id.as_str()) {
+                return Some(&entry.agent_id);
+            }
+            seen.push(&entry.agent_id);
+        }
+        None
+    }
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
@@ -937,16 +2319,41 @@ pub struct OverlayBlob {
     /// creation existed, so `#[serde(default)]` loads them as empty.
     #[serde(default)]
     pub desks: Vec<OverlayDesk>,
+    /// The operator-authored workflow graph bodies. Absent on rows written
+    /// before runtime workflow authoring persisted through the store, so
+    /// `#[serde(default)]` loads them as empty.
+    #[serde(default)]
+    pub workflows: Vec<OverlayWorkflow>,
+    /// The operator-set per-teammate daily spend caps (issue #343). Absent on
+    /// rows written before console budget writes existed, so `#[serde(default)]`
+    /// loads them as empty — which is exactly "the manifest still decides".
+    #[serde(default)]
+    pub budgets: Vec<BudgetOverride>,
+    /// The workflow ids the operator has switched off (issue #276). Absent on
+    /// rows written before the pause switch existed, and `#[serde(default)]`
+    /// reads that absence as "nothing is paused" — the pre-#276 behaviour
+    /// exactly.
+    #[serde(default)]
+    pub disabled_workflows: Vec<String>,
+    /// The source-template provenance recorded at launch. `None` for companies
+    /// provisioned from a raw manifest and for legacy rows written before
+    /// provenance existed (the `#[serde(default)]` keeps those rows loading).
+    #[serde(default)]
+    pub provenance: Option<TemplateProvenance>,
 }
 
 impl OverlayBlob {
-    /// Builds a blob from a record's overlay collections.
+    /// Builds a blob from a record's overlay collections and provenance.
     pub fn from_record(record: &CompanyRecord) -> Self {
         Self {
             agents: record.overlay_agents.clone(),
             desk_members: record.overlay_desk_members.clone(),
             desk_order: record.overlay_desk_order.clone(),
             desks: record.overlay_desks.clone(),
+            workflows: record.overlay_workflows.clone(),
+            budgets: record.overlay_budgets.clone(),
+            disabled_workflows: record.disabled_workflows.clone(),
+            provenance: record.template_provenance.clone(),
         }
     }
 
@@ -967,6 +2374,10 @@ impl OverlayBlob {
                     desk_members: Vec::new(),
                     desk_order: Vec::new(),
                     desks: Vec::new(),
+                    workflows: Vec::new(),
+                    budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
+                    provenance: None,
                 })
                 .map_err(|_| original),
         }
@@ -1001,6 +2412,68 @@ pub struct CompanyRecord {
     /// overlay). Merged with the manifest's `[[group_chat]]` desks at read time.
     #[serde(default)]
     pub overlay_desks: Vec<OverlayDesk>,
+    /// Workflow graphs authored at runtime (console create dialog / orchestrator
+    /// `create_workflow`), persisted here instead of in the company source tree —
+    /// which is read-only in hosted mode (issue #168). Unioned with the seed
+    /// `workflows/*.toml` files by every reader; the seed wins on an id
+    /// collision. The `#[serde(default)]` keeps records written before runtime
+    /// authoring persisted through the store loading without a migration.
+    #[serde(default)]
+    pub overlay_workflows: Vec<OverlayWorkflow>,
+    /// Operator-set per-teammate daily spend caps that win over the manifest's
+    /// `budget_usd_daily` (issue #343). Read through
+    /// [`Self::effective_budget`] — never directly — so the console write path,
+    /// the roster build and both read surfaces cannot drift. Empty means the
+    /// manifest decides, which is byte-for-byte the pre-#343 behaviour; the
+    /// `#[serde(default)]` keeps records written before console budget writes
+    /// existed loading without a migration.
+    ///
+    /// **At most one entry per `agent_id`.** [`Self::effective_budget`] reads the
+    /// first match, so a second entry for the same teammate is not a harmless
+    /// duplicate — it is a silently unreachable cap, and which of the two wins
+    /// depends on insertion order rather than on what an admin last decided.
+    /// Mutate through [`Self::upsert_budget_override`] rather than pushing, and
+    /// check untrusted input with [`Self::duplicate_budget_agent_id`].
+    #[serde(default)]
+    pub overlay_budgets: Vec<BudgetOverride>,
+    /// Workflow ids the operator has switched **off** (issue #276). A workflow
+    /// named here keeps its graph, stays listed and stays runnable by hand, and
+    /// is skipped by
+    /// [`WorkflowScheduler::tick`](crate::runtime::WorkflowScheduler) — the pause
+    /// switch that used to require deleting the workflow outright.
+    ///
+    /// Read through [`Self::workflow_enabled`] and mutate through
+    /// [`Self::set_workflow_enabled`], never directly, so the scheduler gate, the
+    /// two read surfaces and the write path cannot drift.
+    ///
+    /// **A disable list, not an enable list, and that direction is the whole
+    /// design.** Absent means enabled, so every record written before this
+    /// existed keeps firing exactly as it did — the `#[serde(default)]` is a
+    /// no-op migration rather than a silent mass-disable of every saved schedule.
+    ///
+    /// **Not `[workflows].enabled`.** The manifest list is a *declaration* —
+    /// which workflows this company was provisioned with — and
+    /// `merge_enabled_workflows` (`src/runtime/builder.rs`, issue #208) rebuilds
+    /// it at boot from seed ids ∪ surviving overlay ids. Expressing "off" as
+    /// absence from that list would therefore un-express itself on the next
+    /// restart, which for a safety switch is the one failure mode that must not
+    /// exist. This field is the runtime override the console writes, the same
+    /// split [`Self::effective_budget`] draws between a manifest cap and an
+    /// operator's.
+    ///
+    /// Unlike the edit and delete paths, an id here **may name a seed-backed
+    /// workflow**. Pausing does not touch the source tree and can only ever
+    /// remove capability, so it cannot let a runtime write outlive a seed
+    /// rollback the way a record-wins `[tools]` or `[policy]` merge could.
+    #[serde(default)]
+    pub disabled_workflows: Vec<String>,
+    /// Where this company's manifest was seeded from — the source template's
+    /// stable identity, stamped once at launch and carried across rebuilds.
+    /// `None` for companies provisioned from a raw manifest body. The
+    /// `#[serde(default)]` keeps records written before provenance existed
+    /// loading without a migration.
+    #[serde(default)]
+    pub template_provenance: Option<TemplateProvenance>,
 }
 
 impl CompanyRecord {
@@ -1099,6 +2572,155 @@ impl CompanyRecord {
     pub fn is_roster_agent(&self, agent_id: &str) -> bool {
         self.manifest.agents.iter().any(|a| a.id == agent_id)
             || self.overlay_agents.iter().any(|a| a.id == agent_id)
+    }
+
+    /// Resolves an operator-typed teammate key to its canonical roster id,
+    /// searching manifest agents first and then the overlay teammates.
+    ///
+    /// The case-insensitive companion to [`Self::is_roster_agent`], for the one
+    /// place a human types the key by hand: a card's `assignee` (issue #205).
+    /// [`Self::resolve_desk_id`] already accepts a desk by id **or** name
+    /// case-insensitively, so an assignee naming a desk resolved while the same
+    /// string naming a teammate — `"Engineer"` for `engineer` — did not.
+    ///
+    /// Matches on **id only** (never `role`, never an overlay teammate's
+    /// display name) so the key stays one unambiguous namespace; folding the
+    /// case is what stops a typed capital reading as an unknown agent.
+    ///
+    /// [`Self::is_roster_agent`] keeps its exact-match contract: it guards the
+    /// desk overlay, whose ids are machine-written rather than typed.
+    pub fn resolve_roster_agent_id(&self, agent_key: &str) -> Option<String> {
+        self.manifest
+            .agents
+            .iter()
+            .map(|a| &a.id)
+            .chain(self.overlay_agents.iter().map(|a| &a.id))
+            .find(|id| id.eq_ignore_ascii_case(agent_key))
+            .cloned()
+    }
+
+    /// Canonical ids of operator-added teammates whose **display name** matches
+    /// `name_key` case-insensitively.
+    ///
+    /// The companion to [`Self::resolve_roster_agent_id`] for the half of the
+    /// roster that has no typable id. `server::ops::team` mints an overlay
+    /// teammate with `id: generate_id()`, so an operator who adds "Shane" never
+    /// sees anything but the name — matching on ids alone made every teammate
+    /// they added unassignable, on a board whose Assignee field is free text
+    /// with no picker. Manifest agents keep their id-only namespace: their ids
+    /// (`ceo`, `engineer`) are human-authored and typable, and
+    /// [`Self::resolve_roster_agent_id`] is tried first, so a display name can
+    /// never shadow a real id.
+    ///
+    /// Returns **every** match rather than the first, so the caller can tell a
+    /// unique name from a collision the operator created. Silently routing to
+    /// whichever teammate was added first would reintroduce exactly the
+    /// misrouting this resolver exists to end.
+    pub fn overlay_agent_ids_by_name(&self, name_key: &str) -> Vec<String> {
+        self.overlay_agents
+            .iter()
+            .filter(|a| a.name.eq_ignore_ascii_case(name_key))
+            .map(|a| a.id.clone())
+            .collect()
+    }
+
+    /// This teammate's operator-set budget override, if one exists.
+    ///
+    /// The presence of a row is itself information — it is what the console
+    /// renders the "set by … " attribution line from, and what tells "reset to
+    /// the manifest default" (drop the row) apart from "remove the cap" (a row
+    /// whose `budget_usd_daily` is `None`). Callers that only want the number
+    /// should use [`Self::effective_budget`].
+    pub fn budget_override(&self, agent_id: &str) -> Option<&BudgetOverride> {
+        self.overlay_budgets
+            .iter()
+            .find(|entry| entry.agent_id == agent_id)
+    }
+
+    /// The daily USD cap actually in force for `agent_id`: the operator's
+    /// override when one is stored, else the manifest's `budget_usd_daily`,
+    /// else `None` (uncapped).
+    ///
+    /// **The single source of truth for "what may this teammate spend today"**,
+    /// in the shape of [`Self::effective_desk_members`]. The harness gate, the
+    /// per-agent [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) arm,
+    /// the REST roster and the GraphQL roster all read through here, so a cap
+    /// raised in the console cannot be honoured by one and ignored by another.
+    ///
+    /// An **overlay** teammate has no manifest row at all, so before #343 it was
+    /// unconditionally uncapped; now a stored override caps it like any other.
+    /// A stored `Some(0.0)` really does mean zero, and a stored `None` really
+    /// does mean uncapped even when the manifest names a cap — that asymmetry is
+    /// the whole reason the override is `Option<f64>` rather than `f64`.
+    pub fn effective_budget(&self, agent_id: &str) -> Option<f64> {
+        match self.budget_override(agent_id) {
+            Some(entry) => entry.budget_usd_daily,
+            None => self
+                .manifest
+                .agents
+                .iter()
+                .find(|a| a.id == agent_id)
+                .and_then(|a| a.budget_usd_daily),
+        }
+    }
+
+    /// Stores `entry` as **the** override for its teammate, replacing any entry
+    /// already held for that `agent_id`.
+    ///
+    /// The one way a write path should add to [`Self::overlay_budgets`]. Pushing
+    /// directly is what lets a record accumulate two rows for one teammate, and
+    /// [`Self::budget_override`] reads the *first* — so the stale row would keep
+    /// winning and every surface would agree on a cap no admin last set. Making
+    /// the replacement part of the type rather than a convention each caller
+    /// remembers is the point: there is no correct way to append.
+    pub fn upsert_budget_override(&mut self, entry: BudgetOverride) {
+        self.overlay_budgets
+            .retain(|held| held.agent_id != entry.agent_id);
+        self.overlay_budgets.push(entry);
+    }
+
+    /// The first `agent_id` on this record carrying more than one override, if
+    /// any. See [`BudgetOverride::duplicate_agent_id`].
+    pub fn duplicate_budget_agent_id(&self) -> Option<&str> {
+        BudgetOverride::duplicate_agent_id(&self.overlay_budgets)
+    }
+
+    /// Whether `wid` is switched on (issue #276) — the single predicate the
+    /// scheduler gate and both read surfaces share.
+    ///
+    /// Enabled is the default: an id this record has never heard of is on, which
+    /// is what makes [`Self::disabled_workflows`] a no-op for every record
+    /// written before the switch existed.
+    pub fn workflow_enabled(&self, wid: &str) -> bool {
+        !self.disabled_workflows.iter().any(|id| id == wid)
+    }
+
+    /// Switches `wid` on or off, returning whether the record actually changed.
+    ///
+    /// Idempotent in both directions, and the `bool` is why: the write path uses
+    /// it to skip the store save and the audit event when an operator toggles a
+    /// workflow to the state it is already in, so the journal records decisions
+    /// rather than clicks.
+    ///
+    /// Deliberately the **only** mutator. The disarm rules in
+    /// `workflow_create.rs` call it with `false` and nothing else ever calls it
+    /// with `true` except the explicit enable route — keeping the "an edit
+    /// disarms, it never re-arms" invariant in one place instead of in every
+    /// caller's discipline.
+    pub fn set_workflow_enabled(&mut self, wid: &str, enabled: bool) -> bool {
+        let held = self.disabled_workflows.iter().any(|id| id == wid);
+        match (enabled, held) {
+            // Already in the requested state.
+            (true, false) | (false, true) => false,
+            (true, true) => {
+                self.disabled_workflows.retain(|id| id != wid);
+                true
+            }
+            (false, false) => {
+                self.disabled_workflows.push(wid.to_string());
+                true
+            }
+        }
     }
 }
 
@@ -1249,6 +2871,7 @@ pub struct PaymentReceipt {
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::ports::workflow_runner::DeliveryStatus;
 
     fn round_trip<T>(value: &T) -> T
     where
@@ -1256,6 +2879,90 @@ mod test {
     {
         let json = serde_json::to_string(value).expect("serialize");
         serde_json::from_str(&json).expect("deserialize")
+    }
+
+    // ── Issue #174: cycle usage carries cost, and folds ─────────────────────
+
+    /// A cycle with nothing to report writes nothing, and any single non-zero
+    /// field makes it real usage — including a token-less charge.
+    #[test]
+    fn token_usage_is_zero_only_when_every_field_is() {
+        assert!(TokenUsage::default().is_zero());
+        for usage in [
+            TokenUsage {
+                input: 1,
+                ..TokenUsage::default()
+            },
+            TokenUsage {
+                output: 1,
+                ..TokenUsage::default()
+            },
+            TokenUsage {
+                cached_input: 1,
+                ..TokenUsage::default()
+            },
+            TokenUsage {
+                cost_usd: 0.0001,
+                ..TokenUsage::default()
+            },
+        ] {
+            assert!(!usage.is_zero(), "{usage:?} is real usage");
+        }
+    }
+
+    /// Several model passes in one cycle accumulate into one total.
+    #[test]
+    fn token_usage_folds_passes_together() {
+        let mut total = TokenUsage::default();
+        total.fold(&TokenUsage {
+            input: 100,
+            output: 20,
+            cached_input: 10,
+            cost_usd: 0.01,
+        });
+        total.fold(&TokenUsage {
+            input: 50,
+            output: 5,
+            cached_input: 0,
+            cost_usd: 0.02,
+        });
+        assert_eq!(total.input, 150);
+        assert_eq!(total.output, 25);
+        assert_eq!(total.cached_input, 10);
+        assert!((total.cost_usd - 0.03).abs() < 1e-9);
+    }
+
+    /// A bogus peer value must never wrap the meter into a huge or tiny number.
+    #[test]
+    fn token_usage_fold_saturates_instead_of_overflowing() {
+        let mut total = TokenUsage {
+            input: u64::MAX,
+            output: u64::MAX,
+            cached_input: u64::MAX,
+            cost_usd: 0.0,
+        };
+        total.fold(&TokenUsage {
+            input: 10,
+            output: 10,
+            cached_input: 10,
+            cost_usd: 0.0,
+        });
+        assert_eq!(total.input, u64::MAX);
+        assert_eq!(total.output, u64::MAX);
+        assert_eq!(total.cached_input, u64::MAX);
+    }
+
+    /// The cost fields are additive on the wire: a peer that predates them still
+    /// decodes, and an all-zero usage still serializes them for a peer that has
+    /// them.
+    #[test]
+    fn token_usage_decodes_a_payload_without_the_cost_fields() {
+        let legacy: TokenUsage = serde_json::from_str(r#"{"input":7,"output":3}"#).unwrap();
+        assert_eq!(legacy.input, 7);
+        assert_eq!(legacy.output, 3);
+        assert_eq!(legacy.cached_input, 0);
+        assert_eq!(legacy.cost_usd, 0.0);
+        assert_eq!(round_trip(&legacy), legacy);
     }
 
     /// The `TurnStep` wire shape is camelCase with snake_case enum values:
@@ -1269,6 +2976,7 @@ mod test {
             label: "Searching the web".to_string(),
             detail: Some("brave · search".to_string()),
             elapsed_ms: Some(1234),
+            ..TurnStep::default()
         };
         let json = serde_json::to_value(&step).unwrap();
         assert_eq!(json["kind"], "tool_call");
@@ -1289,6 +2997,7 @@ mod test {
             label: "Thinking".to_string(),
             detail: None,
             elapsed_ms: None,
+            ..TurnStep::default()
         };
         let json = serde_json::to_value(&bare).unwrap();
         assert_eq!(json["kind"], "thinking");
@@ -1309,6 +3018,8 @@ mod test {
     #[test]
     fn outbound_message_steps_are_additive_and_omitted_when_empty() {
         let no_steps = OutboundMessage {
+            message_id: None,
+            task_id: None,
             channel: "operator".to_string(),
             text: "hi".to_string(),
             steps: Vec::new(),
@@ -1322,6 +3033,8 @@ mod test {
         assert!(legacy.steps.is_empty());
 
         let with_steps = OutboundMessage {
+            message_id: None,
+            task_id: None,
             channel: "operator".to_string(),
             text: "done".to_string(),
             steps: vec![TurnStep {
@@ -1330,10 +3043,53 @@ mod test {
                 label: "MCP: brave unavailable".to_string(),
                 detail: Some("server rejected the call".to_string()),
                 elapsed_ms: None,
+                ..TurnStep::default()
             }],
             reply_to: None,
         };
         assert_eq!(round_trip(&with_steps), with_steps);
+    }
+
+    /// Issue #246: `OutboundMessage.task_id` is additive on exactly the same
+    /// terms as `steps` above — a bubble that opened no card must serialize
+    /// byte-for-byte as it did before the field existed, and a payload written
+    /// before it existed must still load. Without both halves every already-
+    /// stored response would change shape the moment this field shipped.
+    #[test]
+    fn outbound_message_task_id_is_additive_and_omitted_when_absent() {
+        let no_card = OutboundMessage {
+            message_id: None,
+            task_id: None,
+            channel: "operator".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&no_card).unwrap(),
+            r#"{"channel":"operator","text":"hi"}"#,
+            "a bubble that opened no card keeps the pre-#246 wire form"
+        );
+
+        let legacy: OutboundMessage =
+            serde_json::from_str(r#"{"channel":"operator","text":"hi"}"#).unwrap();
+        assert!(legacy.task_id.is_none());
+
+        let with_card = OutboundMessage {
+            message_id: None,
+            task_id: Some("t-42".to_string()),
+            channel: "operator".to_string(),
+            text: "opened one".to_string(),
+            steps: Vec::new(),
+            reply_to: None,
+        };
+        assert_eq!(round_trip(&with_card), with_card);
+        assert!(
+            serde_json::to_string(&with_card)
+                .unwrap()
+                .contains(r#""taskId":"t-42""#),
+            "the console reads the card off a camelCase key"
+        );
     }
 
     /// `AgentReply.steps` is additive the same way: a reply journaled before
@@ -1352,6 +3108,8 @@ mod test {
 
         // A tool-less reply serializes without the `steps` key.
         let tool_less = CompanyEvent::AgentReply {
+            parent: None,
+            task_id: None,
             chat_id: "main".to_string(),
             agent_id: "ceo".to_string(),
             text: "hi".to_string(),
@@ -1362,6 +3120,8 @@ mod test {
 
         // A reply with a timeline round-trips it.
         let with_steps = CompanyEvent::AgentReply {
+            parent: None,
+            task_id: None,
             chat_id: "main".to_string(),
             agent_id: "ceo".to_string(),
             text: "done".to_string(),
@@ -1371,11 +3131,224 @@ mod test {
                 label: "Reading messages".to_string(),
                 detail: None,
                 elapsed_ms: Some(12),
+                ..TurnStep::default()
             }],
         };
         let back: CompanyEvent =
             serde_json::from_str(&serde_json::to_string(&with_steps).unwrap()).unwrap();
         assert_eq!(back, with_steps);
+    }
+
+    /// #185: the `task_id` correlation key is additive in both directions —
+    /// an event journaled before it existed still loads, and an untagged event
+    /// still serializes byte-for-byte as it did before the field was added.
+    ///
+    /// That second half is the migration-free guarantee: every already-persisted
+    /// `AgentReply` / `McpCallFailed` in every company's log must round-trip
+    /// unchanged, or the cross-backend export/import comparison breaks.
+    #[test]
+    fn task_id_correlation_is_additive_and_omitted_when_absent() {
+        let legacy: CompanyEvent = serde_json::from_str(
+            r#"{"kind":"AgentReply","chat_id":"main","agent_id":"ceo","text":"hi"}"#,
+        )
+        .expect("a pre-task_id AgentReply still loads");
+        match &legacy {
+            CompanyEvent::AgentReply { task_id, .. } => assert!(task_id.is_none()),
+            other => panic!("expected AgentReply, got {other:?}"),
+        }
+
+        // An untagged reply keeps the legacy wire shape exactly.
+        let untagged = CompanyEvent::AgentReply {
+            parent: None,
+            chat_id: "main".to_string(),
+            agent_id: "ceo".to_string(),
+            text: "hi".to_string(),
+            steps: Vec::new(),
+            task_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&untagged).unwrap(),
+            r#"{"kind":"AgentReply","chat_id":"main","agent_id":"ceo","text":"hi"}"#
+        );
+
+        // A dispatch-produced reply carries the key and round-trips.
+        let tagged = CompanyEvent::AgentReply {
+            parent: None,
+            chat_id: "t-1".to_string(),
+            agent_id: "ceo".to_string(),
+            text: "done".to_string(),
+            steps: Vec::new(),
+            task_id: Some("t-1".to_string()),
+        };
+        let back: CompanyEvent =
+            serde_json::from_str(&serde_json::to_string(&tagged).unwrap()).unwrap();
+        assert_eq!(back, tagged);
+
+        // Same contract on the failure event.
+        let legacy_mcp: CompanyEvent = serde_json::from_str(
+            r#"{"kind":"McpCallFailed","server":"gh","tool":"issues","status":"credential_required","message":"needs auth"}"#,
+        )
+        .expect("a pre-task_id McpCallFailed still loads");
+        match &legacy_mcp {
+            CompanyEvent::McpCallFailed { task_id, .. } => assert!(task_id.is_none()),
+            other => panic!("expected McpCallFailed, got {other:?}"),
+        }
+    }
+
+    /// #185: the dispatch terminal round-trips, and reports where the card
+    /// landed so a stopped run is distinguishable from a successful one.
+    #[test]
+    fn desk_task_completed_round_trips() {
+        let done = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "ceo".to_string(),
+            output: "shipped".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: Vec::new(),
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains(r#""kind":"DeskTaskCompleted""#));
+        assert!(
+            !json.contains("artifact_ids"),
+            "a task that published nothing must add nothing to the log: {json}"
+        );
+        let back: CompanyEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, done);
+    }
+
+    /// Issue #244: the terminal anchor names what the run published, and a line
+    /// written before the field existed still replays.
+    ///
+    /// The legacy blob is asserted verbatim because it is exactly what is
+    /// already on disk in every company's event log — if this ever fails, the
+    /// change needs a migration rather than a `#[serde(default)]`.
+    #[test]
+    fn desk_task_completed_carries_artifact_ids_and_still_reads_the_old_shape() {
+        let done = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "ceo".to_string(),
+            output: "Drafted the launch spec.".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: vec!["art-1".to_string(), "art-2".to_string()],
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(
+            json.contains(r#""artifact_ids":["art-1","art-2"]"#),
+            "{json}"
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            done,
+            "the ids must survive the round trip"
+        );
+
+        let legacy = r#"{"kind":"DeskTaskCompleted","task_id":"t-1","desk":"ceo","output":"shipped","column":"in_review"}"#;
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(legacy).unwrap(),
+            CompanyEvent::DeskTaskCompleted {
+                task_id: "t-1".to_string(),
+                desk: "ceo".to_string(),
+                output: "shipped".to_string(),
+                column: "in_review".to_string(),
+                artifact_ids: Vec::new(),
+            },
+            "a pre-#244 journal line must replay with no artifacts, not fail"
+        );
+    }
+
+    /// Issue #364: a thread parent round-trips, and a message journaled before
+    /// threads existed still replays — as unparented, which is the truth about
+    /// it and not a default standing in for one.
+    ///
+    /// The legacy blobs are asserted verbatim because they are exactly what is
+    /// already on disk in every company's log. A message that never was a thread
+    /// reply must serialize byte-for-byte as it always did, so export/import and
+    /// the cross-backend round-trip need no migration.
+    #[test]
+    fn a_thread_parent_round_trips_and_a_pre_thread_line_still_loads() {
+        for legacy in [
+            r#"{"kind":"OperatorMessage","text":"hi"}"#,
+            r#"{"kind":"AgentReply","chat_id":"main","agent_id":"ceo","text":"hi"}"#,
+        ] {
+            let event: CompanyEvent = serde_json::from_str(legacy).unwrap();
+            match &event {
+                CompanyEvent::OperatorMessage { parent, .. }
+                | CompanyEvent::AgentReply { parent, .. } => assert!(
+                    parent.is_none(),
+                    "a pre-#364 line was never a thread reply: {legacy}"
+                ),
+                other => panic!("unexpected variant: {other:?}"),
+            }
+            assert_eq!(
+                serde_json::to_string(&event).unwrap(),
+                legacy,
+                "an unparented message must serialize exactly as it did before"
+            );
+        }
+
+        let threaded = CompanyEvent::OperatorMessage {
+            parent: Some(EventSeq::new(41)),
+            text: "a follow-up".into(),
+            by: None,
+            chat: Some("studio".into()),
+        };
+        let json = serde_json::to_string(&threaded).unwrap();
+        assert!(json.contains(r#""parent":41"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            threaded
+        );
+
+        let answered = CompanyEvent::AgentReply {
+            parent: Some(EventSeq::new(41)),
+            task_id: None,
+            chat_id: "studio".into(),
+            agent_id: "ceo".into(),
+            text: "on it".into(),
+            steps: Vec::new(),
+        };
+        let json = serde_json::to_string(&answered).unwrap();
+        assert!(json.contains(r#""parent":41"#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            answered
+        );
+    }
+
+    /// Issue #364: a reaction round-trips, and an unattributed one adds no
+    /// `by` key — the same additive contract every optional actor here keeps.
+    #[test]
+    fn a_reaction_round_trips() {
+        let anonymous = CompanyEvent::ReactionToggled {
+            message_seq: EventSeq::new(4),
+            emoji: "👍".into(),
+            on: true,
+            by: None,
+        };
+        let json = serde_json::to_string(&anonymous).unwrap();
+        assert_eq!(
+            json,
+            r#"{"kind":"ReactionToggled","message_seq":4,"emoji":"👍","on":true}"#
+        );
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            anonymous
+        );
+
+        let attributed = CompanyEvent::ReactionToggled {
+            message_seq: EventSeq::new(4),
+            emoji: "🎉".into(),
+            on: false,
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "u1".into(),
+            }),
+        };
+        let json = serde_json::to_string(&attributed).unwrap();
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            attributed
+        );
     }
 
     #[test]
@@ -1387,6 +3360,7 @@ mod test {
         assert_eq!(
             event,
             CompanyEvent::OperatorMessage {
+                parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
@@ -1400,6 +3374,7 @@ mod test {
         // export/import and the fs/sqlite/mongo round-trip stay green without
         // touching a single stored record.
         let event = CompanyEvent::OperatorMessage {
+            parent: None,
             text: "hi".into(),
             by: None,
             chat: None,
@@ -1413,6 +3388,7 @@ mod test {
     #[test]
     fn an_attributed_message_round_trips_with_its_actor() {
         let event = CompanyEvent::OperatorMessage {
+            parent: None,
             text: "hi".into(),
             by: Some(Actor {
                 kind: ActorKind::User,
@@ -1441,6 +3417,7 @@ mod test {
     fn company_event_variants_round_trip_tagged() {
         let events = vec![
             CompanyEvent::OperatorMessage {
+                parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,
@@ -1486,6 +3463,7 @@ mod test {
     #[test]
     fn mcp_call_failed_round_trips_and_is_byte_stable() {
         let event = CompanyEvent::McpCallFailed {
+            task_id: None,
             server: "browserbase".into(),
             tool: "browse".into(),
             status: "tool_call_rejected".into(),
@@ -1530,6 +3508,63 @@ mod test {
         );
     }
 
+    /// Issue #335: an unattributed post must serialize with **no** `by` key, so
+    /// the variant's wire shape is the same one a machine-credentialled post
+    /// wrote before attribution could ever be present — and an attributed one
+    /// round-trips its actor.
+    #[test]
+    fn task_discussion_posted_round_trips_and_omits_an_absent_actor() {
+        let anonymous = CompanyEvent::TaskDiscussionPosted {
+            task_id: "t1".into(),
+            text: "blocked on the API key".into(),
+            by: None,
+        };
+        assert_eq!(round_trip(&anonymous), anonymous);
+        assert_eq!(
+            serde_json::to_string(&anonymous).unwrap(),
+            r#"{"kind":"TaskDiscussionPosted","task_id":"t1","text":"blocked on the API key"}"#
+        );
+
+        let attributed = CompanyEvent::TaskDiscussionPosted {
+            task_id: "t1".into(),
+            text: "unblocked".into(),
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "u-7".into(),
+            }),
+        };
+        assert_eq!(round_trip(&attributed), attributed);
+    }
+
+    /// Issue #358: the tombstone's wire shape, pinned because it is written
+    /// into `events.jsonl` and read back by a *different* instance on import.
+    /// The pair (post, tombstone) is what stops a withdrawn message being
+    /// resurrected, so a tombstone that failed to round-trip would silently
+    /// restore the text it was appended to remove.
+    #[test]
+    fn task_discussion_redacted_round_trips_and_omits_an_absent_actor() {
+        let anonymous = CompanyEvent::TaskDiscussionRedacted {
+            task_id: "t1".into(),
+            seq: 42,
+            by: None,
+        };
+        assert_eq!(round_trip(&anonymous), anonymous);
+        assert_eq!(
+            serde_json::to_string(&anonymous).unwrap(),
+            r#"{"kind":"TaskDiscussionRedacted","task_id":"t1","seq":42}"#
+        );
+
+        let attributed = CompanyEvent::TaskDiscussionRedacted {
+            task_id: "t1".into(),
+            seq: 42,
+            by: Some(Actor {
+                kind: ActorKind::User,
+                id: "u-7".into(),
+            }),
+        };
+        assert_eq!(round_trip(&attributed), attributed);
+    }
+
     #[test]
     fn verdict_serializes_lowercase() {
         assert_eq!(
@@ -1552,6 +3587,8 @@ mod test {
             established_thread: true,
             first_time_counterparty: false,
             payload: serde_json::json!({"to": "@vendor"}),
+            agent: None,
+            run_id: None,
         };
         let back = round_trip(&effect);
         assert_eq!(back, effect);
@@ -1624,6 +3661,10 @@ mod test {
             overlay_desk_members: overlay,
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -1826,17 +3867,22 @@ mod test {
         let blob = OverlayBlob::parse(object).expect("object");
         assert_eq!(blob.agents.len(), 1);
         assert_eq!(blob.desk_members.len(), 1);
+        // Issue #85: an object written before provenance existed omits the key;
+        // `#[serde(default)]` loads it as `None` (zero-migration back-compat).
+        assert!(blob.provenance.is_none());
 
         // Legacy: overlay_json used to hold a bare Vec<OverlayAgent>.
         let legacy = r#"[{"id":"a","name":"A","role":"r"}]"#;
         let blob = OverlayBlob::parse(legacy).expect("legacy array");
         assert_eq!(blob.agents.len(), 1);
         assert!(blob.desk_members.is_empty());
+        assert!(blob.provenance.is_none());
 
         // The empty-array default persisted by fresh schema.
         let blob = OverlayBlob::parse("[]").expect("empty array");
         assert!(blob.agents.is_empty());
         assert!(blob.desk_members.is_empty());
+        assert!(blob.provenance.is_none());
         assert!(blob.desks.is_empty());
 
         // A pre-desk-creation object row (no `desks` key) loads with an empty
@@ -1844,6 +3890,260 @@ mod test {
         let pre_desks = r#"{"agents":[],"desk_members":[]}"#;
         let blob = OverlayBlob::parse(pre_desks).expect("pre-desks object");
         assert!(blob.desks.is_empty());
+    }
+
+    /// Issue #85: a record's template provenance round-trips through the
+    /// `OverlayBlob` the sqlite/mongodb stores persist, and a blob carrying
+    /// provenance re-parses with it intact.
+    #[test]
+    fn overlay_blob_carries_template_provenance() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.template_provenance = Some(TemplateProvenance {
+            source_id: "agentic_law_firm".to_string(),
+            version: Some("2.0.0".to_string()),
+            path: Some("companies/agentic_law_firm".to_string()),
+        });
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.provenance, record.template_provenance);
+    }
+
+    /// Issue #168: a runtime-authored workflow body round-trips through the
+    /// `OverlayBlob` the sqlite/mongodb stores persist as `overlay_json`. On a
+    /// hosted tenant this blob is the ONLY copy of the graph, so a serialization
+    /// gap here would silently delete the workflow.
+    #[test]
+    fn overlay_blob_round_trips_workflows() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.overlay_workflows.push(OverlayWorkflow {
+            id: "greeter".to_string(),
+            toml: "id = \"greeter\"\nname = \"Greeter\"\n".to_string(),
+        });
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.workflows, record.overlay_workflows);
+
+        // A row written before workflow bodies persisted (no `workflows` key)
+        // loads as empty — no migration needed.
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-workflows object")
+                .workflows
+                .is_empty()
+        );
+        // …and so does the legacy bare-array form.
+        assert!(
+            OverlayBlob::parse("[]")
+                .expect("legacy array")
+                .workflows
+                .is_empty()
+        );
+    }
+
+    /// Issue #276: the paused-workflow ids ride the same overlay blob as the
+    /// graph bodies, reconstructed on load by both string-column stores
+    /// (`sqlite` and `mongodb` read `OverlayBlob::parse`). A round trip here
+    /// pins that the field is not dropped in `from_record`/`parse`.
+    #[test]
+    fn overlay_blob_round_trips_disabled_workflows() {
+        let mut record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        record.disabled_workflows.push("digest".to_string());
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.disabled_workflows, record.disabled_workflows);
+
+        // A row written before the pause switch existed holds no `disabled_workflows`
+        // key and loads as empty — the pre-#276 behaviour, no migration needed.
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-#276 object")
+                .disabled_workflows
+                .is_empty()
+        );
+        assert!(
+            OverlayBlob::parse("[]")
+                .expect("legacy array")
+                .disabled_workflows
+                .is_empty()
+        );
+    }
+
+    /// A manifest with two teammates, one capped at $5/day and one uncapped —
+    /// the two starting positions every budget-override case builds on.
+    const BUDGET_ROSTER: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\nbudget_usd_daily = 5.0\n\
+         [[agent]]\nid = \"writer\"\nrole = \"Writer\"\n";
+
+    fn budget_entry(agent_id: &str, cap: Option<f64>) -> BudgetOverride {
+        BudgetOverride {
+            agent_id: agent_id.to_string(),
+            budget_usd_daily: cap,
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// Issue #343: with no override stored, `effective_budget` is the manifest
+    /// value verbatim — the pre-#343 behaviour, and the regression net that says
+    /// adding this field changed nothing for a company that never uses it.
+    #[test]
+    fn effective_budget_falls_back_to_the_manifest() {
+        let record = desk_record(BUDGET_ROSTER, Vec::new());
+        assert_eq!(record.effective_budget("analyst"), Some(5.0));
+        assert_eq!(record.effective_budget("writer"), None);
+        // An id on no roster at all is uncapped rather than an error: the gate
+        // reads this per dispatched agent and must not invent a cap.
+        assert_eq!(record.effective_budget("nobody"), None);
+    }
+
+    /// A stored override wins over the manifest in both directions — raising a
+    /// cap and lowering one. This is the "no redeploy" property at its source:
+    /// nothing here consults `company.toml` once a row exists.
+    #[test]
+    fn a_stored_override_beats_the_manifest() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        record
+            .overlay_budgets
+            .push(budget_entry("analyst", Some(50.0)));
+        assert_eq!(record.effective_budget("analyst"), Some(50.0));
+
+        record.overlay_budgets = vec![budget_entry("analyst", Some(1.0))];
+        assert_eq!(record.effective_budget("analyst"), Some(1.0));
+    }
+
+    /// The distinction the issue calls out by name: clearing a cap and setting
+    /// it to zero are different states and must not collapse into each other.
+    ///
+    /// `Some(0.0)` caps the teammate at nothing (it will refuse to dispatch);
+    /// `None` means explicitly uncapped and beats the manifest's $5. If these
+    /// two ever resolved the same way, an operator lifting a cap would instead
+    /// have silenced the teammate completely — the opposite of what they asked
+    /// for, and unrecoverable from the console.
+    #[test]
+    fn clearing_a_cap_is_not_the_same_as_zeroing_it() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+
+        record.overlay_budgets = vec![budget_entry("analyst", Some(0.0))];
+        assert_eq!(record.effective_budget("analyst"), Some(0.0));
+
+        record.overlay_budgets = vec![budget_entry("analyst", None)];
+        assert_eq!(
+            record.effective_budget("analyst"),
+            None,
+            "an explicitly-uncapped override must beat the manifest's cap"
+        );
+    }
+
+    /// An **overlay** teammate has no manifest row, so before #343 it could not
+    /// be capped at all. A stored override caps it like anyone else — and
+    /// dropping that override returns it to uncapped, since there is no manifest
+    /// value underneath to fall back to.
+    #[test]
+    fn an_overlay_teammate_can_be_capped() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        record.overlay_agents.push(OverlayAgent {
+            id: "shane".to_string(),
+            name: "Shane".to_string(),
+            role: "Growth".to_string(),
+            description: None,
+        });
+        assert_eq!(record.effective_budget("shane"), None);
+
+        record.overlay_budgets = vec![budget_entry("shane", Some(2.5))];
+        assert_eq!(record.effective_budget("shane"), Some(2.5));
+
+        record.overlay_budgets.clear();
+        assert_eq!(record.effective_budget("shane"), None);
+    }
+
+    /// Issue #343: one override per teammate. `upsert_budget_override` replaces
+    /// the held row instead of appending a second, so the cap an admin last set
+    /// is the cap every surface reads.
+    ///
+    /// Appending would leave the *first* row winning `budget_override`'s
+    /// find-first read — meaning a raise or a revocation would persist happily
+    /// and change nothing, the failure mode hardest to notice from the console.
+    #[test]
+    fn upserting_an_override_replaces_rather_than_appends() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        record.upsert_budget_override(budget_entry("analyst", Some(50.0)));
+        record.upsert_budget_override(budget_entry("writer", Some(3.0)));
+        record.upsert_budget_override(budget_entry("analyst", None));
+
+        assert_eq!(
+            record.overlay_budgets.len(),
+            2,
+            "a second write for one teammate must replace, not accumulate: {:?}",
+            record.overlay_budgets
+        );
+        assert_eq!(
+            record.effective_budget("analyst"),
+            None,
+            "the latest write must win over the manifest's $5"
+        );
+        assert_eq!(record.effective_budget("writer"), Some(3.0));
+    }
+
+    /// Issue #343: duplicates are detectable, so a caller holding overrides it
+    /// did not write (a bundle import) can refuse them instead of silently
+    /// applying whichever row happens to sort first.
+    #[test]
+    fn duplicate_overrides_are_detected() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        assert_eq!(record.duplicate_budget_agent_id(), None);
+
+        record.overlay_budgets = vec![
+            budget_entry("analyst", Some(9.0)),
+            budget_entry("writer", None),
+        ];
+        assert_eq!(
+            record.duplicate_budget_agent_id(),
+            None,
+            "distinct teammates are not a duplicate"
+        );
+
+        // Two rows for one teammate that disagree about the cap — the case where
+        // guessing would either over-restrict or hand back a revoked allowance.
+        record.overlay_budgets = vec![
+            budget_entry("analyst", Some(9.0)),
+            budget_entry("writer", None),
+            budget_entry("analyst", Some(0.0)),
+        ];
+        assert_eq!(record.duplicate_budget_agent_id(), Some("analyst"));
+    }
+
+    /// Issue #343: the budget overrides round-trip through the `OverlayBlob` the
+    /// sqlite/mongodb stores persist, and pre-#343 rows load as "no overrides"
+    /// (the manifest still decides) rather than failing to parse.
+    #[test]
+    fn overlay_blob_round_trips_budgets() {
+        let mut record = desk_record(BUDGET_ROSTER, Vec::new());
+        record.overlay_budgets = vec![
+            budget_entry("analyst", Some(9.0)),
+            budget_entry("writer", None),
+        ];
+        let json = serde_json::to_string(&OverlayBlob::from_record(&record)).expect("serialize");
+        let blob = OverlayBlob::parse(&json).expect("reparse");
+        assert_eq!(blob.budgets, record.overlay_budgets);
+
+        let legacy = r#"{"agents":[],"desk_members":[]}"#;
+        assert!(
+            OverlayBlob::parse(legacy)
+                .expect("pre-budget object")
+                .budgets
+                .is_empty()
+        );
+        assert!(
+            OverlayBlob::parse("[]")
+                .expect("legacy array")
+                .budgets
+                .is_empty()
+        );
     }
 
     /// An operator-created overlay desk resolves through the same
@@ -1894,6 +4194,481 @@ mod test {
         let json = serde_json::to_string(&blob).expect("serialize");
         let again = OverlayBlob::parse(&json).expect("reparse");
         assert_eq!(again.desks, blob.desks);
+    }
+
+    // ── Issue #228: a workflow run's outcome is journaled ───────────────────
+
+    fn delivery(node: &str, status: DeliveryStatus) -> DeliveryReport {
+        DeliveryReport {
+            node: node.to_string(),
+            kind: "owner".to_string(),
+            target: Some("ada@example.com".to_string()),
+            status,
+            detail: "emailed the company's admin".to_string(),
+            reason: crate::ports::DeliveryReason::OwnerEmailed,
+        }
+    }
+
+    /// The full-bodied variant survives the JSONL round trip the journal puts
+    /// every event through — including the delivery rows, which are the whole
+    /// reason the event exists.
+    #[test]
+    fn workflow_run_finished_round_trips_with_every_field() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: Some("run-1".to_string()),
+            deliveries: vec![
+                delivery("owner_summary", DeliveryStatus::Skipped),
+                delivery("also_sent", DeliveryStatus::Sent),
+            ],
+            pending_approvals: vec!["review".to_string()],
+            error: None,
+            cancelled: false,
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// The failed-run shape round-trips too. This is the arm that today only
+    /// warns to host stdout, so it is the one an operator most needs read back.
+    #[test]
+    fn workflow_run_finished_round_trips_a_failed_run() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: None,
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: Some("agent node `worker` had no inference source".to_string()),
+            cancelled: false,
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// The additive contract, both halves.
+    ///
+    /// **Forward:** a minimal line — only the two required fields, exactly what
+    /// a future/older writer might emit — still loads, so no persisted journal
+    /// needs migrating.
+    ///
+    /// **Backward:** an empty run serializes to *only* those two fields. Every
+    /// optional/collection field is `skip_serializing_if`, which is what keeps
+    /// the wire form of an outcome-less run minimal rather than littered with
+    /// nulls and `[]`s.
+    #[test]
+    fn workflow_run_finished_omits_and_defaults_its_optional_fields() {
+        let json = r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":false}"#;
+        let event: CompanyEvent = serde_json::from_str(json).expect("minimal line loads");
+        assert_eq!(
+            event,
+            CompanyEvent::WorkflowRunFinished {
+                workflow_id: "digest".to_string(),
+                scheduled: false,
+                run_id: None,
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: None,
+                cancelled: false,
+            }
+        );
+        // …and serializing it back emits nothing extra.
+        let out = serde_json::to_string(&event).expect("serialize");
+        assert!(!out.contains("run_id"), "{out}");
+        assert!(!out.contains("deliveries"), "{out}");
+        assert!(!out.contains("pending_approvals"), "{out}");
+        assert!(!out.contains("error"), "{out}");
+        // Issue #383's field joins the same contract, which is what makes it
+        // replay-safe: absent decodes as `false`, and a non-cancelled run's line
+        // is byte-identical to what it was before the field existed.
+        assert!(!out.contains("cancelled"), "{out}");
+    }
+
+    /// Issue #383: a cancelled run round-trips, and is distinguishable from a
+    /// failed one by more than the absence of an error.
+    ///
+    /// The pairing is the assertion. A cancelled run carries `cancelled: true`
+    /// **and** `error: None` — so a reader that only ever looked at `error`
+    /// (every reader before #383) sees a clean finish, which is exactly why the
+    /// console needed a new field rather than a new error string.
+    #[test]
+    fn workflow_run_finished_round_trips_a_cancelled_run() {
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: false,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: true,
+        };
+        assert_eq!(round_trip(&event), event);
+
+        let out = serde_json::to_string(&event).expect("serialize");
+        assert_eq!(
+            out,
+            r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":false,"run_id":"run-1","cancelled":true}"#,
+            "the cancelled line pins its exact wire shape"
+        );
+    }
+
+    /// A pre-#383 line — the overwhelming majority of every journal on disk —
+    /// loads as not cancelled rather than failing to decode.
+    #[test]
+    fn a_pre_383_finished_line_loads_as_not_cancelled() {
+        let line = r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":true,"run_id":"run-9","error":"it broke"}"#;
+        let event: CompanyEvent = serde_json::from_str(line).expect("pre-#383 line loads");
+        let CompanyEvent::WorkflowRunFinished {
+            cancelled, error, ..
+        } = &event
+        else {
+            panic!("expected a WorkflowRunFinished");
+        };
+        assert!(!cancelled, "an old failed run must not read as cancelled");
+        assert_eq!(error.as_deref(), Some("it broke"));
+        // And re-serializing it stays byte-identical — the field is absent
+        // going out as well as coming in.
+        assert_eq!(
+            serde_json::to_string(&event).expect("serialize"),
+            line,
+            "re-writing an old line must not add the new field"
+        );
+    }
+
+    /// Issue #371's opening bracket round-trips through the JSONL the journal
+    /// puts every event through.
+    #[test]
+    fn workflow_run_started_round_trips() {
+        let event = CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            scheduled: true,
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// Both node outcomes round-trip, including the elapsed reading — the field
+    /// that turns "it finished" into "it took this long", which is what tells a
+    /// slow run from a wedged one.
+    #[test]
+    fn workflow_node_finished_round_trips_both_statuses() {
+        for status in [WorkflowNodeStatus::Ok, WorkflowNodeStatus::Error] {
+            let event = CompanyEvent::WorkflowNodeFinished {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                node_id: "ceo".to_string(),
+                status,
+                elapsed_ms: 1234,
+            };
+            assert_eq!(round_trip(&event), event);
+        }
+    }
+
+    /// Every field on both #371 variants is required, and that is the point:
+    /// the correlation id is what groups a run's nodes with its outcome, so a
+    /// line without one would be unfoldable. Nothing is `skip_serializing_if`,
+    /// so the wire form is fully self-describing.
+    #[test]
+    fn workflow_progress_variants_serialize_every_field() {
+        let started = serde_json::to_string(&CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            scheduled: false,
+        })
+        .expect("serialize");
+        assert_eq!(
+            started,
+            r#"{"kind":"WorkflowRunStarted","workflow_id":"digest","run_id":"run-1","scheduled":false}"#
+        );
+
+        let node = serde_json::to_string(&CompanyEvent::WorkflowNodeFinished {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node_id: "ceo".to_string(),
+            status: WorkflowNodeStatus::Error,
+            elapsed_ms: 7,
+        })
+        .expect("serialize");
+        assert_eq!(
+            node,
+            r#"{"kind":"WorkflowNodeFinished","workflow_id":"digest","run_id":"run-1","node_id":"ceo","status":"error","elapsed_ms":7}"#
+        );
+    }
+
+    /// The replay guarantee #371 rests on, stated as a test: adding these two
+    /// variants cannot change how an already-persisted line loads. A journal
+    /// written before #371 contains neither `kind`, and the pre-#371 wire form
+    /// of the variant they sit beside still decodes byte-for-byte as it did.
+    #[test]
+    fn pre_371_journal_lines_are_unaffected_by_the_new_variants() {
+        let line = r#"{"kind":"WorkflowRunFinished","workflow_id":"digest","scheduled":true,"pending_approvals":["review"]}"#;
+        let event: CompanyEvent = serde_json::from_str(line).expect("pre-#371 line loads");
+        assert_eq!(
+            event,
+            CompanyEvent::WorkflowRunFinished {
+                workflow_id: "digest".to_string(),
+                scheduled: true,
+                run_id: None,
+                deliveries: Vec::new(),
+                pending_approvals: vec!["review".to_string()],
+                error: None,
+                cancelled: false,
+            }
+        );
+    }
+
+    /// Issue #327: the workspace announcement survives the JSONL round trip the
+    /// journal puts every event through, and carries its discriminant.
+    #[test]
+    fn workspace_changed_round_trips() {
+        let event = CompanyEvent::WorkspaceChanged {
+            node_id: "n-1".to_string(),
+            change: "updated".to_string(),
+        };
+        assert_eq!(round_trip(&event), event);
+        assert_eq!(event.kind(), "WorkspaceChanged");
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains(r#""kind":"WorkspaceChanged""#), "{json}");
+        assert!(json.contains(r#""node_id":"n-1""#), "{json}");
+    }
+
+    /// The one variant whose retention class diverges from its sibling's, so
+    /// the choice is pinned rather than left to the next reader's memory.
+    ///
+    /// `WorkspaceChanged` is Prunable: it is high-volume machine exhaust whose
+    /// whole meaning is "re-read the tree", nothing addresses it by sequence,
+    /// and nothing folds it at boot. `TaskCardChanged` stays Permanent because
+    /// a board card's lifecycle is the company's work history.
+    #[test]
+    fn a_workspace_announcement_is_prunable_though_its_board_sibling_is_not() {
+        use crate::ports::events::RetentionClass;
+
+        assert_eq!(
+            CompanyEvent::WorkspaceChanged {
+                node_id: "n-1".to_string(),
+                change: "updated".to_string(),
+            }
+            .retention_class(),
+            RetentionClass::Prunable
+        );
+        assert_eq!(
+            CompanyEvent::TaskCardChanged {
+                task_id: "t-1".to_string(),
+                change: "opened".to_string(),
+                column: Some("todo".to_string()),
+            }
+            .retention_class(),
+            RetentionClass::Permanent
+        );
+    }
+
+    /// Issue #529: the delivered-report event survives the JSONL round trip the
+    /// journal puts every event through, `target` and all — the whole reason it
+    /// exists is to be read back after a crash.
+    #[test]
+    fn workflow_report_delivered_round_trips() {
+        let event = CompanyEvent::WorkflowReportDelivered {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node: "owner_summary".to_string(),
+            kind: "owner".to_string(),
+            target: Some("ada@example.com".to_string()),
+        };
+        assert_eq!(round_trip(&event), event);
+    }
+
+    /// Issue #529: the wire shape is pinned, and `target` is omitted entirely
+    /// when a destination named none — the same `skip_serializing_if` economy
+    /// every optional field on this enum keeps, so a channel line stays minimal.
+    #[test]
+    fn workflow_report_delivered_pins_its_wire_shape_and_omits_absent_target() {
+        let with_target = serde_json::to_string(&CompanyEvent::WorkflowReportDelivered {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node: "owner_summary".to_string(),
+            kind: "owner".to_string(),
+            target: Some("ada@example.com".to_string()),
+        })
+        .expect("serialize");
+        assert_eq!(
+            with_target,
+            r#"{"kind":"WorkflowReportDelivered","workflow_id":"digest","run_id":"run-1","node":"owner_summary","destination_kind":"owner","target":"ada@example.com"}"#
+        );
+
+        let no_target = serde_json::to_string(&CompanyEvent::WorkflowReportDelivered {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node: "notice".to_string(),
+            kind: "channel".to_string(),
+            target: None,
+        })
+        .expect("serialize");
+        assert_eq!(
+            no_target,
+            r#"{"kind":"WorkflowReportDelivered","workflow_id":"digest","run_id":"run-1","node":"notice","destination_kind":"channel"}"#,
+            "an absent target must not ride the line as a null"
+        );
+        // …and a line with no `target` loads back as `None` rather than failing.
+        let decoded: CompanyEvent = serde_json::from_str(&no_target).expect("minimal line loads");
+        assert_eq!(
+            decoded,
+            CompanyEvent::WorkflowReportDelivered {
+                workflow_id: "digest".to_string(),
+                run_id: "run-1".to_string(),
+                node: "notice".to_string(),
+                kind: "channel".to_string(),
+                target: None,
+            }
+        );
+    }
+
+    /// Issue #259's two variants pin their wire shape the same way
+    /// `WorkflowCreated` does: `kind` + `workflow_id` + `name`, with `by`
+    /// omitted entirely when absent so the common unattributed line stays the
+    /// short one.
+    #[test]
+    fn workflow_updated_and_deleted_pin_their_wire_shape() {
+        let updated = CompanyEvent::WorkflowUpdated {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&updated).expect("serialize"),
+            r#"{"kind":"WorkflowUpdated","workflow_id":"digest","name":"Daily digest"}"#
+        );
+
+        let deleted = CompanyEvent::WorkflowDeleted {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&deleted).expect("serialize"),
+            r#"{"kind":"WorkflowDeleted","workflow_id":"digest","name":"Daily digest"}"#
+        );
+
+        // Both round-trip.
+        for event in [updated, deleted] {
+            let line = serde_json::to_string(&event).expect("serialize");
+            let back: CompanyEvent = serde_json::from_str(&line).expect("deserialize");
+            assert_eq!(back, event);
+        }
+    }
+
+    /// The graph body must never reach the journal — see the variant docs. A
+    /// reader of the shared append-only log (operator SSE, the inference
+    /// sidecar) has no business seeing agent prompts or destination addresses,
+    /// and the only way a body could leak here is someone adding a field.
+    #[test]
+    fn workflow_updated_carries_no_graph_body() {
+        let line = serde_json::to_string(&CompanyEvent::WorkflowUpdated {
+            workflow_id: "digest".to_string(),
+            name: "Daily digest".to_string(),
+            by: None,
+        })
+        .expect("serialize");
+        assert!(!line.contains("toml"), "{line}");
+        assert!(!line.contains("node"), "{line}");
+        assert!(!line.contains("graph"), "{line}");
+    }
+
+    /// **The backcompat proof.** A journal written before this variant existed
+    /// still loads, line for line, and every one of those lines re-serializes
+    /// byte-identically — which is what "additive, no migration" actually
+    /// claims. Adding an enum variant cannot change how a sibling serializes,
+    /// but nothing else in the suite asserts it for the whole log, and a
+    /// regression here would corrupt an export/import round trip silently.
+    #[test]
+    fn a_journal_written_before_this_variant_still_loads_byte_identically() {
+        // Verbatim lines in the pre-#228 on-disk shapes, including the pre-`by`
+        // / pre-`chat` `OperatorMessage` and the pre-`steps` `AgentReply`.
+        let legacy = [
+            r#"{"kind":"OperatorMessage","text":"ship it"}"#,
+            r#"{"kind":"AgentReply","chat_id":"general","agent_id":"ceo","text":"on it"}"#,
+            r#"{"kind":"ScheduleFired","cron":"0 9 * * *","prompt":"daily"}"#,
+            r#"{"kind":"WorkflowCreated","workflow_id":"digest","name":"Digest"}"#,
+            r#"{"kind":"TaskDispatched","task_id":"t-1"}"#,
+            r#"{"kind":"DeskTaskCompleted","task_id":"t-1","desk":"ceo","output":"done","column":"in_review"}"#,
+        ];
+        for line in legacy {
+            let event: CompanyEvent = serde_json::from_str(line)
+                .unwrap_or_else(|e| panic!("pre-#228 journal line must still load: {line} — {e}"));
+            let again = serde_json::to_string(&event).expect("serialize");
+            assert_eq!(again, line, "pre-#228 line must re-serialize unchanged");
+        }
+    }
+
+    /// Issue #242: an effect remembers which task attempt produced it, and the
+    /// field is additive in the same way `Effect::agent` was — a journal line
+    /// written before it existed replays as `None` (no run correlation, the
+    /// pre-#242 behaviour) rather than failing to parse and taking the whole
+    /// approval queue down with it on replay.
+    #[test]
+    fn effect_run_id_round_trips_and_a_legacy_line_replays_as_none() {
+        let mut effect = Effect {
+            kind: "composio.execute".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
+            agent: Some("finance".to_string()),
+            run_id: None,
+        };
+        let untagged = serde_json::to_string(&effect).expect("serialize");
+        assert!(
+            !untagged.contains("run_id"),
+            "an untagged effect's wire form must be unchanged: {untagged}"
+        );
+
+        effect.run_id = Some("run-7".to_string());
+        let tagged = serde_json::to_string(&effect).expect("serialize");
+        assert!(tagged.contains(r#""run_id":"run-7""#), "{tagged}");
+        assert_eq!(
+            effect,
+            serde_json::from_str::<Effect>(&tagged).expect("round trip")
+        );
+
+        // The pre-#242 line: same bytes, no field.
+        let legacy: Effect = serde_json::from_str(&untagged).expect("legacy effect must load");
+        assert_eq!(legacy.run_id, None);
+        assert_eq!(
+            legacy.agent.as_deref(),
+            Some("finance"),
+            "the earlier additive field must still be read alongside the new one"
+        );
+    }
+
+    /// Issue #242: the run id rides the dispatch event, and it is additive in
+    /// both directions — a tagged dispatch round-trips it, and an untagged one
+    /// serializes exactly the shape a pre-#242 journal holds (asserted verbatim
+    /// above too, but here against the *writer* rather than the reader).
+    #[test]
+    fn task_dispatched_carries_its_run_id_without_changing_the_untagged_shape() {
+        let untagged = CompanyEvent::TaskDispatched {
+            task_id: "t-1".to_string(),
+            run_id: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&untagged).expect("serialize"),
+            r#"{"kind":"TaskDispatched","task_id":"t-1"}"#
+        );
+
+        let tagged = CompanyEvent::TaskDispatched {
+            task_id: "t-1".to_string(),
+            run_id: Some("run-7".to_string()),
+        };
+        let line = serde_json::to_string(&tagged).expect("serialize");
+        assert!(line.contains(r#""run_id":"run-7""#), "{line}");
+        assert_eq!(
+            tagged,
+            serde_json::from_str::<CompanyEvent>(&line).expect("round trip")
+        );
+
+        // A legacy line loads as an untagged dispatch rather than failing.
+        let legacy: CompanyEvent =
+            serde_json::from_str(r#"{"kind":"TaskDispatched","task_id":"t-1"}"#).expect("legacy");
+        assert_eq!(legacy, untagged);
     }
 
     #[test]

@@ -35,23 +35,99 @@
 //! offline [`MockProvider`](provider::MockProvider) does not, so test turns stay
 //! inert.
 
+/// A `RunTurn` over an ACP agent (the `acp` feature).
+///
+/// Gated because nothing in a default build can reach it: the endpoint that
+/// would drive it lives behind the same feature, and `/acp` is a reserved
+/// prefix that 404s without it. Compiling it unconditionally meant a surface
+/// that no lane ran and no route served — see issue #475.
+#[cfg(feature = "acp")]
+pub mod acp_run_turn;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
 pub mod composio;
+/// Issue #410: how a Composio action catalogue is narrowed and rendered for an
+/// agent, and why every cut it makes describes itself. Pure and un-gated (the
+/// live tools are behind `composio`, which CI never *runs*) — see
+/// [`composio_catalog`].
+pub mod composio_catalog;
+/// End-to-end proof that #410's narrowable, self-describing Composio listing is
+/// reachable from a real turn on two large toolkits — the harness, the grant
+/// gate, the approval policy and the Composio client are all real; only the
+/// model's choices and the Composio backend are scripted. Test-only.
+#[cfg(all(test, feature = "composio"))]
+mod composio_turn_test;
+/// Issue #416: the confined turn — an ephemeral agent with no tools, no company
+/// memory and no delegation, for a question that is about one object rather than
+/// about the company. See [`confine`].
+pub mod confine;
 pub mod cost;
+/// Hosted embeddings compute for the in-pod memory engine's meaning tier (188c2).
+/// Needs the `tinycortex` crate's `EmbeddingBackend` trait, so it links only when
+/// both the harness (`openhuman`) and the memory engine (`tinycortex`) are built.
+#[cfg(feature = "tinycortex")]
+pub mod embeddings;
+pub mod lifecycle;
 pub mod mcp;
 pub mod mcp_probe;
 pub mod memory;
 pub mod memory_loop;
 pub mod orchestrator;
+/// Issue #337: the planning station — one tool-less model call per card entering
+/// `planning`, with the host gathering the evidence and verifying every
+/// prerequisite the model claims. See [`planning`].
+pub mod planning;
 pub mod policy;
 pub mod provider;
+/// Issue #244: `publish_artifact` — the only way a workspace file becomes a
+/// deliverable — plus the staging queue the brain drains, the bounded workspace
+/// scan that detects unpublished work, and the follow-up nudge's prompt. See
+/// [`publish`].
+pub mod publish;
+/// End-to-end proof that #244's `publish_artifact` is reachable from a real
+/// dispatch, that a re-run extends by identity, and — the part nothing shorter
+/// than a real turn loop can show — that the follow-up nudge fires **once**,
+/// records a decline, and can never fail the run it follows. Test-only.
+#[cfg(test)]
+mod publish_turn_test;
+pub mod run_trace;
+pub mod run_turn;
+pub mod search;
+/// End-to-end proof that the #238 `web_search` tool is reachable from a real
+/// turn — the harness, the grant gates, the approval policy, the cap and the
+/// meter are all real; only the model's choices and the search backend's
+/// responses are scripted. Test-only.
+#[cfg(test)]
+mod search_turn_test;
 pub mod skills;
 pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
+/// Issue #339: the staging queue the orchestrator's `run_workflow` /
+/// `create_workflow` tools push a workflow reference onto and the
+/// [`HarnessBrain`] drains at the end of a dispatch, so a card that built or
+/// Issue #580: the workflow builder pass — turns a `workflow`-deliverable card's
+/// plan into a proposed graph that lands In Review for approval. Modeled on the
+/// planning station (one card, one tool-less model call, one settled outcome),
+/// but it mints an attempt row because building the workflow is the card's work.
+/// See [`workflow_build`].
+pub mod workflow_build;
+/// ran a workflow can link to it. See [`workflow_refs`].
+pub mod workflow_refs;
+/// End-to-end proof that an agent granted `files` and **not** `shell` can write
+/// a relative path on a company that has never run — the #409 provisioning gap,
+/// which only exists before anything has created the agent's workspace. Covers
+/// a manifest teammate and a runtime overlay teammate, and pins that a traversal
+/// out of a provisioned sandbox is still refused. Test-only.
+#[cfg(test)]
+mod workspace_provision_turn_test;
+pub mod workspace_tools;
+/// End-to-end proof that the #237 workspace tools are reachable from a real
+/// turn, with only the model's choices stubbed. Test-only.
+#[cfg(test)]
+mod workspace_turn_test;
 
 pub use brain::HarnessBrain;
 
@@ -74,11 +150,12 @@ use crate::error::OpenCompanyError;
 use crate::harness::cost::{TurnUsage, record_turn_cost};
 use crate::harness::mcp_probe::McpFailureQueue;
 use crate::harness::orchestrator::DelegationQueue;
-use crate::harness::policy::ApprovalPolicy;
+use crate::harness::policy::{ApprovalPolicy, ApprovalRequestQueue};
 use crate::ports::skills_state::{SkillState, SkillStateStore};
-use crate::ports::types::{CompanyId, CompanyRecord, OverlayAgent, TurnStep};
+use crate::ports::types::{BudgetOverride, CompanyId, CompanyRecord, OverlayAgent, TurnStep};
 use crate::ports::{
-    CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore, UsageMeter,
+    ArtifactStore, CompanyStore, ContextStore, EventLog, FactStore, SecretStore, TaskStore,
+    UsageMeter,
 };
 use crate::runtime::builder::agent_effective_grants;
 
@@ -112,6 +189,12 @@ pub struct HarnessDeps {
     ///
     /// [`TaskDispatched`]: crate::ports::types::CompanyEvent::TaskDispatched
     pub tasks: Option<Arc<dyn TaskStore>>,
+    /// The company's artifact store, so a dispatched card's output is recorded
+    /// as a versioned artifact (#187) instead of only as note text. `None`
+    /// leaves the board's behaviour exactly as before — the note is still
+    /// written either way, so an unwired artifact store loses nothing that
+    /// existed previously.
+    pub artifacts: Option<Arc<dyn ArtifactStore>>,
     /// The company's skill-delta store, so a built agent can see its effective
     /// skill set (company-dir skills ∪ operator deltas ∪ custom docs) as read
     /// tools + a prompt catalogue. `None` leaves the agent skill-less (the chat
@@ -124,6 +207,14 @@ pub struct HarnessDeps {
     /// subtree supplies the committed skill bundles unioned into the effective
     /// set. `None` surfaces only the operator deltas.
     pub skills_source_dir: Option<PathBuf>,
+    /// The repo-level shared skill library (`skills/*/SKILL.md`), the same set
+    /// the console's registry tab browses. Used only to heal pre-fix registry
+    /// installs, whose stored snapshot is a one-line stub — see
+    /// [`EffectiveSkills::materialize`](crate::harness::skills::EffectiveSkills::materialize).
+    /// Empty only when the host serves no shared skill library, where a stub
+    /// simply stays as it is; a platform-provisioned runtime otherwise receives
+    /// the library the application state loaded, same as the serve path.
+    pub skills_registry: Arc<[crate::company::SkillDoc]>,
     /// The company's effective MCP servers (issue #50), resolved to **data**
     /// (manifest `[[mcp_server]]` ∪ the runtime index, with each server's
     /// outbound credential materialized to
@@ -163,6 +254,50 @@ pub struct HarnessDeps {
     /// cheap-shared-handle pattern as [`Self::delegations`]; every string it
     /// carries is scrubbed at the source. Default is an empty queue.
     pub mcp_failures: McpFailureQueue,
+    /// The shared publish queue the `publish_artifact` tool stages onto and the
+    /// [`HarnessBrain`] drains at the end of a dispatch (issue #244). Same
+    /// cheap-shared-handle pattern as [`Self::mcp_failures`], and for the same
+    /// structural reason: tools are built **once per agent** while the card
+    /// varies **per dispatch**, so a tool cannot hold a task id or a store and
+    /// has to hand its work to something that does.
+    ///
+    /// Default is an empty queue, which simply means nothing is ever published
+    /// — every path degrades to "this task produced no artifact", which is a
+    /// legitimate outcome rather than a failure.
+    pub pending_publishes: crate::harness::publish::PendingPublishQueue,
+    /// The shared queue the orchestrator's `run_workflow` / `create_workflow`
+    /// tools stage a workflow reference onto and the [`HarnessBrain`] drains at
+    /// the end of a dispatch (issue #339) — the workflow half of a card's
+    /// output link.
+    ///
+    /// Same cheap-shared-handle pattern as [`Self::pending_publishes`], and for
+    /// the same structural reason: the tools are built **once per agent** while
+    /// the card varies **per dispatch**, so a tool cannot hold a task id and has
+    /// to hand its work to something that does.
+    ///
+    /// Default is an empty queue, which simply means no card ever links to a
+    /// workflow — the stamp falls back to the attempt's trace, which is a
+    /// complete answer rather than a missing one.
+    pub workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue,
+    /// The bounded, in-process cache the orchestrator's `run_workflow` tool fills
+    /// with each successful run's node output and the `read_run_output` companion
+    /// reads back (issue #418) — so a preview the run summary clipped is
+    /// reachable within the same turn.
+    ///
+    /// Same cheap-shared-handle pattern as [`Self::workflow_refs`]: the run tool
+    /// that stores and the read tool that serves are built in one `build_agent`
+    /// pass off the same deps clone, so they share one cache. Default is an empty
+    /// cache; nothing durable rides on it (the console run drawer is the durable
+    /// record), so a fresh process simply starts with nothing to read back.
+    pub run_outputs: crate::harness::orchestrator::RunOutputCache,
+    /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
+    /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
+    /// turn, parking each request through
+    /// [`CycleHost::park_effect`](crate::ports::brain::CycleHost::park_effect)
+    /// so it reaches the operator's Approvals page (issue #172). Same
+    /// cheap-shared-handle pattern as [`Self::delegations`]; the default is an
+    /// empty queue, which simply means nothing is ever parked.
+    pub approval_requests: ApprovalRequestQueue,
     /// The company's [`SecretStore`], so [`HarnessPool::ensure`] can **re-resolve**
     /// the effective MCP server set on each call and rebuild the roster when a
     /// console add/remove/enable-toggle changes it — the MCP-freshness fix (a
@@ -212,14 +347,30 @@ pub struct HarnessDeps {
     pub media: Option<toolbelt::MediaBackend>,
     /// The per-tenant Composio configuration (issue #110). `None` (the default
     /// at every construction site) fails closed — no Composio tools are wired.
-    /// [`HarnessPool::ensure`] re-resolves it from the [`SecretStore`] under
-    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) each turn
-    /// (folded into the roster fingerprint) so a console token set/rotate takes
-    /// effect next turn with no restart. Only wired when a company **explicitly**
-    /// grants `composio` **and** a non-empty token is stored; the token has no
-    /// env fallback, so an absent token means no tools (never a borrowed
-    /// identity).
+    /// [`HarnessPool::ensure`] re-resolves it each turn (folded into the roster
+    /// fingerprint) so a console token set/rotate takes effect next turn with no
+    /// restart. Only wired when a company **explicitly** grants `composio` **and**
+    /// a credential can be obtained: the company's own token under
+    /// [`composio::TOKEN_KEY`](crate::harness::composio::TOKEN_KEY) if it has one,
+    /// else this instance's platform identity. With neither, no tools are wired —
+    /// never a borrowed identity.
     pub composio: Option<composio::TenantComposio>,
+    /// The MANAGED web-search backend (issue #238). `None` (the default at every
+    /// construction site but the production runtime builder) **fails closed** —
+    /// no `web_search` tool is wired and agents behave exactly as before.
+    ///
+    /// Set by the runtime builder from
+    /// [`search_backend_from_env`](crate::harness::provider::search_backend_from_env)
+    /// (env-only — never a tenant secret) with the company's
+    /// `[tools].search_daily_calls` cap applied. When `Some` **and** a company
+    /// **explicitly** grants `search` (never via `*`), [`build::build_agent`]
+    /// wires [`search::search_tools`]; a grant with no credential wires nothing
+    /// and warns, media's shape exactly.
+    ///
+    /// The handle carries the company's shared daily-call ledger, so cloning
+    /// these deps across a roster gives every agent of the company one budget
+    /// rather than one each.
+    pub search: Option<search::SearchBackend>,
     /// Issue #111 — the shared registry of in-flight, steerable runs. The
     /// [`HarnessBrain`] registers a dispatched task / desk delegation here before
     /// running it (and installs the steer stop-hook over the slot's control), so
@@ -229,6 +380,38 @@ pub struct HarnessDeps {
     /// [`delegations`](Self::delegations)); the default is an empty registry,
     /// which simply lists nothing and rejects every steer as `not in flight`.
     pub steer: crate::company::steer::InflightRegistry,
+    /// Issue #383 — the shared set of cancellable workflow runs. The
+    /// orchestrator's `run_workflow` tool mints its run context through this, so
+    /// an agent-initiated run appears in the same map the console's cancel route
+    /// reads and is stoppable like any other. The runtime builder threads in the
+    /// same handle it puts on the [`CompanyRuntime`](crate::company::CompanyRuntime);
+    /// the default is a private map nothing else can see, which simply means the
+    /// tool's runs are not cancellable.
+    pub run_supervisor: crate::runtime::RunSupervisor,
+    /// Issue #170 — the ports an `output` node's `destination` needs to route a
+    /// finished workflow's report to a person or a channel (mail handle, inbox,
+    /// user directory, wired channels), bundled so this struct grows one field
+    /// rather than four.
+    ///
+    /// Read post-engine by
+    /// [`deliver_outputs`](crate::workflows::delivery::deliver_outputs) — never
+    /// by the engine, which knows nothing about destinations. `None` (the
+    /// default at every construction site but the production runtime builder)
+    /// **fails closed and loud**: nothing is sent and the run result carries a
+    /// `failed` row saying delivery is not wired, so an authored destination can
+    /// never quietly do nothing.
+    pub delivery: Option<crate::workflows::WorkflowDeliveryDeps>,
+    /// Issue #237 — the company's shared workspace note tree, so agents can
+    /// read (and, under an explicit `workspace` grant, revise) the operator's
+    /// standards and playbooks instead of guessing at them.
+    ///
+    /// The same [`WorkspaceStore`](crate::ports::WorkspaceStore) handle the
+    /// console's REST/GraphQL surface writes through, so an operator edit is
+    /// visible to the next agent turn with no rebuild — the tools hold no
+    /// snapshot and hit the store per call. `None` (the default at every
+    /// construction site but the production runtime builder) **fails closed**:
+    /// no workspace tools are wired and agents behave exactly as before.
+    pub workspace: Option<Arc<dyn crate::ports::WorkspaceStore>>,
 }
 
 /// One live openhuman agent, keyed by its manifest id.
@@ -237,6 +420,13 @@ pub struct CompanyAgent {
     pub agent_id: String,
     /// The manifest agent's human-readable role.
     pub role: String,
+    /// This teammate's manifest `budget_usd_daily` cap, carried onto the roster
+    /// so the dispatch gate in [`HarnessPool::run_inner`] can read it without
+    /// re-loading the manifest per turn (issue #304).
+    ///
+    /// `None` for an uncapped teammate — and for every overlay teammate, which
+    /// carries no per-agent cap in v1.
+    pub budget_usd_daily: Option<f64>,
     /// The embedded openhuman session. A [`Mutex`] because a `turn` takes
     /// `&mut self` and one agent must serialise its own turns.
     agent: Mutex<Agent>,
@@ -245,6 +435,31 @@ pub struct CompanyAgent {
 /// The graceful reply returned when a turn yields the transient empty-response
 /// class twice — so chat never shows a bare "Couldn't send" for a model hiccup.
 const GRACEFUL_EMPTY_REPLY: &str = "Sorry — I hit a temporary model hiccup and couldn't produce a reply. Please resend your message.";
+
+/// The operator-facing notice returned when the plan-level total token ceiling
+/// (issue #188) is reached — a hard dispatch refusal, so no model call is made.
+/// Surfaced as the turn's reply on every dispatch path (operator chat, task,
+/// steered/background), since they all funnel through
+/// [`HarnessPool::run_inner`](HarnessPool::run_inner).
+const TOTAL_BUDGET_EXHAUSTED_NOTICE: &str =
+    "Token budget for this period is exhausted — dispatch paused until the period resets.";
+
+/// The operator-facing notice returned when one teammate has spent its manifest
+/// `budget_usd_daily` (issue #304) — a hard dispatch refusal for that teammate
+/// only, made before any model call.
+///
+/// Deliberately a *visible refusal* rather than a silent no-op, and deliberately
+/// per-teammate: the rest of the company keeps running, and the operator is told
+/// which desk stopped, what its cap is, and when it comes back. There is no
+/// per-call unit to park at turn level — an inference turn is not a tool call —
+/// so a notice is the honest answer, mirroring
+/// [`TOTAL_BUDGET_EXHAUSTED_NOTICE`].
+fn agent_budget_exhausted_notice(agent_id: &str, cap_usd: f64) -> String {
+    format!(
+        "{agent_id} has reached its daily spend cap of ${cap_usd:.2} — dispatch to this teammate \
+         is paused until the cap resets at 00:00 UTC. Other teammates are unaffected."
+    )
+}
 
 /// The classification of a single `agent.turn` attempt, for the retry wrapper.
 enum AttemptOutcome {
@@ -305,7 +520,7 @@ impl CompanyAgent {
     /// per-turn *local* — deliberately not a [`HarnessDeps`] field — so parallel
     /// turns never collide.
     pub async fn run(&self, message: &str) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
-        self.run_with_steer(message, None, None).await
+        self.run_with_steer(message, None, None, None).await
     }
 
     /// Runs one turn with an optional operator **steer** control installed
@@ -323,11 +538,20 @@ impl CompanyAgent {
     /// empty-response class, the one-shot retry is **skipped** — a cancel (or
     /// pause) issued before any text is produced must not silently restart the
     /// work. With no steer this is byte-identical to the pre-#111 `run`.
+    ///
+    /// When `run_sink` is `Some`, the same collector also writes each step
+    /// through to the [`RunStore`](crate::ports::RunStore) as it arrives, so a
+    /// dispatched card's trace is durable *during* the run rather than only
+    /// after it (issue #242). The await lives in the collector task, never in
+    /// the model loop, so a slow store slows only trace persistence. `None`
+    /// (chat turns, workflow nodes, every test) is byte-identical to the prior
+    /// buffer-only behaviour.
     pub async fn run_with_steer(
         &self,
         message: &str,
         steer: Option<&SteerControl>,
         stream: Option<crate::turn_stream::TurnStreamCtx>,
+        run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<(TurnOutcome, Vec<TurnUsage>)> {
         // Per-turn progress sink + an always-draining collector, so a burst of
         // events never blocks the turn loop on a full channel.
@@ -358,6 +582,11 @@ impl CompanyAgent {
                             .with_chat(ctx.chat_id.clone()),
                     );
                     seq += 1;
+                }
+                // Durable half (#242): persist the step before moving on, so a
+                // process killed mid-run keeps every step written so far.
+                if let Some(sink) = &run_sink {
+                    sink.record(&event).await;
                 }
                 events.push(event);
             }
@@ -464,6 +693,58 @@ fn is_transient_empty_response(err: &anyhow::Error) -> bool {
         .contains("empty response")
 }
 
+/// What a workspace-ensure attempt should say, given what the last attempt for
+/// the same agent said (issue #449).
+///
+/// The attempt itself is per dispatch and stays that way — see
+/// [`note_workspace_attempt`](HarnessPool::note_workspace_attempt) for why
+/// memoising it is the wrong fix. Only the *reporting* is edge-triggered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum WorkspaceReport {
+    /// The first failure since this agent was last healthy: report it.
+    Failed,
+    /// Still failing, and already reported: say nothing.
+    StillFailing,
+    /// Working again after a reported failure: say so once, so a reader who saw
+    /// the error learns it ended.
+    Recovered,
+    /// Working, and was already working: say nothing.
+    StillHealthy,
+}
+
+impl WorkspaceReport {
+    /// Whether this transition has anything to log at all.
+    pub(crate) fn is_silent(self) -> bool {
+        matches!(self, Self::StillFailing | Self::StillHealthy)
+    }
+}
+
+/// Folds one attempt's outcome into the set of currently-failing keys and
+/// returns what to report.
+///
+/// Pure but for the `failing` set it edits, so the whole state machine is
+/// testable without a model, a roster or a filesystem. `failing` holds exactly
+/// the keys whose last attempt failed **and** whose failure has been reported;
+/// `failed` is this attempt's outcome.
+fn workspace_report<K>(failing: &mut HashSet<K>, key: &K, failed: bool) -> WorkspaceReport
+where
+    K: std::hash::Hash + Eq + Clone,
+{
+    if failed {
+        // `insert` returns false when the key was already there — i.e. the
+        // previous attempt failed and was already reported.
+        if failing.insert(key.clone()) {
+            WorkspaceReport::Failed
+        } else {
+            WorkspaceReport::StillFailing
+        }
+    } else if failing.remove(key) {
+        WorkspaceReport::Recovered
+    } else {
+        WorkspaceReport::StillHealthy
+    }
+}
+
 /// A pool of live agents, one roster per company.
 pub struct HarnessPool {
     agents: RwLock<HashMap<CompanyId, Vec<Arc<CompanyAgent>>>>,
@@ -508,6 +789,33 @@ pub struct HarnessPool {
     /// process restart (the regression this fixes). With no skill store wired
     /// the delta set is always empty — stable fingerprint, no rebuild.
     skill_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// Fingerprint of the operator budget-override set the cached roster was
+    /// built from, keyed by company (issue #343). Drives budget freshness:
+    /// [`ensure`](Self::ensure) re-resolves the overrides from
+    /// [`HarnessDeps::store`] on every call and rebuilds the roster whenever a
+    /// cap is set, changed, cleared or reset — so a budget edited on the console
+    /// Team page reaches the dispatch gate and the per-agent
+    /// [`ApprovalPolicy`](policy::ApprovalPolicy) on the company's **next** turn,
+    /// with no restart and no redeploy. That is the entire point of #343: the
+    /// cap is enforced from the roster, and without this axis every other
+    /// fingerprint is stable on a budget-only change, so the fast path would
+    /// reuse a roster still carrying the old cap until the process restarted.
+    /// A company that never sets an override keeps an empty set and a stable
+    /// fingerprint — no rebuild, byte-identical to the pre-#343 behaviour.
+    budget_fingerprints: RwLock<HashMap<CompanyId, u64>>,
+    /// The `(company, agent)` pairs whose last workspace-ensure failed and whose
+    /// failure has already been reported (issue #449).
+    ///
+    /// Not a memo of the *attempt* — see
+    /// [`note_workspace_attempt`](Self::note_workspace_attempt). Purely a record
+    /// of what has already been said, so an unmountable volume produces one
+    /// error line instead of one per turn forever.
+    ///
+    /// A `std::sync::Mutex` rather than a `tokio::sync::RwLock` like its
+    /// neighbours: the critical section is a single hash lookup with no `await`
+    /// in it, so the async lock would buy nothing and cost a scheduling point on
+    /// the dispatch path.
+    workspace_failures: std::sync::Mutex<HashSet<(CompanyId, String)>>,
 }
 
 impl Default for HarnessPool {
@@ -539,7 +847,43 @@ impl HarnessPool {
             capability_fingerprints: RwLock::new(HashMap::new()),
             composio_fingerprints: RwLock::new(HashMap::new()),
             skill_fingerprints: RwLock::new(HashMap::new()),
+            budget_fingerprints: RwLock::new(HashMap::new()),
+            workspace_failures: std::sync::Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Records one workspace-ensure outcome for `(company, agent)` and returns
+    /// what it should say.
+    ///
+    /// **The attempt stays per dispatch.** The obvious fix for a repeating log
+    /// line — remember that this agent's workspace was already handled and stop
+    /// trying — is the wrong one in both directions, and this is why the
+    /// suppression is on the reporting rather than on the work:
+    ///
+    /// * Memoising **success** means a data dir wiped or restored *after* the
+    ///   first successful turn is never noticed again, and every relative file
+    ///   write is refused for the life of the process — the exact regression
+    ///   issue #409 added the per-dispatch retry to prevent.
+    /// * Memoising **failure** means a volume that mounts a second late never
+    ///   recovers, because nothing ever tries again.
+    ///
+    /// Both trade a noisy log for a broken agent. The retry is cheap (two
+    /// syscalls on the already-exists path, against a turn about to call a
+    /// model) and it is what makes the condition self-healing, so it keeps
+    /// running every time. What changes is that a persistent failure is stated
+    /// once rather than once per turn.
+    fn note_workspace_attempt(
+        &self,
+        company: &CompanyId,
+        agent_id: &str,
+        failed: bool,
+    ) -> WorkspaceReport {
+        let key = (company.clone(), agent_id.to_string());
+        let mut failing = self
+            .workspace_failures
+            .lock()
+            .expect("workspace-failure set poisoned");
+        workspace_report(&mut failing, &key, failed)
     }
 
     /// Ensures a company's roster is built and cached.
@@ -569,14 +913,27 @@ impl HarnessPool {
     /// when every other axis (MCP, overlay, capability, composio) is unchanged.
     /// With no skill store wired the delta set is empty and the fingerprint is
     /// stable — no rebuild, exactly as before.
+    ///
+    /// **Budget freshness (issue #343)**: the operator's per-teammate daily
+    /// spend caps ride the same live [`HarnessDeps::store`] read as the overlay
+    /// agents and are fingerprinted alongside them, so a cap set, raised,
+    /// cleared or reset from the console Team page rebuilds the roster and is
+    /// enforced on the company's **next** dispatch. Nothing downstream had to
+    /// change for this: the L1 gate in [`Self::run`] reads
+    /// [`CompanyAgent::budget_usd_daily`] and the policy arm reads the
+    /// [`ApprovalPolicy`](policy::ApprovalPolicy) both roster-built here, so
+    /// rebuilding the roster *is* the enforcement update. That is what makes
+    /// "no restart, no redeploy" a property of the design rather than a claim.
     pub async fn ensure(&self, company: &CompanyRecord, deps: &HarnessDeps) -> crate::Result<()> {
         // Re-resolve + fingerprint the effective MCP set (cheap; no rebuild yet).
         let effective_mcp = self.resolve_effective_mcp(company, deps).await;
         let mcp_fp = mcp_fingerprint(&effective_mcp);
 
-        // Re-resolve + fingerprint the live overlay-agent set the same way.
-        let overlay_agents = self.resolve_effective_overlay(company, deps).await;
+        // Re-resolve + fingerprint the live overlay-agent set the same way, and
+        // the operator budget overrides riding the same store read (issue #343).
+        let (overlay_agents, overlay_budgets) = self.resolve_effective_overlay(company, deps).await;
         let overlay_fp = overlay_fingerprint(&overlay_agents);
+        let budget_fp = budget_fingerprint(&overlay_budgets);
 
         // Re-resolve + fingerprint the tenant's capability filter (issue #108):
         // a per-tenant, per-period, fail-closed budget read from the meter. With
@@ -613,12 +970,14 @@ impl HarnessPool {
             let capability_fingerprints = self.capability_fingerprints.read().await;
             let composio_fingerprints = self.composio_fingerprints.read().await;
             let skill_fingerprints = self.skill_fingerprints.read().await;
+            let budget_fingerprints = self.budget_fingerprints.read().await;
             if agents.contains_key(&company.id)
                 && mcp_fingerprints.get(&company.id) == Some(&mcp_fp)
                 && overlay_fingerprints.get(&company.id) == Some(&overlay_fp)
                 && capability_fingerprints.get(&company.id) == Some(&capability_fp)
                 && composio_fingerprints.get(&company.id) == Some(&composio_fp)
                 && skill_fingerprints.get(&company.id) == Some(&skill_fp)
+                && budget_fingerprints.get(&company.id) == Some(&budget_fp)
             {
                 return Ok(());
             }
@@ -642,6 +1001,27 @@ impl HarnessPool {
         // built from the live-resolved overlay set, not `company.overlay_agents`.
         let mut fresh_company = company.clone();
         fresh_company.overlay_agents = overlay_agents;
+        // Same treatment for the budget overrides (issue #343): `build_roster`
+        // resolves every agent's cap through `fresh_company.effective_budget`,
+        // so installing the live set here is what carries a console budget edit
+        // into the roster the very next turn runs on.
+        fresh_company.overlay_budgets = overlay_budgets;
+
+        // Issue #551 note — this rebuild deliberately touches no workspace.
+        //
+        // It used to provision `Agents/<id>/` for the roster it was about to
+        // build, because a teammate added at runtime (a manifest edit, the
+        // console's `add_member`, the orchestrator's `add_agent`) all land here
+        // as a moved overlay fingerprint and boot could not have known about
+        // them. That justification is gone: a member folder is no longer a
+        // function of the roster. `Agents/` and `Desks/` are laid down once at
+        // boot ([`RuntimeBuilder::build`]) and depend on nothing a rebuild can
+        // change, and `Agents/<id>/` is minted by
+        // [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)
+        // at the moment that agent first produces something — which is also the
+        // repair path if boot's create ever fail-softed, since the minter
+        // creates the root it needs. A rebuild-time call would now be a tree
+        // read that can only ever find its work already done.
         let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
 
         let mut agents = self.agents.write().await;
@@ -666,6 +1046,10 @@ impl HarnessPool {
             .write()
             .await
             .insert(company.id.clone(), skill_fp);
+        self.budget_fingerprints
+            .write()
+            .await
+            .insert(company.id.clone(), budget_fp);
         Ok(())
     }
 
@@ -701,10 +1085,16 @@ impl HarnessPool {
     /// secret store on this axis; others resolve to `None` (no tools). With no
     /// secret store wired this degrades to the static [`HarnessDeps::composio`].
     ///
-    /// The token has no env fallback — an absent/empty secret yields `None` (fail
-    /// closed). The backend URL honors [`composio::COMPOSIO_BACKEND_URL_ENV`],
-    /// read process-globally so a live re-resolution keeps the override even when
-    /// no token was stored at boot.
+    /// Resolution prefers the company's own stored token and falls back to this
+    /// instance's platform identity; with neither it yields `None` (fail closed).
+    /// Both the backend URL (from [`composio::COMPOSIO_BACKEND_URL_ENV`], then the
+    /// tenant API base [`composio::TINYHUMANS_API_URL_ENV`], then the prod
+    /// default) and the platform identity are read process-globally here, so a
+    /// live re-resolution keeps them even when nothing was stored at boot.
+    ///
+    /// Re-deriving the token source every turn costs nothing — building it reads
+    /// no file — and the roster that keeps it holds one instance for its whole
+    /// lifetime, so its rotation cache still works.
     async fn resolve_composio(
         &self,
         company: &CompanyRecord,
@@ -717,9 +1107,18 @@ impl HarnessPool {
         match &deps.secrets {
             Some(secrets) => {
                 use crate::app::config::EnvSource;
-                let url = crate::app::config::ProcessEnv.get(composio::COMPOSIO_BACKEND_URL_ENV);
-                composio::TenantComposio::resolve(&company.id, secrets.as_ref(), toolkits, url)
-                    .await
+                let env = crate::app::config::ProcessEnv;
+                let url = env.get(composio::COMPOSIO_BACKEND_URL_ENV);
+                let api_url = env.get(composio::TINYHUMANS_API_URL_ENV);
+                composio::TenantComposio::resolve(
+                    &company.id,
+                    secrets.as_ref(),
+                    toolkits,
+                    url,
+                    api_url,
+                    crate::company::TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
+                )
+                .await
             }
             None => deps.composio.clone(),
         }
@@ -752,21 +1151,30 @@ impl HarnessPool {
         }
     }
 
-    /// Re-resolves the company's live overlay-agent set (issue #71): reloads the
-    /// [`CompanyRecord`] from [`HarnessDeps::store`] so a teammate added through
-    /// the console `POST .../team` route or the orchestrator's `add_agent` tool
-    /// reaches the roster on the company's next `ensure` call — the same
-    /// live-re-resolution pattern as [`Self::resolve_effective_mcp`]. A missing
-    /// record or a store error degrades to the `company` snapshot passed in
-    /// (never worse than the pre-#71 always-static behaviour).
+    /// Re-resolves the company's live overlay-agent set (issue #71) **and** its
+    /// operator budget overrides (issue #343): reloads the [`CompanyRecord`]
+    /// from [`HarnessDeps::store`] so a teammate added through the console
+    /// `POST .../team` route or the orchestrator's `add_agent` tool, and a cap
+    /// written through `PUT .../team/{id}/budget`, both reach the roster on the
+    /// company's next `ensure` call — the same live-re-resolution pattern as
+    /// [`Self::resolve_effective_mcp`]. A missing record or a store error
+    /// degrades to the `company` snapshot passed in (never worse than the
+    /// pre-#71 always-static behaviour).
+    ///
+    /// The two collections share **one** store round-trip deliberately: they
+    /// come off the same record, and splitting them would double the per-turn
+    /// read for no gain.
     async fn resolve_effective_overlay(
         &self,
         company: &CompanyRecord,
         deps: &HarnessDeps,
-    ) -> Vec<OverlayAgent> {
+    ) -> (Vec<OverlayAgent>, Vec<BudgetOverride>) {
         match deps.store.load(&company.id).await {
-            Ok(Some(record)) => record.overlay_agents,
-            _ => company.overlay_agents.clone(),
+            Ok(Some(record)) => (record.overlay_agents, record.overlay_budgets),
+            _ => (
+                company.overlay_agents.clone(),
+                company.overlay_budgets.clone(),
+            ),
         }
     }
 
@@ -802,6 +1210,15 @@ impl HarnessPool {
         self.skill_fingerprints.read().await.get(company).copied()
     }
 
+    /// The current budget-override fingerprint for a company (test-only), so a
+    /// budget-freshness test can assert the roster was actually rebuilt after a
+    /// console cap change rather than inferring it from the refusal (issue
+    /// #343). This is the observable that makes "no restart" testable.
+    #[cfg(test)]
+    pub async fn budget_fingerprint_of(&self, company: &CompanyId) -> Option<u64> {
+        self.budget_fingerprints.read().await.get(company).copied()
+    }
+
     /// Routes a message to one agent and returns its reply, recording the turn's
     /// cost. `agent_id` must name a member of the company's roster.
     ///
@@ -827,6 +1244,7 @@ impl HarnessPool {
             deps,
             None,
             LiveStream::On { chat_id },
+            None,
         )
         .await
     }
@@ -843,8 +1261,16 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
     ) -> crate::Result<TurnOutcome> {
-        self.run_inner(company, agent_id, message, deps, None, LiveStream::Off)
-            .await
+        self.run_inner(
+            company,
+            agent_id,
+            message,
+            deps,
+            None,
+            LiveStream::Off,
+            None,
+        )
+        .await
     }
 
     /// Routes a message to one agent with an operator **steer** control installed
@@ -853,6 +1279,12 @@ impl HarnessPool {
     /// [`run`](Self::run) — same retrieve→inject, cost accounting, and
     /// memory-writeback. The steer hook fires only between tool-loop iterations.
     /// `chat_id` routes the live turn-stream frames exactly as in [`run`](Self::run).
+    ///
+    /// `run_sink` is the dispatched attempt this turn belongs to, when it
+    /// belongs to one (issue #242) — a desk turn a *dispatched card* handed its
+    /// work to records into the card's run, while the same delegation reached
+    /// from operator chat passes `None`.
+    #[allow(clippy::too_many_arguments)]
     pub async fn run_steered(
         &self,
         company: &CompanyId,
@@ -861,6 +1293,7 @@ impl HarnessPool {
         deps: &HarnessDeps,
         control: &SteerControl,
         chat_id: Option<&str>,
+        run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         self.run_inner(
             company,
@@ -869,6 +1302,7 @@ impl HarnessPool {
             deps,
             Some(control),
             LiveStream::On { chat_id },
+            run_sink,
         )
         .await
     }
@@ -885,6 +1319,7 @@ impl HarnessPool {
         message: &str,
         deps: &HarnessDeps,
         control: &SteerControl,
+        run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         self.run_inner(
             company,
@@ -893,10 +1328,145 @@ impl HarnessPool {
             deps,
             Some(control),
             LiveStream::Off,
+            run_sink,
         )
         .await
     }
 
+    /// The plan-level total-token ceiling, as a refusal or nothing.
+    ///
+    /// Extracted from [`run_inner`](Self::run_inner) so the confined turn
+    /// (issue #416) is gated by the *same* ceiling rather than a second copy of
+    /// the rule: a turn that reaches nothing still spends model tokens, so a
+    /// tenant past its cap must not be able to keep spending through the
+    /// copilot.
+    async fn total_ceiling_refusal(
+        company: &CompanyId,
+        agent_id: &str,
+        deps: &HarnessDeps,
+    ) -> Option<TurnOutcome> {
+        let plan = deps.plan.as_ref()?;
+        plan.total_budget?;
+        match deps.meter.as_deref() {
+            Some(meter) => {
+                let since = plan.period.period_start_millis(crate::ports::now_millis());
+                match meter.query(company, since).await {
+                    Ok(samples) => {
+                        let spent = capability_budget::tokens_in(&samples);
+                        if plan.total_exhausted(spent) {
+                            tracing::info!(
+                                company = %company,
+                                agent = agent_id,
+                                spent,
+                                "[capability-budget] total token ceiling reached; refusing dispatch (no model call) until the period resets"
+                            );
+                            return Some(TurnOutcome {
+                                reply: TOTAL_BUDGET_EXHAUSTED_NOTICE.to_string(),
+                                steps: Vec::new(),
+                            });
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            company = %company,
+                            %error,
+                            "[capability-budget] total-ceiling spend query failed; not hard-refusing — deferring to the per-namespace fail-closed roster"
+                        );
+                    }
+                }
+            }
+            None => {
+                tracing::warn!(
+                    company = %company,
+                    "[capability-budget] no usage meter; cannot enforce the total token ceiling — deferring to the per-namespace fail-closed roster"
+                );
+            }
+        }
+        None
+    }
+
+    /// Runs one **confined** turn (issue #416): an ephemeral agent with no
+    /// tools, no company memory and no roster identity, for a question about one
+    /// object rather than about the company.
+    ///
+    /// Deliberately not a variant of [`run_inner`](Self::run_inner), because the
+    /// two differ in what they are allowed to touch rather than in a flag:
+    ///
+    /// * the agent is **built here and dropped after**, so it is never in the
+    ///   pooled roster and cannot be addressed, dispatched or delegated to;
+    /// * there is **no retrieve→inject** — the company's prior task outcomes are
+    ///   not prepended to the message, so the model cannot answer from work it
+    ///   was not asked about;
+    /// * there is **no memory writeback** — the exchange leaves nothing for a
+    ///   later company turn to retrieve, so a confined conversation cannot
+    ///   become unconfined context tomorrow.
+    ///
+    /// What it does share: the plan-level token ceiling (spend is spend), live
+    /// turn streaming onto the addressed thread, and cost recording, so a
+    /// confined turn is billed and observable exactly like any other.
+    pub async fn run_confined(
+        &self,
+        company: &CompanyId,
+        company_name: &str,
+        message: &str,
+        deps: &HarnessDeps,
+        chat_id: Option<&str>,
+        confinement: &confine::Confinement,
+    ) -> crate::Result<TurnOutcome> {
+        if let Some(refusal) =
+            Self::total_ceiling_refusal(company, confine::CONFINED_AGENT_ID, deps).await
+        {
+            return Ok(refusal);
+        }
+
+        let agent = CompanyAgent {
+            agent_id: confine::CONFINED_AGENT_ID.to_string(),
+            role: "Workflow copilot".to_string(),
+            // A confined turn carries no manifest teammate, so there is no
+            // per-agent daily cap to read; the company-wide ceiling above is the
+            // one that applies to it.
+            budget_usd_daily: None,
+            agent: Mutex::new(confine::build_confined_agent(
+                company,
+                company_name,
+                confinement,
+                deps,
+            )?),
+        };
+
+        let stream_ctx = Some(crate::turn_stream::TurnStreamCtx {
+            company: company.clone(),
+            agent_id: confine::CONFINED_AGENT_ID.to_string(),
+            chat_id: chat_id
+                .map(str::to_string)
+                .unwrap_or_else(|| crate::server::ops::language::DEFAULT_DESK.to_string()),
+        });
+
+        // The message goes to the model AS SENT. This is the retrieve→inject
+        // step's absence, and it is the difference between "grounded in one
+        // workflow" and "confined to one workflow".
+        let (outcome, turn_costs) = agent
+            .run_with_steer(message, None, stream_ctx, None)
+            .await?;
+
+        let provider_slug = deps.provider.telemetry_provider_id();
+        for turn_cost in &turn_costs {
+            record_turn_cost(
+                turn_cost,
+                confine::CONFINED_AGENT_ID,
+                &provider_slug,
+                company,
+                deps.store.as_ref(),
+                deps.meter.as_deref(),
+                None,
+            )
+            .await?;
+        }
+
+        Ok(outcome)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     async fn run_inner(
         &self,
         company: &CompanyId,
@@ -905,6 +1475,7 @@ impl HarnessPool {
         deps: &HarnessDeps,
         steer: Option<&SteerControl>,
         live: LiveStream<'_>,
+        run_sink: Option<Arc<run_trace::RunTraceSink>>,
     ) -> crate::Result<TurnOutcome> {
         let agent = {
             let guard = self.agents.read().await;
@@ -921,6 +1492,142 @@ impl HarnessPool {
                     ))
                 })?
         };
+
+        // Renew the agent's sandbox directory at the moment it acts (issue
+        // #409). `build_agent` already created it, but a roster is built once
+        // and then cached behind fingerprints — and handed *across* an in-place
+        // rebuild — so a workspace that goes missing afterwards (a restored or
+        // wiped data dir, an operator clearing the tree, a boot that raced a
+        // not-yet-mounted volume) would otherwise stay missing for the life of
+        // the process, and every relative file write would be refused as if it
+        // had tried to escape the sandbox. Two syscalls on the already-exists
+        // path, against a turn that is about to call a model — not worth
+        // deferring off the runtime thread.
+        //
+        // Deliberately not fatal, for the same reason `build_agent`'s attempt is
+        // not: an agent with no file grant runs a perfectly good turn without
+        // this directory. The `error!` (not `warn!`) records the one condition
+        // under which the misdirecting guard message can still be reached, so it
+        // is greppable next to the refusal it explains. Both of those are the
+        // right calls and issue #449 does not change either.
+        //
+        // What #449 changes is only how often it is *said*. A workspace root
+        // that cannot be written — a volume that failed to mount, a path that
+        // resolves onto a file — fails identically on every dispatch, so the
+        // unconditional `error!` emitted one byte-identical line per turn,
+        // forever, with nothing distinguishing the thousandth from the first.
+        // The state is edge-triggered instead: the first failure reads exactly
+        // as it did before, the repeats are silent, and a recovery gets one
+        // `info!` so a reader who saw the error learns when it ended. The
+        // attempt itself still runs every dispatch — see
+        // `note_workspace_attempt` for why memoising it would be a regression.
+        let attempt = build::ensure_agent_workspace(&deps.workspace_root, company, agent_id);
+        let report = self.note_workspace_attempt(company, agent_id, attempt.is_err());
+        if !report.is_silent() {
+            let workspace = build::agent_workspace(&deps.workspace_root, company, agent_id);
+            match attempt {
+                Err(error) => tracing::error!(
+                    company = %company,
+                    agent = agent_id,
+                    workspace = %workspace.display(),
+                    %error,
+                    "[harness] could not create the agent workspace before dispatch; relative file writes will be refused (the refusal will read as a workspace escape, but the cause is this missing directory)"
+                ),
+                Ok(_) => tracing::info!(
+                    company = %company,
+                    agent = agent_id,
+                    workspace = %workspace.display(),
+                    "[harness] agent workspace is available again; the earlier creation failure has cleared and relative file writes work"
+                ),
+            }
+        }
+
+        // Plan-level total-token ceiling (issue #188): a HARD dispatch refusal
+        // that never reaches the model once the tenant's total period spend
+        // crosses the cap. The per-namespace budget gate in `ensure` is *soft* —
+        // it only trims which exec tools the roster carries; an exhausted
+        // tenant's turn still runs on intrinsic tools and burns model tokens.
+        // This closes that gap by refusing dispatch outright, before any model
+        // call, on every path that funnels through `run_inner` (operator chat,
+        // task, steered/background). We return early here — before retrieve→
+        // inject and the memory writeback — so a refused turn costs nothing and
+        // leaves no fabricated outcome in the memory store.
+        //
+        // Fail-closed tradeoff (issue #188): the hard refusal fires ONLY when
+        // spend is actually readable. With no meter, or a meter whose query
+        // errors, we do NOT brick the tenant on a transient read failure — we
+        // fall through to run the turn, which the per-namespace fail-closed path
+        // in `resolve_filter`/`ensure` has already stripped of every exec tool.
+        // A `warn!` records the deferral. Refusing every turn on a flaky meter
+        // read would be a strictly worse failure mode than letting an
+        // intrinsic-tools-only turn through.
+        if let Some(refusal) = Self::total_ceiling_refusal(company, agent_id, deps).await {
+            return Ok(refusal);
+        }
+
+        // Per-agent daily spend cap (issue #304): the same HARD, pre-model-call
+        // refusal as the ceiling above, scoped to ONE teammate.
+        //
+        // This is the layer that matters most in practice. The manifest's
+        // `budget_usd_daily` was validated, persisted and passed to
+        // `ApprovalPolicy` — where it sat on a field with no reader. But the
+        // dominant spend stream is not tool calls at all, it is inference, and
+        // inference never reaches a `ToolPolicy`. Gating only priced tool calls
+        // (the policy arm) would leave a capped teammate free to burn its budget
+        // many times over on model turns alone, which is how the cap came to be
+        // decorative in the first place.
+        //
+        // Refused BEFORE retrieve→inject and the memory writeback, exactly like
+        // the total ceiling, so a refused turn costs nothing and leaves no
+        // fabricated outcome in the store. The reply names the teammate, the cap
+        // and the reset — never a bare failure.
+        //
+        // FAIL-OPEN, mirroring #188's documented tradeoff: with no meter, or a
+        // meter whose query errors, we warn and run the turn. Bricking a
+        // company's cognition on a flaky read would be a strictly worse failure
+        // mode than one day of overspend, and there is no operator recourse at
+        // turn level (unlike the policy arm, whose park a human can approve —
+        // which is why THAT layer fails closed and this one does not).
+        if let Some(cap) = agent.budget_usd_daily {
+            match deps.meter.as_deref() {
+                Some(meter) => {
+                    let since = crate::metering::utc_day_start_millis(crate::ports::now_millis());
+                    match meter.query(company, since).await {
+                        Ok(samples) => {
+                            let spent = crate::metering::usd_spent_by_agent(&samples, agent_id);
+                            if spent >= cap {
+                                tracing::info!(
+                                    company = %company,
+                                    agent = agent_id,
+                                    spent,
+                                    cap,
+                                    "[agent-budget] daily spend cap reached; refusing dispatch (no model call) until 00:00 UTC"
+                                );
+                                return Ok(TurnOutcome {
+                                    reply: agent_budget_exhausted_notice(agent_id, cap),
+                                    steps: Vec::new(),
+                                });
+                            }
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                company = %company,
+                                agent = agent_id,
+                                %error,
+                                "[agent-budget] daily-spend query failed; running the turn rather than bricking this teammate"
+                            );
+                        }
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        company = %company,
+                        agent = agent_id,
+                        "[agent-budget] no usage meter; the per-agent daily spend cap cannot be enforced on this host"
+                    );
+                }
+            }
+        }
 
         // Retrieve→inject: pull the top-K prior task outcomes relevant to this
         // message and prepend them as context. On a cold store this yields no
@@ -961,7 +1668,19 @@ impl HarnessPool {
             }),
             LiveStream::Off => None,
         };
-        let (outcome, turn_costs) = agent.run_with_steer(&augmented, steer, stream_ctx).await?;
+        let (outcome, turn_costs) = agent
+            .run_with_steer(&augmented, steer, stream_ctx, run_sink.clone())
+            .await?;
+        // Issue #242: fold this turn's spend into the attempt it belongs to.
+        // Per turn, not once at the end, so a redirect re-run and a delegate's
+        // turn both count — an attempt's cost is what the attempt spent. This is
+        // a second *reader* of `turn_costs`, not a second writer: the ledger and
+        // the usage meter below stay the only places money is recorded.
+        if let Some(sink) = run_sink.as_ref() {
+            for turn_cost in &turn_costs {
+                sink.add_usage(turn_cost);
+            }
+        }
         // Attribute cost to the provider this turn actually resolved to. With a
         // per-tenant [`TenantProvider`](crate::harness::provider::TenantProvider)
         // a console BYOK switch changes the slug between turns, so read it live
@@ -975,6 +1694,10 @@ impl HarnessPool {
                 company,
                 deps.store.as_ref(),
                 deps.meter.as_deref(),
+                // Issue #242: attribute the sample to the attempt this turn ran
+                // under, so "what did this run cost?" is answerable from the
+                // meter as well as from the run row.
+                run_sink.as_ref().map(|s| s.run_id()),
             )
             .await?;
         }
@@ -1105,6 +1828,47 @@ fn overlay_fingerprint(agents: &[OverlayAgent]) -> u64 {
     hasher.finish()
 }
 
+/// A stable fingerprint of a company's operator budget-override set (issue
+/// #343), used to detect a cap set / changed / cleared / reset between
+/// [`HarnessPool::ensure`] calls. Mirrors [`overlay_fingerprint`]'s shape; a
+/// [`BudgetOverride`] holds no secret.
+///
+/// Two details carry weight:
+///
+/// - The set is **sorted by `agent_id`** first, because the write routes push
+///   and retain rather than maintain an order, and an order-sensitive hash would
+///   rebuild the roster (dropping live agent sessions) on a save that changed
+///   nothing an agent can observe.
+/// - The cap is hashed as an `Option` **discriminant plus `f64::to_bits`**, not
+///   through `PartialEq`. `f64` is not `Hash`, and going through bits is also
+///   what keeps `Some(0.0)` distinct from `None` in the hash — the very
+///   distinction the issue insists must not collapse. `to_bits` additionally
+///   makes the hash total over values `PartialEq` would call incomparable.
+fn budget_fingerprint(overrides: &[BudgetOverride]) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    let mut ordered: Vec<&BudgetOverride> = overrides.iter().collect();
+    ordered.sort_by(|a, b| a.agent_id.cmp(&b.agent_id));
+
+    let mut hasher = DefaultHasher::new();
+    ordered.len().hash(&mut hasher);
+    for entry in ordered {
+        entry.agent_id.hash(&mut hasher);
+        match entry.budget_usd_daily {
+            Some(cap) => {
+                1u8.hash(&mut hasher);
+                cap.to_bits().hash(&mut hasher);
+            }
+            None => 0u8.hash(&mut hasher),
+        }
+    }
+    // Attribution is deliberately NOT hashed: who set the cap and when changes
+    // nothing an agent can act on, and folding it in would rebuild the roster
+    // (discarding live sessions) every time the same value was re-saved.
+    hasher.finish()
+}
+
 /// A stable fingerprint of a company's operator skill-delta set (issue #41),
 /// used to detect a skill authored / edited / enabled / disabled between
 /// [`HarnessPool::ensure`] calls. Mirrors [`mcp_fingerprint`]'s shape.
@@ -1165,7 +1929,24 @@ pub(crate) fn build_roster(
         Vec::with_capacity(company.manifest.agents.len() + company.overlay_agents.len());
 
     for manifest_agent in &company.manifest.agents {
-        let agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily);
+        // Issue #343: the cap in force, not the one the manifest shipped with.
+        // `effective_budget` is an operator override when one is stored and the
+        // manifest value otherwise, so a console cap change reaches BOTH readers
+        // built below — the `ApprovalPolicy` arm and `CompanyAgent`'s copy that
+        // the L1 dispatch gate reads — from this one call.
+        let effective_budget = company.effective_budget(&manifest_agent.id);
+        let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+            .with_requests(deps.approval_requests.clone())
+            // Issue #243: stamp who the parked effect belongs to, so approving it
+            // can hand the grant back to this agent rather than to nobody.
+            .with_agent(manifest_agent.id.clone());
+        // Issue #304: give the policy something to measure `budget_usd_daily`
+        // against. Only wired when the host has a meter — without one the cap
+        // arm stays inert and warns once, rather than parking every priced call
+        // on a host that can never answer the question.
+        if let Some(meter) = deps.meter.as_ref() {
+            agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
+        }
         let is_orchestrator = orchestrator.as_deref() == Some(manifest_agent.id.as_str());
         let grants = agent_effective_grants(allow, &manifest_agent.tools);
         let agent = build::build_agent(
@@ -1181,6 +1962,7 @@ pub(crate) fn build_roster(
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
+            budget_usd_daily: effective_budget,
             agent: Mutex::new(agent),
         }));
     }
@@ -1199,9 +1981,19 @@ pub(crate) fn build_roster(
             continue;
         }
         let manifest_agent = overlay_agent_to_manifest(overlay);
-        // No per-teammate budget cap or cognition-tier hint in v1 — see
-        // `overlay_agent_to_manifest`.
-        let agent_policy = ApprovalPolicy::new(policy, manifest_agent.budget_usd_daily);
+        // Issue #343: an overlay teammate has no manifest row to carry a cap, so
+        // before the override existed it was unconditionally uncapped — the "v1
+        // limitation" this lifts. `effective_budget` gives it a stored cap when
+        // an operator set one, and `None` (as before) when nobody has.
+        let effective_budget = company.effective_budget(&manifest_agent.id);
+        let mut agent_policy = ApprovalPolicy::new(policy, effective_budget)
+            .with_requests(deps.approval_requests.clone())
+            // An overlay teammate is a real roster agent and re-dispatches the
+            // same way a manifest one does (issue #243).
+            .with_agent(manifest_agent.id.clone());
+        if let Some(meter) = deps.meter.as_ref() {
+            agent_policy = agent_policy.with_spend(meter.clone(), company.id.clone());
+        }
         let grants = agent_effective_grants(allow, &manifest_agent.tools);
         let agent = build::build_agent(
             &company.id,
@@ -1216,6 +2008,7 @@ pub(crate) fn build_roster(
         roster.push(Arc::new(CompanyAgent {
             agent_id: manifest_agent.id.clone(),
             role: manifest_agent.role.clone(),
+            budget_usd_daily: effective_budget,
             agent: Mutex::new(agent),
         }));
     }
@@ -1227,7 +2020,10 @@ pub(crate) fn build_roster(
 /// [`build::build_agent`] consumes: an empty `tools` list (so
 /// [`agent_effective_grants`] falls back to the full company `[tools].allow`
 /// — the "standard tool grant"), no cognition tier (→ the default `chat-v1`
-/// model), and no per-agent budget cap. The overlay's `name` is a display
+/// model), and no manifest budget cap — an overlay teammate has no manifest row
+/// at all, so its cap (if any) comes from the record's budget overrides via
+/// [`CompanyRecord::effective_budget`], resolved by the caller. The overlay's
+/// `name` is a display
 /// label only — already surfaced through
 /// [`crate::metering::roster_display_names`] — so the persona is framed from
 /// `role`/`description` alone, exactly like a manifest teammate
@@ -1281,6 +2077,9 @@ mod tests {
                     addr: addr.clone(),
                     label: c.label.clone(),
                     len: c.body.len(),
+                    // The mock does not model store time; these tests exercise
+                    // the harness, not the Brain's freshness stat.
+                    stored_at_millis: 0,
                 })
                 .collect())
         }
@@ -1352,12 +2151,37 @@ mod tests {
             self.samples.lock().unwrap().push(sample.clone());
             Ok(())
         }
+        /// Honours `since_millis`, per the port contract ("every sample at or
+        /// after `since_millis`"). The per-agent daily cap (issue #304) is a
+        /// windowed read, so a double that returned everything regardless would
+        /// make the day-rollover test pass against any boundary the code
+        /// computed — including none at all.
+        async fn query(&self, _company: &CompanyId, since: u64) -> crate::Result<Vec<UsageSample>> {
+            Ok(self
+                .samples
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|sample| sample.at_millis >= since)
+                .cloned()
+                .collect())
+        }
+    }
+
+    /// A meter whose reads always fail — for the dispatch gate's fail-open pin.
+    struct FailingMeter;
+
+    #[async_trait]
+    impl UsageMeter for FailingMeter {
+        async fn record(&self, _company: &CompanyId, _sample: &UsageSample) -> crate::Result<()> {
+            Ok(())
+        }
         async fn query(
             &self,
             _company: &CompanyId,
             _since: u64,
         ) -> crate::Result<Vec<UsageSample>> {
-            Ok(self.samples.lock().unwrap().clone())
+            Err(OpenCompanyError::Store("meter unavailable".into()))
         }
     }
 
@@ -1394,6 +2218,10 @@ description = "Builds the product."
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -1418,14 +2246,20 @@ description = "Builds the product."
                 workspace_root: dir.path().to_path_buf(),
                 model_override: None,
                 tasks: None,
+                artifacts: None,
                 skills: None,
                 skills_source_dir: None,
+                skills_registry: std::sync::Arc::from([]),
                 mcp_servers: Vec::new(),
                 facts: None,
                 events: None,
                 delegations: DelegationQueue::default(),
                 workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
                 mcp_failures: McpFailureQueue::default(),
+                pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+                workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+                approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
                 capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -1434,6 +2268,10 @@ description = "Builds the product."
                 media: None,
                 composio: None,
                 steer: crate::company::steer::InflightRegistry::default(),
+                run_supervisor: crate::runtime::RunSupervisor::default(),
+                delivery: None,
+                search: None,
+                workspace: None,
             },
             store,
             meter,
@@ -1475,14 +2313,20 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: Some(source.path().to_path_buf()),
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -1491,6 +2335,10 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
         };
 
         let roster = build_roster(&record(), &deps, &[]).expect("roster builds with skills");
@@ -1555,6 +2403,71 @@ description = "Builds the product."
         assert_eq!(
             roster[0].role, "Chief Executive",
             "the manifest role survives, not the overlay's"
+        );
+    }
+
+    /// Issue #551: a roster rebuild writes nothing to the workspace.
+    ///
+    /// This used to be the feature's second provisioning seam — a teammate
+    /// added at runtime (a manifest edit, the console's `add_member`, the
+    /// orchestrator's `add_agent`) reaches the harness as a moved overlay
+    /// fingerprint, and the folder was minted here. A member folder is no
+    /// longer a function of the roster, so joining one is no longer an event
+    /// the tree records: the folder appears when the teammate first produces
+    /// something, and the two system roots come from boot.
+    ///
+    /// Pinned as a test because a rebuild that quietly resumed writing would
+    /// re-fill the tree with empty folders for teammates who have done nothing
+    /// — exactly the noise this change removed.
+    #[tokio::test]
+    async fn a_roster_rebuild_writes_nothing_to_the_workspace() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ws: Arc<dyn crate::ports::WorkspaceStore> =
+            Arc::new(crate::store::FsOps::new(dir.path()));
+        let mut fx = fixture();
+        fx.deps.workspace = Some(ws.clone());
+
+        let mut rec = record();
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &fx.deps).await.expect("first ensure");
+        assert!(
+            ws.is_empty(&rec.id).await.expect("is_empty"),
+            "the roster build touched the workspace"
+        );
+
+        // The runtime-added teammate. The overlay fingerprint moves, so this
+        // `ensure` takes the rebuild path rather than the cached fast path.
+        rec.overlay_agents.push(OverlayAgent {
+            id: "designer".into(),
+            name: "Dana".into(),
+            role: "Designer".into(),
+            description: None,
+        });
+        pool.ensure(&rec, &fx.deps).await.expect("second ensure");
+
+        assert!(
+            ws.is_empty(&rec.id).await.expect("is_empty"),
+            "the rebuild minted a folder for a teammate that has produced nothing"
+        );
+
+        // …and the folder the teammate *does* get is the one it earns by
+        // producing something, minted through the lazy seam instead.
+        let minted = crate::company::workspace_scaffold::ensure_agent_folder(
+            ws.as_ref(),
+            &rec.id,
+            "designer",
+        )
+        .await
+        .expect("mint");
+        let tree = ws.tree(&rec.id).await.expect("tree");
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Agents", "designer"]);
+        assert_eq!(
+            tree.iter().find(|n| n.id == minted).unwrap().created_by,
+            crate::ports::WorkspaceOrigin::Agent {
+                id: "designer".to_string()
+            },
         );
     }
 
@@ -1654,6 +2567,104 @@ description = "Builds the product."
         assert!(second.contains("second"));
     }
 
+    /// Issue #416 — a confined turn reaches the company's memory neither on the
+    /// way in nor on the way out.
+    ///
+    /// The control half is what makes this a test rather than an assertion of
+    /// absence: the SAME message on the ordinary roster path pulls the seeded
+    /// chunk into the prompt (the mock provider echoes what it was sent, so the
+    /// injection is visible in the reply), and writes the turn back. The
+    /// confined path does neither, from the same store, in the same test.
+    #[tokio::test]
+    async fn a_confined_turn_neither_reads_nor_writes_company_memory() {
+        let context = Arc::new(MockContext::default());
+        let mut fx = fixture();
+        fx.deps.context = context.clone();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        // A prior outcome sitting in the company's memory. The mock store
+        // matches a chunk whose BODY contains the query, and retrieve→inject
+        // queries with the whole message — so a body built around the message is
+        // what a hit looks like here.
+        let question = "why did it fail";
+        context
+            .put(
+                &rec.id,
+                ContextChunk {
+                    label: "prior/outcome".into(),
+                    body: format!("SECRET-PAYROLL-REVIEW: {question} on Monday"),
+                },
+            )
+            .await
+            .expect("seed the company's memory");
+        let seeded = context.chunks.lock().unwrap().len();
+
+        // Control: the ordinary path injects the hit and writes the turn back.
+        let ordinary = pool
+            .run(&rec.id, "ceo", question, &fx.deps, None)
+            .await
+            .expect("the ordinary turn runs")
+            .reply;
+        assert!(
+            ordinary.contains("SECRET-PAYROLL-REVIEW"),
+            "the retrieve→inject step must be live for this test to mean anything: {ordinary}"
+        );
+        assert!(
+            context.chunks.lock().unwrap().len() > seeded,
+            "the ordinary path writes its outcome back to company memory"
+        );
+
+        let before_confined = context.chunks.lock().unwrap().len();
+        let confined = pool
+            .run_confined(
+                &rec.id,
+                "Acme",
+                question,
+                &fx.deps,
+                Some("workflow-copilot:weekly_report"),
+                &confine::Confinement::workflow("weekly_report"),
+            )
+            .await
+            .expect("the confined turn runs")
+            .reply;
+
+        assert!(
+            confined.contains(question),
+            "the confined turn still answers the question it was asked: {confined}"
+        );
+        assert!(
+            !confined.contains("SECRET-PAYROLL-REVIEW"),
+            "a confined turn must not be handed company memory: {confined}"
+        );
+        assert_eq!(
+            context.chunks.lock().unwrap().len(),
+            before_confined,
+            "a confined turn must leave nothing behind for a later turn to retrieve"
+        );
+    }
+
+    /// The confined agent is not on the roster, so nothing can address it: a
+    /// dispatch, a desk hand-off or a `chat` naming it is an unknown agent, the
+    /// same as any other name that is not a teammate.
+    #[tokio::test]
+    async fn the_confined_agent_is_not_addressable() {
+        let fx = fixture();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        let err = pool
+            .run(&rec.id, confine::CONFINED_AGENT_ID, "hi", &fx.deps, None)
+            .await
+            .expect_err("the confined agent is not a roster agent");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+    }
+
     #[tokio::test]
     async fn unknown_agent_is_invalid_request() {
         let fx = fixture();
@@ -1682,6 +2693,155 @@ description = "Builds the product."
         assert!(
             matches!(err, OpenCompanyError::CompanyNotFound(_)),
             "{err:?}"
+        );
+    }
+
+    // --- Workspace-ensure log edge-triggering (issue #449) -------------------
+
+    /// The whole transition table, exhaustively: a broken volume must produce
+    /// one error line and then nothing, and a recovery must be announced once.
+    #[test]
+    fn workspace_report_is_edge_triggered() {
+        let mut failing: HashSet<&str> = HashSet::new();
+
+        // First failure speaks.
+        assert_eq!(
+            workspace_report(&mut failing, &"a", true),
+            WorkspaceReport::Failed
+        );
+        // Every repeat is silent — this is the flood #449 is about.
+        for _ in 0..100 {
+            assert_eq!(
+                workspace_report(&mut failing, &"a", true),
+                WorkspaceReport::StillFailing
+            );
+        }
+        // Recovery speaks exactly once.
+        assert_eq!(
+            workspace_report(&mut failing, &"a", false),
+            WorkspaceReport::Recovered
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"a", false),
+            WorkspaceReport::StillHealthy
+        );
+        // A healthy agent that was never failing says nothing on its first
+        // attempt either — a working workspace has never been worth a line.
+        assert_eq!(
+            workspace_report(&mut failing, &"never-failed", false),
+            WorkspaceReport::StillHealthy
+        );
+        // And it can fail again later: the edge re-arms.
+        assert_eq!(
+            workspace_report(&mut failing, &"a", true),
+            WorkspaceReport::Failed
+        );
+
+        assert!(
+            WorkspaceReport::StillFailing.is_silent() && WorkspaceReport::StillHealthy.is_silent(),
+            "only the repeats are silent"
+        );
+        assert!(
+            !WorkspaceReport::Failed.is_silent() && !WorkspaceReport::Recovered.is_silent(),
+            "both edges must be reported"
+        );
+    }
+
+    /// Two agents interleaved: one failing, one healthy. Each key's edge is its
+    /// own — a second agent's failure must not be swallowed by the first's, and
+    /// a second agent's recovery must not clear the first's failure.
+    #[test]
+    fn workspace_report_tracks_each_key_separately() {
+        let mut failing: HashSet<&str> = HashSet::new();
+
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", true),
+            WorkspaceReport::Failed
+        );
+        // A different agent failing is its own first failure, not a repeat.
+        assert_eq!(
+            workspace_report(&mut failing, &"engineer", true),
+            WorkspaceReport::Failed
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", true),
+            WorkspaceReport::StillFailing
+        );
+        // One recovers; the other stays failing and stays silent.
+        assert_eq!(
+            workspace_report(&mut failing, &"engineer", false),
+            WorkspaceReport::Recovered
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", true),
+            WorkspaceReport::StillFailing
+        );
+        assert_eq!(
+            workspace_report(&mut failing, &"ceo", false),
+            WorkspaceReport::Recovered
+        );
+        assert!(failing.is_empty(), "a recovered key leaves no residue");
+    }
+
+    /// The real dispatch path against a workspace root that cannot hold a
+    /// directory, driven through [`HarnessPool::run`] rather than the helper.
+    ///
+    /// The root is pointed at a **file**, which makes `create_dir_all` fail
+    /// deterministically on every platform (`ENOTDIR` / its Windows equivalent)
+    /// without needing permission bits a CI root user would ignore.
+    ///
+    /// Asserts the reporting state, not the log text: this test binary already
+    /// installs a global `tracing` subscriber elsewhere
+    /// (`runtime::workflow_scheduler`) and asserts it wins that race, so a
+    /// second global capture here would make whichever test lost panic. The
+    /// state is what decides whether a line is emitted, so pinning it pins the
+    /// line count — three dispatches, one report.
+    #[tokio::test]
+    async fn a_broken_workspace_root_reports_once_across_repeated_dispatches() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A regular file where the workspace tree is expected.
+        let not_a_dir = dir.path().join("workspace-root");
+        std::fs::write(&not_a_dir, b"this is a file, not a directory").unwrap();
+
+        let mut fx = fixture();
+        fx.deps.workspace_root = not_a_dir.clone();
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &fx.deps).await.expect("ensure");
+
+        // Sanity: the condition really is a hard, repeatable failure.
+        assert!(
+            build::ensure_agent_workspace(&not_a_dir, &rec.id, "ceo").is_err(),
+            "the test root must actually be unusable, or this proves nothing"
+        );
+
+        for turn in 0..3 {
+            pool.run(&rec.id, "ceo", "hi", &fx.deps, None)
+                .await
+                .unwrap_or_else(|e| panic!("turn {turn} still runs without a workspace: {e:?}"));
+        }
+
+        // The turns ran — a missing workspace is not fatal, which #449 does not
+        // change — and the failure is recorded exactly once.
+        let failing = pool.workspace_failures.lock().unwrap();
+        assert_eq!(
+            failing.len(),
+            1,
+            "one failing agent, tracked once, however many turns it takes"
+        );
+        assert!(failing.contains(&(rec.id.clone(), "ceo".to_string())));
+        drop(failing);
+
+        // The next dispatch after the first is silent: only turn 1 spoke.
+        assert_eq!(
+            pool.note_workspace_attempt(&rec.id, "ceo", true),
+            WorkspaceReport::StillFailing,
+            "dispatches after the first must not re-emit the error"
+        );
+        // And when the volume comes back, one line says so.
+        assert_eq!(
+            pool.note_workspace_attempt(&rec.id, "ceo", false),
+            WorkspaceReport::Recovered
         );
     }
 
@@ -1757,14 +2917,20 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -1773,6 +2939,10 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
         };
         let roster = build_roster(&record(), &deps, &[]).expect("roster");
         // Keep the tempdir alive for the agent's workspace by leaking it into the
@@ -1807,7 +2977,7 @@ description = "Builds the product."
         let control = SteerControl::new();
         control.request(SteerAction::Cancel);
         let (_outcome, usages) = agent
-            .run_with_steer("hi", Some(&control), None)
+            .run_with_steer("hi", Some(&control), None, None)
             .await
             .expect("runs");
         assert_eq!(
@@ -1894,10 +3064,17 @@ description = "Builds the product."
         }
     }
 
-    /// A console-added MCP server reaches the agent on the NEXT `ensure` — the
-    /// roster is rebuilt because the effective set re-resolved from the LIVE
-    /// secret store (not the boot snapshot) changed its fingerprint. This is the
-    /// Parallel-Search / BrowserBase freshness bug, proven end-to-end.
+    /// A console-added MCP server reaches the agent on the NEXT `ensure`, with no
+    /// restart — the roster rebuilds because the effective set, re-resolved from
+    /// the LIVE secret store (not the boot snapshot), changed its fingerprint.
+    /// This is the Parallel-Search / BrowserBase freshness bug proven end-to-end,
+    /// and the CI guard for issue #566: the effective-MCP fingerprint is a *term*
+    /// of [`HarnessPool::ensure`]'s staleness check. Both directions are pinned —
+    /// an unchanged set holds the fingerprint (no needless rebuild), an MCP-only
+    /// change moves it (rebuilt in place, without a restart). A refactor that
+    /// drops the term makes the post-change `ensure` early-return without storing
+    /// the new fingerprint: the value stops moving across the mutation and the
+    /// `assert_ne!` fails, rather than the restart requirement quietly returning.
     #[tokio::test]
     async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
@@ -1911,14 +3088,20 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -1927,6 +3110,10 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
         };
         let pool = HarnessPool::new();
         let rec = record();
@@ -1936,6 +3123,16 @@ description = "Builds the product."
             .mcp_fingerprint_of(&rec.id)
             .await
             .expect("fingerprinted");
+
+        // Stability direction: with no axis changed, a redundant `ensure` is a
+        // no-op — the gate reuses the cached roster and the fingerprint holds, so
+        // the change-direction assertion below can't pass by coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.mcp_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an unchanged MCP set must not move the fingerprint"
+        );
 
         // Console-add a runtime MCP server directly into the live secret store.
         crate::company::mcp::save_runtime_index(
@@ -1956,22 +3153,27 @@ description = "Builds the product."
         .await
         .unwrap();
 
-        // Next ensure re-resolves from the live store → fingerprint changes →
-        // roster rebuilt, so the new server reaches the agent without a restart.
-        pool.ensure(&rec, &deps).await.expect("second ensure");
+        // Change direction: the next ensure re-resolves from the live store →
+        // fingerprint changes → roster rebuilt, so the new server reaches the
+        // agent without a restart.
+        pool.ensure(&rec, &deps).await.expect("post-add ensure");
         let after = pool
             .mcp_fingerprint_of(&rec.id)
             .await
             .expect("fingerprinted");
-        assert_ne!(before, after, "adding a server must change the fingerprint");
+        assert_ne!(
+            before, after,
+            "an MCP-only change must move the staleness fingerprint (issue #566)"
+        );
         assert_eq!(
             pool.resident_companies().await,
             1,
-            "same company, rebuilt in place"
+            "same company, rebuilt in place — not a new residency"
         );
 
-        // A third ensure with no change is a no-op (fingerprint stable).
-        pool.ensure(&rec, &deps).await.expect("third ensure");
+        // Stability after the change too: a further ensure with no new change is
+        // a no-op and the fingerprint holds at its post-change value.
+        pool.ensure(&rec, &deps).await.expect("final no-op ensure");
         assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
     }
 
@@ -2217,14 +3419,20 @@ description = "Builds the product."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -2233,6 +3441,10 @@ description = "Builds the product."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
         };
         let pool = HarnessPool::new();
 
@@ -2326,6 +3538,10 @@ description = "Sets direction."
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         }
     }
 
@@ -2354,6 +3570,7 @@ description = "Sets direction."
         let plan = crate::harness::capability_budget::CapabilityPlan {
             period: crate::harness::capability_budget::BudgetPeriod::Daily,
             budgets: std::collections::BTreeMap::from([("shell".to_string(), 100u64)]),
+            total_budget: None,
         };
         let deps = HarnessDeps {
             provider: Arc::new(MockProvider::new("mock: ")),
@@ -2364,14 +3581,20 @@ description = "Sets direction."
             workspace_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
+            artifacts: None,
             skills: None,
             skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
             delegations: DelegationQueue::default(),
             workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
             mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
             capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
@@ -2380,6 +3603,10 @@ description = "Sets direction."
             media: None,
             composio: None,
             steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
         };
         let pool = HarnessPool::new();
         let rec = granting_record();
@@ -2418,6 +3645,7 @@ description = "Sets direction."
                     cached_input_tokens: 0,
                     cost_usd: 0.0,
                     kind: crate::ports::SampleKind::Inference,
+                    run_id: None,
                 },
             )
             .await
@@ -2479,5 +3707,950 @@ description = "Sets direction."
             Some(fp),
             "no plan → stable fingerprint → no capability-driven rebuild"
         );
+    }
+
+    /// Builds a `HarnessDeps` carrying the given plan + meter, for the total-
+    /// ceiling dispatch tests (issue #188). Everything else is the inert fixture
+    /// wiring (mock provider/context, recording store).
+    fn deps_with_plan(
+        dir: &std::path::Path,
+        context: Arc<MockContext>,
+        meter: Option<Arc<dyn UsageMeter>>,
+        plan: Option<crate::harness::capability_budget::CapabilityPlan>,
+    ) -> HarnessDeps {
+        HarnessDeps {
+            provider: Arc::new(MockProvider::new("mock: ")),
+            provider_slug: "mock".to_string(),
+            context,
+            store: Arc::new(RecordingStore::default()),
+            meter,
+            workspace_root: dir.to_path_buf(),
+            model_override: None,
+            tasks: None,
+            skills: None,
+            skills_source_dir: None,
+            skills_registry: std::sync::Arc::from([]),
+            mcp_servers: Vec::new(),
+            facts: None,
+            events: None,
+            delegations: DelegationQueue::default(),
+            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
+            mcp_failures: McpFailureQueue::default(),
+            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
+            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            approval_requests: ApprovalRequestQueue::default(),
+            secrets: None,
+            web_allowed_domains: Vec::new(),
+            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
+            workflow_source_dir: None,
+            plan,
+            media: None,
+            composio: None,
+            artifacts: None,
+            steer: crate::company::steer::InflightRegistry::default(),
+            run_supervisor: crate::runtime::RunSupervisor::default(),
+            delivery: None,
+            search: None,
+            workspace: None,
+        }
+    }
+
+    /// The hard total-token ceiling (issue #188): once the tenant's total period
+    /// spend crosses the plan's `total_budget`, the very next dispatch is refused
+    /// **before any model call** — the reply is the fixed operator notice, the
+    /// prompt is never echoed (proving the model was not run), and no fabricated
+    /// outcome lands in memory. A turn under the ceiling still runs normally.
+    #[tokio::test]
+    async fn run_refuses_dispatch_once_the_total_ceiling_is_crossed() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: std::collections::BTreeMap::new(),
+            total_budget: Some(100),
+        };
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            Some(plan),
+        );
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        // Under the ceiling (0 spend < 100): the turn runs and echoes the prompt.
+        let ok = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("under-ceiling turn runs")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "under the ceiling the model runs: {ok:?}"
+        );
+
+        // Push total period spend to 150 — past the 100-token ceiling.
+        meter
+            .record(
+                &rec.id,
+                &UsageSample {
+                    at_millis: crate::ports::now_millis(),
+                    agent: "ceo".into(),
+                    provider: "managed".into(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: 0,
+                    cost_usd: 0.0,
+                    kind: crate::ports::SampleKind::Inference,
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let before = context
+            .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+            .await
+            .unwrap()
+            .len();
+
+        // Over the ceiling: dispatch is refused with a benign notice — NOT an Err.
+        let refused = pool
+            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused, TOTAL_BUDGET_EXHAUSTED_NOTICE,
+            "the refusal returns the fixed operator notice"
+        );
+        assert!(
+            !refused.contains("should-not-echo"),
+            "the model was never called, so the prompt is not echoed: {refused:?}"
+        );
+
+        // A refused turn writes no outcome back to memory.
+        let after = context
+            .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+            .await
+            .unwrap()
+            .len();
+        assert_eq!(before, after, "a refused turn stores nothing in memory");
+    }
+
+    /// Issue #416, the reason [`HarnessPool::total_ceiling_refusal`] was
+    /// extracted rather than copied: a confined turn reaches nothing, but it
+    /// still spends model tokens, so the tenant's ceiling refuses it exactly as
+    /// it refuses a roster dispatch. Without this test the gate could be dropped
+    /// from `run_confined` and every other test would stay green — the copilot
+    /// would simply keep spending past the cap.
+    #[tokio::test]
+    async fn a_confined_turn_is_refused_once_the_total_ceiling_is_crossed() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: std::collections::BTreeMap::new(),
+            total_budget: Some(100),
+        };
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            Some(plan),
+        );
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let confinement = confine::Confinement::workflow("weekly_report");
+        let thread = Some("workflow-copilot:weekly_report");
+
+        // Under the ceiling the copilot answers, so the refusal below is the
+        // ceiling talking and not the confined path failing to run at all.
+        let ok = pool
+            .run_confined(&rec.id, "Acme", "hello-marker", &deps, thread, &confinement)
+            .await
+            .expect("under-ceiling confined turn runs")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "under the ceiling the model runs: {ok:?}"
+        );
+
+        // Push total period spend past the 100-token ceiling.
+        meter
+            .record(
+                &rec.id,
+                &UsageSample {
+                    at_millis: crate::ports::now_millis(),
+                    agent: "ceo".into(),
+                    provider: "managed".into(),
+                    input_tokens: 100,
+                    output_tokens: 50,
+                    cached_input_tokens: 0,
+                    cost_usd: 0.0,
+                    kind: crate::ports::SampleKind::Inference,
+                    run_id: None,
+                },
+            )
+            .await
+            .unwrap();
+
+        let refused = pool
+            .run_confined(
+                &rec.id,
+                "Acme",
+                "should-not-echo",
+                &deps,
+                thread,
+                &confinement,
+            )
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused, TOTAL_BUDGET_EXHAUSTED_NOTICE,
+            "the copilot must not keep spending past the tenant ceiling"
+        );
+        assert!(
+            !refused.contains("should-not-echo"),
+            "the model was never called, so the prompt is not echoed: {refused:?}"
+        );
+    }
+
+    /// Fail-closed tradeoff (issue #188): with a total ceiling configured but no
+    /// meter to read spend from, the hard refusal does NOT fire — a transient
+    /// unreadable-spend condition must not brick every turn. The turn runs (the
+    /// per-namespace fail-closed roster already handles exec-tool stripping).
+    #[tokio::test]
+    async fn run_does_not_refuse_when_spend_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        // A zero ceiling would refuse from the first token IF spend were readable;
+        // with no meter wired the gate must defer, not brick.
+        let plan = crate::harness::capability_budget::CapabilityPlan {
+            period: crate::harness::capability_budget::BudgetPeriod::Daily,
+            budgets: std::collections::BTreeMap::new(),
+            total_budget: Some(0),
+        };
+        let deps = deps_with_plan(dir.path(), context.clone(), None, Some(plan));
+        let pool = HarnessPool::new();
+        let rec = record();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("no meter must not brick the turn")
+            .reply;
+        assert!(
+            reply.contains("hello-marker"),
+            "an unreadable ceiling defers to running the turn: {reply:?}"
+        );
+        assert_ne!(
+            reply, TOTAL_BUDGET_EXHAUSTED_NOTICE,
+            "the hard refusal must not fire without a spend read"
+        );
+    }
+
+    // --- The per-agent daily spend cap at dispatch (issue #304) --------------
+
+    /// A company whose `ceo` carries a $5/day cap and whose `engineer` carries
+    /// none — the pair that proves the gate is per-teammate, not per-company.
+    fn capped_record() -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+budget_usd_daily = 5.0
+
+[[agent]]
+id = "engineer"
+role = "Engineer"
+description = "Builds the product."
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..record()
+        }
+    }
+
+    /// A `$usd` inference sample for `agent`, stamped at `at_millis`.
+    fn spend_sample(agent: &str, usd: f64, at_millis: u64) -> UsageSample {
+        UsageSample {
+            at_millis,
+            agent: agent.into(),
+            provider: "managed".into(),
+            input_tokens: 0,
+            output_tokens: 0,
+            cached_input_tokens: 0,
+            cost_usd: usd,
+            kind: crate::ports::SampleKind::Inference,
+            run_id: None,
+        }
+    }
+
+    /// The heart of #304 at the layer that carries the money: once a teammate
+    /// has spent its manifest `budget_usd_daily`, its next dispatch is refused
+    /// **before any model call** — while its uncapped colleague keeps working.
+    ///
+    /// This is the layer that matters, because the dominant spend stream is
+    /// inference and inference never reaches a `ToolPolicy`. Gating only priced
+    /// tool calls would leave a capped teammate free to burn its budget many
+    /// times over on model turns alone.
+    #[tokio::test]
+    async fn run_refuses_dispatch_for_a_teammate_over_its_daily_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = capped_record();
+
+        // The CEO has spent its whole $5 today. The engineer has spent nothing.
+        meter
+            .record(
+                &rec.id,
+                &spend_sample("ceo", 5.00, crate::ports::now_millis()),
+            )
+            .await
+            .unwrap();
+
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let samples_before = meter.samples.lock().unwrap().len();
+        let memory_before = context
+            .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+            .await
+            .unwrap()
+            .len();
+
+        let refused = pool
+            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome, not a hard error")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("ceo", 5.0),
+            "the refusal names the teammate, its cap and the reset"
+        );
+        assert!(
+            !refused.contains("should-not-echo"),
+            "the model was never called, so the prompt is not echoed: {refused:?}"
+        );
+        assert_eq!(
+            meter.samples.lock().unwrap().len(),
+            samples_before,
+            "a pre-model-call refusal meters nothing"
+        );
+        assert_eq!(
+            context
+                .list(&rec.id, memory_loop::OUTCOME_LABEL_PREFIX)
+                .await
+                .unwrap()
+                .len(),
+            memory_before,
+            "a refused turn stores no fabricated outcome"
+        );
+
+        // The cap is per-teammate: the uncapped engineer is untouched, and the
+        // CEO's spend does not count against it.
+        let ok = pool
+            .run(&rec.id, "engineer", "hello-marker", &deps, None)
+            .await
+            .expect("an uncapped teammate keeps working")
+            .reply;
+        assert!(
+            ok.contains("hello-marker"),
+            "one teammate's exhausted budget must not stop the company: {ok:?}"
+        );
+    }
+
+    // --- Console budget overrides, live (issue #343) -------------------------
+
+    /// **The no-restart proof.** A daily cap written through the company store —
+    /// the exact path `PUT …/team/{id}/budget` writes through — is enforced on
+    /// the company's **next dispatch**, in one process, with no restart and no
+    /// redeploy.
+    ///
+    /// This is the whole of #343 at the layer that decides whether a teammate
+    /// works. Before it, `budget_usd_daily` was readable only from the manifest,
+    /// which is a boot snapshot baked into the tenant image — so an operator
+    /// whose teammate had stopped had no remedy short of us shipping a new
+    /// image. The four phases walk exactly that operator's day:
+    ///
+    ///   A. the CEO has spent its manifest $5 and is refused (issue #304, and
+    ///      the state that motivates the issue);
+    ///   B. an admin **raises** the cap to $50 — the stopped teammate works
+    ///      again on its very next turn. This is the acceptance criterion;
+    ///   C. the admin sets the cap to **$0** — a real cap of nothing, refused
+    ///      from the first cent;
+    ///   D. the admin **clears** the cap — an explicitly-uncapped override that
+    ///      beats the manifest's $5 even with $5 already spent, so the teammate
+    ///      works again.
+    ///
+    /// C and D are the same route with different bodies and they must not
+    /// resolve alike: C refuses, D runs. That is "clearing is distinct from
+    /// zeroing" asserted on live behaviour rather than on a type.
+    ///
+    /// Throughout, the pool holds **one** resident company and is never
+    /// reconstructed — `resident_companies()` stays 1 and the same `pool` binding
+    /// serves every phase — so the only mechanism that can be carrying these
+    /// changes is the budget fingerprint flipping and `ensure` rebuilding the
+    /// roster in place. Each phase asserts that fingerprint actually moved.
+    #[tokio::test]
+    async fn a_budget_written_through_the_store_is_enforced_on_the_next_dispatch() {
+        use crate::ports::types::{Actor, ActorKind, BudgetOverride};
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = capped_record();
+
+        // A live store, so `ensure` re-resolves the overrides the way it does in
+        // production. `deps_with_plan`'s default store is inert.
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+
+        // The CEO has already spent its manifest $5 today.
+        meter
+            .record(
+                &rec.id,
+                &spend_sample("ceo", 5.00, crate::ports::now_millis()),
+            )
+            .await
+            .unwrap();
+
+        let mut deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        deps.store = live_store.clone();
+
+        // ONE pool for the whole test. Nothing below reconstructs it, so nothing
+        // below can be smuggling in a restart.
+        let pool = HarnessPool::new();
+
+        /// Writes an override through the store exactly as the console route
+        /// does, and returns the record for the next `ensure`.
+        fn with_override(base: &CompanyRecord, cap: Option<f64>) -> CompanyRecord {
+            let mut next = base.clone();
+            next.overlay_budgets = vec![BudgetOverride {
+                agent_id: "ceo".to_string(),
+                budget_usd_daily: cap,
+                set_by: Actor {
+                    kind: ActorKind::User,
+                    id: "user-admin".to_string(),
+                },
+                at_millis: crate::ports::now_millis(),
+            }];
+            next
+        }
+
+        // --- A. The manifest cap is spent: the teammate is stopped. ----------
+        pool.ensure(&rec, &deps).await.expect("ensure A");
+        let fp_manifest = pool
+            .budget_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        let refused = pool
+            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("ceo", 5.0),
+            "phase A: the manifest's $5 cap is spent, so dispatch is refused"
+        );
+
+        // --- B. An admin raises the cap. The teammate works again. -----------
+        live_store
+            .save(&with_override(&rec, Some(50.0)))
+            .await
+            .unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure B");
+        let fp_raised = pool
+            .budget_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            fp_manifest, fp_raised,
+            "phase B: setting a cap must move the budget fingerprint, or the \
+             cached roster is reused and the change never reaches the gate"
+        );
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "phase B: the same company, rebuilt in place — not a new process"
+        );
+        let unblocked = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("the raised cap unblocks the teammate")
+            .reply;
+        assert!(
+            unblocked.contains("hello-marker"),
+            "phase B: raising the cap from the console must unblock the stopped \
+             teammate on its very next dispatch, with no restart: {unblocked:?}"
+        );
+
+        // --- C. The admin sets the cap to zero. Zero is a real cap. ----------
+        live_store
+            .save(&with_override(&rec, Some(0.0)))
+            .await
+            .unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure C");
+        let fp_zero = pool
+            .budget_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(fp_raised, fp_zero, "phase C: lowering a cap is a change");
+        let zeroed = pool
+            .run(&rec.id, "ceo", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome")
+            .reply;
+        assert_eq!(
+            zeroed,
+            agent_budget_exhausted_notice("ceo", 0.0),
+            "phase C: a $0 cap refuses from the first cent"
+        );
+
+        // --- D. The admin clears the cap. Cleared is not zero. ---------------
+        live_store.save(&with_override(&rec, None)).await.unwrap();
+        pool.ensure(&rec, &deps).await.expect("ensure D");
+        let fp_cleared = pool
+            .budget_fingerprint_of(&rec.id)
+            .await
+            .expect("fingerprinted");
+        assert_ne!(
+            fp_zero, fp_cleared,
+            "phase D: 'no cap' and 'a cap of $0' must not hash alike — if they \
+             did, clearing a cap would silently leave the teammate at zero"
+        );
+        let cleared = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("an explicitly-uncapped teammate runs")
+            .reply;
+        assert!(
+            cleared.contains("hello-marker"),
+            "phase D: an explicitly-uncapped override beats the manifest's $5 \
+             even with $5 already spent today: {cleared:?}"
+        );
+
+        // Nothing above restarted anything.
+        assert_eq!(
+            pool.resident_companies().await,
+            1,
+            "one company, rebuilt in place across all four phases"
+        );
+
+        // A further `ensure` with no change is a no-op: the axis is not thrashing
+        // the roster (and dropping live agent sessions) on every turn.
+        pool.ensure(&rec, &deps).await.expect("ensure idempotent");
+        assert_eq!(pool.budget_fingerprint_of(&rec.id).await, Some(fp_cleared));
+    }
+
+    /// An **overlay** teammate — one added from the console, with no manifest
+    /// row — can be capped through the same override, and is refused when it has
+    /// spent it. Before #343 an overlay teammate was unconditionally uncapped
+    /// ("overlay teammates are uncapped in v1"), so this is a capability that did
+    /// not exist rather than a behaviour that changed.
+    #[tokio::test]
+    async fn an_overlay_teammate_can_be_capped_from_the_console() {
+        use crate::ports::types::{Actor, ActorKind, BudgetOverride};
+
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+
+        let mut rec = record();
+        rec.overlay_agents.push(OverlayAgent {
+            id: "growth".into(),
+            name: "Jamie".into(),
+            role: "Growth Lead".into(),
+            description: None,
+        });
+        let live_store = Arc::new(LiveStore::default());
+        live_store.save(&rec).await.unwrap();
+
+        let mut deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        deps.store = live_store.clone();
+        let pool = HarnessPool::new();
+
+        // Uncapped to begin with: it answers.
+        pool.ensure(&rec, &deps).await.expect("ensure");
+        let reply = pool
+            .run(&rec.id, "growth", "hello-marker", &deps, None)
+            .await
+            .expect("an uncapped overlay teammate answers")
+            .reply;
+        assert!(reply.contains("hello-marker"), "got {reply:?}");
+
+        // The operator caps it at $1 and it has already spent $2.
+        meter
+            .record(
+                &rec.id,
+                &spend_sample("growth", 2.00, crate::ports::now_millis()),
+            )
+            .await
+            .unwrap();
+        let mut capped = rec.clone();
+        capped.overlay_budgets = vec![BudgetOverride {
+            agent_id: "growth".to_string(),
+            budget_usd_daily: Some(1.0),
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-admin".to_string(),
+            },
+            at_millis: crate::ports::now_millis(),
+        }];
+        live_store.save(&capped).await.unwrap();
+
+        pool.ensure(&rec, &deps).await.expect("ensure again");
+        let refused = pool
+            .run(&rec.id, "growth", "should-not-echo", &deps, None)
+            .await
+            .expect("a refusal is a benign outcome")
+            .reply;
+        assert_eq!(
+            refused,
+            agent_budget_exhausted_notice("growth", 1.0),
+            "a console-added teammate is capped by the same gate as a manifest one"
+        );
+    }
+
+    /// Fail-open pin, mirroring #188's documented tradeoff exactly: with a cap
+    /// set but spend unreadable, the turn RUNS.
+    ///
+    /// A `$0` cap would refuse from the first cent if spend were readable, so a
+    /// meter that errors is the only reason this turn can proceed. Bricking a
+    /// teammate's cognition on a flaky read is a strictly worse failure mode
+    /// than one day of overspend — and unlike the policy arm's park, a turn-level
+    /// refusal offers the operator nothing to approve.
+    #[tokio::test]
+    async fn run_does_not_refuse_a_capped_teammate_when_spend_is_unreadable() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[policy]
+mode = "full"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+description = "Sets direction."
+budget_usd_daily = 0.0
+"#,
+        )
+        .expect("valid manifest");
+        let rec = CompanyRecord {
+            manifest,
+            ..record()
+        };
+
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(Arc::new(FailingMeter) as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("an unreadable budget must not brick the teammate")
+            .reply;
+        assert!(
+            reply.contains("hello-marker"),
+            "an unreadable cap defers to running the turn: {reply:?}"
+        );
+
+        // ...and with no meter at all, the same deferral.
+        let no_meter = deps_with_plan(dir.path(), context.clone(), None, None);
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &no_meter).await.expect("ensure");
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &no_meter, None)
+            .await
+            .expect("no meter must not brick the teammate")
+            .reply;
+        assert!(reply.contains("hello-marker"), "no meter defers: {reply:?}");
+    }
+
+    /// The cap is the UTC calendar day: yesterday's $9 does not refuse today's
+    /// first turn. Depends on `RecordingMeter` honouring `since_millis`.
+    #[tokio::test]
+    async fn a_yesterday_stamped_spend_does_not_refuse_todays_dispatch() {
+        let dir = tempfile::tempdir().unwrap();
+        let context = Arc::new(MockContext::default());
+        let meter = Arc::new(RecordingMeter::default());
+        let rec = capped_record();
+
+        let yesterday =
+            crate::metering::utc_day_start_millis(crate::ports::now_millis()).saturating_sub(1);
+        meter
+            .record(&rec.id, &spend_sample("ceo", 9.00, yesterday))
+            .await
+            .unwrap();
+
+        let deps = deps_with_plan(
+            dir.path(),
+            context.clone(),
+            Some(meter.clone() as Arc<dyn UsageMeter>),
+            None,
+        );
+        let pool = HarnessPool::new();
+        pool.ensure(&rec, &deps).await.expect("ensure");
+
+        let reply = pool
+            .run(&rec.id, "ceo", "hello-marker", &deps, None)
+            .await
+            .expect("a new day admits the turn")
+            .reply;
+        assert!(
+            reply.contains("hello-marker"),
+            "the cap resets at 00:00Z; yesterday's spend is spent: {reply:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // The approval gate's coverage over the live toolbelt (issue #443)
+    // -----------------------------------------------------------------------
+
+    /// Build one agent and return the tools it actually received.
+    ///
+    /// A local mirror of `build`'s own `built_tool_names` — that one is private
+    /// to its test module, and this file owns `deps_with_plan`, which is the
+    /// expensive half.
+    fn belt(grants: &[&str], is_orchestrator: bool, wire_everything: bool) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        if wire_everything {
+            // The three tool families gated on a wired dependency rather than
+            // on a cargo feature. Without these the belt is missing exactly the
+            // tools most likely to be misclassified — the workspace writes and
+            // the priced search.
+            deps.workspace = Some(Arc::new(crate::store::FsOps::new(dir.path())));
+            deps.artifacts = Some(Arc::new(crate::store::FsOps::new(dir.path())));
+            deps.search = Some(crate::harness::search::SearchBackend::new(
+                "https://api.example.test".to_string(),
+                crate::company::credentials::Credential::from_value("managed-platform-token"),
+                crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+            ));
+            // A registered MCP server is what puts `mcp_list_servers`,
+            // `mcp_list_tools` and `mcp_call_tool` on the belt — the three
+            // tools issue #443 is about. Without one the coverage check would
+            // pass while never having looked at them.
+            // A skills source dir is what puts `list_workflows`,
+            // `describe_workflow` and `read_workflow_resource` on the belt.
+            // Leaving it `None` is how those three stayed invisible to this
+            // check while `describe_workflow` parked in production.
+            let company_src = dir.path().join("company-src");
+            std::fs::create_dir_all(company_src.join("skills").join("brief")).expect("skill dir");
+            std::fs::write(
+                company_src.join("skills").join("brief").join("SKILL.md"),
+                "---\nname: brief\ndescription: Write a brief\n---\n\nWrite one.\n",
+            )
+            .expect("skill file");
+            deps.skills_source_dir = Some(company_src);
+            deps.mcp_servers = vec![McpServerDecl {
+                name: "notes".to_string(),
+                endpoint: "https://mcp.example.test".to_string(),
+                description: None,
+                allowed_tools: Vec::new(),
+                disallowed_tools: Vec::new(),
+                timeout_secs: 30,
+                enabled: true,
+                source: crate::company::mcp::McpSource::Runtime,
+                auth: crate::company::mcp::AuthMaterial::None,
+            }];
+        }
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build::build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            is_orchestrator,
+        )
+        .expect("agent builds");
+        agent.tools().iter().map(|t| t.name().to_string()).collect()
+    }
+
+    /// **The mechanism issue #443 asks for.** Every tool this crate can put in
+    /// front of an agent must be classified in
+    /// [`crate::policy::consequence`], or this fails.
+    ///
+    /// Three families had needed the same carve-out before it, each added after
+    /// somebody hit it, and what the gate did with the ones nobody hit was
+    /// silent: the tool simply started asking for permission, and whoever
+    /// noticed was an operator wondering why a read needed approving. That is
+    /// how `mcp_list_servers` — which the agent persona *instructs* every agent
+    /// to call — came to cost an approval, and how `file_read`, `glob` and
+    /// `grep` came to park with nobody reporting it.
+    ///
+    /// A tool declaring its own consequence to the gate at call time would be
+    /// better, and is not reachable: openhuman's `ToolPolicy` surface hands the
+    /// bridge a name and arguments, never the tool. So the declaration is
+    /// checked against the live belt here instead — the issue's own stated
+    /// fallback, "exhaustive by construction rather than by memory".
+    ///
+    /// Feature-aware by construction: it enumerates whatever this build wires,
+    /// so a family behind a cargo feature is covered by the lane that enables
+    /// it rather than by a `cfg` branch that has to be kept in step.
+    #[test]
+    fn every_registered_tool_is_declared() {
+        let declared: std::collections::BTreeSet<&str> =
+            crate::policy::consequence::declared_tools().collect();
+        let mut live: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for (grants, orchestrator, everything) in [
+            (&["*"][..], false, false),
+            (&["*"][..], true, false),
+            (&["*"][..], false, true),
+            (&["*"][..], true, true),
+            (
+                &["workspace", "search", "media", "composio"][..],
+                false,
+                true,
+            ),
+        ] {
+            live.extend(belt(grants, orchestrator, everything));
+        }
+        // A vacuity guard with teeth. `!live.is_empty()` would not notice the
+        // belt quietly narrowing to the tools nobody was worried about, and
+        // three of the four names below are the ones the issues are about.
+        for expected in [
+            "shell",
+            "workspace_write",
+            "file_read",
+            "describe_workflow",
+            #[cfg(feature = "mcp")]
+            "mcp_list_servers",
+            #[cfg(feature = "mcp")]
+            "mcp_call_tool",
+        ] {
+            assert!(
+                live.contains(expected),
+                "the belt builder stopped wiring `{expected}`, so this check has \
+                 narrowed without anyone deciding to narrow it: {live:?}"
+            );
+        }
+        let undeclared: Vec<&String> = live
+            .iter()
+            .filter(|name| !declared.contains(name.as_str()))
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "these tools are wired onto a live agent but nobody has said what they can \
+             reach, so the gate is guessing from their names and they cannot be granted \
+             standing: {undeclared:?}. Add them to `crate::policy::consequence::DECLARED`."
+        );
+    }
+
+    /// The one-directional cross-check on the declaration.
+    ///
+    /// A tool's own `permission_level()` is NOT trustworthy as the authority —
+    /// it defaults to `ReadOnly`, and upstream tools that plainly mutate
+    /// (`git_operations`, `memory_store`) never override it, so believing a
+    /// `ReadOnly` claim would wave a write straight through the gate. But the
+    /// claims in the *other* direction are deliberate: nothing declares itself
+    /// `Execute` or `Dangerous` by accident. So those are checked, and a
+    /// `ReadOnly` claim is ignored.
+    #[test]
+    fn nothing_that_declares_itself_executable_is_internal_or_grantable() {
+        use oh::tools::traits::PermissionLevel;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let deps = deps_with_plan(dir.path(), Arc::new(MockContext::default()), None, None);
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let agent = build::build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            ApprovalPolicy::new(&Policy::default(), None),
+            &deps,
+            &["*".to_string()],
+            &[],
+            true,
+        )
+        .expect("agent builds");
+        let args = serde_json::json!({});
+        let mut checked = 0;
+        for tool in agent.tools() {
+            if !matches!(
+                tool.permission_level(),
+                PermissionLevel::Execute | PermissionLevel::Dangerous
+            ) {
+                continue;
+            }
+            checked += 1;
+            let verdict = crate::policy::consequence_of(tool.name(), &args);
+            assert!(
+                verdict.reach.denied_under_readonly(),
+                "`{}` declares itself executable but a read-only desk would allow it",
+                tool.name()
+            );
+            assert!(
+                !verdict.standing.is_grantable(),
+                "`{}` declares itself executable and must not be grantable",
+                tool.name()
+            );
+        }
+        assert!(checked > 0, "no executable tool was on the belt to check");
     }
 }

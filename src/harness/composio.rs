@@ -6,114 +6,172 @@
 //!
 //! In OpenHuman's **backend mode**, no Composio call carries an `entity_id`: the
 //! backend derives the Composio entity from the **bearer JWT** on the request.
-//! So the *only* isolation lever is **which token the client is constructed
-//! with**, and that construction happens **server-side** here — never from agent
-//! input and never from manifest free-text. The token is resolved from the
-//! company's [`SecretStore`] under [`TOKEN_KEY`]; it has **no environment
-//! fallback**, so a missing/empty secret yields `None` and no tools are wired
-//! (fail closed). Two companies pasting the *same* token would share one entity
-//! — that cannot be prevented client-side and is documented as a deployment
-//! caveat (one backend token per company).
+//! So the *only* isolation lever is **which credential the call is made with**,
+//! and that resolution happens **server-side** here — never from agent input and
+//! never from manifest free-text.
 //!
-//! ## Write-only token
+//! Two sources, in strict precedence:
 //!
-//! The token is a write-only credential. It is scrubbed out of **every**
-//! `ToolResult` (success and error), every tracing line, and the [`Debug`]
-//! impl. Only non-secret status (backend URL, toolkit allowlist) is ever
-//! surfaced.
+//! 1. **The company's own token**, stored in its [`SecretStore`] under
+//!    [`TOKEN_KEY`] by the console. A company that brings its own Composio
+//!    identity keeps it, always.
+//! 2. **This instance's platform identity** — the
+//!    [`TinyhumansTokenSource`](crate::company::credentials::TinyhumansTokenSource)
+//!    the runtime authenticates with everywhere else. On the hosted platform that
+//!    is a projected, audience-bound token the cluster rotates in place, so it is
+//!    read **per call**, never captured when the roster is built.
+//!
+//! With neither, resolution yields `None` and no tools are wired (fail closed) —
+//! an absent credential must mean "no tools", never a borrowed identity. Two
+//! companies pasting the *same* token would share one entity; that cannot be
+//! prevented client-side and is documented as a deployment caveat.
+//!
+//! ## Rotation must not churn the roster
+//!
+//! The roster fingerprint hashes the credential's **identity**, not its bytes:
+//! for the projected tier that is the tier + path (see
+//! [`Credential::hash_identity`]). Hashing the value would rebuild every agent's
+//! tool roster on the platform's rotation schedule — every few minutes, forever.
+//! A pasted per-company token still fingerprints by value, because there a new
+//! value really is a new identity.
+//!
+//! ## Write-only credential
+//!
+//! The token is write-only. Whatever value a call resolves is fed to
+//! [`redact`](crate::harness::mcp_probe::redact) (successes) or
+//! [`scrub`](crate::harness::mcp_probe::scrub) (errors) as a known secret, so it
+//! cannot survive into **any** `ToolResult`; it is absent from every tracing
+//! line and from the [`Debug`] impl. Only non-secret status (backend URL,
+//! toolkit allowlist) is ever surfaced.
+//!
+//! ## Result sizing (issue #410)
+//!
+//! Successes go through `redact` + a **body** budget, never through `scrub`.
+//! `scrub` caps at 300 bytes — correct for the one-line MCP failure sentence it
+//! was built for, and the reason every Composio result used to arrive as a
+//! silent fragment. See `scrubbed_ok` below and
+//! [`composio_catalog`](crate::harness::composio_catalog).
 
 use std::sync::Arc;
 
+use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
 
 // The credential key + backend routing live in the always-compiled
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
-pub use crate::company::composio::{COMPOSIO_BACKEND_URL_ENV, TOKEN_KEY, backend_url_or_default};
+pub use crate::company::composio::{
+    COMPOSIO_BACKEND_URL_ENV, TINYHUMANS_API_URL_ENV, TOKEN_KEY, backend_url_or_default,
+};
 
-/// A per-tenant Composio configuration: the backend URL, the tenant's OAuth
-/// bearer token, and the toolkit allowlist.
+/// A per-tenant Composio configuration: the backend URL, how the outbound bearer
+/// is obtained, and the toolkit allowlist.
 ///
-/// **Security invariant**: `auth_token` is a per-company credential. The backend
-/// derives the Composio entity from it, so a company can only ever reach its own
-/// connected accounts. The token is never logged, returned, or `Debug`-printed.
+/// **Security invariant**: the credential decides which Composio entity the
+/// backend resolves, so a company can only ever reach its own connected
+/// accounts. It is never logged, returned, or `Debug`-printed.
 ///
 /// Always compiled (so the [`HarnessDeps`](crate::harness::HarnessDeps) field
 /// exists in every `openhuman` build and every construction site fails closed
 /// with `None`); the live tool constructors in [`composio_tools`] are gated
 /// behind the `composio` feature.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TenantComposio {
     /// The Composio backend base URL (e.g. `https://api.tinyhumans.ai`).
     pub backend_url: String,
-    /// The per-tenant OAuth bearer token. Never a managed/platform key; the
-    /// backend derives the tenant's Composio entity from it. Write-only.
-    pub auth_token: String,
+    /// How the outbound bearer is obtained: the company's own stored token, or
+    /// this instance's platform identity. Resolved per call — see the module docs.
+    credential: Credential,
     /// The toolkit allowlist (Gmail / Slack / GitHub, …). Empty defers to the
     /// backend's server-enforced allowlist (open mode); non-empty narrows
     /// strictly, client-side, before any network round-trip.
     pub toolkits: Vec<String>,
 }
 
-impl std::fmt::Debug for TenantComposio {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Never let the tenant credential land in a trace.
-        f.debug_struct("TenantComposio")
-            .field("backend_url", &self.backend_url)
-            .field(
-                "auth_token",
-                &if self.auth_token.is_empty() {
-                    "<unset>"
-                } else {
-                    "<redacted>"
-                },
-            )
-            .field("toolkits", &self.toolkits)
-            .finish()
-    }
-}
-
 impl TenantComposio {
-    /// Resolve a per-tenant Composio config from the company secret store, or
-    /// `None` (fail closed) when no non-empty token is stored.
+    /// A config over an explicit credential — the constructor tests and callers
+    /// outside the resolver use.
+    pub fn new(
+        backend_url: impl Into<String>,
+        credential: Credential,
+        toolkits: Vec<String>,
+    ) -> Self {
+        Self {
+            backend_url: backend_url.into(),
+            credential,
+            toolkits,
+        }
+    }
+
+    /// Resolve a per-tenant Composio config, or `None` (fail closed) when no
+    /// credential can be obtained at all.
     ///
-    /// The token comes **only** from [`TOKEN_KEY`] in the secret store — there is
-    /// no environment or platform-key fallback, by design: an absent token must
-    /// mean "no tools", never "borrow someone else's identity". The URL *may*
-    /// come from [`COMPOSIO_BACKEND_URL_ENV`], falling back to
-    /// [`DEFAULT_COMPOSIO_BACKEND_URL`]. `toolkits` is the manifest allowlist,
-    /// threaded through unchanged.
+    /// Precedence: the company's **own** token under [`TOKEN_KEY`] in the secret
+    /// store wins; otherwise this instance's platform identity (`token_source`)
+    /// is used. A company that pasted its own Composio token therefore keeps it
+    /// even on the hosted platform, and a company that pasted nothing borrows no
+    /// one else's identity — it presents the identity of the instance it runs in,
+    /// which the backend resolves to that instance's owner.
     ///
-    /// A secret-store read error degrades to `None` (fail closed) rather than
-    /// bubbling — a transient store hiccup withholds the tools for that turn
-    /// instead of bricking the roster build.
+    /// The URL resolves from [`COMPOSIO_BACKEND_URL_ENV`], then the tenant API
+    /// base [`TINYHUMANS_API_URL_ENV`], then [`DEFAULT_BACKEND_URL`] — see
+    /// [`backend_url_or_default`]. `toolkits` is the manifest allowlist, threaded
+    /// through unchanged.
+    ///
+    /// A secret-store read error degrades to the token source (and, failing that,
+    /// to `None`) rather than bubbling — a transient store hiccup must not brick
+    /// the roster build.
     pub async fn resolve(
         company: &CompanyId,
         secrets: &dyn SecretStore,
         toolkits: Vec<String>,
         backend_url_env: Option<String>,
+        api_url_env: Option<String>,
+        token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
-        let token = match secrets.get(company, TOKEN_KEY).await {
-            Ok(Some(SecretValue(token))) => token,
-            _ => return None,
+        let stored = match secrets.get(company, TOKEN_KEY).await {
+            Ok(Some(SecretValue(token))) => Credential::from_value(token),
+            _ => Credential::None,
         };
-        let token = token.trim().to_string();
-        if token.is_empty() {
-            return None;
-        }
-        Some(Self {
-            backend_url: backend_url_or_default(backend_url_env),
-            auth_token: token,
+        let credential = match (stored, token_source) {
+            // The company's own token always wins.
+            (stored @ Credential::Value(_), _) => stored,
+            (_, Some(source)) => Credential::from_source(source),
+            (_, None) => return None,
+        };
+        Some(Self::new(
+            backend_url_or_default(backend_url_env, api_url_env),
+            credential,
             toolkits,
-        })
+        ))
+    }
+
+    /// The credential this config presents. Status and fingerprinting only —
+    /// callers on the request path want [`Self::current_token`].
+    pub fn credential(&self) -> &Credential {
+        &self.credential
+    }
+
+    /// The bearer to present on **this** Composio call.
+    ///
+    /// Resolved per call so a platform token the cluster rotated in place is
+    /// picked up without rebuilding the roster. `None` would mean no credential
+    /// at all, which [`Self::resolve`] already rules out; the tools refuse the
+    /// call rather than dialling the backend unauthenticated.
+    pub async fn current_token(&self) -> crate::Result<Option<String>> {
+        self.credential.current().await
     }
 
     /// A stable, credential-safe fingerprint of the resolved config, folded into
     /// the harness roster fingerprint so a console token set/rotate (or a
     /// toolkit-allowlist change) rebuilds the roster on the next turn without a
-    /// restart. Hashes the token too so a rotation is detected — but the hash is
-    /// one-way, so the fingerprint never carries the secret.
+    /// restart.
+    ///
+    /// The credential contributes its **identity**, not its bytes: a projected
+    /// platform token rotates every few minutes, and hashing the value would
+    /// rebuild the whole roster on that schedule. A pasted per-company token does
+    /// contribute its value, since changing it is a real identity change.
     pub fn fingerprint(config: &Option<TenantComposio>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -122,7 +180,7 @@ impl TenantComposio {
             Some(c) => {
                 1u8.hash(&mut hasher);
                 c.backend_url.hash(&mut hasher);
-                c.auth_token.hash(&mut hasher);
+                c.credential.hash_identity(&mut hasher);
                 c.toolkits.hash(&mut hasher);
             }
         }
@@ -133,6 +191,12 @@ impl TenantComposio {
 /// Whether a toolkit is admitted by an allowlist. An **empty** allowlist defers
 /// to the backend's server-enforced allowlist (open mode) and admits every
 /// toolkit; a non-empty allowlist admits only its members (case-insensitive).
+///
+/// Every call site is inside the `composio`-gated [`live`] module, so this is
+/// genuinely dead in an `openhuman`-without-`composio` build and is gated to
+/// match. A blanket `#[allow(dead_code)]` would say the same thing to the
+/// compiler while also hiding the day a real call site disappears.
+#[cfg(feature = "composio")]
 fn toolkit_allowed(allowlist: &[String], toolkit: &str) -> bool {
     allowlist.is_empty()
         || allowlist
@@ -142,12 +206,19 @@ fn toolkit_allowed(allowlist: &[String], toolkit: &str) -> bool {
 
 /// The toolkit a Composio action slug belongs to: the segment before the first
 /// `_`, lowercased (`GMAIL_SEND_EMAIL` → `gmail`). Empty slug → empty string.
+///
+/// Gated for the same reason as [`toolkit_allowed`]: both call sites live in
+/// the `composio`-gated [`live`] module.
+#[cfg(feature = "composio")]
 fn slug_toolkit(slug: &str) -> String {
     slug.split('_').next().unwrap_or("").to_ascii_lowercase()
 }
 
 #[cfg(feature = "composio")]
-pub use live::composio_tools;
+pub use live::{
+    ComposioMetering, authorize_connect_url, composio_tools, list_catalog_toolkits,
+    list_connection_states,
+};
 
 #[cfg(feature = "composio")]
 mod live {
@@ -157,70 +228,131 @@ mod live {
     use async_trait::async_trait;
     use serde_json::{Value, json};
 
-    use crate::harness::mcp_probe::scrub;
+    use crate::harness::composio_catalog as catalog;
+    use crate::harness::mcp_probe::{redact, scrub};
+    use crate::metering::record_oauth_call;
+    use crate::ports::UsageMeter;
+    use crate::ports::now_millis;
 
-    use oh::composio::ComposioClient;
     use oh::integrations::IntegrationClient;
+    use oh::integrations::composio::ComposioClient;
     use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
     use openhuman_core::openhuman as oh;
 
-    /// Build the five per-tenant Composio tools over the tenant's bearer token.
+    /// What `composio_execute` needs to meter a call it just made: the company
+    /// the sample belongs to, the agent that made it, and the meter to write to.
     ///
-    /// Each tool holds its own [`ComposioClient`] (cheap `Arc` clone over the
-    /// shared [`IntegrationClient`]), the known-secret vector `[auth_token]` fed
-    /// to [`scrub`] so the credential can never survive into agent-visible
-    /// output, and the toolkit allowlist. The read tools are `ReadOnly`; the
-    /// `authorize` / `execute` tools are `Execute` and additionally park for
+    /// Bundled because these three travel together and are individually
+    /// meaningless — and because [`composio_tools`] would otherwise grow four
+    /// positional parameters at a call site that already has many.
+    #[derive(Clone)]
+    pub struct ComposioMetering {
+        /// The company the sample is scoped to.
+        pub company: CompanyId,
+        /// The agent whose turn made the call.
+        pub agent: String,
+        /// The usage meter. `None` leaves metering off entirely (the harness
+        /// wires no meter in some embeddings) — the tools still work.
+        pub meter: Option<Arc<dyn UsageMeter>>,
+    }
+
+    /// Build the five per-tenant Composio tools over the tenant's credential.
+    ///
+    /// Each tool holds the shared [`TenantComposio`] and the toolkit allowlist,
+    /// and builds its [`ComposioClient`] **when it runs** via [`live_call`] — the
+    /// bearer is resolved then, not now, so a platform token that rotated since
+    /// the roster was built still authenticates. The read tools are `ReadOnly`;
+    /// the `authorize` / `execute` tools are `Execute` and additionally park for
     /// operator approval through the harness [`ApprovalPolicy`](crate::harness::policy).
+    ///
+    /// `metering` lets `composio_execute` record a
+    /// [`SampleKind::OauthCall`](crate::ports::usage::SampleKind) sample per
+    /// call it completes, which is what puts numbers in the Usage view's
+    /// calls-by-provider chart (issue #152).
     ///
     /// Gated on the `composio` feature; the default/`openhuman` build never
     /// compiles this.
-    pub fn composio_tools(config: &TenantComposio) -> Vec<Box<dyn Tool>> {
-        // The Config-free seam: `IntegrationClient::new(backend_url, auth_token)`
-        // takes the per-tenant credential directly, with no OpenHuman global
-        // `Config`. The bearer is the ONLY isolation lever — see the module docs.
-        let client = ComposioClient::new(Arc::new(IntegrationClient::new(
-            config.backend_url.clone(),
-            config.auth_token.clone(),
-        )));
-        let secrets = vec![config.auth_token.clone()];
+    pub fn composio_tools(
+        config: &TenantComposio,
+        metering: ComposioMetering,
+    ) -> Vec<Box<dyn Tool>> {
+        let config = Arc::new(config.clone());
         let toolkits = Arc::new(config.toolkits.clone());
         vec![
             Box::new(ComposioListToolkitsTool {
-                client: client.clone(),
-                secrets: secrets.clone(),
+                config: Arc::clone(&config),
                 toolkits: Arc::clone(&toolkits),
             }),
             Box::new(ComposioListConnectionsTool {
-                client: client.clone(),
-                secrets: secrets.clone(),
+                config: Arc::clone(&config),
                 toolkits: Arc::clone(&toolkits),
             }),
             Box::new(ComposioListToolsTool {
-                client: client.clone(),
-                secrets: secrets.clone(),
+                config: Arc::clone(&config),
                 toolkits: Arc::clone(&toolkits),
             }),
             Box::new(ComposioAuthorizeTool {
-                client: client.clone(),
-                secrets: secrets.clone(),
+                config: Arc::clone(&config),
                 toolkits: Arc::clone(&toolkits),
             }),
             Box::new(ComposioExecuteTool {
-                client,
-                secrets,
+                config,
                 toolkits,
+                metering,
             }),
         ]
     }
 
-    /// Serialize a successful response to JSON, then scrub it against the tenant
-    /// token before it can reach the agent. Text-only output — the structured
-    /// value is dropped so a credential the backend might reflect can never ride
-    /// out in a JSON field.
-    fn scrubbed_ok(value: Value, secrets: &[String]) -> ToolResult {
+    /// A client for one call plus the known-secret vector that call's output must
+    /// be scrubbed against.
+    ///
+    /// Built per call on purpose. The Config-free seam
+    /// `IntegrationClient::new(backend_url, auth_token)` takes the credential
+    /// directly (no OpenHuman global `Config`), and the bearer it is handed is the
+    /// ONLY isolation lever — see the module docs — so it must be the value the
+    /// credential yields *now*. A per-call client costs one HTTP-client
+    /// construction on a path that is already a network round-trip; capturing the
+    /// token once instead would leave a hosted tenant presenting a bearer the
+    /// cluster rotated away from minutes ago.
+    ///
+    /// The scrub vector carries exactly the token that went out, so it cannot
+    /// survive into agent-visible output even if the backend reflects it.
+    async fn live_call(config: &TenantComposio) -> Result<(ComposioClient, Vec<String>)> {
+        let token = config
+            .current_token()
+            .await
+            .map_err(|e| anyhow::anyhow!("resolving this company's Composio credential: {e}"))?
+            .ok_or_else(|| anyhow::anyhow!("no Composio credential is configured"))?;
+        let client = ComposioClient::new(Arc::new(IntegrationClient::new(
+            config.backend_url.clone(),
+            token.clone(),
+        )));
+        Ok((client, vec![token]))
+    }
+
+    /// Serialize a successful response to JSON, redact the tenant token out of
+    /// it, and bound it to a *body* budget before it reaches the agent.
+    /// Text-only output — the structured value is dropped so a credential the
+    /// backend might reflect can never ride out in a JSON field.
+    ///
+    /// # Why not `scrub` (issue #410)
+    ///
+    /// This used to call [`scrub`], whose third pass caps its output at
+    /// [`SCRUB_MAX_BYTES`](crate::harness::mcp_probe::SCRUB_MAX_BYTES) — 300
+    /// bytes, the right size for the one-line MCP failure sentence it was built
+    /// for and a catastrophe for a tool body. Every Composio result was cut to
+    /// 300 bytes and terminated with a bare `…`: an action listing became the
+    /// first action and half of its schema, and `composio_execute` returned 300
+    /// bytes of whatever the provider actually said. Nothing in the result said
+    /// it was a fragment, so the agent had no reason to ask differently and
+    /// reissued the identical call until the repetition guard stopped the run.
+    ///
+    /// [`redact`] keeps the security half — the token replacement and the URL
+    /// query strip — verbatim and unconditional; only the length decision moves
+    /// here, where it can be sized for a body and describe its own cut.
+    fn scrubbed_ok(value: Value, secrets: &[String], what: &str) -> ToolResult {
         let text = serde_json::to_string_pretty(&value).unwrap_or_else(|_| value.to_string());
-        ToolResult::success(scrub(&text, secrets))
+        ToolResult::success(catalog::bound_body(redact(&text, secrets), what))
     }
 
     /// A scrubbed error result — the tenant token is stripped from any error
@@ -239,11 +371,119 @@ mod live {
             .ok_or_else(|| anyhow::anyhow!("missing required `{key}` string argument"))
     }
 
+    /// Begin an OAuth handoff for `toolkit` and return the Composio-hosted
+    /// connect URL the operator opens in a browser. Backs the console's
+    /// `POST …/composio/authorize` route (the same building block the
+    /// `composio_authorize` agent tool wraps).
+    ///
+    /// Composio runs the OAuth itself — there is **no** local callback route.
+    /// The console opens the returned URL in a new tab and polls
+    /// [`list_connection_states`] until the toolkit reports connected.
+    ///
+    /// The tenant allowlist is enforced **before** any network call — a toolkit
+    /// the company is not permitted to connect never reaches the backend. Any
+    /// upstream error is scrubbed of the tenant bearer before it bubbles.
+    pub async fn authorize_connect_url(config: &TenantComposio, toolkit: &str) -> Result<String> {
+        let toolkit = toolkit.trim();
+        if toolkit.is_empty() {
+            anyhow::bail!("composio authorize: toolkit must not be empty");
+        }
+        if !toolkit_allowed(&config.toolkits, toolkit) {
+            anyhow::bail!("toolkit `{toolkit}` is not in this company's Composio allowlist");
+        }
+        tracing::debug!(toolkit = %toolkit, "[composio] ops authorize");
+        let (client, secrets) = live_call(config).await?;
+        match client.authorize(toolkit, None).await {
+            Ok(resp) => Ok(resp.connect_url),
+            Err(err) => Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+        }
+    }
+
+    /// The per-toolkit connected state the console renders as provider rows: one
+    /// `(toolkit, connected)` pair per toolkit that has at least one connection,
+    /// with `connected == true` when **any** connection for that toolkit is
+    /// active. Backs the console's `GET …/composio/connections` route.
+    ///
+    /// Filtered to the tenant allowlist (mirrors the `composio_list_connections`
+    /// agent tool) so a connection outside the company's grant is never
+    /// surfaced. Sorted by toolkit for a stable render order. Any upstream error
+    /// is scrubbed of the tenant bearer before it bubbles.
+    pub async fn list_connection_states(config: &TenantComposio) -> Result<Vec<(String, bool)>> {
+        tracing::debug!(allowlist = ?config.toolkits, "[composio] ops list_connections");
+        let (client, secrets) = live_call(config).await?;
+        let resp = match client.list_connections().await {
+            Ok(resp) => resp,
+            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+        };
+        let mut states: std::collections::BTreeMap<String, bool> =
+            std::collections::BTreeMap::new();
+        for conn in resp.connections {
+            let toolkit = conn.normalized_toolkit();
+            if !toolkit_allowed(&config.toolkits, &toolkit) {
+                continue;
+            }
+            let active = conn.is_active();
+            states
+                .entry(toolkit)
+                .and_modify(|c| *c = *c || active)
+                .or_insert(active);
+        }
+        Ok(states.into_iter().collect())
+    }
+
+    /// The backend's live Composio toolkit catalog — every slug it will let
+    /// this tenant connect. Backs the console's open-mode provider list
+    /// (issue #397).
+    ///
+    /// This is the same `GET /agent-integrations/composio/toolkits` call the
+    /// `composio_list_toolkits` agent tool makes and the same one OpenHuman's
+    /// Skills grid drives off, so the console offers what the backend actually
+    /// permits instead of a list maintained by hand here.
+    ///
+    /// Deliberately **not** filtered by the tenant allowlist, unlike
+    /// [`list_connection_states`]: the only caller is the open-mode path, where
+    /// the allowlist is empty by definition. A company with a non-empty
+    /// allowlist is offered its own list verbatim and never reaches this
+    /// function — the catalog must not be able to widen a manifest that
+    /// deliberately narrowed.
+    ///
+    /// Entries are the catalog's **connectable** slugs — `enabled == true`,
+    /// mirroring the vendored runtime's own `connectable_toolkit_slugs`, since
+    /// advertising a provider the backend gate will refuse only invites a failed
+    /// sign-in. Backends predating the dynamic catalog send no `catalog[]` at
+    /// all; their plain slug allowlist is used instead. Slugs are trimmed,
+    /// lowercased, de-duplicated and sorted for a stable render order. Any
+    /// upstream error is scrubbed of the tenant bearer before it bubbles.
+    pub async fn list_catalog_toolkits(config: &TenantComposio) -> Result<Vec<String>> {
+        tracing::debug!("[composio] ops list_catalog_toolkits");
+        let (client, secrets) = live_call(config).await?;
+        let resp = match client.list_toolkits().await {
+            Ok(resp) => resp,
+            Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
+        };
+        let normalize = |slug: &str| slug.trim().to_ascii_lowercase();
+        let mut slugs: std::collections::BTreeSet<String> = resp
+            .catalog
+            .iter()
+            .filter(|entry| entry.enabled.unwrap_or(false))
+            .map(|entry| normalize(&entry.slug))
+            .filter(|slug| !slug.is_empty())
+            .collect();
+        if slugs.is_empty() {
+            slugs = resp
+                .toolkits
+                .iter()
+                .map(|slug| normalize(slug))
+                .filter(|slug| !slug.is_empty())
+                .collect();
+        }
+        Ok(slugs.into_iter().collect())
+    }
+
     // ── composio_list_toolkits ──────────────────────────────────────────
 
     struct ComposioListToolkitsTool {
-        client: ComposioClient,
-        secrets: Vec<String>,
+        config: Arc<TenantComposio>,
         toolkits: Arc<Vec<String>>,
     }
 
@@ -254,27 +494,34 @@ mod live {
         }
 
         fn description(&self) -> &str {
-            "List the Composio toolkits (integrations such as Gmail, Slack, GitHub) available to this company. Read-only."
+            catalog::list_toolkits_description()
         }
 
         fn parameters_schema(&self) -> Value {
-            json!({
-                "type": "object",
-                "properties": {},
-                "additionalProperties": false
-            })
+            catalog::list_toolkits_parameters_schema()
         }
 
         fn permission_level(&self) -> PermissionLevel {
             PermissionLevel::ReadOnly
         }
 
-        async fn execute(&self, _args: Value) -> Result<ToolResult> {
+        async fn execute(&self, args: Value) -> Result<ToolResult> {
+            let request = catalog::ToolkitListRequest::parse(&args);
             tracing::debug!(
                 allowlist = ?self.toolkits,
+                search = ?request.search,
+                limit = request.limit,
                 "[composio] list_toolkits"
             );
-            match self.client.list_toolkits().await {
+            let (client, secrets) = match live_call(&self.config).await {
+                Ok(live) => live,
+                Err(err) => {
+                    return Ok(ToolResult::error(format!(
+                        "composio_list_toolkits failed: {err}"
+                    )));
+                }
+            };
+            match client.list_toolkits().await {
                 Ok(mut resp) => {
                     if !self.toolkits.is_empty() {
                         resp.toolkits
@@ -282,15 +529,43 @@ mod live {
                         resp.catalog
                             .retain(|entry| toolkit_allowed(&self.toolkits, &entry.slug));
                     }
-                    Ok(scrubbed_ok(
-                        serde_json::to_value(&resp).unwrap_or(Value::Null),
-                        &self.secrets,
-                    ))
+                    // Issue #410: bounded, self-describing rendering rather than
+                    // the whole catalogue as pretty JSON. Composio publishes
+                    // several hundred toolkits, each with prose and a categories
+                    // array, so this listing is the same silent-cut class as the
+                    // action listing one level down.
+                    let catalogued: Vec<catalog::CatalogToolkit> = resp
+                        .catalog
+                        .iter()
+                        .map(|entry| catalog::CatalogToolkit {
+                            slug: entry.slug.clone(),
+                            name: entry.name.clone(),
+                            description: entry.description.clone().unwrap_or_default(),
+                            connected: entry.enabled,
+                        })
+                        .collect();
+                    // Backends predating the dynamic catalogue send only the
+                    // slug allowlist; render those slugs rather than nothing.
+                    let toolkits: Vec<catalog::CatalogToolkit> = if catalogued.is_empty() {
+                        resp.toolkits
+                            .iter()
+                            .map(|slug| catalog::CatalogToolkit {
+                                slug: slug.clone(),
+                                name: String::new(),
+                                description: String::new(),
+                                connected: None,
+                            })
+                            .collect()
+                    } else {
+                        catalogued
+                    };
+                    let rendered = catalog::render_toolkits(&toolkits, &request);
+                    Ok(ToolResult::success(redact(&rendered, &secrets)))
                 }
                 Err(err) => Ok(scrubbed_err(
                     "composio_list_toolkits failed",
                     &err,
-                    &self.secrets,
+                    &secrets,
                 )),
             }
         }
@@ -299,8 +574,7 @@ mod live {
     // ── composio_list_connections ───────────────────────────────────────
 
     struct ComposioListConnectionsTool {
-        client: ComposioClient,
-        secrets: Vec<String>,
+        config: Arc<TenantComposio>,
         toolkits: Arc<Vec<String>>,
     }
 
@@ -331,7 +605,15 @@ mod live {
                 allowlist = ?self.toolkits,
                 "[composio] list_connections"
             );
-            match self.client.list_connections().await {
+            let (client, secrets) = match live_call(&self.config).await {
+                Ok(live) => live,
+                Err(err) => {
+                    return Ok(ToolResult::error(format!(
+                        "composio_list_connections failed: {err}"
+                    )));
+                }
+            };
+            match client.list_connections().await {
                 Ok(mut resp) => {
                     if !self.toolkits.is_empty() {
                         resp.connections.retain(|conn| {
@@ -340,13 +622,14 @@ mod live {
                     }
                     Ok(scrubbed_ok(
                         serde_json::to_value(&resp).unwrap_or(Value::Null),
-                        &self.secrets,
+                        &secrets,
+                        "connections list",
                     ))
                 }
                 Err(err) => Ok(scrubbed_err(
                     "composio_list_connections failed",
                     &err,
-                    &self.secrets,
+                    &secrets,
                 )),
             }
         }
@@ -355,8 +638,7 @@ mod live {
     // ── composio_list_tools ─────────────────────────────────────────────
 
     struct ComposioListToolsTool {
-        client: ComposioClient,
-        secrets: Vec<String>,
+        config: Arc<TenantComposio>,
         toolkits: Arc<Vec<String>>,
     }
 
@@ -367,21 +649,11 @@ mod live {
         }
 
         fn description(&self) -> &str {
-            "List the callable Composio actions (function schemas) for one or more toolkits. Pass `toolkits` (array of slugs) to narrow; omit to list every allowed toolkit's actions. Read-only."
+            catalog::list_tools_description()
         }
 
         fn parameters_schema(&self) -> Value {
-            json!({
-                "type": "object",
-                "properties": {
-                    "toolkits": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Toolkit slugs to list actions for (e.g. `gmail`, `slack`, `github`)."
-                    }
-                },
-                "additionalProperties": false
-            })
+            catalog::list_tools_parameters_schema()
         }
 
         fn permission_level(&self) -> PermissionLevel {
@@ -416,9 +688,17 @@ mod live {
                     .filter(|t| toolkit_allowed(&self.toolkits, t))
                     .collect()
             };
+            // The narrowing + rendering request (issue #410). Toolkit resolution
+            // above is a security decision (allowlist intersection) and stays
+            // here; `search` / `detail` / `limit` are presentation and live in
+            // the pure catalogue module.
+            let request = catalog::ListRequest::parse(&args, effective.clone());
             tracing::debug!(
                 effective = ?effective,
                 allowlist = ?self.toolkits,
+                search = ?request.search,
+                detail = ?request.detail,
+                limit = request.limit,
                 "[composio] list_tools"
             );
 
@@ -427,23 +707,41 @@ mod live {
             } else {
                 Some(effective.as_slice())
             };
-            match self.client.list_tools(query, None).await {
+            let (client, secrets) = match live_call(&self.config).await {
+                Ok(live) => live,
+                Err(err) => {
+                    return Ok(ToolResult::error(format!(
+                        "composio_list_tools failed: {err}"
+                    )));
+                }
+            };
+            match client.list_tools(query, None).await {
                 Ok(mut resp) => {
                     if !self.toolkits.is_empty() {
                         resp.tools.retain(|schema| {
                             toolkit_allowed(&self.toolkits, &slug_toolkit(&schema.function.name))
                         });
                     }
-                    Ok(scrubbed_ok(
-                        serde_json::to_value(&resp).unwrap_or(Value::Null),
-                        &self.secrets,
-                    ))
+                    // Issue #410: render through the bounded, self-describing
+                    // catalogue view rather than dumping the whole response as
+                    // pretty JSON. A hundred-action toolkit serialized whole is
+                    // hundreds of kilobytes; the harness's shared tool-result
+                    // budget then cut it on a byte boundary, leaving the agent a
+                    // fragment with nothing in it saying so.
+                    let actions: Vec<catalog::CatalogAction> = resp
+                        .tools
+                        .iter()
+                        .map(|schema| catalog::CatalogAction {
+                            toolkit: slug_toolkit(&schema.function.name),
+                            slug: schema.function.name.clone(),
+                            description: schema.function.description.clone().unwrap_or_default(),
+                            parameters: schema.function.parameters.clone(),
+                        })
+                        .collect();
+                    let rendered = catalog::render(&actions, &request);
+                    Ok(ToolResult::success(redact(&rendered, &secrets)))
                 }
-                Err(err) => Ok(scrubbed_err(
-                    "composio_list_tools failed",
-                    &err,
-                    &self.secrets,
-                )),
+                Err(err) => Ok(scrubbed_err("composio_list_tools failed", &err, &secrets)),
             }
         }
     }
@@ -451,8 +749,7 @@ mod live {
     // ── composio_authorize ──────────────────────────────────────────────
 
     struct ComposioAuthorizeTool {
-        client: ComposioClient,
-        secrets: Vec<String>,
+        config: Arc<TenantComposio>,
         toolkits: Arc<Vec<String>>,
     }
 
@@ -491,7 +788,7 @@ mod live {
         async fn execute(&self, args: Value) -> Result<ToolResult> {
             let toolkit = match required_string_arg(&args, "toolkit") {
                 Ok(t) => t,
-                Err(err) => return Ok(scrubbed_err("composio_authorize", &err, &self.secrets)),
+                Err(err) => return Ok(ToolResult::error(format!("composio_authorize: {err}"))),
             };
             // Enforce the allowlist BEFORE any network call — a toolkit the
             // tenant is not permitted to connect never reaches the backend.
@@ -502,16 +799,21 @@ mod live {
             }
             let extra = args.get("extra_params").cloned();
             tracing::debug!(toolkit = %toolkit, "[composio] authorize");
-            match self.client.authorize(&toolkit, extra).await {
+            let (client, secrets) = match live_call(&self.config).await {
+                Ok(live) => live,
+                Err(err) => {
+                    return Ok(ToolResult::error(format!(
+                        "composio_authorize failed: {err}"
+                    )));
+                }
+            };
+            match client.authorize(&toolkit, extra).await {
                 Ok(resp) => Ok(scrubbed_ok(
                     serde_json::to_value(&resp).unwrap_or(Value::Null),
-                    &self.secrets,
+                    &secrets,
+                    "authorization response",
                 )),
-                Err(err) => Ok(scrubbed_err(
-                    "composio_authorize failed",
-                    &err,
-                    &self.secrets,
-                )),
+                Err(err) => Ok(scrubbed_err("composio_authorize failed", &err, &secrets)),
             }
         }
     }
@@ -519,9 +821,9 @@ mod live {
     // ── composio_execute ────────────────────────────────────────────────
 
     struct ComposioExecuteTool {
-        client: ComposioClient,
-        secrets: Vec<String>,
+        config: Arc<TenantComposio>,
         toolkits: Arc<Vec<String>>,
+        metering: ComposioMetering,
     }
 
     #[async_trait]
@@ -531,7 +833,7 @@ mod live {
         }
 
         fn description(&self) -> &str {
-            "Run a Composio action by its slug (e.g. `GMAIL_SEND_EMAIL`) with a JSON `arguments` object. Use `composio_list_tools` first to discover the slug and its parameters."
+            "Run a Composio action by its slug (e.g. `GMAIL_SEND_EMAIL`) with a JSON `arguments` object. Discover the slug first with `composio_list_tools({\"search\": \"<words>\"})`, then read its parameters with `composio_list_tools({\"search\": \"<SLUG>\", \"detail\": \"schemas\"})`. Never guess a slug that was not listed."
         }
 
         fn parameters_schema(&self) -> Value {
@@ -559,7 +861,7 @@ mod live {
         async fn execute(&self, args: Value) -> Result<ToolResult> {
             let tool = match required_string_arg(&args, "tool") {
                 Ok(t) => t,
-                Err(err) => return Ok(scrubbed_err("composio_execute", &err, &self.secrets)),
+                Err(err) => return Ok(ToolResult::error(format!("composio_execute: {err}"))),
             };
             // Enforce the allowlist on the slug's toolkit prefix BEFORE any
             // network call (e.g. `GMAIL_SEND_EMAIL` → `gmail`).
@@ -572,13 +874,118 @@ mod live {
             let arguments = args.get("arguments").cloned();
             // tracing carries the slug/toolkit only — NEVER arguments or bodies.
             tracing::debug!(tool = %tool, toolkit = %toolkit, "[composio] execute");
-            match self.client.execute_tool(&tool, arguments).await {
-                Ok(resp) => Ok(scrubbed_ok(
-                    serde_json::to_value(&resp).unwrap_or(Value::Null),
-                    &self.secrets,
-                )),
-                Err(err) => Ok(scrubbed_err("composio_execute failed", &err, &self.secrets)),
+            let (client, secrets) = match live_call(&self.config).await {
+                Ok(live) => live,
+                Err(err) => {
+                    return Ok(ToolResult::error(format!("composio_execute failed: {err}")));
+                }
+            };
+            match client.execute_tool(&tool, arguments).await {
+                Ok(resp) => {
+                    // Metered only on success — i.e. a call that actually
+                    // reached the connected account. `connections` in the read
+                    // model is the *count of providers seen*, so counting a
+                    // failed call would report a connection for a provider this
+                    // company may not even be connected to. Never fails the
+                    // call: `record_oauth_call` logs and swallows.
+                    if let Some(meter) = self.metering.meter.as_deref() {
+                        record_oauth_call(
+                            meter,
+                            &self.metering.company,
+                            &self.metering.agent,
+                            &toolkit,
+                            now_millis(),
+                        )
+                        .await;
+                    }
+                    Ok(scrubbed_ok(
+                        serde_json::to_value(&resp).unwrap_or(Value::Null),
+                        &secrets,
+                        &format!("`{tool}` output"),
+                    ))
+                }
+                Err(err) => Ok(scrubbed_err("composio_execute failed", &err, &secrets)),
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod live_tests {
+        use super::*;
+
+        use std::sync::Mutex;
+
+        use crate::ports::types::CompanyId;
+        use crate::ports::usage::UsageSample;
+
+        #[derive(Default)]
+        struct RecordingMeter {
+            samples: Mutex<Vec<UsageSample>>,
+        }
+
+        #[async_trait]
+        impl UsageMeter for RecordingMeter {
+            async fn record(
+                &self,
+                _company: &CompanyId,
+                sample: &UsageSample,
+            ) -> crate::Result<()> {
+                self.samples.lock().unwrap().push(sample.clone());
+                Ok(())
+            }
+            async fn query(
+                &self,
+                _company: &CompanyId,
+                _since: u64,
+            ) -> crate::Result<Vec<UsageSample>> {
+                Ok(self.samples.lock().unwrap().clone())
+            }
+        }
+
+        /// An execute tool whose allowlist admits `gmail` only, wired to a
+        /// recording meter. The client is constructed but never dialled by the
+        /// paths under test — both return before any network call.
+        fn tool_with(meter: Arc<RecordingMeter>) -> ComposioExecuteTool {
+            ComposioExecuteTool {
+                config: Arc::new(TenantComposio::new(
+                    "https://example.invalid",
+                    Credential::from_value("token"),
+                    vec!["gmail".to_string()],
+                )),
+                toolkits: Arc::new(vec!["gmail".to_string()]),
+                metering: ComposioMetering {
+                    company: CompanyId::new("acme"),
+                    agent: "ceo".to_string(),
+                    meter: Some(meter),
+                },
+            }
+        }
+
+        /// A call blocked by the toolkit allowlist never reaches the provider,
+        /// so it must not count towards `oauthCalls` — and must not invent a
+        /// `connections` entry for a toolkit this company cannot even use.
+        #[tokio::test]
+        async fn allowlist_rejection_records_no_sample() {
+            let meter = Arc::new(RecordingMeter::default());
+            let result = tool_with(meter.clone())
+                .execute(json!({"tool": "SLACK_POST_MESSAGE"}))
+                .await
+                .expect("execute returns a result rather than erroring");
+            assert!(result.is_error, "the call should be refused");
+            assert!(meter.samples.lock().unwrap().is_empty());
+        }
+
+        /// A malformed call is rejected before the client is touched, so it is
+        /// likewise not a metered OAuth call.
+        #[tokio::test]
+        async fn missing_tool_argument_records_no_sample() {
+            let meter = Arc::new(RecordingMeter::default());
+            let result = tool_with(meter.clone())
+                .execute(json!({}))
+                .await
+                .expect("execute returns a result rather than erroring");
+            assert!(result.is_error, "the call should be refused");
+            assert!(meter.samples.lock().unwrap().is_empty());
         }
     }
 }
@@ -587,6 +994,10 @@ mod live {
 mod tests {
     use super::*;
 
+    // The three helper tests below follow their subjects behind the `composio`
+    // feature: `toolkit_allowed` / `slug_toolkit` do not exist in an
+    // `openhuman`-without-`composio` build.
+    #[cfg(feature = "composio")]
     #[test]
     fn toolkit_allowed_empty_defers_to_backend() {
         // Empty allowlist = open mode: every toolkit admitted.
@@ -594,6 +1005,7 @@ mod tests {
         assert!(toolkit_allowed(&[], "anything"));
     }
 
+    #[cfg(feature = "composio")]
     #[test]
     fn toolkit_allowed_non_empty_narrows_case_insensitively() {
         let allow = vec!["gmail".to_string(), "github".to_string()];
@@ -603,6 +1015,7 @@ mod tests {
         assert!(!toolkit_allowed(&allow, "slack"));
     }
 
+    #[cfg(feature = "composio")]
     #[test]
     fn slug_toolkit_extracts_lowercased_prefix() {
         assert_eq!(slug_toolkit("GMAIL_SEND_EMAIL"), "gmail");
@@ -613,11 +1026,11 @@ mod tests {
 
     #[test]
     fn debug_redacts_the_token() {
-        let config = TenantComposio {
-            backend_url: "https://api.tinyhumans.ai".to_string(),
-            auth_token: "super-secret-tenant-token".to_string(),
-            toolkits: vec!["gmail".to_string()],
-        };
+        let config = TenantComposio::new(
+            "https://api.tinyhumans.ai",
+            Credential::from_value("super-secret-tenant-token"),
+            vec!["gmail".to_string()],
+        );
         let shown = format!("{config:?}");
         assert!(
             !shown.contains("super-secret-tenant-token"),
@@ -633,56 +1046,75 @@ mod tests {
 
     #[test]
     fn debug_marks_unset_token() {
-        let config = TenantComposio {
-            backend_url: "https://api.tinyhumans.ai".to_string(),
-            auth_token: String::new(),
-            toolkits: Vec::new(),
-        };
+        let config = TenantComposio::new("https://api.tinyhumans.ai", Credential::None, Vec::new());
         let shown = format!("{config:?}");
         assert!(shown.contains("<unset>"), "{shown}");
     }
 
-    /// Tenant isolation at the resolver seam (issue #110): the token comes ONLY
-    /// from the company secret store — there is no env/platform-key fallback — so
-    /// a company with no stored token resolves to `None` (fail closed, no tools),
-    /// never a borrowed identity, even if a platform key like `TINYHUMANS_API_KEY`
-    /// exists in the environment. A stored token resolves to a config that
-    /// carries exactly that token.
+    /// The resolver's precedence and its fail-closed floor: the company's own
+    /// stored token always wins; with none stored the instance's platform token
+    /// source is used; with neither there is no config at all (no tools) — never a
+    /// borrowed identity. A raw `TINYHUMANS_API_KEY` in the environment is not a
+    /// source: the platform identity is passed in explicitly by the caller.
     #[tokio::test]
-    async fn resolve_is_fail_closed_without_a_stored_token_and_has_no_env_fallback() {
+    async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_closed() {
         use crate::ports::SecretStore;
         use crate::ports::types::{CompanyId, SecretValue};
         use crate::store::FsSecretStore;
 
-        let dir =
-            std::env::temp_dir().join(format!("oc-composio-res-{}", crate::ports::generate_id()));
-        let secrets = FsSecretStore::new(&dir);
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-res-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
         let company = CompanyId::new("acme");
+        let source = || Arc::new(TinyhumansTokenSource::static_key("platform-identity"));
 
-        // A platform key in the environment must NOT leak in — the resolver never
-        // reads it. (No token stored → None.)
-        // SAFETY: single-threaded test; we set then restore the env.
-        unsafe { std::env::set_var("TINYHUMANS_API_KEY", "platform-managed-key") };
+        // Nothing stored and no platform identity → fail closed. That an ambient
+        // `TINYHUMANS_API_KEY` cannot be consulted is guaranteed by the signature
+        // — `resolve` takes the source explicitly and has no `EnvSource` — so it
+        // needs no proof by process-env mutation. Setting one here used to leak
+        // into every other test in this binary (`std::env` is process-wide and
+        // nothing restored it), which made an ops-route assertion on
+        // `credentialSource == "none"` flake depending on test order.
         assert!(
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None)
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
                 .await
                 .is_none(),
-            "no stored token must fail closed, ignoring any env platform key"
+            "no credential at all must fail closed"
         );
 
-        // An explicitly-empty token still fails closed.
+        // Nothing stored, but this instance has an identity → it is used.
+        let attested =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("the platform identity resolves");
+        assert_eq!(
+            token_of(&attested).await.as_deref(),
+            Some("platform-identity")
+        );
+
+        // An explicitly-empty stored token is not a token: still the source.
         secrets
             .set(&company, TOKEN_KEY, SecretValue("   ".to_string()))
             .await
             .unwrap();
-        assert!(
-            TenantComposio::resolve(&company, &secrets, Vec::new(), None)
+        let attested =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
                 .await
-                .is_none(),
-            "an empty/whitespace token must fail closed"
+                .expect("the platform identity resolves");
+        assert_eq!(
+            token_of(&attested).await.as_deref(),
+            Some("platform-identity")
+        );
+        // …and with no source either, an empty stored token fails closed.
+        assert!(
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
+                .await
+                .is_none()
         );
 
-        // A real stored token resolves and carries exactly that token + default URL.
+        // The company's OWN token wins over the platform identity.
         secrets
             .set(
                 &company,
@@ -691,33 +1123,104 @@ mod tests {
             )
             .await
             .unwrap();
-        let resolved = TenantComposio::resolve(&company, &secrets, vec!["gmail".into()], None)
-            .await
-            .expect("a stored token resolves");
-        assert_eq!(resolved.auth_token, "tenant-token-xyz");
+        let resolved = TenantComposio::resolve(
+            &company,
+            &secrets,
+            vec!["gmail".into()],
+            None,
+            None,
+            Some(source()),
+        )
+        .await
+        .expect("a stored token resolves");
+        assert_eq!(
+            token_of(&resolved).await.as_deref(),
+            Some("tenant-token-xyz"),
+            "a company that brought its own token keeps it"
+        );
         assert_eq!(resolved.backend_url, "https://api.tinyhumans.ai");
         assert_eq!(resolved.toolkits, vec!["gmail".to_string()]);
 
+        // With no explicit override, the tenant API base is threaded into the
+        // backend URL so a staging tenant's Composio follows staging.
+        let staged = TenantComposio::resolve(
+            &company,
+            &secrets,
+            Vec::new(),
+            None,
+            Some("https://staging-api.tinyhumans.ai".into()),
+            None,
+        )
+        .await
+        .expect("a stored token resolves");
+        assert_eq!(staged.backend_url, "https://staging-api.tinyhumans.ai");
+
         unsafe { std::env::remove_var("TINYHUMANS_API_KEY") };
-        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// The bearer a config would present right now.
+    async fn token_of(config: &TenantComposio) -> Option<String> {
+        config.current_token().await.expect("resolves")
+    }
+
+    fn config_with(credential: Credential) -> Option<TenantComposio> {
+        Some(TenantComposio::new(
+            "https://api.tinyhumans.ai",
+            credential,
+            vec!["gmail".to_string()],
+        ))
+    }
+
+    /// The rotation contract: a projected platform token whose bytes change every
+    /// few minutes must NOT move the roster fingerprint, or every agent's tool
+    /// roster is rebuilt on the cluster's rotation schedule. A tier change or a
+    /// changed *stored* token must still move it.
+    #[tokio::test]
+    async fn fingerprint_is_stable_across_a_projected_rotation() {
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-fp-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "token-before").unwrap();
+
+        let projected = config_with(Credential::from_source(Arc::new(
+            TinyhumansTokenSource::projected_file(&path),
+        )));
+        let before = TenantComposio::fingerprint(&projected);
+        assert_eq!(
+            token_of(projected.as_ref().unwrap()).await.as_deref(),
+            Some("token-before")
+        );
+
+        // The kubelet rewrites the file in place.
+        std::fs::write(&path, "token-after").unwrap();
+        assert_eq!(
+            token_of(projected.as_ref().unwrap()).await.as_deref(),
+            Some("token-after"),
+            "the call must pick up the rotated token"
+        );
+        assert_eq!(
+            TenantComposio::fingerprint(&projected),
+            before,
+            "a rotation must NOT rebuild the roster"
+        );
+
+        // A different projected path is a different identity.
+        let other = config_with(Credential::from_source(Arc::new(
+            TinyhumansTokenSource::projected_file(dir.path().join("other")),
+        )));
+        assert_ne!(TenantComposio::fingerprint(&other), before);
     }
 
     #[test]
-    fn fingerprint_changes_on_token_rotation_and_none() {
-        let a = Some(TenantComposio {
-            backend_url: "https://api.tinyhumans.ai".to_string(),
-            auth_token: "token-a".to_string(),
-            toolkits: vec!["gmail".to_string()],
-        });
-        let b = Some(TenantComposio {
-            backend_url: "https://api.tinyhumans.ai".to_string(),
-            auth_token: "token-b".to_string(),
-            toolkits: vec!["gmail".to_string()],
-        });
+    fn fingerprint_moves_on_tier_and_stored_value_changes() {
+        let a = config_with(Credential::from_value("token-a"));
+        let b = config_with(Credential::from_value("token-b"));
         assert_ne!(
             TenantComposio::fingerprint(&a),
             TenantComposio::fingerprint(&b),
-            "a rotated token must move the fingerprint"
+            "a rotated stored token must move the fingerprint"
         );
         assert_ne!(
             TenantComposio::fingerprint(&a),
@@ -728,6 +1231,204 @@ mod tests {
             TenantComposio::fingerprint(&a),
             TenantComposio::fingerprint(&a.clone()),
             "the same config fingerprints stably"
+        );
+
+        // Swapping a stored token for the platform identity is a tier change.
+        let attested = config_with(Credential::from_source(Arc::new(
+            TinyhumansTokenSource::projected_file("/var/run/secrets/tinyhumans.ai/token"),
+        )));
+        assert_ne!(
+            TenantComposio::fingerprint(&attested),
+            TenantComposio::fingerprint(&a),
+            "a tier change must move the fingerprint"
+        );
+    }
+}
+
+/// The console-facing ops helpers ([`authorize_connect_url`],
+/// [`list_connection_states`]) over a mock Composio backend: proves the connect
+/// URL is surfaced, the allowlist is enforced before any network call, and
+/// connection rows aggregate to per-toolkit `connected` state filtered to the
+/// tenant grant.
+#[cfg(all(test, feature = "composio"))]
+mod ops_helper_tests {
+    use super::*;
+
+    use std::net::SocketAddr;
+
+    use axum::Router;
+    use axum::routing::{get, post};
+    use serde_json::{Value, json};
+
+    /// Mock `POST /agent-integrations/composio/authorize` — returns a hosted
+    /// connect URL inside the backend's `{success,data}` envelope.
+    async fn authorize_handler() -> axum::Json<Value> {
+        axum::Json(json!({
+            "success": true,
+            "data": { "connectUrl": "https://connect.composio.dev/abc", "connectionId": "conn-xyz" }
+        }))
+    }
+
+    /// Mock `GET /agent-integrations/composio/connections` — gmail has one
+    /// active + one pending row (→ connected), slack only pending (→ not
+    /// connected), notion active (filtered out unless allowlisted).
+    async fn connections_handler() -> axum::Json<Value> {
+        axum::Json(json!({
+            "success": true,
+            "data": { "connections": [
+                { "id": "c1", "toolkit": "gmail", "status": "ACTIVE" },
+                { "id": "c2", "toolkit": "gmail", "status": "INITIATED" },
+                { "id": "c3", "toolkit": "slack", "status": "INITIATED" },
+                { "id": "c4", "toolkit": "notion", "status": "ACTIVE" }
+            ] }
+        }))
+    }
+
+    /// Mock `GET /agent-integrations/composio/toolkits` — the dynamic catalog
+    /// shape (backend #1012): a `toolkits` allowlist plus a `catalog[]` whose
+    /// entries carry an `enabled` gate. `zendesk` is present but not connectable
+    /// and must not be advertised; the casing and whitespace on `HubSpot` must
+    /// normalise.
+    async fn toolkits_handler() -> axum::Json<Value> {
+        axum::Json(json!({
+            "success": true,
+            "data": {
+                "toolkits": ["gmail", "slack"],
+                "catalog": [
+                    { "slug": " HubSpot ", "name": "HubSpot", "enabled": true },
+                    { "slug": "gmail", "name": "Gmail", "enabled": true },
+                    { "slug": "zendesk", "name": "Zendesk", "enabled": false },
+                    { "slug": "gmail", "name": "Gmail (dup)", "enabled": true }
+                ]
+            }
+        }))
+    }
+
+    /// Mock toolkits route for a backend predating the dynamic catalog: the
+    /// plain slug allowlist and no `catalog[]` at all.
+    async fn legacy_toolkits_handler() -> axum::Json<Value> {
+        axum::Json(json!({
+            "success": true,
+            "data": { "toolkits": ["Notion", "gmail", ""] }
+        }))
+    }
+
+    async fn spawn_backend() -> String {
+        spawn_backend_with(get(toolkits_handler)).await
+    }
+
+    async fn spawn_backend_with(toolkits: axum::routing::MethodRouter) -> String {
+        let app = Router::new()
+            .route(
+                "/agent-integrations/composio/authorize",
+                post(authorize_handler),
+            )
+            .route(
+                "/agent-integrations/composio/connections",
+                get(connections_handler),
+            )
+            .route("/agent-integrations/composio/toolkits", toolkits);
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn config(url: &str, toolkits: Vec<String>) -> TenantComposio {
+        TenantComposio::new(
+            url.to_string(),
+            Credential::from_value("tenant-token"),
+            toolkits,
+        )
+    }
+
+    #[tokio::test]
+    async fn authorize_returns_hosted_connect_url() {
+        let url = spawn_backend().await;
+        let out = authorize_connect_url(&config(&url, vec!["gmail".into()]), "gmail")
+            .await
+            .expect("authorize returns a connect URL");
+        assert_eq!(out, "https://connect.composio.dev/abc");
+    }
+
+    #[tokio::test]
+    async fn authorize_rejects_toolkit_outside_allowlist_before_any_network_call() {
+        // Backend URL is unreachable — the allowlist rejection must fire first.
+        let out =
+            authorize_connect_url(&config("http://127.0.0.1:1", vec!["gmail".into()]), "slack")
+                .await;
+        let err = out.expect_err("a toolkit outside the allowlist must be refused");
+        assert!(err.to_string().contains("allowlist"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn list_connection_states_aggregates_active_and_filters_to_allowlist() {
+        let url = spawn_backend().await;
+        // gmail + slack allowed; notion is active upstream but not in the grant.
+        let states = list_connection_states(&config(&url, vec!["gmail".into(), "slack".into()]))
+            .await
+            .expect("list connections");
+        assert_eq!(
+            states,
+            vec![("gmail".to_string(), true), ("slack".to_string(), false)],
+            "gmail active (one ACTIVE row), slack pending only, notion filtered out"
+        );
+    }
+
+    /// The console's open-mode source (issue #397): the backend's real catalog,
+    /// normalised. Connectable entries only, trimmed + lowercased, de-duplicated,
+    /// sorted.
+    #[tokio::test]
+    async fn list_catalog_toolkits_returns_the_backends_connectable_catalog() {
+        let url = spawn_backend().await;
+        let catalog = list_catalog_toolkits(&config(&url, Vec::new()))
+            .await
+            .expect("catalog fetch");
+        assert_eq!(
+            catalog,
+            vec!["gmail".to_string(), "hubspot".to_string()],
+            "connectable entries only, normalised, de-duplicated and sorted"
+        );
+    }
+
+    /// A backend predating the dynamic catalog sends no `catalog[]`. Its plain
+    /// slug allowlist is used rather than reporting an empty catalog — which the
+    /// console would (correctly) render as a degraded fallback.
+    #[tokio::test]
+    async fn list_catalog_toolkits_falls_back_to_the_plain_allowlist() {
+        let url = spawn_backend_with(get(legacy_toolkits_handler)).await;
+        let catalog = list_catalog_toolkits(&config(&url, Vec::new()))
+            .await
+            .expect("catalog fetch");
+        assert_eq!(catalog, vec!["gmail".to_string(), "notion".to_string()]);
+    }
+
+    /// An unreachable backend is an error, never a quietly-empty catalog — the
+    /// caller has to be able to tell "nothing is permitted" from "I could not
+    /// ask".
+    #[tokio::test]
+    async fn list_catalog_toolkits_surfaces_a_fetch_failure() {
+        let out = list_catalog_toolkits(&config("http://127.0.0.1:1", Vec::new())).await;
+        out.expect_err("an unreachable backend must not read as an empty catalog");
+    }
+
+    #[tokio::test]
+    async fn list_connection_states_empty_allowlist_admits_every_toolkit() {
+        let url = spawn_backend().await;
+        let states = list_connection_states(&config(&url, Vec::new()))
+            .await
+            .expect("list connections");
+        assert_eq!(
+            states,
+            vec![
+                ("gmail".to_string(), true),
+                ("notion".to_string(), true),
+                ("slack".to_string(), false),
+            ]
         );
     }
 }
@@ -802,15 +1503,16 @@ mod isolation_tests {
     }
 
     fn config(url: &str, token: &str) -> TenantComposio {
-        TenantComposio {
-            backend_url: url.to_string(),
-            auth_token: token.to_string(),
-            toolkits: Vec::new(),
-        }
+        TenantComposio::new(url, Credential::from_value(token), Vec::new())
     }
 
     fn list_connections_tool(config: &TenantComposio) -> Box<dyn Tool> {
-        composio_tools(config)
+        let metering = ComposioMetering {
+            company: CompanyId::new("acme"),
+            agent: "ceo".to_string(),
+            meter: None,
+        };
+        composio_tools(config, metering)
             .into_iter()
             .find(|t| t.name() == "composio_list_connections")
             .expect("composio_list_connections tool present")
@@ -871,6 +1573,77 @@ mod isolation_tests {
                 .iter()
                 .any(|a| a.contains("token-a") && a.contains("token-b")),
             "a single request must never carry both tokens: {seen:?}"
+        );
+    }
+
+    /// The rotation contract at the tool boundary: a projected platform token the
+    /// cluster rewrites in place must reach the backend on the **next** call, with
+    /// no roster rebuild — and the freshly-resolved value must be the one the
+    /// scrub vector protects, so a backend that reflects it still cannot leak it.
+    #[tokio::test]
+    async fn a_rotated_projected_token_is_presented_and_scrubbed_per_call() {
+        use crate::company::credentials::TinyhumansTokenSource;
+
+        // Reflect the bearer back inside an envelope failure, and record it.
+        async fn reflect(State(log): State<AuthLog>, headers: HeaderMap) -> axum::Json<Value> {
+            let auth = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("")
+                .to_string();
+            log.lock().unwrap().push(auth.clone());
+            axum::Json(json!({ "success": false, "error": format!("upstream said: {auth}") }))
+        }
+        let log: AuthLog = Arc::new(Mutex::new(Vec::new()));
+        let app = Router::new()
+            .route("/agent-integrations/composio/connections", get(reflect))
+            .with_state(log.clone());
+        let listener = tokio::net::TcpListener::bind(SocketAddr::from(([127, 0, 0, 1], 0)))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-rot-")
+            .tempdir()
+            .expect("tempdir");
+        let path = dir.path().join("token");
+        std::fs::write(&path, "projected-secret-before").unwrap();
+
+        // ONE config, built once — exactly what a roster holds across turns.
+        let config = TenantComposio::new(
+            format!("http://{addr}"),
+            Credential::from_source(Arc::new(TinyhumansTokenSource::projected_file(&path))),
+            Vec::new(),
+        );
+        let tool = list_connections_tool(&config);
+
+        let first = tool.execute(json!({})).await.unwrap();
+        assert!(
+            !first.output().contains("projected-secret-before"),
+            "the resolved token leaked into agent-visible output: {}",
+            first.output()
+        );
+
+        // The kubelet rewrites the file in place; the SAME tool must present the
+        // new token and scrub that one.
+        std::fs::write(&path, "projected-secret-after").unwrap();
+        let second = tool.execute(json!({})).await.unwrap();
+        assert!(
+            !second.output().contains("projected-secret-after"),
+            "the rotated token leaked into agent-visible output: {}",
+            second.output()
+        );
+
+        let seen = log.lock().unwrap().clone();
+        assert_eq!(
+            seen,
+            vec![
+                "Bearer projected-secret-before".to_string(),
+                "Bearer projected-secret-after".to_string()
+            ],
+            "each call must carry the token the file held at that moment: {seen:?}"
         );
     }
 

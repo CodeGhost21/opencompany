@@ -32,7 +32,7 @@ use crate::ports::types::SecretValue;
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::mailer::{MailCredentials, OutboundEmail};
-use crate::server::ops::{SMTP_KEY, ScopedCompany, scoped};
+use crate::server::ops::{AdminScopedCompany, SMTP_KEY, scoped};
 
 /// The SMTP security mode. Mirrors the console's `SmtpSecurity`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -145,8 +145,11 @@ async fn store_credentials(
 }
 
 /// `PUT …/smtp` (both scope forms).
+///
+/// Requires authority over the company (issue #403): these credentials are the
+/// address the company's mail goes out as.
 async fn put_smtp(
-    company: ScopedCompany,
+    company: AdminScopedCompany,
     Json(creds): Json<SmtpCredentials>,
 ) -> Result<Json<SmtpStatus>, ApiError> {
     store_credentials(company.runtime, creds).await
@@ -227,7 +230,11 @@ pub(crate) async fn load_credentials(
 }
 
 /// Appends a sent email to the sender's inbox so the console shows outbound mail.
-async fn record_outbound(runtime: &CompanyRuntime, creds: &SmtpCredentials, email: &OutboundEmail) {
+pub(crate) async fn record_outbound(
+    runtime: &CompanyRuntime,
+    creds: &SmtpCredentials,
+    email: &OutboundEmail,
+) {
     let record = EmailRecord {
         id: generate_id(),
         inbox: local_part(&creds.from_email),
@@ -246,7 +253,12 @@ async fn record_outbound(runtime: &CompanyRuntime, creds: &SmtpCredentials, emai
 
 /// The local part of an address (`ceo@acme.test` → `ceo`), or the whole string
 /// when it carries no `@`.
-pub(crate) fn local_part(address: &str) -> String {
+///
+/// `pub` (not `pub(crate)`) so the `opencompany` binary target — a separate
+/// crate from this library — can reuse it to scope an injected mailbox to its
+/// owning company (see `spawn_mailbox_poller`/`register_company` in
+/// `src/bin/opencompany.rs`).
+pub fn local_part(address: &str) -> String {
     address
         .split_once('@')
         .map(|(local, _)| local.to_string())
@@ -254,8 +266,13 @@ pub(crate) fn local_part(address: &str) -> String {
 }
 
 /// `POST …/smtp/test` (both scope forms).
+///
+/// Requires authority over the company (issue #403). Grouped with the write
+/// rather than with the read-only probes because the caller chooses the
+/// recipient: it sends real mail from the company's address to an address
+/// supplied in the request body.
 async fn test_smtp(
-    company: ScopedCompany,
+    company: AdminScopedCompany,
     State(state): State<AppState>,
     body: Option<Json<TestSend>>,
 ) -> Result<Json<TestResult>, Response> {

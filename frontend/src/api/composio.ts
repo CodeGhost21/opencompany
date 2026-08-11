@@ -1,15 +1,28 @@
 // The live Composio API (issue #110, epic #26 Cell D): the console reads the
-// company's Composio status and writes its per-tenant OAuth bearer token through
-// the host's `.../composio` routes (REST, camelCase over the wire).
+// company's Composio status and — when a company brings its own account — writes
+// a per-company OAuth bearer token through the host's `.../composio` routes
+// (REST, camelCase over the wire).
 //
-// The token is the entire tenant-isolation lever — the backend derives the
-// Composio entity from it — so it is WRITE-ONLY: sent on `PUT .../composio/token`
-// and stored in the host's secret store; it is never returned. The read shape
-// carries only a `tokenConfigured` boolean plus non-secret routing (backend URL,
+// On the hosted platform nothing is pasted: the instance authenticates with a
+// platform-minted, audience-bound identity and Composio calls present that, which
+// the read shape reports as `credentialSource: "attested"`. The write route is the
+// per-company BYO override, and the only option when this repo is run standalone
+// — which is UNSUPPORTED. Either way the token is WRITE-ONLY: sent on
+// `PUT .../composio/token`, stored in the host's secret store, never returned. The
+// read shape carries only `credentialSource` plus non-secret routing (backend URL,
 // toolkit allowlist). Standalone functions over the shared client (mirrors
 // `api/inference.ts`), so no change to `OpenCompanyClient` is needed.
 
 import type { OpenCompanyClient } from "./client";
+
+/**
+ * Where this company's Composio credential comes from.
+ *
+ * - `attested` — the instance's own platform identity; nothing is stored here.
+ * - `static` — a token this company pasted, or a static instance key.
+ * - `none` — no credential can be obtained, so agents get no Composio tools.
+ */
+export type ComposioCredentialSource = "attested" | "static" | "none";
 
 /** The company's Composio status. Never carries the token. */
 export interface ComposioStatus {
@@ -17,18 +30,67 @@ export interface ComposioStatus {
   inBuild: boolean;
   /** Whether the company explicitly grants `composio` (a `*` wildcard does not count). */
   granted: boolean;
-  /** Whether a per-tenant token is stored — never the token itself. */
-  tokenConfigured: boolean;
+  /** Which credential this company's Composio calls present — never the credential itself. */
+  credentialSource: ComposioCredentialSource;
   /** The effective Composio backend URL (non-secret). */
   backendUrl: string;
-  /** The manifest toolkit allowlist (empty = defer to the backend allowlist). */
+  /** The manifest toolkit allowlist verbatim (empty = defer to the backend allowlist). */
   toolkits: string[];
+  /**
+   * Whether this company is in **open mode** — an empty manifest allowlist,
+   * which means the backend's own allowlist governs and every toolkit it
+   * permits is reachable (issue #397).
+   *
+   * The host tells us rather than letting us infer it: an empty `toolkits`
+   * means *allow everything*, which is the opposite of what an empty list
+   * reads as. Gating provider rows on `toolkits.length > 0` was exactly that
+   * misreading, and it left 19 of 20 shipped templates with nothing to click.
+   */
+  openMode: boolean;
+  /**
+   * The toolkits to render as provider rows — the manifest list when non-empty,
+   * else the backend's live catalog. In open mode this is still not a hard
+   * limit: any slug the backend permits can be authorized, which is what the
+   * "other provider" field is for.
+   */
+  effectiveToolkits: string[];
+  /**
+   * Where {@link effectiveToolkits} came from (issue #397).
+   *
+   * - `manifest` — the company's own allowlist, offered verbatim. Not a
+   *   degradation: the company chose this list.
+   * - `backend` — Composio's live catalog. Authoritative.
+   * - `fallback` — the catalog could not be fetched, so this is a built-in
+   *   starter list that may be incomplete. Always paired with
+   *   {@link catalogNotice}.
+   *
+   * Rendering a `fallback` the same way as a `backend` list would waste the
+   * distinction: eight providers would look like the whole set, which is the
+   * shape of the bug this issue was reopened for.
+   */
+  catalogSource: "manifest" | "backend" | "fallback";
+  /** Why the list is a fallback, for the operator. `null` unless degraded. */
+  catalogNotice: string | null;
 }
 
 /** A mutating response: the resulting status plus a plain-language note. */
 export interface ComposioMutation {
   status: ComposioStatus;
   note: string;
+}
+
+/** The `POST …/composio/authorize` response: the hosted connect URL to open. */
+export interface ComposioAuthorize {
+  /** Composio-hosted OAuth URL the operator opens in a new browser tab. */
+  connectUrl: string;
+}
+
+/** One toolkit's connected state, as returned by `GET …/composio/connections`. */
+export interface ComposioConnection {
+  /** Toolkit slug, e.g. `gmail`. */
+  toolkit: string;
+  /** Whether the company has at least one active connection for this toolkit. */
+  connected: boolean;
 }
 
 /** The company's Composio status. */
@@ -40,8 +102,9 @@ export function getComposioStatus(
 }
 
 /**
- * Set / rotate / clear the write-only per-tenant Composio token. A non-empty
- * value rotates it; an empty string clears it.
+ * Set / rotate / clear this company's own Composio token. A non-empty value
+ * rotates it; an empty string clears it, reverting to the instance's identity
+ * where there is one.
  */
 export function setComposioToken(
   client: OpenCompanyClient,
@@ -49,4 +112,34 @@ export function setComposioToken(
   token: string,
 ): Promise<ComposioMutation> {
   return client.put<ComposioMutation>(`${client.scopeFor(company)}/composio/token`, { token });
+}
+
+/**
+ * Begin a per-provider OAuth handoff for `toolkit` (e.g. `gmail`). Returns the
+ * Composio-hosted connect URL the console opens in a new tab. Composio runs the
+ * OAuth itself — there is no local callback — so the console then polls
+ * {@link listComposioConnections} until the toolkit reports connected. 409 when
+ * the feature is not in the build, or no per-tenant token is configured yet.
+ */
+export function startComposioAuthorize(
+  client: OpenCompanyClient,
+  company: string | null,
+  toolkit: string,
+): Promise<ComposioAuthorize> {
+  return client.post<ComposioAuthorize>(`${client.scopeFor(company)}/composio/authorize`, {
+    toolkit,
+  });
+}
+
+/**
+ * The company's per-toolkit connected state — one row per toolkit that has at
+ * least one connection. The console cross-references this against the granted
+ * `toolkits` to render each provider row's connected / sign-in state. 409 when
+ * the feature is not in the build, or no per-tenant token is configured yet.
+ */
+export function listComposioConnections(
+  client: OpenCompanyClient,
+  company: string | null,
+): Promise<ComposioConnection[]> {
+  return client.get<ComposioConnection[]>(`${client.scopeFor(company)}/composio/connections`);
 }

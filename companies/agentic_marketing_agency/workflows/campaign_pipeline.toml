@@ -36,6 +36,21 @@ id = "research"
 kind = "tool_call"
 name = "Web research"
 summary = "Pulls sources and competitor takes."
+# `on_error` is a first-class node field, NOT a `config` key — the validator
+# rejects reserved keys inside `[node.config]`. `continue` means a search that
+# fails (e.g. no managed search credential on this install) becomes an error
+# item on the default port and the run proceeds to `copy`, instead of halting
+# the whole pipeline. web_search degrades gracefully with no credential.
+on_error = "continue"
+[node.config]
+# The metered discovery tool wired by the workflow tool belt (issue #238); the
+# `web` namespace can only read a URL the agent already has, never find one.
+slug = "web_search"
+[node.config.args]
+# Bind the strategist's reply as the query: `=`-expressions resolve against the
+# input item, and an agent node returns `{ text, agent_ref }` (see caps::mod).
+query = "=item.text"
+max_results = 5
 
 [[node]]
 id = "copy"
@@ -52,10 +67,14 @@ summary = "Generates the hero image."
 agent = "creative_director"
 
 [[node]]
+# No CMS exists to POST to, and the human sign-off is `[company].human_role`, so
+# this is an agent assembly step, not an HTTP call. Reusing `copywriter` across
+# two nodes is legal — the id stays `publish` so the edges are untouched.
 id = "publish"
-kind = "http_request"
-name = "Publish to CMS"
-summary = "POST the approved draft."
+kind = "agent"
+name = "Assemble final post"
+summary = "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off."
+agent = "copywriter"
 
 [[node]]
 id = "done"

@@ -17,6 +17,7 @@
 //! [`WebhookSink`](crate::server::webhook::WebhookSink); the default build
 //! records deliveries in memory.
 
+use axum::extract::rejection::JsonRejection;
 use axum::extract::{Path, State};
 use axum::http::header::CONTENT_TYPE;
 use axum::http::{HeaderMap, StatusCode, Uri};
@@ -42,6 +43,14 @@ pub fn router() -> Router<AppState> {
         .route("/api/v1/companies", post(provision))
         .route("/api/v1/companies/{id}/pause", post(pause))
         .route("/api/v1/companies/{id}/resume", post(resume))
+        .route(
+            "/api/v1/companies/{id}/emergency-pause",
+            post(emergency_pause),
+        )
+        .route(
+            "/api/v1/companies/{id}/emergency-resume",
+            post(emergency_resume),
+        )
         .route("/api/v1/companies/{id}/suspend", post(suspend))
         .route("/api/v1/companies/{id}/archive", post(archive))
 }
@@ -188,12 +197,22 @@ async fn provision(
         );
     }
 
+    // The shared skill library, when this host serves one. A configured library
+    // that cannot load is a server error rather than a silent empty registry —
+    // provisioning a runtime that cannot heal its registry installs would hide
+    // the misconfiguration until an agent came up skill-less.
+    let skills_registry = match state.shared_skill_registry() {
+        Ok(registry) => registry,
+        Err(err) => return ApiError(err).into_response(),
+    };
+
     // Build over the data dir, honoring the selected storage backend (fs
     // defaults when none is configured).
     let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest)
         .with_id(id.clone())
         .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
-        .with_host_base_url(state.config().host_base_url());
+        .with_host_base_url(state.config().host_base_url())
+        .with_skills_registry(skills_registry);
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
     }
@@ -321,6 +340,187 @@ async fn resume(
         }
     }
     transition(&state, &auth, &id, "running").await
+}
+
+// ---------------------------------------------------------------------------
+// Emergency stop (issue #86)
+// ---------------------------------------------------------------------------
+
+/// The confirmation phrase `emergency-pause` requires in its body.
+///
+/// A fixed phrase, not the company id: engaging the stop is the *safe*
+/// direction, and an operator reaching for a panic button under pressure should
+/// not have to look up an id to make it work. The step-up here is only to stop a
+/// stray click, so it is deliberately weaker than the release below.
+const PAUSE_CONFIRMATION: &str = "EMERGENCY-PAUSE";
+
+/// The step-up body both emergency routes take.
+#[derive(Debug, Deserialize)]
+struct EmergencyBody {
+    /// The confirmation phrase. See [`PAUSE_CONFIRMATION`] and
+    /// [`emergency_resume`] for what each route expects.
+    #[serde(default)]
+    confirm: String,
+    /// An optional operator note, journaled with the event.
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+/// Rejects a request whose confirmation phrase does not match `expected`.
+///
+/// A plain byte comparison of two operator-supplied short strings — no model
+/// judgement, no fuzzy matching, no normalisation beyond trimming surrounding
+/// whitespace a form would add. The response names what was expected, because
+/// this is a confirmation step and not a secret; hiding it would just make the
+/// panic button hard to press in an emergency.
+fn confirmation_error(supplied: &str, expected: &str) -> Option<Response> {
+    if supplied.trim() == expected {
+        return None;
+    }
+    Some(envelope(
+        StatusCode::BAD_REQUEST,
+        "confirmation_required",
+        &format!("this action requires {{\"confirm\": \"{expected}\"}} in the request body"),
+    ))
+}
+
+/// `POST /api/v1/companies/{id}/emergency-pause` — the governance kill switch
+/// (owner-scoped, issue #86).
+///
+/// Denies every new effect outside `EffectGroup::Other` until an operator
+/// deliberately releases it. Distinct from `/pause`, which stops the company
+/// *including chat* by moving `lifecycle`; this leaves the lifecycle untouched
+/// so the operator can keep asking the company what it was doing.
+///
+/// Idempotent: pressing it twice returns `200` with `changed: false` rather than
+/// an error. A panic button that punishes a second press is a bad panic button.
+async fn emergency_pause(
+    crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<EmergencyBody>, JsonRejection>,
+) -> Response {
+    let id = CompanyId::new(id);
+    if let Some(resp) = authorize_address(&state, &auth, &id) {
+        return resp;
+    }
+    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
+        return resp;
+    }
+    // A missing, empty, or malformed JSON body all read as "no step-up was
+    // supplied" and fall through to the same `confirmation_required` envelope a
+    // request with an absent body already gets — a panic button has to tell the
+    // operator *what* to send, not answer with an opaque `Json` rejection.
+    let body = body.ok().map(|Json(b)| b).unwrap_or(EmergencyBody {
+        confirm: String::new(),
+        reason: None,
+    });
+    if let Some(resp) = confirmation_error(&body.confirm, PAUSE_CONFIRMATION) {
+        return resp;
+    }
+    let Some(runtime) = state.registry().get(&id) else {
+        return not_found(id.as_ref());
+    };
+    match runtime
+        .emergency_pause(lifecycle_actor(&auth), body.reason)
+        .await
+    {
+        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Err(err) => {
+            emergency_response(
+                &runtime,
+                false,
+                Some(format!(
+                    "the emergency stop is active in memory but its journal \
+                 write failed and will not survive a restart: {err}"
+                )),
+            )
+            .await
+        }
+    }
+}
+
+/// `POST /api/v1/companies/{id}/emergency-resume` — release the kill switch
+/// (owner-scoped, issue #86).
+///
+/// **The confirmation is the company's own id**, which is a deliberately
+/// stronger step-up than the fixed phrase `emergency-pause` takes. Releasing is
+/// the unsafe direction: it is the only way out of the stop, so it should not be
+/// reachable by replaying the same body against a different company, and typing
+/// the id is the standard way to make an operator name what they are about to
+/// restart.
+///
+/// There is no timeout anywhere in this path. A stop persists until this
+/// endpoint is called by an identified operator, across restarts included.
+async fn emergency_resume(
+    crate::server::platform_auth::CompanyAuth(auth): crate::server::platform_auth::CompanyAuth,
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    body: Result<Json<EmergencyBody>, JsonRejection>,
+) -> Response {
+    let id = CompanyId::new(id);
+    if let Some(resp) = authorize_address(&state, &auth, &id) {
+        return resp;
+    }
+    if let Some(resp) = crate::server::platform_auth::refuse_until_password_changed(&auth) {
+        return resp;
+    }
+    // Same contract as `emergency_pause`: a missing, empty, or malformed body
+    // reads as "no step-up was supplied" and answers with the documented
+    // `confirmation_required` envelope rather than a bare `Json` rejection.
+    let body = body.ok().map(|Json(b)| b).unwrap_or(EmergencyBody {
+        confirm: String::new(),
+        reason: None,
+    });
+    if let Some(resp) = confirmation_error(&body.confirm, id.as_ref()) {
+        return resp;
+    }
+    let Some(runtime) = state.registry().get(&id) else {
+        return not_found(id.as_ref());
+    };
+    match runtime
+        .emergency_resume(lifecycle_actor(&auth), body.reason)
+        .await
+    {
+        Ok(changed) => emergency_response(&runtime, changed, None).await,
+        Err(err) => {
+            emergency_response(
+                &runtime,
+                false,
+                Some(format!(
+                    "the emergency stop is still engaged in memory but its journal \
+                 write failed and will not survive a restart: {err}"
+                )),
+            )
+            .await
+        }
+    }
+}
+
+/// The shared success body: the company's status plus whether this call was the
+/// one that moved the switch. `message` is only present on the degraded arm —
+/// when the in-memory transition happened but its journal append failed, so the
+/// operator gets the real `emergency_paused` state plus the caveat instead of a
+/// bare error that reads as "nothing happened".
+async fn emergency_response(
+    runtime: &std::sync::Arc<crate::runtime::CompanyRuntime>,
+    changed: bool,
+    message: Option<String>,
+) -> Response {
+    match runtime.status().await {
+        Ok(status) => {
+            let mut body = match serde_json::to_value(&status) {
+                Ok(serde_json::Value::Object(map)) => map,
+                _ => serde_json::Map::new(),
+            };
+            body.insert("changed".into(), json!(changed));
+            if let Some(message) = message {
+                body.insert("message".into(), json!(message));
+            }
+            (StatusCode::OK, Json(serde_json::Value::Object(body))).into_response()
+        }
+        Err(err) => ApiError(err).into_response(),
+    }
 }
 
 /// `POST /api/v1/companies/{id}/suspend` — park a company (platform-scoped).

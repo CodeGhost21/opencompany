@@ -7,6 +7,11 @@
 pub mod app;
 pub mod brain;
 pub mod company;
+/// Local-only runtime host used by the packaged Tauri desktop application.
+/// It embeds the existing operator API and ships the curated company presets;
+/// it deliberately does not pull OpenHuman's local-AI configuration into the
+/// OpenCompany product.
+pub mod desktop;
 pub mod economy;
 pub mod error;
 pub mod feedback;
@@ -21,6 +26,13 @@ pub mod metering;
 pub mod openhuman;
 pub mod policy;
 pub mod ports;
+/// The `x-sdk-name: opencompany` identity attached to this crate's own
+/// backend HTTP clients. Ungated (no `openhuman` feature requirement) because
+/// `brain/` and `feedback/` need it and neither is feature-gated.
+pub mod product;
+/// Machines that dial out to execute this host's work (the `runner` feature).
+#[cfg(feature = "runner")]
+pub mod runner;
 pub mod runtime;
 pub mod server;
 pub mod store;

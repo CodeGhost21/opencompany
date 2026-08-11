@@ -31,8 +31,9 @@ use crate::ports::events::EventLog;
 use crate::ports::memory::MemoryStore;
 use crate::ports::store::CompanyStore;
 use crate::ports::types::{
-    CompanyId, CompanyRecord, CompressedTrace, ContextChunk, EventSeq, LedgerEntry, OverlayAgent,
-    OverlayDesk, OverlayDeskMember, OverlayDeskOrder, StoredEvent,
+    BudgetOverride, CompanyEvent, CompanyId, CompanyRecord, CompressedTrace, ContextChunk,
+    EventSeq, LedgerEntry, OverlayAgent, OverlayDesk, OverlayDeskMember, OverlayDeskOrder,
+    OverlayWorkflow, StoredEvent, TemplateProvenance,
 };
 
 /// Canonical bundle file and directory names, matching the fs
@@ -79,8 +80,10 @@ fn io_err(path: &Path, source: std::io::Error) -> OpenCompanyError {
 
 /// Bundle metadata persisted alongside the manifest. Carries the company id so an
 /// import can restore the original id even when it diverges from the manifest
-/// slug. The fs [`CompanyStore`] reads only `lifecycle`; the extra field is
-/// ignored there (serde skips unknown fields).
+/// slug, plus the source-template provenance so a template-launched company keeps
+/// its provenance across an export/import round-trip. The fs [`CompanyStore`]
+/// reads only `lifecycle`; the extra fields are ignored there (serde skips
+/// unknown fields).
 #[derive(Serialize, Deserialize)]
 struct BundleMeta {
     lifecycle: String,
@@ -108,6 +111,30 @@ struct BundleMeta {
     /// bundles.
     #[serde(default)]
     overlay_desks: Vec<OverlayDesk>,
+    /// The operator workflow-authoring overlay — graph bodies created from the
+    /// console or the orchestrator tool, which live on the record (never in the
+    /// read-only source tree). Preserved so console-created workflows survive an
+    /// export→import instead of being silently dropped. `#[serde(default)]` for
+    /// back-compat with older bundles.
+    #[serde(default)]
+    overlay_workflows: Vec<OverlayWorkflow>,
+    /// The operator-set per-teammate daily spend caps (issue #343). Preserved so
+    /// an export→import keeps the caps an operator set from the console, rather
+    /// than silently reverting every teammate to its manifest default.
+    /// `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    overlay_budgets: Vec<BudgetOverride>,
+    /// The workflow ids switched off at export time (issue #276). Preserved so
+    /// an export→import does not silently re-arm a schedule the operator had
+    /// paused — which is the one direction this bundle must never move on its
+    /// own. `#[serde(default)]` for back-compat with older bundles.
+    #[serde(default)]
+    disabled_workflows: Vec<String>,
+    /// The source-template provenance, when the exported company carried one.
+    /// `#[serde(default)]` keeps older bundles written before provenance existed
+    /// importing cleanly (they decode to `None` — no migration).
+    #[serde(default)]
+    template_provenance: Option<TemplateProvenance>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -131,6 +158,7 @@ struct BundleContents {
     id: CompanyId,
     manifest: CompanyManifest,
     lifecycle: String,
+    template_provenance: Option<TemplateProvenance>,
     ledger: Vec<LedgerEntry>,
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
@@ -147,6 +175,15 @@ struct BundleContents {
     /// The operator-created desk overlay, carried through the bundle so
     /// export→import preserves operator-created desks.
     overlay_desks: Vec<OverlayDesk>,
+    /// The operator workflow-authoring overlay, carried through the bundle so
+    /// export→import preserves console-created workflow graphs.
+    overlay_workflows: Vec<OverlayWorkflow>,
+    /// The operator-set per-teammate daily spend caps, carried through the
+    /// bundle so export→import preserves console-set budgets (issue #343).
+    overlay_budgets: Vec<BudgetOverride>,
+    /// The workflow ids switched off, carried through the bundle so an import
+    /// restores a paused workflow paused (issue #276).
+    disabled_workflows: Vec<String>,
 }
 
 impl BundleContents {
@@ -163,7 +200,13 @@ impl BundleContents {
             .await?
             .ok_or_else(|| OpenCompanyError::CompanyNotFound(id.to_string()))?;
 
-        let events = events.read_from(id, EventSeq::new(0), usize::MAX).await?;
+        // Issue #358: the withdrawn half of a discussion never reaches the
+        // bundle. This is the load-bearing half of that issue — hiding a
+        // message on the console while the bundle keeps carrying it makes the
+        // record *portable* instead of merely permanent, which is the worse
+        // failure of the two.
+        let events =
+            scrub_redacted_discussion(events.read_from(id, EventSeq::new(0), usize::MAX).await?);
         let traces = memory.recent_traces(id, usize::MAX).await?;
 
         let metas = context.list(id, "").await?;
@@ -181,6 +224,7 @@ impl BundleContents {
             id: id.clone(),
             manifest: record.manifest,
             lifecycle: record.lifecycle,
+            template_provenance: record.template_provenance,
             ledger: record.ledger,
             events,
             traces,
@@ -189,6 +233,9 @@ impl BundleContents {
             overlay_desk_members: record.overlay_desk_members,
             overlay_desk_order: record.overlay_desk_order,
             overlay_desks: record.overlay_desks,
+            overlay_workflows: record.overlay_workflows,
+            overlay_budgets: record.overlay_budgets,
+            disabled_workflows: record.disabled_workflows,
         })
     }
 
@@ -215,6 +262,10 @@ impl BundleContents {
                 overlay_desk_members: self.overlay_desk_members.clone(),
                 overlay_desk_order: self.overlay_desk_order.clone(),
                 overlay_desks: self.overlay_desks.clone(),
+                overlay_workflows: self.overlay_workflows.clone(),
+                overlay_budgets: self.overlay_budgets.clone(),
+                disabled_workflows: self.disabled_workflows.clone(),
+                template_provenance: self.template_provenance.clone(),
             })
             .await?;
         for entry in &self.ledger {
@@ -255,6 +306,10 @@ impl BundleContents {
             overlay_desk_members: self.overlay_desk_members.clone(),
             overlay_desk_order: self.overlay_desk_order.clone(),
             overlay_desks: self.overlay_desks.clone(),
+            overlay_workflows: self.overlay_workflows.clone(),
+            overlay_budgets: self.overlay_budgets.clone(),
+            disabled_workflows: self.disabled_workflows.clone(),
+            template_provenance: self.template_provenance.clone(),
         };
         write_file(
             &dest.join(META_JSON),
@@ -305,8 +360,32 @@ impl BundleContents {
 
         let meta: BundleMeta = serde_json::from_str(&read_to_string(&src.join(META_JSON)).await?)?;
 
+        // A bundle is the one place `overlay_budgets` arrives from outside this
+        // process, so it is the one place the "at most one override per teammate"
+        // invariant can be violated by data we did not write. Refuse rather than
+        // resolve: `CompanyRecord::effective_budget` reads the first match, so
+        // importing two rows for one teammate would apply whichever the bundle
+        // happened to serialize first — possibly the obsolete one, possibly the
+        // looser one, and with somebody else's name on the attribution. A bundle
+        // that disagrees with itself about a spend cap has no right answer to
+        // pick, and picking silently is how a revoked allowance comes back.
+        if let Some(agent_id) = BudgetOverride::duplicate_agent_id(&meta.overlay_budgets) {
+            return Err(OpenCompanyError::Store(format!(
+                "invalid {META_JSON}: {} carries more than one budget override for teammate \
+                 '{agent_id}'; at most one is allowed",
+                meta.id
+            )));
+        }
+
         let ledger = read_jsonl::<LedgerEntry>(&src.join(LEDGER_JSONL)).await?;
-        let events = read_jsonl::<StoredEvent>(&src.join(EVENTS_JSONL)).await?;
+        // Scrubbed on the way IN as well as on the way out (issue #358), which
+        // is not belt-and-braces: a bundle written by a host that predates this
+        // carries the withdrawn text beside its tombstone, and importing it
+        // as-is would write that text into a fresh journal — the resurrection
+        // the issue names, arriving through the one door the exporter cannot
+        // guard.
+        let events =
+            scrub_redacted_discussion(read_jsonl::<StoredEvent>(&src.join(EVENTS_JSONL)).await?);
         let traces =
             read_jsonl::<CompressedTrace>(&src.join(MEMORY_DIR).join(TRACES_JSONL)).await?;
 
@@ -327,6 +406,7 @@ impl BundleContents {
             id: CompanyId::new(meta.id),
             manifest,
             lifecycle: meta.lifecycle,
+            template_provenance: meta.template_provenance,
             ledger,
             events,
             traces,
@@ -335,8 +415,69 @@ impl BundleContents {
             overlay_desk_members: meta.overlay_desk_members,
             overlay_desk_order: meta.overlay_desk_order,
             overlay_desks: meta.overlay_desks,
+            overlay_workflows: meta.overlay_workflows,
+            overlay_budgets: meta.overlay_budgets,
+            disabled_workflows: meta.disabled_workflows,
         })
     }
+}
+
+/// Replaces the text of every discussion post a later tombstone withdrew
+/// (issue #358).
+///
+/// ## Why the bundle is where this matters most
+///
+/// A withdrawal that only affected the console would leave the message in
+/// `events.jsonl`, and the bundle is the copy that *leaves the instance* — it
+/// is handed to support, restored onto a laptop, committed to a repository. So
+/// a redaction that stops at the read fold does not make a pasted credential
+/// less exposed; it makes it exposed somewhere nobody is looking.
+///
+/// ## What it does
+///
+/// Walks the log once, collecting the `(task_id, seq)` pairs named by
+/// [`CompanyEvent::TaskDiscussionRedacted`], then rewrites the `text` of each
+/// post they name to
+/// [`REDACTED_DISCUSSION_TEXT`](crate::ports::tasks::REDACTED_DISCUSSION_TEXT).
+/// Two passes rather than one because a tombstone always follows its post, so a
+/// single forward pass would have already written the post out.
+///
+/// **The tombstone itself is kept.** Dropping it would leave the imported
+/// company with a post whose text is a placeholder and no record of why, and
+/// the fold would show it as an ordinary message reading "This message was
+/// removed." — a sentence nobody wrote. Carried through, the imported thread
+/// says the same thing the exporting one did, with the same attribution.
+///
+/// Every other event passes through untouched, including posts with no
+/// tombstone: this is a substitution, not a filter, so the log's shape,
+/// ordering and sequence numbering are exactly what they were.
+fn scrub_redacted_discussion(events: Vec<StoredEvent>) -> Vec<StoredEvent> {
+    use std::collections::HashSet;
+
+    let withdrawn: HashSet<(String, u64)> = events
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            CompanyEvent::TaskDiscussionRedacted { task_id, seq, .. } => {
+                Some((task_id.clone(), *seq))
+            }
+            _ => None,
+        })
+        .collect();
+    if withdrawn.is_empty() {
+        return events;
+    }
+
+    events
+        .into_iter()
+        .map(|mut stored| {
+            if let CompanyEvent::TaskDiscussionPosted { task_id, text, .. } = &mut stored.event
+                && withdrawn.contains(&(task_id.clone(), stored.seq.value()))
+            {
+                *text = crate::ports::tasks::REDACTED_DISCUSSION_TEXT.to_string();
+            }
+            stored
+        })
+        .collect()
 }
 
 /// Exports `id`'s complete state through the ports into an unpacked bundle
@@ -439,6 +580,22 @@ fn jsonl<T: Serialize>(items: &[T]) -> Result<String> {
 }
 
 /// Parses every non-empty JSONL line of `path`, skipping an absent file.
+///
+/// **Import stays strict, by decision** (issue #387). The boot path now tolerates
+/// a damaged ledger line — see
+/// [`read_jsonl_lenient`](crate::store::fs::read_jsonl_lenient) — and this reader
+/// deliberately does not follow it. The two are not the same situation:
+///
+/// * Boot has no alternative. The bundle is the company's only copy, refusing to
+///   read it strands the tenant, and skipping keeps the bytes on disk for repair.
+/// * Import does have one. The bundle being read is an *incoming* archive whose
+///   source still exists, and refusing it costs nothing but a retry with a good
+///   bundle. Half-importing instead would mint a company whose ledger silently
+///   disagrees with the archive it claims to be, with no record of what was
+///   dropped — an inconsistency that outlives the damaged file.
+///
+/// So a corrupt archive fails the import outright. That is the correct answer
+/// here, and it should not be "fixed" to match the boot path.
 async fn read_jsonl<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Vec<T>> {
     let contents = match tokio::fs::read_to_string(path).await {
         Ok(contents) => contents,
@@ -592,6 +749,7 @@ mod test {
         let id = runtime.id().clone();
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
                 text: "kick off".into(),
                 by: None,
                 chat: None,
@@ -781,6 +939,10 @@ mod test {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -822,9 +984,286 @@ mod test {
         }
     }
 
+    /// Issue #358, the half that actually closes it: a withdrawn discussion
+    /// message is not in the bundle, and an import cannot bring it back.
+    ///
+    /// Asserted three ways, because each is a different way to leak it:
+    ///
+    /// 1. the **bundle file** (`events.jsonl`) does not contain the secret —
+    ///    this is the copy that leaves the instance, so grepping the bytes is
+    ///    the assertion that matters most;
+    /// 2. the **imported journal** carries the placeholder, not the text;
+    /// 3. the **tombstone travels**, so the imported thread still reports that
+    ///    a message was withdrawn rather than showing a bare placeholder that
+    ///    reads like something a person typed.
+    ///
+    /// A post with no tombstone is untouched in the same bundle, so this is a
+    /// substitution rather than a filter that eats discussion history.
+    #[tokio::test]
+    async fn a_withdrawn_discussion_message_does_not_survive_export_import() {
+        let home1 = tmp_root("redact-src");
+        let home2 = tmp_root("redact-dst");
+        let dest = tmp_root("redact-bundle");
+        let id = CompanyId::new("redact-co");
+        const SECRET: &str = "sk-live-DO-NOT-SHIP-THIS";
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+        let leaked = e1
+            .append(
+                &id,
+                CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t1".into(),
+                    text: format!("blocked on the API key: {SECRET}"),
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+        // A second post nobody withdrew, to prove the scrub is targeted.
+        e1.append(
+            &id,
+            CompanyEvent::TaskDiscussionPosted {
+                task_id: "t1".into(),
+                text: "rotated it, we are unblocked".into(),
+                by: None,
+            },
+        )
+        .await
+        .unwrap();
+        e1.append(
+            &id,
+            CompanyEvent::TaskDiscussionRedacted {
+                task_id: "t1".into(),
+                seq: leaked.value(),
+                by: Some(Actor {
+                    kind: ActorKind::Operator,
+                    id: "owner".into(),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // 1. The bytes that leave the building.
+        let shipped = tokio::fs::read_to_string(dest.join(EVENTS_JSONL))
+            .await
+            .unwrap();
+        assert!(
+            !shipped.contains(SECRET),
+            "the withdrawn message shipped in the bundle: {shipped}"
+        );
+        assert!(
+            shipped.contains(crate::ports::tasks::REDACTED_DISCUSSION_TEXT),
+            "the withdrawn post is missing its placeholder: {shipped}"
+        );
+        assert!(
+            shipped.contains("rotated it, we are unblocked"),
+            "the scrub ate a post nobody withdrew: {shipped}"
+        );
+
+        // 2 and 3. What the importing instance ends up holding.
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2, e2.clone(), m2, c2).await.unwrap();
+        let events = e2
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+
+        let posted: Vec<&str> = events
+            .iter()
+            .filter_map(|stored| match &stored.event {
+                CompanyEvent::TaskDiscussionPosted { text, .. } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            posted,
+            vec![
+                crate::ports::tasks::REDACTED_DISCUSSION_TEXT,
+                "rotated it, we are unblocked"
+            ],
+            "the imported journal must carry the placeholder, not the secret"
+        );
+        assert!(
+            events.iter().any(|stored| matches!(
+                &stored.event,
+                CompanyEvent::TaskDiscussionRedacted { task_id, seq, .. }
+                    if task_id == "t1" && *seq == leaked.value()
+            )),
+            "the tombstone did not survive the round trip, so the imported thread \
+             cannot say the message was withdrawn"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// The same guard on the way IN: a bundle written by a host that predates
+    /// #358 carries the withdrawn text beside its tombstone, and importing it
+    /// must not write that text into the fresh journal.
+    ///
+    /// Built by hand-editing the exported `events.jsonl` back to the
+    /// pre-redaction bytes, which is exactly the shape such a bundle has.
+    #[tokio::test]
+    async fn an_old_bundle_cannot_smuggle_a_withdrawn_message_back_in() {
+        let home1 = tmp_root("smuggle-src");
+        let home2 = tmp_root("smuggle-dst");
+        let dest = tmp_root("smuggle-bundle");
+        let id = CompanyId::new("smuggle-co");
+        const SECRET: &str = "sk-live-SMUGGLED";
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+        let leaked = e1
+            .append(
+                &id,
+                CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t1".into(),
+                    text: SECRET.into(),
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+        e1.append(
+            &id,
+            CompanyEvent::TaskDiscussionRedacted {
+                task_id: "t1".into(),
+                seq: leaked.value(),
+                by: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // Put the secret back, as an older exporter would have written it.
+        let path = dest.join(EVENTS_JSONL);
+        let scrubbed = tokio::fs::read_to_string(&path).await.unwrap();
+        let old_shape = scrubbed.replace(crate::ports::tasks::REDACTED_DISCUSSION_TEXT, SECRET);
+        assert!(old_shape.contains(SECRET), "the fixture did not rewrite");
+        tokio::fs::write(&path, old_shape).await.unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2, e2.clone(), m2, c2).await.unwrap();
+        let events = e2
+            .read_from(&id, EventSeq::new(0), usize::MAX)
+            .await
+            .unwrap();
+        assert!(
+            !events.iter().any(|stored| matches!(
+                &stored.event,
+                CompanyEvent::TaskDiscussionPosted { text, .. } if text.contains(SECRET)
+            )),
+            "an old bundle smuggled a withdrawn message into the new journal"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// Issue #85: a template-launched company's `template_provenance` survives an
+    /// export → import round-trip intact (source_id, version, and path all carry
+    /// through the bundle's `meta.json`), so exporting then importing never
+    /// silently strips a company's origin template.
+    #[tokio::test]
+    async fn template_provenance_survives_roundtrip() {
+        let home1 = tmp_root("prov-src");
+        let home2 = tmp_root("prov-dst");
+        let dest = tmp_root("prov-bundle");
+        let id = CompanyId::new("prov-co");
+
+        let provenance = TemplateProvenance {
+            source_id: "agentic_law_firm".into(),
+            version: None,
+            path: Some("agentic_law_firm".into()),
+        };
+
+        // Register a company carrying template provenance in the source home.
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: Some(provenance.clone()),
+        })
+        .await
+        .unwrap();
+
+        // Export → import into a fresh home.
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let imported = import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+        assert_eq!(imported, id, "id preserved through the bundle");
+
+        // The imported record carries the identical provenance — all three fields.
+        let rec = s2.load(&id).await.unwrap().expect("imported record");
+        assert_eq!(
+            rec.template_provenance,
+            Some(provenance),
+            "template provenance lost across the bundle round-trip"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
     /// EVERY operator overlay — the team (`overlay_agents`), desk memberships
     /// (`overlay_desk_members`), the desk-order hierarchy (`overlay_desk_order`),
-    /// and operator-created desks (`overlay_desks`) — survives an export→import.
+    /// operator-created desks (`overlay_desks`), and runtime-authored workflow
+    /// graphs (`overlay_workflows`) — survives an export→import.
     /// A prior version threaded only `overlay_desk_order` through the bundle, so a
     /// round-trip silently ERASED operator-added teammates, desk memberships, and
     /// operator-created desks (data loss). This asserts all four come back intact
@@ -883,6 +1322,15 @@ mod test {
             description: Some("Marketing pod".into()),
             members: vec!["ceo".into()],
         }];
+        // A workflow graph authored at runtime (issue #168). On a hosted tenant
+        // this body is the ONLY copy — a bundle that dropped it would lose the
+        // workflow outright.
+        let workflows = vec![OverlayWorkflow {
+            id: "console_flow".into(),
+            toml: "id = \"console_flow\"\nname = \"Console flow\"\n\
+                   [[node]]\nid = \"start\"\nkind = \"trigger\"\nname = \"Start\"\n"
+                .into(),
+        }];
 
         let (s1, e1, m1, c1) = fs_ports(&home1);
         s1.save(&CompanyRecord {
@@ -894,6 +1342,10 @@ mod test {
             overlay_desk_members: desk_members.clone(),
             overlay_desk_order: order.clone(),
             overlay_desks: desks.clone(),
+            overlay_workflows: workflows.clone(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -942,12 +1394,242 @@ mod test {
             dst_record.overlay_desks, desks,
             "operator-created desks altered by the bundle round-trip"
         );
+        assert!(
+            !dst_record.overlay_workflows.is_empty(),
+            "runtime-authored workflows erased by the bundle round-trip"
+        );
+        assert_eq!(
+            dst_record.overlay_workflows, workflows,
+            "runtime-authored workflows altered by the bundle round-trip"
+        );
         // And the hierarchy still drives routing: `cto` remains the lead after
         // import.
         assert_eq!(
             dst_record.effective_desk_members("eng")[0],
             "cto",
             "routing lead reverted to blueprint after import"
+        );
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// A manifest naming two capped teammates, so a round-trip that dropped the
+    /// overrides would fall back to real caps rather than to "uncapped" — the
+    /// regression would still show as the *wrong* numbers, not as absent ones.
+    fn budget_manifest() -> CompanyManifest {
+        toml::from_str(
+            r#"
+            [company]
+            name = "Budget Co"
+            output = "widgets"
+
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            budget_usd_daily = 5.0
+
+            [[agent]]
+            id = "cto"
+            role = "Tech"
+            budget_usd_daily = 9.0
+        "#,
+        )
+        .expect("parse manifest")
+    }
+
+    fn admin_actor() -> Actor {
+        Actor {
+            kind: ActorKind::User,
+            id: "user-admin".into(),
+        }
+    }
+
+    /// Issue #343: **all three** budget states survive an export→import — not
+    /// just the empty overlay every other fixture carries.
+    ///
+    /// The three are only distinct if serialization keeps them distinct, and two
+    /// of the three collapse into each other under the obvious mistakes:
+    /// `Some(0.0)` becomes `None` if the field is ever serialized with
+    /// `skip_serializing_if = "is_zero"`-style cleverness, and an explicit `None`
+    /// becomes "no entry at all" if the row is dropped when it carries no cap.
+    /// Either collapse is a silent unrecoverable change to a spend cap: a
+    /// teammate an admin muted starts spending again, or a teammate an admin
+    /// deliberately uncapped inherits the manifest's cap back. Attribution is
+    /// asserted alongside the cap because a restored cap nobody appears to have
+    /// set is its own defect.
+    #[tokio::test]
+    async fn budget_overrides_survive_roundtrip_including_zero_and_explicit_none() {
+        let home1 = tmp_root("budget-src");
+        let home2 = tmp_root("budget-dst");
+        let dest = tmp_root("budget-bundle");
+        let id = CompanyId::new("budget-co");
+
+        let budgets = vec![
+            // Cap of exactly zero: "this teammate may not spend", NOT "no cap".
+            BudgetOverride {
+                agent_id: "ceo".into(),
+                budget_usd_daily: Some(0.0),
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_000,
+            },
+            // Explicitly uncapped, beating the manifest's $9.
+            BudgetOverride {
+                agent_id: "cto".into(),
+                budget_usd_daily: None,
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_001,
+            },
+        ];
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: budget_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: budgets.clone(),
+            // Issue #276: a paused workflow rides the same bundle. The empty
+            // list this fixture used to carry could not have detected the field
+            // being dropped — and dropping it would silently re-arm a schedule
+            // an operator had switched off, which is the one direction an
+            // import must never move on its own.
+            disabled_workflows: vec!["digest".to_string()],
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+
+        // Sanity: both overrides already beat the manifest in the source.
+        let src_record = s1.load(&id).await.unwrap().unwrap();
+        assert_eq!(src_record.effective_budget("ceo"), Some(0.0));
+        assert_eq!(src_record.effective_budget("cto"), None);
+
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        import_bundle(&dest, s2.clone(), e2, m2, c2).await.unwrap();
+
+        let dst_record = s2.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            dst_record.overlay_budgets, budgets,
+            "budget overrides altered by the bundle round-trip"
+        );
+        assert!(
+            !dst_record.workflow_enabled("digest"),
+            "the bundle round-trip re-armed a paused workflow"
+        );
+
+        // Cap, attribution and timestamp, read the way every surface reads them.
+        assert_eq!(
+            dst_record.effective_budget("ceo"),
+            Some(0.0),
+            "a zero cap must survive as zero, not decay into uncapped"
+        );
+        assert_eq!(
+            dst_record.effective_budget("cto"),
+            None,
+            "an explicitly-uncapped override must survive and still beat the manifest's $9"
+        );
+        let ceo = dst_record.budget_override("ceo").expect("ceo attribution");
+        assert_eq!(ceo.set_by, admin_actor());
+        assert_eq!(ceo.at_millis, 1_700_000_000_000);
+        let cto = dst_record.budget_override("cto").expect(
+            "an explicitly-uncapped override must keep its attribution row — it is exactly the \
+             case an operator needs to see attributed",
+        );
+        assert_eq!(cto.set_by, admin_actor());
+        assert_eq!(cto.at_millis, 1_700_000_000_001);
+
+        for dir in [home1, home2, dest] {
+            tokio::fs::remove_dir_all(&dir).await.ok();
+        }
+    }
+
+    /// Issue #343: a bundle carrying two overrides for one teammate is **refused**
+    /// at import, not silently reduced to whichever row deserialized first.
+    ///
+    /// Import is the only boundary where `overlay_budgets` arrives from outside
+    /// this process, so it is the only place the write path's one-per-teammate
+    /// invariant can be broken. The two rows here disagree ($0 versus $50, set by
+    /// different people), which is the point: there is no correct row to pick,
+    /// and picking silently would either mute a teammate or restore an allowance
+    /// an admin revoked, with the wrong name on the attribution either way.
+    #[tokio::test]
+    async fn a_bundle_with_duplicate_budget_overrides_is_rejected() {
+        let home1 = tmp_root("dup-src");
+        let home2 = tmp_root("dup-dst");
+        let dest = tmp_root("dup-bundle");
+        let id = CompanyId::new("dup-co");
+
+        let (s1, e1, m1, c1) = fs_ports(&home1);
+        s1.save(&CompanyRecord {
+            id: id.clone(),
+            manifest: budget_manifest(),
+            ledger: Vec::new(),
+            lifecycle: "running".into(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+        export_bundle(&id, &dest, s1, e1, m1, c1, ExportOpts::default())
+            .await
+            .unwrap();
+
+        // Forge the tampered/foreign bundle by rewriting its meta.json — the shape
+        // an import can be handed but the write path can never produce.
+        let meta_path = dest.join(META_JSON);
+        let mut meta: BundleMeta =
+            serde_json::from_str(&tokio::fs::read_to_string(&meta_path).await.unwrap()).unwrap();
+        meta.overlay_budgets = vec![
+            BudgetOverride {
+                agent_id: "ceo".into(),
+                budget_usd_daily: Some(0.0),
+                set_by: admin_actor(),
+                at_millis: 1_700_000_000_000,
+            },
+            BudgetOverride {
+                agent_id: "ceo".into(),
+                budget_usd_daily: Some(50.0),
+                set_by: Actor {
+                    kind: ActorKind::User,
+                    id: "user-other".into(),
+                },
+                at_millis: 1_700_000_000_002,
+            },
+        ];
+        tokio::fs::write(&meta_path, serde_json::to_string(&meta).unwrap())
+            .await
+            .unwrap();
+
+        let (s2, e2, m2, c2) = fs_ports(&home2);
+        let err = import_bundle(&dest, s2.clone(), e2, m2, c2)
+            .await
+            .expect_err("import must refuse a bundle with two overrides for one teammate");
+        let message = err.to_string();
+        assert!(
+            message.contains("ceo") && message.contains("budget override"),
+            "the refusal must name the teammate so an operator can fix the bundle: {message}"
+        );
+
+        // And nothing was written: a refused import must not half-apply.
+        assert!(
+            s2.load(&id).await.unwrap().is_none(),
+            "a rejected bundle must not persist a partial company record"
         );
 
         for dir in [home1, home2, dest] {
@@ -965,6 +1647,7 @@ mod test {
         let id = runtime.id().clone();
         runtime
             .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
                 text: "hi".into(),
                 by: None,
                 chat: None,

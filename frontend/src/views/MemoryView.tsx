@@ -1,3 +1,8 @@
+// Issue #302: unmounted from the console — hidden, not retired. The host's
+// `/memory` routes, FactStore and tests are unchanged, and agents keep reading
+// and writing memory; only the operator-facing Brain tab is gone. Re-listing
+// "memory" in `app-shell.tsx`'s `View`/`NAV` brings it back. Do not delete it
+// as dead code.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Brain, Loader2, Plus, Search, Trash2 } from "lucide-react";
 import { toast } from "sonner";
@@ -17,6 +22,7 @@ import {
   type MemoryStats,
 } from "@/api/memory";
 import type { OpenCompanyClient } from "@/api/client";
+import { Markdown } from "@/components/markdown";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -269,7 +275,9 @@ function HealthStrip({
     { label: "Total items", value: String(total) },
     { label: "Agent memory", value: String(stats?.agentChunks ?? 0) },
     { label: "Task outcomes", value: String(stats?.taskOutcomes ?? 0) },
-    { label: "Last updated", value: formatUpdated(stats?.factsUpdatedAtMillis ?? 0) },
+    // Across every memory source, not just operator facts — agents write only
+    // context chunks, so a facts-only figure left this stat at "—" forever.
+    { label: "Last updated", value: formatUpdated(stats?.lastUpdatedAtMillis ?? 0) },
   ];
   return (
     <Card data-testid="memory-health">
@@ -308,7 +316,14 @@ function MemoryCard({ entry, onDelete }: { entry: MemoryEntry; onDelete: () => v
             {badge.label}
           </Badge>
         </div>
-        {entry.body && <p className="text-sm text-muted-foreground">{entry.body}</p>}
+        {entry.body && (
+          // Render markdown so **bold**/lists in memory bodies format instead
+          // of showing raw markup. Force muted-foreground on every descendant so
+          // prose's own palette doesn't override the card's muted body styling.
+          <Markdown className="text-muted-foreground [&_*]:text-muted-foreground [&>:first-child]:mt-0 [&>:last-child]:mb-0">
+            {entry.body}
+          </Markdown>
+        )}
         <div className="flex items-center justify-between pt-1">
           <span className="text-xs text-muted-foreground">via {entry.source}</span>
           {/* Delete is only offered on operator facts; agent memory and task

@@ -33,7 +33,7 @@ description = "Write ads, pages, and campaign copy."
 # NEW optional per-agent keys:
 tier = "reasoning"                 # cognition tier hint (see glossary)
 tools = ["docs.*", "email.send"]   # tool grant globs
-budget_usd_daily = 5.0             # per-agent daily spend cap
+budget_usd_daily = 5.0             # per-agent daily spend cap (UTC day)
 
 # ── new tables (all optional) ──────────────────────────────────────────
 [users]
@@ -65,7 +65,9 @@ provider = "openhuman"             # delegate to an OpenHuman channel
 
 [tools]
 provider = "openhuman"             # openhuman (default) | builtin
-allow = ["web.*", "docs.*"]        # company-wide grant; agents intersect
+allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
+                                   # `search` must be named — `*` never grants it
+search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
 mode = "supervised"                # readonly | supervised (default) | full
@@ -99,6 +101,58 @@ prompt = "Weekly review and operator digest"
   use when delegating; it never selects a model (the backend maps tiers to
   SKUs). `tools` and `budget_usd_daily` intersect with the company-wide
   `[tools].allow` and `[budget]` — the most restrictive wins.
+
+  **`budget_usd_daily`** (enforced since issue #304 — before that it was
+  validated, stored and displayed, but nothing read it) caps one teammate's
+  spend over the **UTC calendar day**, resetting at `00:00Z` — the same
+  boundary `[plan]`'s daily token budget uses. Spend is re-read from the usage
+  meter on every check, so a restart mid-day resumes against the real figure
+  rather than a fresh zero.
+
+  It covers **metered, attributed** spend: inference turns and priced tool
+  calls (`web_search`, `media_generate_*`), plus any tool call that declares an
+  `amount_usd`. Two behaviours at the cap:
+
+  - **Dispatch is refused** for that teammate, before any model call, with a
+    notice naming the cap and the reset. The rest of the company keeps running.
+  - **A priced tool call parks for approval** rather than being denied.
+    Approving it runs that one call and nothing more; the cap is not raised.
+    Free reads and sends are unaffected — a spend cap caps spend.
+
+  Known limits, stated rather than papered over:
+
+  - **Executed x402 payments escape the counter.** Ledger entries carry no
+    agent, so there is nothing to attribute them to. What *is* covered is the
+    pre-flight case: a call declaring an `amount_usd` that would breach the
+    remaining budget parks before the money moves. Company-wide payment
+    spending is governed by `[budget].monthly_usd`, which is enforced on the
+    economy path.
+  - **Turn-boundary overshoot.** A turn or call that starts under the cap can
+    finish over it; the overshoot is bounded by one call. There is no
+    reservation ledger in v1 — the same documented window `[plan]` carries.
+  - **Unreadable spend fails differently at each layer, deliberately.** With no
+    meter or a failing meter, dispatch **runs** (bricking a teammate's
+    cognition with no operator recourse is worse than a day of overspend),
+    while a priced tool call **parks** (a human can wave that one through).
+  Since issue #343 the manifest value is a **default, not the last word**. An
+  admin can set, change or clear a teammate's cap from the console
+  (`PUT`/`DELETE …/team/{agentId}/budget`); the override is stored on the
+  company record, wins over `budget_usd_daily` everywhere the cap is read
+  ([`CompanyRecord::effective_budget`] is the single reconciliation point), and
+  takes effect on the teammate's **next dispatch** — no restart, no redeploy.
+  That matters most on a hosted tenant, where `company.toml` is baked into the
+  container image and an operator has no way to edit it. Three stored states,
+  kept deliberately distinct: no override (the manifest applies), a cap of `x`
+  (`0` included, meaning "may not spend"), and an explicit "uncapped" that beats
+  a manifest cap. `DELETE` drops the override so the manifest applies again,
+  which no `PUT` body can express. Writes are admin-only and record who set the
+  cap and when.
+
+  - **Operator-added (overlay) teammates carry no manifest cap**, because they
+    have no `[[agent]]` entry — but since #343 they can be capped through a
+    console override like anyone else, including at creation.
+
+  [`CompanyRecord::effective_budget`]: ../../../src/ports/types.rs
 - **`[brain]`** selects the `Brain` implementation. `hosted` requires a
   TinyHumans credential at runtime; `sidecar` requires the `sidecar` feature.
 - **`[inference]`** (issue #56 — BYOK) routes the company's agents through a
@@ -112,6 +166,24 @@ prompt = "Weekly review and operator digest"
   Precedence is **runtime console override > manifest `[inference]` > managed
   default**, and a per-tenant provider re-resolves it every turn — so a console
   switch takes effect on the agents' next turn with **no restart**.
+  That holds only once the company is already on the harness cognition path.
+  *Which brain a company runs* is decided once, when the runtime is built: a
+  company that resolved no inference source at boot gets the offline echo brain
+  and an unwired workflow runner, and a credential saved afterwards reaches
+  neither. The status route reports that state as `restartRequired` — a resolved
+  config next to a non-harness `cognition` — and the console says "restart"
+  instead of "next turn" for it (issue #266).
+  Since issue #290 that save **rebuilds the company's runtime in place** rather
+  than asking for a restart the operator may have no way to perform: a hosted
+  tenant's unit of restart is its container, and the control plane has no button
+  for it. `PUT …/inference` quiesces the running runtime, hands its live state to
+  a successor, and swaps the registry — see
+  [runtime rebuild](rebuild.md). `restartRequired` remains on the read shape and
+  stays honest: it is still `true` on a host that wired no rebuilder, which is
+  when a restart genuinely is the only route.
+  Saving `managed` from the console is a *revert* (`DELETE …/inference`) and
+  carries no credential, so the console refuses that save while a key is still
+  typed in the form rather than dropping it and reporting success (issue #265).
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
@@ -157,8 +229,87 @@ prompt = "Weekly review and operator digest"
     credential configured, a `media` grant wires no tools (fail-closed). The
     Usage view surfaces a dedicated media status row (active / awaiting
     credential / not granted / not in this build).
+  - **`search`** (issue #238) is a seventh gateable namespace covering the single
+    `web_search` tool — source *discovery* for the research skills, which
+    previously ran on a belt that could read a known URL but never find one. It
+    is **priced and opt-in**: granted only by an **explicit** `search` /
+    `search.*` entry in `[tools].allow` (the `*` wildcard deliberately does
+    **not** grant it, and unlike `media`/`composio` it is **not** in the default
+    grant list either), and it runs exclusively on the **managed platform
+    credential** — the same identity as managed inference, resolved from the
+    environment, never a tenant key. The backend charges per request and reports
+    the amount, which is recorded as one `SearchCall` usage sample and rolls into
+    the window's cost.
+    Three things differ from `media` on purpose:
+    - **Individual searches do not park for approval.** Consent is the explicit
+      grant; the boundary is `[tools].search_daily_calls`, a per-company **daily
+      call cap** (default 200; `0` pauses search without editing `allow`).
+      Over-cap returns a loud "search budget exhausted" tool error, never an
+      empty result set — an agent handed silence invents citations. An operator
+      who does want a per-call gate sets
+      `[policy].always_approve = ["web_search"]`, which overrides every tier.
+    - **`[policy].mode = "readonly"` still denies it.** A search reaches a third
+      party and spends money, so a desk whose contract is that nothing is spent
+      does not get one.
+    - **There is no `search` Cargo feature.** The tool rides the `openhuman`
+      harness feature so CI's gated lane actually compiles and tests it.
+    The Usage view surfaces a `Web searches` KPI plus a search status row
+    (active / paused at cap 0 / awaiting credential / not granted / not in this
+    build).
+  - **`workspace`** (issues #237, #551) grants the company's shared note tree —
+    the `Standards/` / `Playbooks/` / `Product/` documents seeded from
+    `companies/<name>/workspace/**`, plus whatever the operator and the agents
+    have written since. It is **split**, unlike every other namespace: *reads*
+    (`workspace_list`, `workspace_read`) follow the ordinary rule, so a
+    catch-all `*` confers them; *mutations* (`workspace_write`,
+    `workspace_create`) need an **explicit** `workspace` or `workspace.write`
+    entry in `[tools].allow`, because they change a tree every other agent then
+    treats as the company's source of truth. `workspace.read` is therefore a
+    genuinely read-only grant. Create and write ride the one flag on purpose:
+    overwriting an existing standard is strictly more destructive than adding a
+    note beside it, so a grant permitting the first has already permitted the
+    second. `workspace_write` overwrites one **existing** note and requires an
+    `expected_updated_at` revision token taken from a prior read, so a note
+    edited in the console since the agent read it is refused rather than
+    clobbered. `workspace_create` adds one folder or note at a path that is
+    **free** and whose parent folder already exists — never an overwrite, never
+    a `mkdir -p`. The single exception is the agent's own
+    `Agents/<agent-id>/`, which is created on demand when the agent writes
+    directly into it, because that folder is minted on first use rather than
+    provisioned at boot. Since issue #552 this call is one of two paths that
+    bring it into existence; publishing a deliverable
+    (`artifact_mirror::materialize`) is the other, and both go through the same
+    `ensure_agent_folder` seam. Renaming and deleting stay operator-only.
+
+    Agent writes are **unconfined**: an agent may create or edit anywhere in its
+    company's tree. Confining creation while leaving overwrite free would
+    protect nothing. What keeps the tree navigable instead is steering plus
+    attribution — the persona brief names the agent's own reserved folder
+    `Agents/<agent-id>/` (minted the first time that agent puts something in it;
+    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    home for what it produces and marks shared
+    guidance as something to edit only on purpose, and every node records who
+    created it and who last wrote it (issue #326), which the console shows. Both
+    sides are capped at the agent harness's own per-tool-result byte budget
+    minus the framing a read wraps a body in (issue #417) — 12 KiB today,
+    derived rather than chosen so a full read always survives the harness cut
+    and the write gate is measured against the bytes the model actually
+    received. A larger note is agent-read-only: the agent sees a truncated body,
+    and a write against it is refused rather than discarding the part it could
+    not see, so only an operator can edit it in the console. **Operator edits
+    are not capped by this** — the console and the REST handlers write through
+    the `WorkspaceStore` port directly and never enter the agent tool path. Under
+    `[policy].mode = "supervised"` (the default) a write additionally parks for
+    approval, and under `readonly` it is denied — reads stay available in every
+    mode. The namespace is **not** gateable by `[plan].token_budgets`: reads
+    cost nothing and shedding them would only make agents guess at company
+    standards. The tools hit the store per call, so an operator's console edit
+    is visible to the next turn with no restart.
 - **`[[schedule]]`** entries become `ScheduleFired` events; cron syntax is
-  standard 5-field.
+  standard 5-field, interpreted in UTC. A saved *workflow* schedules itself
+  separately, with the same dialect: its `trigger` node carries a `schedule`
+  cron that the workflow scheduler fires (issue #169). A manifest schedule
+  drives a company cycle; a trigger schedule drives one workflow run.
 
 ## Layering and provenance
 

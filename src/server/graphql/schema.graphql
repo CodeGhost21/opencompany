@@ -137,7 +137,9 @@ type Company {
 	"""
 	memory(query: String, kind: MemoryKind, first: Int! = 50, offset: Int! = 0): MemoryFactPage!
 	"""
-	The enabled workflows, as one-line summaries.
+	The company's saved workflows, as one-line summaries — seed graphs and
+	runtime-authored ones alike. Each carries an `enabled` flag reporting
+	manifest membership; listing is not gated on it.
 	"""
 	workflows: [WorkflowSummary!]!
 	"""
@@ -164,6 +166,12 @@ type Company {
 	SMTP status — host/port/username only, never the password.
 	"""
 	smtp: SmtpStatus!
+	"""
+	The source-template provenance recorded at launch: the stable template
+	id (directory slug) and, when known, its version. Null for a company
+	provisioned from a raw manifest body rather than a template.
+	"""
+	provenance: TemplateProvenance
 }
 
 """
@@ -178,6 +186,14 @@ type ConnectionState {
 	Whether an OAuth token is stored for this provider.
 	"""
 	connected: Boolean!
+	"""
+	Which route a Connect for this provider would take on this host:
+	`attested` (the platform runs it — nothing to register here), `static`
+	(a token already stored for this company, or this host's own registered
+	provider application: the self-hosted hatch), or `none` (no Connect can
+	succeed here). A tier name, never a credential and never a path.
+	"""
+	credentialSource: String!
 	"""
 	The connected account label, when known.
 	"""
@@ -336,6 +352,14 @@ type FsNode {
 	When it was last updated, ISO-8601 UTC.
 	"""
 	updatedAt: String!
+	"""
+	Who created the node.
+	"""
+	createdBy: WorkspaceOrigin!
+	"""
+	Who last wrote the node's content (a rename or move does not change it).
+	"""
+	updatedBy: WorkspaceOrigin!
 }
 
 type Inbox {
@@ -470,6 +494,27 @@ type Message {
 	parity). Empty for operator messages and tool-less replies.
 	"""
 	steps: [MessageStep!]!
+	"""
+	The board card this reply is about (issue #246): the card the turn
+	opened, or the dispatched card it ran for (#185). Projected from the
+	same [`MessageView`] field the REST route reads, so the two surfaces
+	agree on which messages carry a card. Null on operator messages and on
+	every reply journaled before the field existed.
+	"""
+	taskId: ID
+	"""
+	The message this one replies to (issue #364) — a thread reply rather
+	than a new line in the channel. Null for a message posted straight into
+	the channel, which is every message journaled before threads were
+	persisted. Same [`MessageView`] field the REST route reads, so the two
+	surfaces cannot disagree about the shape of a thread.
+	"""
+	parentId: ID
+	"""
+	Who reacted to this message with what (issue #364), one row per person
+	per emoji. Empty when nobody has.
+	"""
+	reactions: [MessageReaction!]!
 }
 
 """
@@ -484,6 +529,25 @@ type MessagePage {
 	The total number of items across all pages (before offset/limit).
 	"""
 	total: Int!
+}
+
+"""
+One person's reaction on a history message (issue #364). GraphQL mirror of
+the REST `reactions` array, so the two surfaces carry the same rows.
+"""
+type MessageReaction {
+	"""
+	The emoji.
+	"""
+	emoji: String!
+	"""
+	Who reacted, as a display label — never a raw user id.
+	"""
+	by: String!
+	"""
+	Whether the reading viewer is the one who reacted.
+	"""
+	mine: Boolean!
 }
 
 """
@@ -571,10 +635,15 @@ type RegistrySkill {
 	The publisher of the registry skill.
 	"""
 	publisher: String!
+	"""
+	The library revision this entry ships, from frontmatter. `None` for a
+	skill authored before `version` existed.
+	"""
+	version: String
 }
 
 """
-One skill installed in a company. Mirrors `frontend/src/lib/skills.ts`.
+One skill installed in a company. Mirrors the console's `@/api/skills` types.
 """
 type Skill {
 	"""
@@ -601,6 +670,10 @@ type Skill {
 	Whether the skill is enabled for the company.
 	"""
 	enabled: Boolean!
+	"""
+	The library revision this skill's document carries, when it has one.
+	"""
+	version: String
 }
 
 """
@@ -642,7 +715,8 @@ type Task {
 	"""
 	note: String
 	"""
-	The board column: `backlog` | `in_progress` | `in_review` | `done`.
+	The board column: `todo` | `planning` | `in_progress` | `paused` |
+	`in_review` | `done`.
 	"""
 	column: String!
 	"""
@@ -693,6 +767,51 @@ type TeamMember {
 	Whether this teammate has an enabled inbox.
 	"""
 	inboxEnabled: Boolean!
+	"""
+	This teammate's daily spend cap in force (issue #304), or null when it
+	has none. Null-vs-set is the capped/uncapped distinction — `0` would
+	mean "capped at nothing".
+	
+	Since #343 this is the **effective** cap: an operator override set from
+	the console when one is stored, the manifest value otherwise.
+	"""
+	budgetUsdDaily: Float
+	"""
+	What this teammate has spent since 00:00 UTC; non-null only alongside a
+	cap.
+	"""
+	spentTodayUsd: Float
+	"""
+	The user id of the admin who last set this teammate's cap from the
+	console (issue #343); null when no override is stored. Non-null even
+	when the override *removed* the cap, which is how "nobody capped this"
+	is told from "an admin uncapped this".
+	"""
+	budgetSetBy: String
+	"""
+	When that cap was set (epoch millis). `Float` round-trips the full u64
+	range that would overflow GraphQL's `Int`, matching `Approval.atMillis`.
+	"""
+	budgetSetAtMillis: Float
+}
+
+"""
+The source-template provenance of a company: where its manifest was seeded
+from. Mirrors [`TemplateProvenance`](crate::ports::types::TemplateProvenance).
+"""
+type TemplateProvenance {
+	"""
+	The template's stable identifier — the source directory slug.
+	"""
+	sourceId: String!
+	"""
+	The template's version, when the source exposes one.
+	"""
+	version: String
+	"""
+	The source directory path the company was launched from, when recorded.
+	"""
+	path: String
 }
 
 """
@@ -811,6 +930,11 @@ type UsageTotals {
 	Number of distinct connections used.
 	"""
 	connections: Int!
+	"""
+	Total metered web searches (issue #238). Their USD cost is already
+	inside `cost_usd`; this is the call count.
+	"""
+	searchCalls: Float!
 }
 
 """
@@ -892,6 +1016,14 @@ type WorkflowNode {
 	Whether the node pauses awaiting operator approval before it runs.
 	"""
 	requiresApproval: Boolean
+	"""
+	Where an `output` node's report is routed once the run finishes (issue
+	#170), as a JSON scalar: `{"kind": "owner"|"email"|"channel",
+	"target"?: "…"}`. Exposed for the same reason `config` is — so
+	`Company.workflow(id)` does not drop model data. Both keys are single
+	words, so the model shape needs no camelCase mirror the way `retry` does.
+	"""
+	destination: JSON
 }
 
 """
@@ -907,7 +1039,14 @@ type WorkflowSummary {
 	"""
 	name: String!
 	"""
-	Whether the workflow is enabled in the manifest.
+	Whether the workflow id appears in the company manifest's
+	`[workflows].enabled` list.
+	
+	This is manifest membership, **not** "does this workflow exist and can it
+	run". A runtime-authored workflow is listed here whether or not it is
+	manifest-enabled, and `Company.workflow(id)` / the run routes serve any
+	saved graph regardless of this flag — nothing consults it to decide
+	whether a workflow may run. Treat it as "declared by the blueprint".
 	"""
 	enabled: Boolean!
 }
@@ -933,9 +1072,36 @@ type WorkspaceFile {
 	"""
 	updatedAt: String!
 	"""
+	Who created this file.
+	"""
+	createdBy: WorkspaceOrigin!
+	"""
+	Who last wrote the content above.
+	"""
+	updatedBy: WorkspaceOrigin!
+	"""
 	Other files whose content links to this one via `[[name]]`.
 	"""
 	backlinks: [FsNode!]!
+}
+
+"""
+Who authored a workspace node. Mirrors [`WorkspaceOrigin`] (issue #326).
+
+Flattened into `kind` + optional `agentId` rather than exposed as a GraphQL
+union: `agentId` is non-null exactly when `kind` is `agent`, and a union of
+two empty types plus one single-field type buys a client nothing but three
+inline fragments. The Rust type keeps the invariant; this is its projection.
+"""
+type WorkspaceOrigin {
+	"""
+	`seed`, `operator` or `agent`.
+	"""
+	kind: String!
+	"""
+	The agent's roster id — set only when `kind` is `agent`.
+	"""
+	agentId: String
 }
 
 """

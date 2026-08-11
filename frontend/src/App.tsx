@@ -1,28 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
-import { verifyCode } from "@/api/auth";
-import { OpenCompanyClient } from "@/api/client";
-import { ApiError, type CompanyStatus } from "@/api/types";
-import { AppShell } from "@/components/app-shell";
-import { CompanyPicker } from "@/components/company-picker";
-import { Login } from "@/views/Login";
-import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
-import { Button } from "@/components/ui/button";
+import { signInWithHubToken, verifyCode } from "@/api/auth";
+import { embeddedHost } from "@/api/transport/desktop";
+import { ApiError } from "@/api/types";
+import { ConnectionRail } from "@/components/connection-rail";
 import { resolveConfig } from "@/config";
-
-type Phase =
-  | { kind: "loading" }
-  | { kind: "error"; message: string; hint?: string }
-  | { kind: "login"; company: string | null }
-  | { kind: "picker"; companies: CompanyStatus[] }
-  | {
-      kind: "console";
-      company: string | null;
-      status: CompanyStatus;
-      companies: CompanyStatus[];
-      canGoBack: boolean;
-    };
+import {
+  addConnection,
+  clientFor,
+  probe,
+  restoreConnections,
+  useConnections,
+} from "@/connections/registry";
+import { ConnectionConsole } from "@/views/ConnectionConsole";
 
 /**
  * Reads `?company=&code=` off a magic-link landing.
@@ -41,6 +32,34 @@ function readMagicLink(): { company: string | null; code: string } | null {
 }
 
 /**
+ * Reads `?token=&key=auth` off a hub sign-in landing.
+ *
+ * The hub appends these to the redirect URI it was given, so they arrive on a
+ * plain top-level navigation back to this console. `key=auth` is the hub's own
+ * marker for that redirect and is what distinguishes this token from the
+ * `?token=` the console config uses for a platform bearer — see `config.ts`.
+ *
+ * **Pure**, for the same reason `readMagicLink` is: StrictMode double-invokes
+ * the `useMemo` this runs in, so stripping the URL here would make the second
+ * invocation read a cleaned URL and silently drop the token.
+ *
+ * A failed sign-in comes back as `?error=` instead, which is not read here —
+ * the hub's error text is its own wording about its own flow, and this console
+ * says its piece in `hubNotice`.
+ */
+function readHubToken(): string | null {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("key") !== "auth") return null;
+  return params.get("token");
+}
+
+/** Whether the hub bounced the sign-in back with a failure rather than a token. */
+function readHubError(): boolean {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("key") === "auth" && params.get("error") !== null;
+}
+
+/**
  * Strips the magic link out of the address bar.
  *
  * The code is a single-use credential, so it must not linger in the URL, the
@@ -55,195 +74,245 @@ function clearMagicLinkFromUrl(): void {
   window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
 }
 
+/**
+ * Strips the hub's sign-in result out of the address bar.
+ *
+ * `replaceState` rather than a push, so the token is gone from the history
+ * entry as well as from the bar — a back button that restored it would hand a
+ * live ecosystem credential to a reload, and a `Referer` carrying it would hand
+ * it to whatever the console links out to next.
+ *
+ * `company` is deliberately kept. It is not a credential, and dropping it would
+ * un-scope the console on a reload of a multi-company host.
+ */
+function clearHubResultFromUrl(): void {
+  const params = new URLSearchParams(window.location.search);
+  if (params.get("key") !== "auth") return;
+  params.delete("token");
+  params.delete("error");
+  params.delete("key");
+  const query = params.toString();
+  window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
+}
+
 export function App() {
   const config = useMemo(() => resolveConfig(), []);
-  const client = useMemo(() => new OpenCompanyClient(config), [config]);
-  const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  /**
+   * The bootstrap connection.
+   *
+   * The web build resolves exactly one, from the same `resolveConfig()` it
+   * always did — nothing about how a browser finds its host has changed. What
+   * changed is that the host is now a *record* rather than an implicit global,
+   * so a second one is an addition rather than a rewrite.
+   */
+  const bootstrapId = useMemo(
+    () => {
+      // Hosts added in a previous session come back first, so the bootstrap add
+      // below finds its own profile already registered and reuses that entry
+      // rather than creating a duplicate row for one host.
+      restoreConnections();
+      return addConnection({
+        baseUrl: config.baseUrl,
+        defaultCompany: config.company,
+        credential: config.operatorToken
+          ? { kind: "platform", token: config.operatorToken }
+          : { kind: "cookie" },
+      });
+    },
+    [config],
+  );
+  /**
+   * The host running inside this application, when there is one.
+   *
+   * Asked for rather than assumed: the embedded host binds an ephemeral port,
+   * so only the core knows its address — and it may not be running at all,
+   * most often because another instance holds the data root. `null` then, and
+   * the desktop still shows every remote host, which is the point of holding
+   * several.
+   *
+   * A connection like any other. Added after the first paint because the
+   * address arrives over IPC; the probe effect below picks it up from the id
+   * list, so nothing here has to drive it.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void embeddedHost().then((host) => {
+      if (cancelled || !host) return;
+      addConnection({ baseUrl: host.baseUrl, label: "This computer" });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const connections = useConnections();
+  /**
+   * Which console is on screen.
+   *
+   * Local UI state, deliberately not in the registry. Every connection stays
+   * registered and probed regardless of what is selected — selection changes
+   * what is *rendered* and nothing else. A selected-connection field in the
+   * registry is the single-valued thing that stops buzz from holding two
+   * workspaces, and it would undo this slice.
+   */
+  const [selected, setSelected] = useState(bootstrapId);
+
   // A pure read, so StrictMode's double render is harmless.
   const magicLink = useMemo(() => readMagicLink(), []);
+  const hubToken = useMemo(() => readHubToken(), []);
+  const hubFailed = useMemo(() => readHubError(), []);
   /**
    * The in-flight redemption, so a link is redeemed exactly once.
    *
    * StrictMode double-invokes effects, and a login code is single-use: the
    * second call would spend nothing and 401, bouncing a perfectly good sign-in
-   * to the login screen. Both runs await this one promise instead. A ref rather
-   * than a "done" flag, because the second run must *wait for* the first — not
-   * skip ahead and query with a session that does not exist yet.
+   * to the login screen. Both runs await this one promise instead.
    */
   const redemption = useRef<Promise<unknown> | null>(null);
+  const [auth, setAuth] = useState<{ ready: boolean; notice?: string; failed?: boolean }>({
+    // Nothing to redeem is the common case, and it must not cost a frame.
+    ready: !magicLink && !hubToken && !hubFailed,
+  });
 
-  // Now that the code is captured in state, take it out of the URL.
+  // Now that any credential is captured in state, take it out of the URL.
   useEffect(() => {
     if (magicLink) clearMagicLinkFromUrl();
-  }, [magicLink]);
+    if (hubToken || hubFailed) clearHubResultFromUrl();
+  }, [magicLink, hubToken, hubFailed]);
 
-  // An expired or revoked session anywhere in the console drops to sign-in
-  // rather than showing a broken page.
+  /**
+   * Redeem a landing credential before any console asks for data.
+   *
+   * Stays in `App` rather than moving into the console: a magic link arrives on
+   * the document URL, which belongs to the app, and it always names the
+   * bootstrap connection — there is no way to land on a link for the second
+   * host you added yesterday.
+   */
   useEffect(() => {
-    client.onUnauthorized = () => setPhase({ kind: "login", company: config.company });
-    return () => {
-      client.onUnauthorized = null;
-    };
-  }, [client, config.company]);
-
-  useEffect(() => {
+    if (auth.ready) return;
+    const client = clientFor(bootstrapId);
+    if (!client) return;
     let cancelled = false;
-    const set = (p: Phase) => !cancelled && setPhase(p);
 
-    async function boot() {
-      // A magic-link landing: redeem it before anything else, so the session
-      // exists by the time the console asks for data.
-      if (magicLink) {
-        const company = magicLink.company ?? config.company;
+    async function redeem() {
+      if (hubFailed) {
+        if (!cancelled)
+          setAuth({
+            ready: true,
+            failed: true,
+            notice: "That sign-in didn't complete. Try again, or use a link below.",
+          });
+        return;
+      }
+      if (hubToken) {
         try {
-          redemption.current ??= verifyCode(client, company, magicLink.code);
+          redemption.current ??= signInWithHubToken(client!, config.company, hubToken);
           await redemption.current;
-        } catch {
-          // A dead link is not fatal — fall through to sign-in and let them
-          // ask for another. The reason stays vague on purpose.
-          set({ kind: "login", company });
+        } catch (err) {
+          if (!cancelled) setAuth({ ready: true, failed: true, notice: hubNotice(err) });
           return;
         }
       }
-
-      // Explicit company wins: go straight to its console.
-      if (config.company) {
+      if (magicLink) {
         try {
-          const status = await client.status(config.company);
-          set({ kind: "console", company: config.company, status, companies: [status], canGoBack: false });
-        } catch (err) {
-          set(connectionError(client, err, config.company));
-        }
-        return;
-      }
-
-      // Otherwise discover companies from the host.
-      try {
-        const companies = await client.listCompanies();
-        if (companies.length === 1) {
-          const c = companies[0];
-          set({ kind: "console", company: c.id, status: c, companies, canGoBack: false });
-        } else if (companies.length > 1) {
-          set({ kind: "picker", companies });
-        } else {
-          set({
-            kind: "error",
-            message: "No companies are running on this host.",
-            hint: "Start one with `opencompany serve --company <dir>`.",
-          });
-        }
-      } catch (listErr) {
-        // Fall back to the single-company alias (prosumer serve).
-        try {
-          const status = await client.status(null);
-          set({ kind: "console", company: null, status, companies: [], canGoBack: false });
+          redemption.current ??= verifyCode(client!, magicLink.company ?? config.company, magicLink.code);
+          await redemption.current;
         } catch {
-          set(connectionError(client, listErr, config.company));
+          // A dead link is not fatal — fall through to sign-in and let them ask
+          // for another. The reason stays vague on purpose.
+          if (!cancelled) setAuth({ ready: true, failed: true });
+          return;
         }
       }
+      if (!cancelled) setAuth({ ready: true });
     }
 
-    void boot();
+    void redeem();
     return () => {
       cancelled = true;
     };
-  }, [client, config.company, magicLink]);
+  }, [auth.ready, bootstrapId, config.company, hubFailed, hubToken, magicLink]);
 
-  const switchCompany = useCallback(
-    async (id: string, companies: CompanyStatus[]) => {
-      try {
-        const status = await client.status(id);
-        setPhase({ kind: "console", company: id, status, companies, canGoBack: true });
-      } catch (err) {
-        setPhase(connectionError(client, err, id));
-      }
-    },
-    [client],
-  );
+  // Probe every registered connection, independently: one host being slow or
+  // unreachable must not hold up another's console.
+  //
+  // Keyed on the *ids*, not the connection objects. Every status change emits a
+  // fresh array, so depending on the array would re-run this on each one — and
+  // `probe` itself sets `connecting`, which is a status change. The registry's
+  // in-flight guard makes that safe regardless; this keeps it from happening.
+  const connectionIds = connections.map((c) => c.id).join(",");
+  useEffect(() => {
+    // Redemption must land first: a probe before it would read a session that
+    // does not exist yet and park the bootstrap row on `unauthenticated`.
+    if (!auth.ready) return;
+    for (const id of connectionIds.split(",").filter(Boolean)) {
+      void probe(id);
+    }
+  }, [auth.ready, connectionIds]);
 
-  const backToPicker = useCallback(() => {
-    void client.listCompanies().then((companies) => setPhase({ kind: "picker", companies }));
-  }, [client]);
-
-  switch (phase.kind) {
-    case "loading":
-      return (
-        <FullScreen>
-          <div className="flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="size-4 animate-spin" /> Connecting…
-          </div>
-        </FullScreen>
-      );
-
-    case "login":
-      return (
-        <Login
-          client={client}
-          company={phase.company}
-          onSignedIn={() => window.location.reload()}
-        />
-      );
-
-    case "error":
-      return (
-        <FullScreen>
-          <div className="w-full max-w-md space-y-4">
-            <Alert variant="destructive">
-              <AlertTitle>Can&apos;t connect</AlertTitle>
-              <AlertDescription>
-                {phase.message}
-                {phase.hint && <span className="mt-1 block font-mono text-xs opacity-80">{phase.hint}</span>}
-              </AlertDescription>
-            </Alert>
-            <Button className="w-full" onClick={() => location.reload()}>
-              Retry
-            </Button>
-          </div>
-        </FullScreen>
-      );
-
-    case "picker":
-      return (
-        <CompanyPicker
-          companies={phase.companies}
-          onPick={(id) => void switchCompany(id, phase.companies)}
-        />
-      );
-
-    case "console":
-      return (
-        <AppShell
-          key={phase.company ?? "single"}
-          client={client}
-          company={phase.company}
-          initialStatus={phase.status}
-          companies={phase.companies}
-          onSwitchCompany={(id) => void switchCompany(id, phase.companies)}
-          onBackToPicker={phase.canGoBack ? backToPicker : undefined}
-        />
-      );
+  if (!auth.ready) {
+    return (
+      <div className="grid min-h-svh place-items-center bg-background p-6 text-center">
+        <div className="flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="size-4 animate-spin" /> Signing in…
+        </div>
+      </div>
+    );
   }
-}
 
-function FullScreen({ children }: { children: React.ReactNode }) {
+  const active = connections.find((c) => c.id === selected) ?? connections[0];
+  const client = active ? clientFor(active.id) : undefined;
+
   return (
-    <div className="grid min-h-svh place-items-center bg-background p-6 text-center">{children}</div>
+    <div className="flex min-h-svh">
+      <ConnectionRail
+        connections={connections}
+        selected={active?.id ?? null}
+        onSelect={setSelected}
+        onAdd={(baseUrl) => {
+          const id = addConnection({ baseUrl });
+          setSelected(id);
+          void probe(id);
+        }}
+      />
+      <div className="min-w-0 flex-1">
+        {active && client && (
+          // Keyed by connection: switching hosts remounts rather than
+          // reconciling, so no view can carry one host's in-flight state into
+          // another's render.
+          <ConnectionConsole
+            key={active.id}
+            connectionId={active.id}
+            client={client}
+            defaultCompany={active.defaultCompany}
+            notice={active.id === bootstrapId ? auth.notice : undefined}
+            forceLogin={active.id === bootstrapId && auth.failed === true}
+          />
+        )}
+      </div>
+    </div>
   );
 }
 
-function connectionError(client: OpenCompanyClient, err: unknown, company: string | null): Phase {
-  const where = client.baseUrl || "this origin";
-  if (err instanceof ApiError && err.status === 401) {
-    // A 401 now usually means "no session", not "no operator token" — humans
-    // sign in. Offering the login view is right for a user and harmless for an
-    // operator, who can still pass ?token=. Returning the error phase here
-    // would also race the client's onUnauthorized hook and win, stranding a
-    // signed-out user on a dead end.
-    return { kind: "login", company };
+/**
+ * What to tell someone whose ecosystem sign-in did not work.
+ *
+ * Each line is about the *credential* or the *host*, never about the person:
+ * "expired", "no access yet", "not connected". None of them confirms or denies
+ * that any address has an account here, which is the rule the whole sign-in
+ * surface is built around.
+ */
+function hubNotice(err: unknown): string {
+  const code = err instanceof ApiError ? err.code : "";
+  switch (code) {
+    case "hub_rejected":
+      return "That sign-in expired. Try again, or use a link below.";
+    case "not_a_member":
+      return "You're signed in to TinyHumans, but this company hasn't given you access yet. Ask an admin to invite you.";
+    case "hub_unavailable":
+      return "This host isn't connected to a TinyHumans account. Sign in with a link instead.";
+    default:
+      return "We couldn't complete that sign-in. Try a link below.";
   }
-  return {
-    kind: "error",
-    message: `Couldn't reach a company host at ${where}.`,
-    hint: "Set the host with ?api=<url>, or run `opencompany serve`.",
-  };
 }
+

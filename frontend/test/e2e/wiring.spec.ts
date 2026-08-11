@@ -1,5 +1,11 @@
 import { expect, test } from "@playwright/test";
 
+import { LIVE_BRAIN, LIVE_BRAIN_REASON } from "./capabilities";
+
+// File-level: this spec exists only to prove the mocked-backend chain, so there
+// is nothing in it that a default-feature host can answer.
+test.skip(!LIVE_BRAIN, LIVE_BRAIN_REASON);
+
 /**
  * End-to-end wiring proof for the operator console.
  *
@@ -8,14 +14,32 @@ import { expect, test } from "@playwright/test";
  *   magic-link auth → session cookie → console → POST /api/v1/company/chat
  *     → (mocked) LLM backend → reply rendered as a company bubble
  *
- * It runs against a live host that the harness brings up separately with a
- * mocked inference backend that echoes a `__MOCK_LLM__` marker. The spec only
- * asserts on that marker (never exact echo text): the agent harness transforms
- * the prompt before it reaches the backend, so only the marker is stable.
+ * It runs against a feature-gated host with a mocked inference backend behind
+ * it — `mock-brain.mjs`, which `playwright.config.ts` starts and points the
+ * host at when `PW_LIVE_BRAIN=1` (issue #467). The spec only asserts on that
+ * backend's `__MOCK_LLM__` marker (never exact echo text): the agent harness
+ * transforms the prompt before it reaches the backend, so only the marker is
+ * stable.
  *
  * The admin address must match `companies/e2e_harness/company.toml`'s
  * `[users] admins`, which is what makes the login flow succeed.
  */
+
+// The first-run product tour opens a Radix dialog over the console, and while
+// it is up every element beneath it is `aria-hidden` — so `getByRole` finds
+// nothing, including the composer's Send button. `getByPlaceholder` still
+// matches (it is an attribute selector, and Playwright's visibility model is
+// CSS-based), which is why this spec appeared to reach the composer and then
+// timed out on the very next line. Nineteen of the other specs already do this;
+// this one predates the tour and was never updated.
+test.beforeEach(async ({ page }) => {
+  await page.addInitScript(() => {
+    const real = Storage.prototype.getItem;
+    Storage.prototype.getItem = function getItem(key: string) {
+      return key.startsWith("oc-tour:") ? '{"skipped":true}' : real.call(this, key);
+    };
+  });
+});
 
 test("operator console renders a mocked backend reply end to end", async ({
   page,
@@ -39,7 +63,14 @@ test("operator console renders a mocked backend reply end to end", async ({
   await expect(page.getByText(/^Couldn't send/)).toHaveCount(0);
 });
 
-test("operator adds a Brain memory that persists across reload and can be deleted", async ({
+/**
+ * Parked by issue #302: the console no longer lists Brain, so `/#/memory` now
+ * canonicalizes to Overview and the assertions below cannot run. The host's
+ * `/memory` routes and FactStore are unchanged — this stays here verbatim to be
+ * un-skipped the day the surface is relisted, rather than deleted and rewritten
+ * from memory.
+ */
+test.skip("operator adds a Brain memory that persists across reload and can be deleted", async ({
   page,
 }) => {
   // The Brain tab reads the real FactStore over `…/memory`; adding a note must

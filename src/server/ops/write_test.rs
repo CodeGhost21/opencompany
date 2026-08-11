@@ -11,14 +11,18 @@ use crate::company::CompanyManifest;
 use crate::company::steer::{InflightEntry, InflightKind};
 use crate::ports::facts::{FactKind, FactRecord};
 use crate::ports::tasks::TaskRecord;
-use crate::ports::types::{CompanyId, CompanyRecord};
+use crate::ports::types::{CompanyId, CompanyRecord, ContextChunk};
 use crate::runtime::RuntimeBuilder;
+use crate::runtime::journal::TaskLink;
 use crate::server::router;
 use crate::store::FsCompanyStore;
 use crate::{AppConfig, AppState};
 
-fn home() -> std::path::PathBuf {
-    std::env::temp_dir().join(format!("opencompany-ops-{}", crate::ports::generate_id()))
+fn home() -> tempfile::TempDir {
+    tempfile::Builder::new()
+        .prefix("opencompany-ops-")
+        .tempdir()
+        .expect("tempdir")
 }
 
 fn manifest() -> CompanyManifest {
@@ -26,6 +30,24 @@ fn manifest() -> CompanyManifest {
         "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
     )
     .unwrap()
+}
+
+/// The sorted node names in a workspace tree body.
+///
+/// A freshly-built company is no longer an empty tree: boot scaffolds the
+/// reserved `Agents/` and `Desks/` roots (issue #551), so the tests below name
+/// what they expect rather than counting to zero. Nothing is provisioned
+/// *inside* them — a member folder is minted when that agent or desk first
+/// produces something.
+fn provisioned_names(tree: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = tree
+        .as_array()
+        .expect("the tree read is an array")
+        .iter()
+        .map(|node| node["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.sort();
+    names
 }
 
 async fn state_with_company(home: &std::path::Path) -> AppState {
@@ -42,6 +64,10 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -56,6 +82,32 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
     // tests keep asserting write behavior rather than auth.
     crate::server::test_support::seed_fixed_admin(&state, "acme").await;
     state
+}
+
+/// The repo's shared skill library (`<crate root>/skills`), the same directory
+/// the serve path derives `skills_root` from.
+fn repo_skills_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("skills")
+}
+
+/// Like [`state_with_company`], but with the repo's shared skill library wired
+/// in, so registry reads and server-authoritative installs resolve against real
+/// documents instead of degrading to the empty-registry fallback.
+async fn state_with_registry(home: &std::path::Path) -> AppState {
+    // `with_skills_root` consumes and returns the state, so the registered
+    // company and seeded admin move along with it.
+    state_with_company(home)
+        .await
+        .with_skills_root(repo_skills_root())
+}
+
+/// The operator deltas persisted for `acme` — the durable rows behind the API.
+async fn persisted_skills(state: &AppState) -> Vec<crate::ports::skills_state::SkillState> {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    runtime.skills().list(runtime.id()).await.expect("deltas")
 }
 
 async fn send(
@@ -103,7 +155,8 @@ async fn send_auth(
 
 #[tokio::test]
 async fn tasks_crud_round_trips_under_both_scopes() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Create via the single-company alias.
@@ -116,7 +169,8 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(task["title"], "Q2 brief");
-    assert_eq!(task["column"], "backlog");
+    // Issue #206/#301: manual entry lands in To-do, the board's one intake lane.
+    assert_eq!(task["column"], "todo");
     let id = task["id"].as_str().unwrap().to_string();
 
     // Drag (PATCH column) via the {id} scope.
@@ -156,13 +210,463 @@ async fn tasks_crud_round_trips_under_both_scopes() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// #205: a card may only be assigned to somebody the company actually has.
+/// Before this the board's free-text Assignee field accepted anything, the bad
+/// value was persisted verbatim, and dispatch silently handed the work to the
+/// orchestrator instead.
+#[tokio::test]
+async fn task_writes_reject_an_off_roster_assignee() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Fetch my activity", "assignee": "Shane"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.to_string().contains("Shane"),
+        "the refusal must name what was typed: {body}"
+    );
+
+    // A roster teammate is fine, matched case-insensitively…
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Q2 brief", "assignee": "CEO"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = task["id"].as_str().unwrap().to_string();
+
+    // …and so is blank — an unassigned card is not an error.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Unowned"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The same rule on PATCH, and the rejected patch leaves the card untouched.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"title": "Renamed", "assignee": "Shane"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let card = board
+        .as_array()
+        .expect("board")
+        .iter()
+        .find(|c| c["id"] == json!(id))
+        .expect("the card survives a rejected patch")
+        .clone();
+    assert_eq!(
+        card["assignee"], "ceo",
+        "the typed key is stored as the canonical roster id"
+    );
+    assert_eq!(
+        card["title"], "Q2 brief",
+        "a rejected patch must not persist the fields it did apply"
+    );
+}
+
+/// #205: a column the board does not render is refused too. A typo'd
+/// `in-progress` used to be persisted verbatim, hiding the card from every
+/// rendered column *and* — since only the exact literal `in_progress`
+/// edge-fires a dispatch — silently never running it.
+#[tokio::test]
+async fn task_writes_reject_a_column_the_board_cannot_render() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Typo'd", "column": "in-progress"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body.to_string().contains("in_progress"),
+        "the refusal must list the columns that do exist: {body}"
+    );
+
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Fine", "column": "paused"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"column": "reviewing"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(board.as_array().expect("board")[0]["column"], "paused");
+}
+
+/// #334: `in_review → done` is a move the write boundary accepts, and the one
+/// the board's drag actually sends.
+///
+/// QA reported that a card "cannot be moved out of In review" — the drop did
+/// nothing and said nothing, which cannot distinguish a host refusing the write
+/// from a console that never sent it. It was the console (the drop was missing
+/// the mostly off-window last column, and every miss was silent), but nothing
+/// pinned the host's half of that answer. This does: both columns are in
+/// `BOARD_COLUMNS`, the transition is special-cased nowhere, and `done` is
+/// terminal — the card lands there and no dispatch fires behind it.
+#[tokio::test]
+async fn a_card_moves_from_in_review_to_done() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, seeded) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Invoice March retainer", "column": "in_review"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let id = seeded["id"].as_str().unwrap().to_string();
+
+    // Exactly the body a drag onto Done sends.
+    let (status, moved) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"column": "done"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the board's drag PATCH must be accepted: {moved}"
+    );
+    assert_eq!(moved["column"], crate::ports::tasks::COLUMN_DONE);
+
+    // What the board reads back on its next poll, not just what the echo said —
+    // a card that snaps back is the shape of the original report.
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let card = board
+        .as_array()
+        .expect("board")
+        .iter()
+        .find(|c| c["id"] == json!(id))
+        .expect("the card is still on the board");
+    assert_eq!(card["column"], crate::ports::tasks::COLUMN_DONE);
+}
+
+/// Issue #206: `POST …/tasks` defaults a new card to To-do — the board's one
+/// manual-entry column — while an explicit `column` still wins, so the
+/// lifecycle paths that place a card themselves are untouched.
+///
+/// Issue #301 kept the default and reshaped what "explicit" may say: `planning`
+/// is now a column (inert, but the write boundary must accept it before §4's
+/// auto-advance starts writing it), and the removed `backlog` pool is refused.
+#[tokio::test]
+async fn created_tasks_default_to_the_todo_column() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, defaulted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "queued work"})),
+    )
+    .await;
+    assert_eq!(defaulted["column"], crate::ports::tasks::COLUMN_TODO);
+
+    // An explicit column is still honored verbatim — `spawn_task`, the
+    // orchestrator's `revise`, and a failed run all place their own card.
+    let (status, explicit) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "being planned", "column": "planning"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(explicit["column"], crate::ports::tasks::COLUMN_PLANNING);
+
+    // Issue #301: `backlog` is gone from the board, so a client still writing
+    // it is refused rather than persisting a card nothing renders. Legacy data
+    // heals silently on read (`ports::tasks`), but a *write* fails loudly — the
+    // error names the set that replaced it.
+    let (status, refused) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "parked", "column": "backlog"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        refused.to_string().contains("todo"),
+        "the refusal must name the columns that replaced it: {refused}"
+    );
+
+    // …and the same on a drag, so a stale console cannot move a card into the
+    // removed column either.
+    let id = defaulted["id"].as_str().unwrap().to_string();
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({"column": "backlog"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+/// Issue #246: `POST …/tasks` carries the thread a card was opened from.
+///
+/// `TaskRecord.origin_chat_id` has existed since #151 and the tool-spawn path
+/// stamped it, but this handler hardcoded `None` and no DTO projected it — so a
+/// card opened from a conversation had no way back to it, and #151's
+/// "answer where you were asked" post-back could never fire for anything the
+/// REST surface created. Both halves are checked here: the write keeps it, and
+/// **both** reads (the board list and task detail) hand it back.
+#[tokio::test]
+async fn a_task_created_from_a_thread_remembers_and_reads_back_that_thread() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Ship the brief", "originChatId": "strategy"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(created["originChatId"], "strategy");
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // The board read (what the console lists) carries it…
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(board.as_array().unwrap()[0]["originChatId"], "strategy");
+
+    // …and so does task detail, which is where an operator asks "where did
+    // this come from?".
+    let (status, detail) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["task"]["originChatId"], "strategy");
+
+    // A card created without a thread — the board's `+` button — omits the key
+    // entirely rather than sending null, so the pre-#246 wire shape is
+    // unchanged for every card that has no conversation behind it.
+    let (_, plain) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Typed on the board"})),
+    )
+    .await;
+    assert!(
+        plain.get("originChatId").is_none(),
+        "a card with no originating thread must not grow the key: {plain}"
+    );
+
+    // A blank thread id is normalised away rather than persisted as a thread
+    // that matches nothing.
+    let (_, blank) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Blank origin", "originChatId": "   "})),
+    )
+    .await;
+    assert!(blank.get("originChatId").is_none(), "{blank}");
+}
+
+/// Issue #339: the card's output link reaches the console on **both** reads.
+///
+/// The board read matters as much as task detail here, and that is the whole
+/// point: the link is rendered on the card, so a board that had to open every
+/// card to discover what it produced would cost N reads per four-second poll.
+///
+/// A card that never succeeded omits the key entirely rather than sending
+/// `null`, so the pre-#339 wire shape is unchanged for every card the board
+/// created — which is also what the console reads as "link to the card itself".
+#[tokio::test]
+async fn a_stamped_card_hands_its_output_link_to_both_reads() {
+    use crate::ports::artifacts::ArtifactKind;
+    use crate::ports::tasks::{
+        TaskOutput, TaskOutputAction, TaskOutputArtifact, TaskOutputWorkflow,
+    };
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // A card the board created: no attempt has run, so no link.
+    let (_, plain) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Typed on the board"})),
+    )
+    .await;
+    assert!(
+        plain.get("output").is_none(),
+        "a card that never succeeded must not grow the key: {plain}"
+    );
+    let id = plain["id"].as_str().unwrap().to_string();
+
+    // Stamp it the way a successful settle does, through the plain store port.
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    let mut card = runtime
+        .tasks()
+        .list(&company)
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|t| t.id == id)
+        .expect("card");
+    card.output = Some(TaskOutput {
+        run_id: "run-2".to_string(),
+        attempt: Some(2),
+        at_millis: 42,
+        artifacts: vec![TaskOutputArtifact {
+            artifact_id: "a-1".to_string(),
+            version: 3,
+            title: "Launch spec".to_string(),
+            kind: ArtifactKind::Markdown,
+        }],
+        workflows: vec![TaskOutputWorkflow {
+            workflow_id: "digest".to_string(),
+            run_id: Some("wf-1".to_string()),
+            action: TaskOutputAction::Ran,
+        }],
+    });
+    runtime.tasks().upsert(&company, &card).await.unwrap();
+
+    // The board read — the one the card's own link is rendered from.
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let listed = board
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["id"] == json!(id))
+        .expect("the card is on the board");
+    assert_eq!(listed["output"]["runId"], "run-2");
+    assert_eq!(listed["output"]["attempt"], 2);
+    assert_eq!(listed["output"]["artifacts"][0]["artifactId"], "a-1");
+    assert_eq!(
+        listed["output"]["artifacts"][0]["version"], 3,
+        "the link must carry the version the run wrote, not just the record"
+    );
+    assert_eq!(listed["output"]["artifacts"][0]["kind"], "markdown");
+    assert_eq!(listed["output"]["workflows"][0]["workflowId"], "digest");
+    assert_eq!(listed["output"]["workflows"][0]["action"], "ran");
+
+    // …and task detail, where the operator opens what the link points at.
+    let (status, detail) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(detail["task"]["output"]["runId"], "run-2");
+    assert_eq!(detail["task"]["output"]["artifacts"][0]["version"], 3);
+}
+
+/// Issue #246 spend gate, at the HTTP boundary. The transcript's "Add to
+/// board" action omits `column` on purpose so the *server* decides where a
+/// chat-created card lands — and the one thing that must never happen is that
+/// it lands on the dispatch trigger, which spends an agent turn nobody
+/// approved. `dispatch_task` is a no-op in this build (no harness attached),
+/// so the load-bearing assertion is the landing column itself; the journal
+/// check is the belt to that braces, and would catch a create that started
+/// journaling a dispatch of its own.
+#[tokio::test]
+async fn a_chat_created_card_lands_off_the_dispatch_trigger() {
+    use crate::ports::tasks::{COLUMN_IN_PROGRESS, COLUMN_TODO};
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Draft the announcement", "originChatId": "main"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_ne!(
+        created["column"], COLUMN_IN_PROGRESS,
+        "a chat-created card must never arrive already dispatched"
+    );
+    assert_eq!(
+        created["column"], COLUMN_TODO,
+        "it lands in the board's intake lane, where the human drag is the gate"
+    );
+
+    // Issue #301 added a second pre-dispatch column and made To-do the only
+    // intake lane, so the spend gate is re-checked across every creation shape
+    // the board can produce: the bare board `+` (which now sends nothing but a
+    // prompt-derived title) and an explicit `planning`. Neither may dispatch —
+    // `planning` in particular is *not* a dispatch trigger, which is the whole
+    // reason it can ship inert ahead of §4's auto-advance.
+    for body in [
+        json!({"title": "Typed on the board"}),
+        json!({"title": "Being planned", "column": "planning"}),
+    ] {
+        let (status, created) = send(&state, "POST", "/api/v1/company/tasks", Some(body)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_ne!(created["column"], COLUMN_IN_PROGRESS, "{created}");
+    }
+
+    let journal = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    assert!(
+        !journal
+            .iter()
+            .any(|e| matches!(e.event, CompanyEvent::TaskDispatched { .. })),
+        "creating a card must not dispatch it, whichever pre-dispatch column it lands in"
+    );
 }
 
 #[tokio::test]
 async fn steer_task_validates_statuses_and_journals_acceptance() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let company = CompanyId::new("acme");
     let runtime = state.registry().get(&company).unwrap();
@@ -185,10 +689,16 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 id: "idle".into(),
                 title: "Idle".into(),
                 note: None,
-                column: "backlog".into(),
+                column: crate::ports::tasks::COLUMN_TODO.into(),
                 priority: "medium".into(),
                 assignee: String::new(),
                 updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -267,13 +777,12 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
             ..
         } if task_id == "active" && action == "redirect" && instruction == "focus on the API"
     )));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_create_and_delete_journals_event() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, fact) = send(
@@ -295,13 +804,12 @@ async fn memory_create_and_delete_journals_event() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn memory_list_filters_stats_and_dual_write() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -368,6 +876,8 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["factsUpdatedAtMillis"], 3_000);
     assert_eq!(stats["agentChunks"], 0);
     assert_eq!(stats["taskOutcomes"], 0);
+    // Nothing but facts so far, so "Last updated" tracks the newest fact.
+    assert_eq!(stats["lastUpdatedAtMillis"], 3_000);
 
     // Dual-write: the HTTP create path mirrors the fact into the ContextStore so
     // the agent can recall it. A direct search finds the mirrored text — the
@@ -396,8 +906,105 @@ async fn memory_list_filters_stats_and_dual_write() {
     assert_eq!(stats["facts"], 4);
     assert_eq!(stats["agentChunks"], 1);
     assert_eq!(stats["taskOutcomes"], 0);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// The Brain's "Last updated" stat must move when *agents* write memory, not
+/// only when the operator hand-authors a fact.
+///
+/// The reported bug (#153): agent memory and task outcomes land exclusively in
+/// the `ContextStore`, and the stat was computed from the `FactStore` alone —
+/// so a company whose agents were actively remembering, but whose operator had
+/// never added a fact, showed "—" forever.
+#[tokio::test]
+async fn memory_stats_last_updated_covers_agent_written_context() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // A brand-new company remembers nothing: the stat is genuinely empty, and
+    // "—" is the honest rendering.
+    let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stats["facts"], 0);
+    assert_eq!(stats["agentChunks"], 0);
+    assert_eq!(
+        stats["lastUpdatedAtMillis"], 0,
+        "no memory of any kind yet, so the stat has nothing to report"
+    );
+
+    // Now an agent writes memory — no operator fact anywhere in sight. This is
+    // the exact state that used to pin the stat at 0.
+    let before = crate::ports::now_millis();
+    for (label, body) in [
+        ("agent-ceo/notes", "the launch slipped to Friday"),
+        ("task-outcome/agent-ceo", "Task: ship it\nOutcome: done"),
+    ] {
+        runtime
+            .context
+            .put(
+                runtime.id(),
+                ContextChunk {
+                    label: label.to_string(),
+                    body: body.to_string(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(stats["facts"], 0, "still no operator facts");
+    assert_eq!(stats["agentChunks"], 2);
+    assert_eq!(stats["taskOutcomes"], 1);
+    assert_eq!(
+        stats["factsUpdatedAtMillis"], 0,
+        "the facts-only figure is unchanged — it is simply not the whole story"
+    );
+    let last_updated = stats["lastUpdatedAtMillis"].as_u64().unwrap();
+    assert!(
+        last_updated >= before,
+        "agent-written memory must move the Brain's Last updated stat, got {last_updated}"
+    );
+
+    // An operator fact newer than any chunk takes over the stat.
+    runtime
+        .facts()
+        .upsert(
+            runtime.id(),
+            &FactRecord {
+                id: "f-future".into(),
+                kind: FactKind::Fact,
+                title: "Board meeting".into(),
+                body: "moved to Monday".into(),
+                source: "You".into(),
+                updated_at_millis: last_updated + 60_000,
+            },
+        )
+        .await
+        .unwrap();
+    let (status, stats) = send(&state, "GET", "/api/v1/company/memory/stats", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        stats["lastUpdatedAtMillis"],
+        last_updated + 60_000,
+        "the stat is the max across every memory source, whichever is freshest"
+    );
+
+    // The list surfaces the same stamps per row, so a context card no longer
+    // renders "—" while the header claims recent activity.
+    let (status, rows) = send(&state, "GET", "/api/v1/company/memory", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = rows.as_array().unwrap();
+    let context_rows: Vec<&Value> = rows.iter().filter(|r| r["origin"] != "fact").collect();
+    assert_eq!(context_rows.len(), 2);
+    assert!(
+        context_rows
+            .iter()
+            .all(|r| r["updatedAt"].as_u64().unwrap() >= before),
+        "each agent-written row carries the time it was stored"
+    );
 }
 
 /// End-to-end proof that the dual-write closes the manual-ingest loop: an
@@ -409,7 +1016,8 @@ async fn memory_list_filters_stats_and_dual_write() {
 async fn memory_operator_fact_is_injected_into_the_agent_turn() {
     use crate::harness::memory_loop;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
 
@@ -438,8 +1046,6 @@ async fn memory_operator_fact_is_injected_into_the_agent_turn() {
     assert!(augmented.contains("Relevant prior work"));
     assert!(augmented.contains("we ship on Friday at noon"));
     assert!(augmented.trim_end().ends_with("when do we ship?"));
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Two-company isolation over HTTP: company B never sees company A's facts, and
@@ -448,12 +1054,13 @@ async fn memory_operator_fact_is_injected_into_the_agent_turn() {
 #[tokio::test]
 async fn memory_is_isolated_between_companies() {
     use crate::server::platform_auth::{
-        PlatformAuthConfig, PlatformClaims, StaticPlatformVerifier,
+        PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier,
     };
     use std::collections::HashSet;
 
-    let home = home();
-    let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new("plat-secret"));
     let state = AppState::new(AppConfig::default())
         .with_home(home.clone())
         .with_platform_auth(PlatformAuthConfig::new(verifier));
@@ -472,7 +1079,7 @@ async fn memory_is_isolated_between_companies() {
     }
 
     let token = |tenant: &str| {
-        StaticPlatformVerifier::tenant_token(&PlatformClaims {
+        UnsignedTenantVerifier::tenant_token(&PlatformClaims {
             tenant: tenant.to_string(),
             scopes: HashSet::from(["operator".to_string()]),
             companies: None,
@@ -524,13 +1131,12 @@ async fn memory_is_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workspace_create_write_move_and_cycle_rejection() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (_, folder) = send(
@@ -605,13 +1211,483 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     )
     .await;
     assert_eq!(status, StatusCode::NO_CONTENT);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// The read plane the console's Workspace tab runs on (issue #177): the tree
+/// `GET` reflects writes, and the file `GET` carries content plus
+/// server-computed backlinks.
+///
+/// Before this the only workspace read was GraphQL, which the console has no
+/// client for — so the tab rendered a localStorage fixture and never saw a note
+/// an agent (or another browser) wrote.
+#[tokio::test]
+async fn workspace_tree_and_file_reads_reflect_writes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // A workspace with nothing seeded into it reads as a real tree, not a 404
+    // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
+    // `Agents/` and `Desks/` roots (issue #551). The manifest here has an agent
+    // and it gets no folder — a member folder is minted on first use, not on
+    // joining the roster.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        provisioned_names(&tree),
+        vec!["Agents", "Desks"],
+        "a fresh company starts with the two system roots and nothing else"
+    );
+    let provisioned = tree.as_array().unwrap().len();
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Standards", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+
+    let (_, voice) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "voice.md",
+            "kind": "file",
+            "parentId": folder_id,
+            "content": "# Voice\n\nWarm and concise.",
+        })),
+    )
+    .await;
+    let voice_id = voice["id"].as_str().unwrap().to_string();
+
+    // A second note links to the first, so it must show up as its backlink.
+    let (_, brief) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "brief.md",
+            "kind": "file",
+            "content": "Follows our [[voice]].",
+        })),
+    )
+    .await;
+    let brief_id = brief["id"].as_str().unwrap().to_string();
+
+    // The tree carries every node's metadata — and deliberately no bodies, so a
+    // navigation read never grows with the size of the workspace.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let tree = tree.as_array().unwrap();
+    assert_eq!(tree.len(), provisioned + 3);
+    for node in tree {
+        assert!(
+            node.get("content").is_none(),
+            "the tree read must not ship note bodies"
+        );
+        assert!(node["updatedAt"].is_number());
+    }
+    let listed = tree
+        .iter()
+        .find(|node| node["id"] == json!(voice_id))
+        .expect("the created note is in the tree");
+    assert_eq!(listed["name"], "voice.md");
+    assert_eq!(listed["kind"], "file");
+    assert_eq!(listed["parentId"], json!(folder_id));
+    // Authorship rides every node of the tree read (issue #326). These routes
+    // are the console's, so the console is the operator.
+    assert_eq!(listed["createdBy"], json!({"kind": "operator"}));
+    assert_eq!(listed["updatedBy"], json!({"kind": "operator"}));
+    // …and the scaffold's own nodes say what they are, so the console can tell
+    // "the runtime laid this down" from "somebody wrote this".
+    for root in ["Agents", "Desks"] {
+        let node = tree
+            .iter()
+            .find(|node| node["name"] == json!(root))
+            .unwrap_or_else(|| panic!("the {root} root is in the tree"));
+        assert_eq!(node["createdBy"], json!({"kind": "seed"}));
+        assert_eq!(node["kind"], json!("folder"));
+        assert!(node["parentId"].is_null());
+    }
+
+    // The file read carries the body and the inbound backlink, computed server
+    // side — the console derives neither.
+    let (status, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{voice_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(file["name"], "voice.md");
+    assert!(
+        file["content"]
+            .as_str()
+            .unwrap()
+            .contains("Warm and concise")
+    );
+    assert!(file["updatedAt"].is_number());
+    assert_eq!(file["createdBy"], json!({"kind": "operator"}));
+    assert_eq!(file["updatedBy"], json!({"kind": "operator"}));
+    let backlinks = file["backlinks"].as_array().unwrap();
+    assert_eq!(backlinks.len(), 1);
+    assert_eq!(backlinks[0]["id"], json!(brief_id));
+    assert_eq!(backlinks[0]["name"], "brief.md");
+
+    // An out-of-band write (an agent, or another browser) is visible on the very
+    // next read — the whole point of the tab reading the store.
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{voice_id}"),
+        Some(json!({"content": "# Voice\n\nRewritten elsewhere."})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{voice_id}"),
+        None,
+    )
+    .await;
+    assert!(
+        file["content"]
+            .as_str()
+            .unwrap()
+            .contains("Rewritten elsewhere")
+    );
+
+    // A folder id and an unknown id are both 404 — never an empty note.
+    let (status, body) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{folder_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "company_not_found");
+
+    let (status, _) = send(
+        &state,
+        "GET",
+        "/api/v1/company/workspace/file/does-not-exist",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// Two-company isolation over the workspace read plane: company A's notes are
+/// invisible to B, and a tenant token may not address a company it does not own.
+/// The store is per-company by construction — this pins that the new `GET`s do
+/// not widen it.
+#[tokio::test]
+async fn workspace_reads_are_isolated_between_companies() {
+    use crate::server::platform_auth::{
+        PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier,
+    };
+    use std::collections::HashSet;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new("plat-secret"));
+    let state = AppState::new(AppConfig::default())
+        .with_home(home.clone())
+        .with_platform_auth(PlatformAuthConfig::new(verifier));
+
+    for name in ["a", "b"] {
+        let id = CompanyId::new(name);
+        let runtime = RuntimeBuilder::new(home.clone(), manifest())
+            .with_id(id.clone())
+            .build()
+            .await
+            .unwrap();
+        state
+            .registry()
+            .insert(id.clone(), std::sync::Arc::new(runtime));
+        state.set_owner(id.clone(), format!("tenant:{name}"));
+    }
+
+    let token = |tenant: &str| {
+        UnsignedTenantVerifier::tenant_token(&PlatformClaims {
+            tenant: tenant.to_string(),
+            scopes: HashSet::from(["operator".to_string()]),
+            companies: None,
+        })
+    };
+
+    let (status, note) = send_auth(
+        &state,
+        "POST",
+        "/api/v1/companies/a/workspace",
+        Some(json!({"name": "secret.md", "kind": "file", "content": "A body"})),
+        Some(&token("tenant:a")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // B's own workspace holds only its own scaffolded system roots — A's note
+    // is not in it.
+    let (status, tree_b) = send_auth(
+        &state,
+        "GET",
+        "/api/v1/companies/b/workspace",
+        None,
+        Some(&token("tenant:b")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "Desks"]);
+
+    // Even naming A's node id explicitly, B's scope does not resolve it.
+    let (status, _) = send_auth(
+        &state,
+        "GET",
+        &format!("/api/v1/companies/b/workspace/file/{note_id}"),
+        None,
+        Some(&token("tenant:b")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // And A's token may not address B's workspace at all — 403 (scoped auth).
+    let (status, _) = send_auth(
+        &state,
+        "GET",
+        "/api/v1/companies/b/workspace",
+        None,
+        Some(&token("tenant:a")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn skills_install_persists_the_registry_document_not_the_client_metadata() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // Deliberately hostile client metadata: if any of it reaches the persisted
+    // document, install is still trusting the client.
+    let (status, skill) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-scan/install",
+        Some(json!({
+            "name": "Not The Real Name",
+            "description": "a one-line stub the client made up",
+            "category": "Finance"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The response reflects the library's own metadata, not the request body.
+    assert_eq!(skill["name"], "Competitor Scan");
+    assert_eq!(skill["category"], "Research");
+    assert_eq!(skill["source"], "registry");
+    // The pinned revision rides on the installed projection, so a later "update
+    // available" check can diff an install against the live library.
+    assert_eq!(skill["version"], "1.0.0");
+    assert!(
+        skill["description"]
+            .as_str()
+            .unwrap()
+            .starts_with("Profile a handful of competitors"),
+        "description came from the registry, got {:?}",
+        skill["description"]
+    );
+
+    // The persisted SKILL.md carries the whole procedure — the actual bug.
+    let deltas = persisted_skills(&state).await;
+    let row = deltas
+        .iter()
+        .find(|s| s.slug == "competitor-scan")
+        .expect("the install persisted a row");
+    let doc = row.custom_doc.as_deref().expect("a document was persisted");
+    assert!(
+        doc.contains("## Steps"),
+        "body lost its Steps section: {doc}"
+    );
+    assert!(
+        doc.contains("## Output"),
+        "body lost its Output section: {doc}"
+    );
+    assert!(
+        doc.contains("version: 1.0.0"),
+        "the snapshot pins the library version: {doc}"
+    );
+    // None of the client's metadata leaked in.
+    assert!(!doc.contains("Not The Real Name"), "{doc}");
+    assert!(!doc.contains("a one-line stub the client made up"), "{doc}");
+    // The body is the real procedure, not a copy of the description.
+    let parsed = crate::company::parse_skill_md("competitor-scan", doc).expect("valid");
+    assert_ne!(
+        parsed.body.trim(),
+        parsed.description.trim(),
+        "the body must not be a degenerate copy of the description"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_404s_a_slug_the_registry_lacks_and_persists_nothing() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    // `competitor-analysis` was one of the console's phantom entries — it never
+    // existed in the shared library. It must now fail loudly.
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/competitor-analysis/install",
+        Some(json!({"name": "Competitor Analysis", "description": "phantom"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["code"], "not_found");
+
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a rejected install must persist nothing"
+    );
+}
+
+#[tokio::test]
+async fn skills_install_falls_back_to_client_metadata_when_no_registry_is_served() {
+    // Platform-provisioned mode: no shared library, so there is nothing to
+    // resolve against and the client's metadata is all the host has.
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let (status, skill) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/tenant-only-skill/install",
+        Some(json!({"name": "Tenant Only", "description": "provisioned elsewhere"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an empty registry must not 404 every install"
+    );
+    assert_eq!(skill["name"], "Tenant Only");
+    assert_eq!(skill["source"], "registry");
+}
+
+/// A *configured* shared library that cannot load must not degrade to the
+/// empty-registry fallback above. Doing so would silently hand the client
+/// authorship of a registry skill's contents on exactly the hosts that meant to
+/// be server-authoritative — one malformed `SKILL.md` in the image and every
+/// install starts trusting whatever the browser posted.
+#[tokio::test]
+async fn skills_install_500s_when_the_configured_library_cannot_load() {
+    let home_dir = home();
+    // A skills root that exists but holds a `SKILL.md` with no `description`,
+    // which the parser rejects.
+    let broken_root = home_dir.path().join("broken-skills");
+    std::fs::create_dir_all(broken_root.join("web-research")).expect("skill dir");
+    std::fs::write(
+        broken_root.join("web-research/SKILL.md"),
+        "---\nname: Web Research\n---\n# Web Research\n",
+    )
+    .expect("SKILL.md");
+
+    let state = state_with_company(home_dir.path())
+        .await
+        .with_skills_root(&broken_root);
+
+    // The state itself reports the load failure rather than an empty registry.
+    assert!(
+        state.shared_skill_registry().is_err(),
+        "a configured-but-unloadable library must surface its error"
+    );
+
+    let (status, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/skills/web-research/install",
+        Some(json!({"name": "Client Authored", "description": "not the library's"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::INTERNAL_SERVER_ERROR,
+        "a broken library is a server error, not a client-metadata install: {body}"
+    );
+    assert!(
+        persisted_skills(&state).await.is_empty(),
+        "a failed install must persist nothing"
+    );
+
+    // The registry listing fails the same way rather than reporting "no library".
+    let (status, _) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+}
+
+#[tokio::test]
+async fn skills_registry_lists_the_live_library_without_bodies() {
+    let home_dir = home();
+    let state = state_with_registry(home_dir.path()).await;
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().expect("an array");
+    // Counted from disk rather than hardcoded, so adding a skill to the shared
+    // library does not break this test — it still asserts the route lists the
+    // *whole* library.
+    let on_disk = crate::company::load_dir_skills(&repo_skills_root())
+        .expect("the shared library parses")
+        .len();
+    assert!(on_disk >= 14, "sanity: the library is populated");
+    assert_eq!(rows.len(), on_disk, "every shared skill is listed");
+
+    for row in rows {
+        assert!(
+            row.get("body").is_none(),
+            "registry rows must never carry a body: {row}"
+        );
+        assert_eq!(row["version"], "1.0.0", "{row}");
+        assert_eq!(row["publisher"], "OpenCompany", "{row}");
+    }
+
+    let scan = rows
+        .iter()
+        .find(|r| r["id"] == "competitor-scan")
+        .expect("competitor-scan is in the library");
+    assert_eq!(scan["name"], "Competitor Scan");
+    assert_eq!(scan["category"], "Research");
+
+    // The console's old hardcoded array listed slugs the host cannot serve;
+    // the live list must not contain them.
+    for phantom in ["competitor-analysis", "social-scheduler", "meeting-notes"] {
+        assert!(
+            !rows.iter().any(|r| r["id"] == phantom),
+            "phantom slug {phantom} is not in the live registry"
+        );
+    }
+}
+
+#[tokio::test]
+async fn skills_registry_is_empty_when_no_library_is_served() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+    let (status, body) = send(&state, "GET", "/api/v1/company/skills/registry", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body.as_array().expect("an array").len(), 0);
 }
 
 #[tokio::test]
 async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Install from registry, carrying the entry's metadata so the host persists
@@ -695,13 +1771,12 @@ async fn skills_install_toggle_custom_and_builtin_uninstall_conflict() {
     assert_eq!(my_skill["source"], "custom");
     assert_eq!(my_skill["name"], "My Skill");
     assert!(!my_skill["enabled"].as_bool().unwrap());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn team_overlay_add_delete_and_manifest_delete_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // The manifest teammate shows up on the read side before any overlay add,
@@ -767,14 +1842,13 @@ async fn team_overlay_add_delete_and_manifest_delete_conflict() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(ack["key"], "ceo");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn inbox_read_marks_and_reports_unread() {
     use crate::ports::inbox::EmailRecord;
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
     for i in 0..2 {
@@ -813,13 +1887,378 @@ async fn inbox_read_marks_and_reports_unread() {
     let (status, body) = send(&state, "POST", "/api/v1/company/inboxes/ceo/read", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["unread"], 0);
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// Appends one received email to `inbox`, for the read-surface tests below.
+async fn append_mail(
+    runtime: &crate::company::runtime::CompanyRuntime,
+    inbox: &str,
+    id: &str,
+    subject: &str,
+    at_millis: u64,
+) {
+    use crate::ports::inbox::EmailRecord;
+    runtime
+        .inbox()
+        .append(
+            runtime.id(),
+            &EmailRecord {
+                id: id.into(),
+                inbox: inbox.into(),
+                from_name: format!("{inbox} correspondent"),
+                from_email: format!("{inbox}-sender@x.test"),
+                subject: subject.into(),
+                body: format!("body for {subject}"),
+                at_millis,
+                read: false,
+                outbound: false,
+            },
+        )
+        .await
+        .unwrap();
+}
+
+/// The regression for issue #173: two teammates' inboxes must read back as two
+/// *different* sets of mail. The console used to render a client-side fixture —
+/// the same four invented emails for everybody — because no per-agent read was
+/// reachable over REST at all.
+#[tokio::test]
+async fn inbox_reads_are_per_agent_and_never_shared() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Enable two inboxes and file distinct mail in each. Inbox keys are agent
+    // ids; `cto` is an operator-added teammate as far as the toggle cares, so it
+    // takes its own key without a manifest entry.
+    for agent in ["ceo", "cto"] {
+        let (status, _) = send(
+            &state,
+            "PUT",
+            &format!("/api/v1/company/team/{agent}/inbox"),
+            Some(json!({"enabled": true})),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    append_mail(&runtime, "ceo", "c1", "board deck", 10).await;
+    append_mail(&runtime, "ceo", "c2", "investor intro", 20).await;
+    append_mail(&runtime, "cto", "t1", "on-call rotation", 30).await;
+
+    // The roster lists both, each with its own unread count.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let ceo = rows.iter().find(|r| r["key"] == "ceo").unwrap();
+    let cto = rows.iter().find(|r| r["key"] == "cto").unwrap();
+    assert_eq!(ceo["enabled"], true);
+    assert_eq!(ceo["unread"], 2);
+    assert_eq!(cto["unread"], 1);
+
+    // Each inbox reads back only its own mail — the shared-fixture bug. The
+    // route serves store (append) order; the console sorts newest-first.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ceo_subjects: Vec<&str> = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["subject"].as_str().unwrap())
+        .collect();
+    assert_eq!(ceo_subjects, vec!["board deck", "investor intro"]);
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/cto/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["subject"], "on-call rotation");
+    assert_eq!(items[0]["fromEmail"], "cto-sender@x.test");
+    assert_eq!(items[0]["inbox"], "cto");
+}
+
+/// An inbox nobody has mail in — or that does not exist at all — reads as an
+/// empty list rather than a 404. An enabled-but-empty inbox is a legitimate
+/// state, and the console must render it as such rather than as an error.
+#[tokio::test]
+async fn inbox_messages_soft_fail_on_unknown_key() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    append_mail(&runtime, "ceo", "m0", "mail 0", 1).await;
+
+    let (status, body) = send(
+        &state,
+        "GET",
+        "/api/v1/company/inboxes/nobody/messages",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(body.as_array().unwrap().is_empty());
+
+    // …and the inbox that *does* hold mail is unaffected by that read.
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(body.as_array().unwrap().len(), 1);
+}
+
+/// An inbox switched on but never written to is still listed, so the console can
+/// show it the moment the Team toggle flips — and `GET …/team` reports the same
+/// enabled state, so the toggle isn't a client-side guess.
+#[tokio::test]
+async fn team_read_reports_inbox_enabled_and_empty_inbox_is_listed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Before the toggle: no inbox on the roster, and nothing listed.
+    let (status, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ceo = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "ceo")
+        .unwrap()
+        .clone();
+    assert_eq!(ceo["inboxEnabled"], false);
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert!(body.as_array().unwrap().is_empty());
+
+    // Toggle it on: listed with zero mail, and the roster agrees.
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/team/ceo/inbox",
+        Some(json!({"enabled": true})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    let rows = body.as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["key"], "ceo");
+    assert_eq!(rows[0]["enabled"], true);
+    assert_eq!(rows[0]["unread"], 0);
+    // The manifest role is the display name until a domain gives it an address.
+    assert_eq!(rows[0]["name"], "Chief");
+
+    let (_, roster) = send(&state, "GET", "/api/v1/company/team", None).await;
+    let ceo = roster
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["id"] == "ceo")
+        .unwrap()
+        .clone();
+    assert_eq!(ceo["inboxEnabled"], true);
+
+    // Toggling back off keeps the inbox listed but disabled — the console
+    // filters on `enabled`, so it drops out of the selector without losing mail.
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/team/ceo/inbox",
+        Some(json!({"enabled": false})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(body.as_array().unwrap()[0]["enabled"], false);
+}
+
+/// Mail that arrives through the ingest webhook is exactly what the console's
+/// read surface returns — the end-to-end path issue #173's repro step 4 walked.
+#[tokio::test]
+async fn ingested_mail_shows_up_on_the_console_read_surface() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Straight into the store, as `file_and_notify` does for a verified payload
+    // (the HMAC path itself is covered in `ops::test`).
+    append_mail(&runtime, "ceo", "ingested-1", "hello from outside", 42).await;
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = body.as_array().unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0]["id"], "ingested-1");
+    assert_eq!(items[0]["subject"], "hello from outside");
+    assert_eq!(items[0]["read"], false);
+    assert_eq!(items[0]["outbound"], false);
+
+    // Reading it drops the unread count the selector badges.
+    let (_, body) = send(
+        &state,
+        "POST",
+        "/api/v1/company/inboxes/ceo/read",
+        Some(json!({"ids": ["ingested-1"]})),
+    )
+    .await;
+    assert_eq!(body["unread"], 0);
+    let (_, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(body.as_array().unwrap()[0]["unread"], 0);
+}
+
+#[tokio::test]
+async fn inbox_list_and_messages_project_store() {
+    use crate::ports::inbox::EmailRecord;
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    // One inbound (unread) + one outbound reply in inbox "ceo".
+    runtime
+        .inbox()
+        .append(
+            runtime.id(),
+            &EmailRecord {
+                id: "in1".into(),
+                inbox: "ceo".into(),
+                from_name: "Priya".into(),
+                from_email: "p@x.test".into(),
+                subject: "hi".into(),
+                body: "hello world".into(),
+                at_millis: 1,
+                read: false,
+                outbound: false,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .inbox()
+        .append(
+            runtime.id(),
+            &EmailRecord {
+                id: "out1".into(),
+                inbox: "ceo".into(),
+                from_name: String::new(),
+                from_email: "ceo@acme.test".into(),
+                subject: "re: hi".into(),
+                body: "reply".into(),
+                at_millis: 2,
+                read: false,
+                outbound: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    // GET /inboxes surfaces the message-bearing inbox; outbound doesn't count toward unread.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let ceo = body
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|i| i["key"] == "ceo")
+        .expect("ceo inbox listed");
+    assert_eq!(ceo["unread"], 1);
+
+    // GET messages returns both, camelCase, oldest first.
+    let (status, body) = send(&state, "GET", "/api/v1/company/inboxes/ceo/messages", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let msgs = body.as_array().unwrap();
+    assert_eq!(msgs.len(), 2);
+    assert_eq!(msgs[0]["id"], "in1");
+    assert_eq!(msgs[0]["fromEmail"], "p@x.test");
+    assert_eq!(msgs[1]["outbound"], true);
+}
+
+/// Issue #416, the half that holds in every build: a question asked on a
+/// workflow copilot thread must not leave work on the company's board.
+///
+/// The copilot is a conversation *about a graph*, and its questions are phrased
+/// at the graph — "add a node that emails the report". The chat route's
+/// deterministic intent detector reads that as a request to the company and
+/// opens a `todo` card, which is the same class of over-reach this issue is
+/// about, reached from the route rather than from the model. The control half
+/// matters as much as the confined half: the identical sentence on an ordinary
+/// thread still opens its card, so this narrows the copilot rather than
+/// disabling a feature.
+#[tokio::test]
+async fn a_copilot_thread_question_opens_no_board_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Deliberately the most actionable phrasing the copilot invites.
+    let ask = "build a node that emails the weekly report";
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": ask, "chat": "workflow-copilot:weekly_report"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    // Strict on the shape, like the control half below: `is_none_or` would pass
+    // on a body that is not a list at all, so a route that started answering an
+    // error object would go green here and panic there — reported as a failure
+    // of the control rather than of the thing under test.
+    let cards = board.as_array().expect("the board lists cards");
+    assert!(
+        cards.is_empty(),
+        "a copilot question left work on the board: {board}"
+    );
+
+    // The same rule reaches the other deterministic side effect a chat turn
+    // has: a complaint phrase on a copilot thread is the operator correcting a
+    // conversation about their graph, not feedback about the company's work.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({
+            "message": "no, that is wrong, this node keeps failing",
+            "chat": "workflow-copilot:weekly_report",
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, filed) = send(&state, "GET", "/api/v1/company/feedback", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let items = filed.as_array().expect("the feedback list is an array");
+    assert!(
+        items.is_empty(),
+        "a copilot correction filed company feedback: {filed}"
+    );
+
+    // Control: the same sentence on the ordinary thread still opens a card, so
+    // the suppression is scoped to the copilot and not a regression of #246.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/chat",
+        Some(json!({"message": ask})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = board.as_array().expect("the board lists cards");
+    assert_eq!(
+        cards.len(),
+        1,
+        "the ordinary thread must still open exactly one card: {board}"
+    );
 }
 
 #[tokio::test]
 async fn chat_accepts_desk_id_and_replies() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, body) = send(
@@ -831,20 +2270,19 @@ async fn chat_accepts_desk_id_and_replies() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert!(body["responses"].is_array());
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn credential_route_rejects_foreign_tenant() {
     use crate::server::platform_auth::{
-        PlatformAuthConfig, PlatformClaims, StaticPlatformVerifier,
+        PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier,
     };
     use std::collections::HashSet;
 
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // Platform mode: `acme` is owned by `tenant:acme`.
-    let verifier = std::sync::Arc::new(StaticPlatformVerifier::new("plat-secret"));
+    let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new("plat-secret"));
     let state = AppState::new(AppConfig::default())
         .with_home(home.clone())
         .with_platform_auth(PlatformAuthConfig::new(verifier));
@@ -860,7 +2298,7 @@ async fn credential_route_rejects_foreign_tenant() {
     state.set_owner(id.clone(), "tenant:acme");
 
     let token = |tenant: &str| {
-        StaticPlatformVerifier::tenant_token(&PlatformClaims {
+        UnsignedTenantVerifier::tenant_token(&PlatformClaims {
             tenant: tenant.to_string(),
             scopes: HashSet::from(["operator".to_string()]),
             companies: None,
@@ -888,13 +2326,12 @@ async fn credential_route_rejects_foreign_tenant() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn unknown_company_scope_is_404() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let (status, _) = send(
         &state,
@@ -904,7 +2341,6 @@ async fn unknown_company_scope_is_404() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -936,6 +2372,10 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -952,7 +2392,8 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
 
 #[tokio::test]
 async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // Cold: no servers.
@@ -977,7 +2418,20 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(added["server"]["name"], "notion");
     assert_eq!(added["server"]["source"], "runtime");
     assert_eq!(added["server"]["authConfigured"], true);
-    assert!(added["note"].as_str().unwrap().contains("rebuild"));
+    // Issue #566: a mutating MCP change reaches agents on the company's next turn
+    // (the effective set is re-fingerprinted every `HarnessPool::ensure` cycle), so
+    // the note must state the no-restart contract outright — not merely avoid one
+    // stale phrase. Asserting the positive claim rejects any "restart required"
+    // variant too, which a bare `!contains("restart the company")` would let pass.
+    let note = added["note"].as_str().unwrap();
+    assert!(
+        note.contains("next turn"),
+        "note should promise next-turn pickup: {note}"
+    );
+    assert!(
+        note.contains("no restart needed"),
+        "mutating MCP response must state no restart is needed: {note}"
+    );
 
     // The token must NOT appear anywhere in the add response.
     assert!(
@@ -1035,13 +2489,12 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(status, StatusCode::NO_CONTENT);
     let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
     assert_eq!(list.as_array().unwrap().len(), 0);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, mcp_manifest()).await;
 
     // The manifest server shows up as `manifest`.
@@ -1065,8 +2518,6 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery
@@ -1074,7 +2525,8 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
 #[cfg(not(feature = "openhuman"))]
 #[tokio::test]
 async fn mcp_discovery_is_not_wired_without_the_feature() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_manifest(&home, mcp_manifest()).await;
     let (status, body) = send(
         &state,
@@ -1085,14 +2537,14 @@ async fn mcp_discovery_is_not_wired_without_the_feature() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// A `user:pass@host` endpoint smuggles a credential into the URL — rejected as
 /// a 400 (the error-hardening cell's validate-on-add).
 #[tokio::test]
 async fn mcp_userinfo_endpoint_is_rejected() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     let (status, _) = send(
         &state,
@@ -1102,7 +2554,6 @@ async fn mcp_userinfo_endpoint_is_rejected() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// A query-parameter credential (BrowserBase style) round-trips write-only:
@@ -1110,7 +2561,8 @@ async fn mcp_userinfo_endpoint_is_rejected() {
 /// non-secret id left in the endpoint URL raises the non-blocking advisory.
 #[tokio::test]
 async fn mcp_query_param_auth_round_trips_write_only_with_advisory() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     let (status, added) = send(
@@ -1155,7 +2607,6 @@ async fn mcp_query_param_auth_round_trips_write_only_with_advisory() {
     )
     .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // ---------------------------------------------------------------------------
@@ -1183,6 +2634,10 @@ async fn state_with_source_dir(
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -1217,9 +2672,13 @@ fn workflow_body(id: &str) -> Value {
     })
 }
 
+/// Issue #168: the create path persists the graph **on the record**, never in
+/// the company source tree (which is a read-only mount in hosted mode), and
+/// both read routes serve it from there.
 #[tokio::test]
-async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
-    let home = home();
+async fn workflow_create_persists_on_the_record_appends_enabled_and_is_listed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1236,22 +2695,23 @@ async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
     assert_eq!(created["nodes"].as_array().unwrap().len(), 3);
     assert_eq!(created["edges"].as_array().unwrap().len(), 2);
 
-    // The graph landed on disk as TOML under the seed dir.
+    // Nothing was written into the company source tree — the read-only mount in
+    // hosted mode, and the whole reason #168 failed with EROFS.
     let path = seed_dir.join("workflows").join("greet.toml");
-    assert!(path.is_file(), "workflow file was written to {path:?}");
-    let on_disk = std::fs::read_to_string(&path).unwrap();
-    assert!(on_disk.contains("id = \"greet\""));
-    assert!(on_disk.contains("agent = \"ceo\""));
+    assert!(!path.exists(), "the source tree must not be written to");
 
-    // The operator's live manifest record gained the id in `[workflows].enabled`
-    // — the version-controlled seed dir's own `company.toml` was never touched
+    // The body and the enabled id both landed on the operator's live record —
+    // the version-controlled seed dir's own `company.toml` was never touched
     // (there isn't one here; only the store's copy is checked).
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let record = store.load(&CompanyId::new("acme")).await.unwrap().unwrap();
     assert_eq!(record.manifest.workflows.enabled, vec!["greet".to_string()]);
+    assert_eq!(record.overlay_workflows.len(), 1);
+    assert_eq!(record.overlay_workflows[0].id, "greet");
+    assert!(record.overlay_workflows[0].toml.contains("agent = \"ceo\""));
 
-    // `GET …/workflows` (which scans the seed dir) now lists it.
+    // `GET …/workflows` (seed ∪ overlay) now lists it.
     let (status, list) = send(&state, "GET", "/api/v1/company/workflows", None).await;
     assert_eq!(status, StatusCode::OK);
     let rows = list.as_array().unwrap();
@@ -1262,13 +2722,12 @@ async fn workflow_create_writes_file_appends_enabled_and_is_listed() {
     let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(graph["name"], "greet");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_duplicate_id_is_conflict() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1291,13 +2750,12 @@ async fn workflow_create_duplicate_id_is_conflict() {
     .await;
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["code"], "conflict");
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let seed_dir = home.join("seed");
     std::fs::create_dir_all(&seed_dir).unwrap();
     let state = state_with_source_dir(&home, &seed_dir, manifest()).await;
@@ -1362,35 +2820,39 @@ async fn workflow_create_rejects_bad_edges_missing_agent_and_no_trigger() {
                 .unwrap_or(true)
         }
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
-async fn workflow_create_without_source_dir_is_bad_request() {
-    let home = home();
+async fn workflow_create_without_source_dir_succeeds() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // `state_with_company` boots with no `seed_dir`, so the company has no
-    // writable source directory — the platform-provisioned-mode case.
+    // source directory at all — the platform-provisioned-mode case. Issue #168:
+    // creation used to be refused here with a 400; the body now lands on the
+    // record, so it succeeds and reads back.
     let state = state_with_company(&home).await;
 
-    let (status, body) = send(
+    let (status, created) = send(
         &state,
         "POST",
         "/api/v1/company/workflows",
         Some(workflow_body("greet")),
     )
     .await;
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["code"], "invalid_request");
+    assert_eq!(status, StatusCode::OK, "body: {created}");
+    assert_eq!(created["id"], "greet");
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+    let (status, graph) = send(&state, "GET", "/api/v1/company/workflows/greet", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(graph["nodes"].as_array().unwrap().len(), 3);
 }
 
 /// Without the `openhuman` feature the on-demand Test route is "not wired".
 #[cfg(not(feature = "openhuman"))]
 #[tokio::test]
 async fn mcp_test_route_is_not_wired_without_the_feature() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     send(
         &state,
@@ -1408,7 +2870,6 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["code"], "not_wired");
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 /// Under the `openhuman` feature, adding a server probes it — and a probe that
@@ -1417,7 +2878,8 @@ async fn mcp_test_route_is_not_wired_without_the_feature() {
 #[cfg(feature = "openhuman")]
 #[tokio::test]
 async fn mcp_add_probes_without_rollback_and_persists_health() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
     // A syntactically valid but unreachable endpoint (nothing listening).
@@ -1458,8 +2920,6 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
         health["status"].is_string(),
         "test returns health: {health}"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 // -- Telegram channel (issue #31) -------------------------------------------
@@ -1467,8 +2927,20 @@ async fn mcp_add_probes_without_rollback_and_persists_health() {
 use crate::company::telegram::RecordingTelegramApi;
 
 /// A running "acme" company whose host has a recording Telegram transport
-/// injected, so the inbound webhook can actually deliver a reply offline.
+/// injected, so the inbound webhook can actually deliver a reply offline. The
+/// host is loopback-only (no `public_url`) — the local/self-host shape of issue
+/// #203.
 async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) -> AppState {
+    state_with_telegram_at(home, api, None).await
+}
+
+/// As [`state_with_telegram`], but with `public_url` set — the hosted shape,
+/// where Telegram can actually deliver to the `/hooks/...` route.
+async fn state_with_telegram_at(
+    home: &std::path::Path,
+    api: RecordingTelegramApi,
+    public_url: Option<&str>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -1482,6 +2954,10 @@ async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) 
             overlay_desk_members: Vec::new(),
             overlay_desk_order: Vec::new(),
             overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
         })
         .await
         .unwrap();
@@ -1492,7 +2968,11 @@ async fn state_with_telegram(home: &std::path::Path, api: RecordingTelegramApi) 
         .unwrap();
     let connections =
         crate::server::ops::ConnectionsRuntime::new().with_telegram(std::sync::Arc::new(api));
-    let state = AppState::new(AppConfig::default()).with_connections(connections);
+    let state = AppState::new(AppConfig {
+        public_url: public_url.map(str::to_string),
+        ..AppConfig::default()
+    })
+    .with_connections(connections);
     state.registry().insert(id, std::sync::Arc::new(runtime));
     crate::server::test_support::seed_fixed_admin(&state, "acme").await;
     state
@@ -1542,20 +3022,18 @@ fn telegram_update(chat_id: i64, text: &str) -> Value {
 
 #[tokio::test]
 async fn telegram_config_is_write_only_and_status_reads_back() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
 
-    // Nothing configured yet.
+    // Nothing configured yet. This host binds loopback with no `public_url`, so
+    // it never offers a webhook URL (issue #203) — Telegram could not deliver
+    // to one, and inbound rides `getUpdates` polling instead.
     let (status, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cfg["configured"], false);
     assert_eq!(cfg["tokenSet"], false);
-    assert!(
-        cfg["webhookUrl"]
-            .as_str()
-            .unwrap()
-            .ends_with("/hooks/acme/telegram")
-    );
+    assert!(cfg["webhookUrl"].is_null(), "unreachable host: {cfg}");
 
     // Store both credentials (write-only).
     let (status, cfg) = send(
@@ -1597,13 +3075,12 @@ async fn telegram_config_is_write_only_and_status_reads_back() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cfg["configured"], false);
     assert_eq!(cfg["tokenSet"], false);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_webhook_rejects_an_unverified_post() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let state = state_with_company(&home).await;
     send(
         &state,
@@ -1620,13 +3097,12 @@ async fn telegram_webhook_rejects_an_unverified_post() {
     // Wrong secret.
     let (status, _, _) = telegram_hook(&state, Some("nope"), telegram_update(1, "hi")).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api.clone()).await;
     send(
@@ -1654,13 +3130,52 @@ async fn telegram_inbound_runs_a_turn_and_delivers_the_reply_back() {
         !raw.contains(BOT_TOKEN),
         "token leaked into webhook response"
     );
-
-    tokio::fs::remove_dir_all(&home).await.ok();
 }
 
 #[tokio::test]
 async fn telegram_set_webhook_registers_the_public_url() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let api = RecordingTelegramApi::new();
+    // The hosted shape: a real public https URL Telegram can deliver to.
+    let state = state_with_telegram_at(&home, api.clone(), Some("https://acme.example")).await;
+    send(
+        &state,
+        "PUT",
+        "/api/v1/company/channels/telegram",
+        Some(json!({ "botToken": BOT_TOKEN, "webhookSecret": WEBHOOK_SECRET })),
+    )
+    .await;
+
+    // The status advertises the webhook only on such a host.
+    let (_, cfg) = send(&state, "GET", "/api/v1/company/channels/telegram", None).await;
+    assert_eq!(
+        cfg["webhookUrl"],
+        "https://acme.example/hooks/acme/telegram"
+    );
+
+    let (status, res) = send(
+        &state,
+        "POST",
+        "/api/v1/company/channels/telegram/webhook",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(res["ok"], true);
+    let webhooks = api.webhooks();
+    assert_eq!(webhooks.len(), 1);
+    assert_eq!(webhooks[0], "https://acme.example/hooks/acme/telegram");
+}
+
+/// Issue #203: on a host with no public https URL, registering a webhook is
+/// refused outright. Accepting it would be actively harmful — Telegram could
+/// never deliver to the URL *and* a registration blocks `getUpdates`, so it
+/// would take down the one inbound path that does work.
+#[tokio::test]
+async fn telegram_set_webhook_is_refused_on_a_host_telegram_cannot_reach() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     let api = RecordingTelegramApi::new();
     let state = state_with_telegram(&home, api.clone()).await;
     send(
@@ -1678,18 +3193,45 @@ async fn telegram_set_webhook_registers_the_public_url() {
         None,
     )
     .await;
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(res["ok"], true);
-    let webhooks = api.webhooks();
-    assert_eq!(webhooks.len(), 1);
-    assert!(webhooks[0].ends_with("/hooks/acme/telegram"));
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        res.to_string().contains("OPENCOMPANY_PUBLIC_URL"),
+        "the refusal must say how to fix it: {res}"
+    );
+    assert!(
+        api.webhooks().is_empty(),
+        "no loopback URL was ever handed to Telegram"
+    );
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// The channel is usable with a bot token alone: no webhook secret, no public
+/// URL, no `setWebhook` — the polling listener covers inbound.
+#[tokio::test]
+async fn telegram_is_configured_by_a_bot_token_alone() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let api = RecordingTelegramApi::new();
+    let state = state_with_telegram(&home, api).await;
+
+    let (status, cfg) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/channels/telegram",
+        Some(json!({ "botToken": BOT_TOKEN })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cfg["configured"], true, "a token is the whole setup: {cfg}");
+    assert_eq!(cfg["secretSet"], false);
+    assert!(cfg["webhookUrl"].is_null());
+    // The host has a transport wired, so it long-polls for inbound.
+    assert_eq!(cfg["polling"], true);
 }
 
 #[tokio::test]
 async fn telegram_token_never_leaks_even_when_delivery_fails() {
-    let home = home();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
     // A transport that fails with an error embedding the bot token.
     let api = RecordingTelegramApi::failing_with_token_echo();
     let state = state_with_telegram(&home, api).await;
@@ -1711,6 +3253,3213 @@ async fn telegram_token_never_leaks_even_when_delivery_fails() {
         !raw.contains(BOT_TOKEN),
         "token leaked on a failed delivery"
     );
+}
 
-    tokio::fs::remove_dir_all(&home).await.ok();
+/// #187: the Artifacts tab's full loop — an agent draft, a human edit appended
+/// as a new version, and the diff between them.
+///
+/// The point of the port is that the operator's edit does **not** overwrite the
+/// agent's text, so this asserts v1 survives verbatim after the edit. A store
+/// that mutated in place would still serve a plausible-looking artifact while
+/// having destroyed the one datum the epic wants.
+#[tokio::test]
+async fn artifact_versions_capture_the_human_edit_and_diff() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // The agent's draft.
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({
+            "taskId": "t-1",
+            "title": "Launch post",
+            "kind": "markdown",
+            "body": "alpha\nbeta\ngamma",
+            "authorId": "ceo"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    assert_eq!(created["versions"].as_array().unwrap().len(), 1);
+    // No human has touched it, so no diff is offered.
+    assert!(created.get("humanEditDiff").is_none());
+
+    // The operator edits one line before approving.
+    let (status, edited) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/artifacts/{id}/versions"),
+        Some(json!({ "body": "alpha\nBETA\ngamma" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let versions = edited["versions"].as_array().unwrap();
+    assert_eq!(versions.len(), 2);
+    // v1 is untouched — the whole reason versions are append-only.
+    assert_eq!(versions[0]["body"], "alpha\nbeta\ngamma");
+    assert_eq!(versions[0]["author"], "agent");
+    assert_eq!(versions[1]["author"], "operator");
+    assert_eq!(versions[1]["note"], "operator edit before approval");
+
+    // The derived diff rides along, so the tab needs one call.
+    let diff = &edited["humanEditDiff"];
+    assert_eq!(diff["fromVersion"], 1);
+    assert_eq!(diff["toVersion"], 2);
+    assert_eq!(diff["added"], 1);
+    assert_eq!(diff["removed"], 1);
+
+    // …and is also addressable on its own.
+    let (status, standalone) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(standalone["toVersion"], 2);
+
+    // Listing by task returns it; an unrelated task sees nothing.
+    let (status, listed) = send(&state, "GET", "/api/v1/company/tasks/t-1/artifacts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed.as_array().unwrap().len(), 1);
+    let (_, empty) = send(
+        &state,
+        "GET",
+        "/api/v1/company/tasks/t-other/artifacts",
+        None,
+    )
+    .await;
+    assert_eq!(empty.as_array().unwrap().len(), 0);
+
+    // Issue #244: this record was created through the REST route, not by a
+    // publish, so it carries no `source` — and the response omits the key
+    // entirely rather than sending a null the console would have to special-case.
+    assert!(
+        listed[0].get("source").is_none(),
+        "a record with no source must not carry an empty one: {}",
+        listed[0]
+    );
+}
+
+/// Issue #244: a published artifact's `source` reaches the console.
+///
+/// The record is flattened into [`ArtifactView`], so this is really asserting
+/// that the projection stays a flatten and never becomes a hand-written field
+/// list — the moment it does, a new record field is silently invisible to the
+/// tab that exists to render it.
+#[tokio::test]
+async fn a_published_artifacts_source_reaches_the_console() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+    let published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "# Spec",
+        "ceo",
+        1,
+    )
+    .with_source("specs/launch.md");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, listed) = send(&state, "GET", "/api/v1/company/tasks/t-1/artifacts", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed[0]["source"], "specs/launch.md");
+
+    let (status, one) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(one["source"], "specs/launch.md");
+}
+
+/// #185: `GET …/tasks/{id}` assembles the header, the per-task timeline, and
+/// the lineage in one read.
+///
+/// The timeline half is the point: the journal is company-scoped, so this
+/// asserts that a reply tagged with *this* task is admitted while an untagged
+/// chat reply and a reply tagged to a *different* task are both excluded. Those
+/// three cases are exactly what the `task_id` threading exists to separate.
+#[tokio::test]
+async fn task_detail_assembles_timeline_and_lineage() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    let card = |id: &str, title: &str, parent: Option<&str>| TaskRecord {
+        id: id.into(),
+        title: title.into(),
+        note: None,
+        column: "in_review".into(),
+        priority: "medium".into(),
+        assignee: "ceo".into(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: parent.map(str::to_string),
+        output: None,
+        plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
+    };
+    for t in [
+        card("t-parent", "Parent", None),
+        card("t-1", "Ship it", Some("t-parent")),
+        card("t-child", "Subtask", Some("t-1")),
+        card("t-other", "Unrelated", None),
+    ] {
+        runtime.tasks().upsert(&company, &t).await.unwrap();
+    }
+
+    for event in [
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+            run_id: None,
+        },
+        // Tagged to this task — admitted.
+        CompanyEvent::AgentReply {
+            parent: None,
+            chat_id: "t-1".into(),
+            agent_id: "ceo".into(),
+            text: "on it".into(),
+            steps: Vec::new(),
+            task_id: Some("t-1".into()),
+        },
+        // An ordinary chat reply — excluded.
+        CompanyEvent::AgentReply {
+            parent: None,
+            chat_id: "General".into(),
+            agent_id: "ceo".into(),
+            text: "unrelated chatter".into(),
+            steps: Vec::new(),
+            task_id: None,
+        },
+        // Tagged to a different task — excluded.
+        CompanyEvent::AgentReply {
+            parent: None,
+            chat_id: "t-other".into(),
+            agent_id: "ceo".into(),
+            text: "someone else's work".into(),
+            steps: Vec::new(),
+            task_id: Some("t-other".into()),
+        },
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+        },
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    assert_eq!(body["task"]["id"], "t-1");
+    assert_eq!(body["task"]["parentTaskId"], "t-parent");
+
+    let kinds: Vec<&str> = body["timeline"]
+        .as_array()
+        .expect("timeline array")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(kinds, vec!["dispatched", "reply", "completed"]);
+
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(
+        !raw.contains("unrelated chatter") && !raw.contains("someone else's work"),
+        "another task's / an untagged chat reply leaked onto this timeline: {raw}"
+    );
+
+    assert_eq!(body["lineage"]["parent"]["id"], "t-parent");
+    let children = body["lineage"]["children"].as_array().unwrap();
+    assert_eq!(children.len(), 1);
+    assert_eq!(children[0]["id"], "t-child");
+
+    // An unknown id 404s, matching PATCH/DELETE.
+    let (status, _) = send(&state, "GET", "/api/v1/company/tasks/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #187: the diff route's argument contract, and the 404s.
+#[tokio::test]
+async fn artifact_diff_rejects_a_half_specified_range() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({ "taskId": "t-1", "title": "Draft", "body": "one" })),
+    )
+    .await;
+    let id = created["id"].as_str().unwrap().to_string();
+
+    // Neither bound, and no operator edit yet → nothing to diff, stated plainly
+    // rather than silently returning an empty diff.
+    let (status, _) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Half a range is a 400, not a guess about the other end.
+    let (status, _) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff?from=1"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A version that does not exist names itself.
+    let (status, _) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/artifacts/{id}/diff?from=1&to=9"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Unknown artifact ids 404 on every handler that takes one.
+    let (status, _) = send(&state, "GET", "/api/v1/company/artifacts/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts/nope/versions",
+        Some(json!({ "body": "x" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = send(&state, "DELETE", "/api/v1/company/artifacts/nope", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #185 gave `GET …/tasks/{task_id}` a handler, which now overlaps the static
+/// `GET …/tasks/inflight` the operator strip reads.
+///
+/// Before #185 the dynamic segment carried no GET, so nothing could shadow the
+/// strip. Now something can: if the routes were ever reordered (or the static
+/// one dropped), `inflight` would be parsed as a *card id*, `task_detail` would
+/// find no such card, and the strip would 404 — with no test failing anywhere
+/// else, because no card can be named `inflight` for the collision to show up
+/// in ordinary use.
+#[tokio::test]
+async fn inflight_read_is_not_shadowed_by_task_detail() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // The strip's read still resolves to the inflight handler: an array, not
+    // the object `task_detail` would return, and not a 404.
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/inflight", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.is_array(),
+        "GET /tasks/inflight must hit list_inflight, not task_detail: {body}"
+    );
+}
+
+/// Seeds a board card for the discussion tests (#335).
+fn discussion_card(id: &str, title: &str) -> TaskRecord {
+    TaskRecord {
+        id: id.into(),
+        title: title.into(),
+        note: None,
+        column: "todo".into(),
+        priority: "medium".into(),
+        assignee: "ceo".into(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: None,
+        output: None,
+        plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
+    }
+}
+
+/// #358: a posted message can be withdrawn, and the text stops being served.
+///
+/// The shape the issue asks for, asserted end to end over the real HTTP stack:
+/// the row survives (position, author, time), the text does not, the withdrawal
+/// is attributed, the journal keeps both events, and nothing about a message
+/// nobody withdrew changes.
+#[tokio::test]
+async fn a_withdrawn_discussion_message_stops_being_served() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    const SECRET: &str = "sk-live-0000-DO-NOT-KEEP";
+    let (status, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": format!("blocked on the API key: {SECRET}") })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let seq = posted["seq"].as_u64().expect("the post carries its seq");
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": "rotated it, we are unblocked" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let (status, withdrawn) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(withdrawn["redacted"], true);
+    assert_eq!(
+        withdrawn["redactedBy"], "harness-admin",
+        "a withdrawal nobody's name is on is a message that can vanish quietly"
+    );
+    assert_eq!(
+        withdrawn["seq"], seq,
+        "the row keeps its place in the thread"
+    );
+
+    // The reload: what every reader of this card now gets.
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let thread = body["discussion"].as_array().expect("discussion array");
+    assert_eq!(thread.len(), 2, "the row is withdrawn, not deleted: {body}");
+    assert_eq!(thread[0]["seq"], seq);
+    assert_eq!(thread[0]["redacted"], true);
+    assert_eq!(thread[0]["redactedBy"], "harness-admin");
+    assert_eq!(
+        thread[0]["author"], "harness-admin",
+        "the poster is still named"
+    );
+    assert_eq!(
+        thread[1]["text"], "rotated it, we are unblocked",
+        "withdrawing one message must not touch another"
+    );
+    assert!(
+        thread[1].get("redacted").is_none(),
+        "an ordinary row must keep the shape a pre-#358 console renders: {thread:?}"
+    );
+    assert!(
+        !serde_json::to_string(&body).unwrap().contains(SECRET),
+        "the withdrawn text is still being served on the detail read: {body}"
+    );
+
+    // The journal keeps both events: the post's existence is a fact, and the
+    // withdrawal is a second fact about it.
+    let events = runtime
+        .events()
+        .read_from(&company, crate::ports::types::EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.event,
+            CompanyEvent::TaskDiscussionRedacted { task_id, seq: s, .. }
+                if task_id == "t-1" && *s == seq
+        )),
+        "the withdrawal was not journaled"
+    );
+
+    // Idempotent: asking twice is not an error, and does not grow the journal.
+    let before = events.len();
+    let (status, again) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(again["redacted"], true);
+    let after = runtime
+        .events()
+        .read_from(&company, crate::ports::types::EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(
+        before, after,
+        "a repeated withdrawal appended a second tombstone"
+    );
+}
+
+/// #358: a `seq` that is not a discussion post on *this* card is a `404`, not a
+/// tombstone written into the journal against something else.
+#[tokio::test]
+async fn withdrawing_something_that_is_not_this_cards_post_is_refused() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    for card in [
+        discussion_card("t-1", "Ship it"),
+        discussion_card("t-other", "Unrelated"),
+    ] {
+        runtime.tasks().upsert(&company, &card).await.unwrap();
+    }
+
+    let (_, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-other/discussion",
+        Some(json!({ "text": "another card's message" })),
+    )
+    .await;
+    let seq = posted["seq"].as_u64().unwrap();
+
+    // Another card's post, addressed through this card.
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A sequence position that holds no event at all.
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        "/api/v1/company/tasks/t-1/discussion/99999",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // The other card's thread is untouched by either attempt.
+    let (_, other) = send(&state, "GET", "/api/v1/company/tasks/t-other", None).await;
+    let thread = other["discussion"].as_array().unwrap();
+    assert_eq!(thread.len(), 1);
+    assert_eq!(thread[0]["text"], "another card's message");
+    assert!(thread[0].get("redacted").is_none());
+}
+
+/// #358 + #335's paging: a withdrawal is applied even when the tombstone sits
+/// *newer* than the cursor the caller is paging back through.
+///
+/// The trap this pins: the discussion arm skips events at or after
+/// `discussionBefore`, and a tombstone is always newer than the post it
+/// withdraws. Applying the cursor to tombstones too would serve the original
+/// text to anybody who scrolled far enough back — the one reader most likely to
+/// be looking for it.
+#[tokio::test]
+async fn a_withdrawal_survives_paging_back_past_it() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    const SECRET: &str = "sk-live-PAGED-BACK";
+    let (_, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": SECRET })),
+    )
+    .await;
+    let seq = posted["seq"].as_u64().unwrap();
+
+    // Enough newer posts that the first one falls off the first page.
+    for n in 0..60 {
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t-1".into(),
+                    text: format!("message {n}"),
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/tasks/t-1/discussion/{seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Page back to the start of the thread, past the tombstone's own position.
+    let (_, first) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let oldest_on_page = first["discussion"].as_array().unwrap()[0]["seq"]
+        .as_u64()
+        .unwrap();
+    let (status, older) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/tasks/t-1?discussionBefore={oldest_on_page}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        !serde_json::to_string(&older).unwrap().contains(SECRET),
+        "paging back served the withdrawn text: {older}"
+    );
+    let row = older["discussion"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["seq"] == seq)
+        .expect("the withdrawn row is on the older page");
+    assert_eq!(row["redacted"], true);
+}
+
+/// #335: the per-task Discussion tab's whole contract — a post persists, reads
+/// back on the card's own detail, and belongs to exactly one card.
+///
+/// The acceptance criterion is "posts survive a reload and are visible from
+/// another browser", which is the same thing as: the message lives in the
+/// company journal, not in the posting session. So the assertions are made
+/// through a *second, independent request* rather than off the POST's echo.
+///
+/// The scoping half matters as much: the journal is company-scoped, so a fold
+/// that forgot to compare `task_id` would show every card the same thread.
+#[tokio::test]
+async fn task_discussion_posts_persist_and_are_scoped_to_their_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    for card in [
+        discussion_card("t-1", "Ship it"),
+        discussion_card("t-other", "Unrelated"),
+        discussion_card("t-quiet", "Nobody has said anything"),
+    ] {
+        runtime.tasks().upsert(&company, &card).await.unwrap();
+    }
+
+    // Surrounding whitespace is trimmed, and the poster is named from the
+    // roster — never by user id, and never by email address.
+    let (status, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": "  blocked on the API key  " })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(posted["text"], "blocked on the API key");
+    assert_eq!(posted["author"], "harness-admin");
+
+    for (task, text) in [
+        ("t-1", "unblocked, the key was rotated"),
+        ("t-other", "someone else's thread"),
+    ] {
+        let (status, _) = send(
+            &state,
+            "POST",
+            &format!("/api/v1/company/tasks/{task}/discussion"),
+            Some(json!({ "text": text })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CREATED);
+    }
+
+    // The reload: a fresh read of the card, which reaches the journal rather
+    // than anything the posting request kept.
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let thread = body["discussion"].as_array().expect("discussion array");
+    let texts: Vec<&str> = thread.iter().map(|m| m["text"].as_str().unwrap()).collect();
+    assert_eq!(
+        texts,
+        vec!["blocked on the API key", "unblocked, the key was rotated"],
+        "the thread reads back oldest-first"
+    );
+    assert!(
+        thread[0]["seq"].as_u64().unwrap() < thread[1]["seq"].as_u64().unwrap(),
+        "seq is the thread's strict order: {thread:?}"
+    );
+    assert!(
+        !serde_json::to_string(&body["discussion"])
+            .unwrap()
+            .contains("someone else's thread"),
+        "another card's message leaked onto this thread"
+    );
+
+    // The two projections stay apart: a discussion post is not a run event, so
+    // it must not appear on the timeline the Timeline tab renders.
+    assert!(
+        body["timeline"].as_array().unwrap().is_empty(),
+        "a discussion post must not land on the run timeline: {body}"
+    );
+
+    // The other card sees only its own message, and a card nobody has posted on
+    // reads back an empty thread — what keeps the tab's empty state honest.
+    let (_, other) = send(&state, "GET", "/api/v1/company/tasks/t-other", None).await;
+    let other_thread = other["discussion"].as_array().unwrap();
+    assert_eq!(other_thread.len(), 1);
+    assert_eq!(other_thread[0]["text"], "someone else's thread");
+
+    let (_, quiet) = send(&state, "GET", "/api/v1/company/tasks/t-quiet", None).await;
+    assert_eq!(quiet["discussion"].as_array().unwrap().len(), 0);
+
+    // Both scope forms serve the same thread.
+    let (status, scoped) = send(&state, "GET", "/api/v1/companies/acme/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["discussion"].as_array().unwrap().len(), 2);
+}
+
+/// #335: what the write boundary refuses, and what it forgives.
+///
+/// An empty message is refused because there is no delete in v1 — a blank row
+/// would be permanent noise. An unknown card is refused because the post would
+/// otherwise be journaled somewhere no read surface can reach. An over-long
+/// message is *not* refused: it is truncated, so a long paste still posts.
+#[tokio::test]
+async fn task_discussion_rejects_an_empty_message_and_an_unknown_card() {
+    use crate::ports::tasks::MAX_DISCUSSION_CHARS;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    for text in ["", "   \n\t "] {
+        let (status, _) = send(
+            &state,
+            "POST",
+            "/api/v1/company/tasks/t-1/discussion",
+            Some(json!({ "text": text })),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "empty text: {text:?}");
+    }
+
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/nope/discussion",
+        Some(json!({ "text": "into the void" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+
+    // A long paste posts, capped on a character boundary.
+    let long = "é".repeat(MAX_DISCUSSION_CHARS + 500);
+    let (status, posted) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks/t-1/discussion",
+        Some(json!({ "text": long })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        posted["text"].as_str().unwrap().chars().count(),
+        MAX_DISCUSSION_CHARS
+    );
+
+    // Only the accepted post is on the thread: the three refusals journaled
+    // nothing.
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(body["discussion"].as_array().unwrap().len(), 1);
+}
+
+/// #348 review: the thread is served on a screen that polls every 4s, so it
+/// comes back as a **page** — the newest slice — with the rest reachable behind
+/// a cursor. Without the cap, one busy card re-sends its whole history fifteen
+/// times a minute per open browser, forever.
+///
+/// Asserted as a reader experiences it: the newest messages are the ones on the
+/// first read, the response admits there are older ones, and passing the oldest
+/// held `seq` back walks to the page before it without dropping or repeating a
+/// message. The cursor's page is the *end* of the thread, which is what makes
+/// `discussionHasMore` false there.
+#[tokio::test]
+async fn task_discussion_is_paged_newest_first_and_walks_back_with_a_cursor() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    // A thread longer than one page. Journaled directly: this test is about the
+    // read's shape, and the write path is pinned by the tests above.
+    const POSTS: usize = 62;
+    for n in 0..POSTS {
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::TaskDiscussionPosted {
+                    task_id: "t-1".into(),
+                    text: format!("message {n}"),
+                    by: None,
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let page = body["discussion"].as_array().unwrap();
+    assert!(
+        page.len() < POSTS,
+        "an unbounded thread came back whole: {} posts",
+        page.len()
+    );
+    assert_eq!(
+        body["discussionHasMore"], true,
+        "a truncated thread that does not say so reads as the whole conversation"
+    );
+    // The tail, not the head: what somebody opening the card needs first.
+    assert_eq!(
+        page.last().unwrap()["text"],
+        format!("message {}", POSTS - 1)
+    );
+    let first_seq = page[0]["seq"].as_u64().unwrap();
+    let oldest_on_page = page[0]["text"].as_str().unwrap().to_string();
+
+    // Walk back: the page *before* the oldest message held.
+    let (status, older) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/tasks/t-1?discussionBefore={first_seq}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let older_page = older["discussion"].as_array().unwrap();
+    assert_eq!(
+        older_page.len(),
+        POSTS - page.len(),
+        "the cursor page plus the first page must be the whole thread"
+    );
+    assert_eq!(
+        older["discussionHasMore"], false,
+        "nothing precedes the start of the thread"
+    );
+    assert_eq!(older_page[0]["text"], "message 0");
+    assert!(
+        older_page
+            .iter()
+            .all(|m| m["seq"].as_u64().unwrap() < first_seq),
+        "the cursor is exclusive — a message must not be served twice: {older_page:?}"
+    );
+    assert!(
+        !older_page
+            .iter()
+            .any(|m| m["text"].as_str() == Some(oldest_on_page.as_str())),
+        "the cursor message repeated on its own older page"
+    );
+
+    // A short thread is not paged at all — the flag stays honest downward.
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-2", "Quiet"))
+        .await
+        .unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::TaskDiscussionPosted {
+                task_id: "t-2".into(),
+                text: "just the one".into(),
+                by: None,
+            },
+        )
+        .await
+        .unwrap();
+    let (_, quiet) = send(&state, "GET", "/api/v1/company/tasks/t-2", None).await;
+    assert_eq!(quiet["discussion"].as_array().unwrap().len(), 1);
+    assert_eq!(quiet["discussionHasMore"], false);
+}
+
+/// #348 review: every post in the tests above is the harness admin, which
+/// exercises one of `into_message`'s three branches. The other two are the ones
+/// that matter for what reaches a reader's screen:
+///
+/// * a **departed** user — off the roster, so there is no name to resolve —
+///   must read as `someone`, never as the raw user id the journal holds;
+/// * a **machine credential** — the platform scope, which names no person —
+///   must read as `operator`, and must journal no actor at all.
+///
+/// The machine half goes through the real write path with a tenant token, so it
+/// pins `ScopedCompany`'s "keep the person, drop the credential" rule too: a
+/// platform post that started attributing itself to *something* would show up
+/// here as a label that is not `operator`.
+#[tokio::test]
+async fn task_discussion_names_a_departed_user_someone_and_a_machine_credential_operator() {
+    use crate::ports::types::{Actor, ActorKind, CompanyEvent};
+    use crate::server::platform_auth::{
+        PlatformAuthConfig, PlatformClaims, UnsignedTenantVerifier,
+    };
+    use std::collections::HashSet;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let verifier = std::sync::Arc::new(UnsignedTenantVerifier::new("plat-secret"));
+    let state = state_with_company(&home)
+        .await
+        .with_platform_auth(PlatformAuthConfig::new(verifier));
+    let company = CompanyId::new("acme");
+    state.set_owner(company.clone(), "tenant:acme".to_string());
+    let runtime = state.registry().get(&company).unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-1", "Ship it"))
+        .await
+        .unwrap();
+
+    // A user who has since left: journaled with an id the roster can no longer
+    // resolve. Only the journal can hold this state, so the fixture is written
+    // there rather than posted.
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::TaskDiscussionPosted {
+                task_id: "t-1".into(),
+                text: "I looked at this before I left".into(),
+                by: Some(Actor {
+                    kind: ActorKind::User,
+                    id: "u-departed".into(),
+                }),
+            },
+        )
+        .await
+        .unwrap();
+
+    let token = UnsignedTenantVerifier::tenant_token(&PlatformClaims {
+        tenant: "tenant:acme".to_string(),
+        scopes: HashSet::from(["operator".to_string()]),
+        companies: None,
+    });
+    let (status, posted) = send_auth(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/tasks/t-1/discussion",
+        Some(json!({ "text": "posted by the platform" })),
+        Some(&token),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(posted["author"], "operator");
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let thread = body["discussion"].as_array().unwrap();
+    let authors: Vec<&str> = thread
+        .iter()
+        .map(|m| m["author"].as_str().unwrap())
+        .collect();
+    assert_eq!(authors, vec!["someone", "operator"]);
+    // The id the journal holds must not reach a reader — a thread is read by
+    // every member of the company.
+    let wire = serde_json::to_string(&body["discussion"]).unwrap();
+    assert!(
+        !wire.contains("u-departed"),
+        "a user id reached the wire: {wire}"
+    );
+}
+
+/// #352: `GET …/tasks/{id}/export` answers a downloadable HTML document, built
+/// from the same read the console consumes, and changes nothing.
+///
+/// The last clause is an acceptance criterion in its own right and the one thing
+/// the renderer's own tests cannot see: a document that quietly journalled an
+/// "exported" event, or touched the card's column or `updatedAt`, would make an
+/// audit export a modification of the thing being audited. So the board row and
+/// the journal length are both compared across the call.
+#[tokio::test]
+async fn task_export_serves_a_readable_document_and_alters_nothing() {
+    use crate::ports::types::{CompanyEvent, EventSeq};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "t-1".into(),
+                title: "Launch post".into(),
+                note: Some("Write the launch post.".into()),
+                column: "in_review".into(),
+                priority: "high".into(),
+                assignee: "writer".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+            },
+        )
+        .await
+        .unwrap();
+    for event in [
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+            // `None` is the honest value here, not a placeholder: this fixture
+            // journals a dispatch directly rather than going through the choke
+            // point that mints a run row (#242), and the export renders the
+            // timeline, which does not read `run_id`.
+            run_id: None,
+        },
+        CompanyEvent::AgentReply {
+            parent: None,
+            chat_id: "t-1".into(),
+            agent_id: "writer".into(),
+            text: "First draft is up.".into(),
+            steps: Vec::new(),
+            task_id: Some("t-1".into()),
+        },
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let before_board = runtime.tasks().list(&company).await.unwrap();
+    let before_events = runtime
+        .events()
+        .read_from(&company, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap()
+        .len();
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/v1/company/tasks/t-1/export")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let content_type = response
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    let disposition = response
+        .headers()
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default()
+        .to_string();
+    assert_eq!(content_type, "text/html; charset=utf-8");
+    assert_eq!(
+        disposition, "attachment; filename=\"task-launch-post.html\"",
+        "the export must download as a named file"
+    );
+
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(bytes.to_vec()).expect("the document is utf-8");
+    assert!(html.starts_with("<!doctype html>"));
+    assert!(html.contains("Launch post"));
+    assert!(html.contains("<dd>In review</dd>"));
+    assert!(html.contains("First draft is up."));
+
+    let after_board = runtime.tasks().list(&company).await.unwrap();
+    assert_eq!(after_board, before_board, "exporting altered the board");
+    let after_events = runtime
+        .events()
+        .read_from(&company, EventSeq::new(0), usize::MAX)
+        .await
+        .unwrap()
+        .len();
+    assert_eq!(after_events, before_events, "exporting journalled an event");
+
+    let (status, _) = send(&state, "GET", "/api/v1/company/tasks/nope/export", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// #185 review follow-up: pin the two timeline branches the first test skipped —
+/// `tool_failed`, and the window-correlated `approval` arm.
+///
+/// The approval arm is the only branch in `fold_task_journal` whose correlation is
+/// heuristic (parked effects carry no task id, so it is scoped by the run
+/// window). That makes it the one most likely to regress into leaking another
+/// run's resolution, so it is asserted from both sides: a resolution *before*
+/// the dispatch anchor must be excluded, one *inside* the window admitted.
+#[tokio::test]
+async fn task_timeline_scopes_approvals_to_the_run_window() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "t-1".into(),
+                title: "Ship it".into(),
+                note: None,
+                column: "in_review".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    let approval = |id: &str| CompanyEvent::ApprovalResolved {
+        approval_id: ApprovalId::new(id),
+        verdict: Verdict::Approve,
+        by: Actor {
+            kind: ActorKind::User,
+            id: "u-1".into(),
+        },
+    };
+
+    for event in [
+        // Before the dispatch anchor — belongs to some other run, must not leak.
+        approval("before"),
+        CompanyEvent::TaskDispatched {
+            task_id: "t-1".into(),
+            run_id: None,
+        },
+        // Inside the window — admitted.
+        approval("during"),
+        CompanyEvent::McpCallFailed {
+            task_id: Some("t-1".into()),
+            server: "gh".into(),
+            tool: "issues".into(),
+            status: "credential_required".into(),
+            message: "needs auth".into(),
+        },
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".into(),
+            desk: "ceo".into(),
+            output: "shipped".into(),
+            column: "in_review".into(),
+            artifact_ids: Vec::new(),
+        },
+        // After the window closed — must not leak either.
+        approval("after"),
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let kinds: Vec<&str> = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        kinds,
+        vec!["dispatched", "approval", "tool_failed", "completed"],
+        "exactly one approval — the one inside the run window"
+    );
+
+    // The failure carries its scrubbed message; the operator's identity on the
+    // approval is dropped, matching the SSE projection's deny-by-default stance.
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(raw.contains("needs auth"));
+    assert!(!raw.contains("u-1"), "operator identity leaked: {raw}");
+}
+
+// ── Issue #305: working time vs waiting-on-a-human time ──────────────────────
+//
+// The split is a *read-time join*: the park instant lives only in the runtime
+// journal (`ApprovalParked`), the resolution only in the event log
+// (`ApprovalResolved`), and `approval_id` is the single key shared by both.
+// These tests pin that join, its window clamp, and the two ways a wait can end
+// (an operator decided, or the TTL swept it) — plus the negative case, which is
+// an acceptance criterion in its own right: a task that never waited must
+// report no waiting figure at all rather than a zero.
+
+/// Parks an approval in the journal and seeds a card + its dispatch anchor.
+/// Returns `(runtime, dispatched_at_millis)`.
+async fn dispatched_task(
+    state: &AppState,
+    company: &CompanyId,
+) -> (std::sync::Arc<crate::CompanyRuntime>, u64) {
+    use crate::ports::types::CompanyEvent;
+
+    let runtime = state.registry().get(company).unwrap();
+    runtime
+        .tasks()
+        .upsert(
+            company,
+            &TaskRecord {
+                id: "t-1".into(),
+                title: "Ship it".into(),
+                note: None,
+                column: "in_progress".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .events()
+        .append(
+            company,
+            CompanyEvent::TaskDispatched {
+                task_id: "t-1".into(),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+    let dispatched_at = runtime
+        .events()
+        .read_from(company, crate::ports::types::EventSeq::new(0), 64)
+        .await
+        .unwrap()
+        .last()
+        .unwrap()
+        .at_millis;
+    (runtime, dispatched_at)
+}
+
+/// A parked effect to journal. Its content is irrelevant to the join — only the
+/// id and the instant matter.
+fn parked_effect() -> crate::ports::types::Effect {
+    use crate::ports::types::{Effect, EffectGroup};
+    Effect {
+        kind: "filing.submit".into(),
+        group: EffectGroup::Sign,
+        amount_usd: None,
+        established_thread: false,
+        first_time_counterparty: false,
+        payload: serde_json::Value::Null,
+        agent: None,
+        run_id: None,
+    }
+}
+
+/// Pulls the single `approval` row out of a task-detail body.
+fn only_approval(body: &Value) -> Value {
+    let rows: Vec<Value> = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "approval")
+        .cloned()
+        .collect();
+    assert_eq!(rows.len(), 1, "expected exactly one approval row: {rows:?}");
+    rows[0].clone()
+}
+
+/// **The acceptance test** (#305): an approval that parked and later resolved
+/// reports the wait it actually caused.
+///
+/// Before this, `ApprovalResolved` carried a verdict and an actor but no park
+/// time, so the console could only show one undifferentiated elapsed figure — a
+/// task idle all day on a human looked exactly like one busy all day. The
+/// assertion is exact arithmetic against the observed event timestamps, not a
+/// tolerance: the whole value of the number is that it is not an estimate.
+#[tokio::test]
+async fn task_timeline_reports_the_wait_an_approval_actually_caused() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // Parked 40ms into the run. The sleep only guarantees the resolution lands
+    // strictly after the park; the assertion below derives the expected span
+    // from the real timestamps rather than from the sleep's duration.
+    let id = ApprovalId::new("appr-1");
+    let parked_at = dispatched_at + 40;
+    runtime
+        .journal
+        .record_parked(
+            &id,
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    // Both halves of a real resolution: the journal drops it from the parked
+    // queue *and* the event log gains the resolution. Doing only the latter
+    // would leave the task reading as still waiting — the assertion at the end
+    // of this test is what pins the pair together.
+    runtime.journal.record_resolved(&id).await.unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::ApprovalResolved {
+                approval_id: id.clone(),
+                verdict: Verdict::Approve,
+                by: Actor {
+                    kind: ActorKind::User,
+                    id: "u-1".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let approval = only_approval(&body);
+    let resolved_at = approval["atMillis"].as_u64().unwrap();
+    assert!(
+        resolved_at > parked_at,
+        "the sleep did not outlast the park"
+    );
+    assert_eq!(
+        approval["waitedMillis"].as_u64().unwrap(),
+        resolved_at - parked_at,
+        "the wait must be the real park→resolve span, not an inference",
+    );
+    assert_eq!(approval["label"], "Approval approved");
+
+    // The join must not become a new identity leak: it reads `approval_id` and
+    // `by.kind`, never `by.id`.
+    let raw = serde_json::to_string(&body["timeline"]).unwrap();
+    assert!(!raw.contains("u-1"), "operator identity leaked: {raw}");
+
+    // The wait is over, so nothing is pending: no live figure.
+    assert!(
+        body.get("waitingSince").is_none(),
+        "a resolved approval must not leave the task reading as still waiting",
+    );
+}
+
+/// A wait that ended in a TTL sweep is still a wait, and must not read as a
+/// human decision.
+///
+/// Expiry used to write *only* a journal record, so a default-deny-on-silence
+/// produced no event at all — the single case where waiting is most costly was
+/// the one case the timeline could not see. The sweep now also appends a
+/// system-attributed `ApprovalResolved`, and the read side labels it as an
+/// expiry: rendering "Approval denied" would claim somebody looked at it.
+#[tokio::test]
+async fn expired_approval_is_labelled_as_an_expiry_and_carries_its_wait() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    let id = ApprovalId::new("appr-stale");
+    let parked_at = dispatched_at + 40;
+    runtime
+        .journal
+        .record_parked(
+            &id,
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // Re-park into the gate at epoch 0 so it is unambiguously past any TTL.
+    runtime
+        .approval_gate
+        .rehydrate(id.clone(), parked_effect(), 0);
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    let expired = runtime.sweep_expired_approvals().await.unwrap();
+    assert_eq!(expired, vec![id]);
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let approval = only_approval(&body);
+    assert_eq!(
+        approval["label"], "Approval expired (auto-denied)",
+        "an expiry must not read as though a human decided",
+    );
+    let resolved_at = approval["atMillis"].as_u64().unwrap();
+    assert_eq!(
+        approval["waitedMillis"].as_u64().unwrap(),
+        resolved_at - parked_at,
+        "an expired approval's wait is the span nobody answered in",
+    );
+}
+
+/// An approval already parked when the task was dispatched charges this run only
+/// for the part of its wait that overlapped the run.
+///
+/// Approvals carry no task id, so they are correlated to the dispatch window.
+/// Without the clamp, an effect parked hours before this card was dispatched
+/// would dump its whole backlog wait onto this task's header — a figure larger
+/// than the task's own elapsed time, which is visibly wrong.
+#[tokio::test]
+async fn a_wait_that_began_before_dispatch_is_clamped_to_the_run_window() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // Parked a full hour before this task was ever dispatched.
+    let id = ApprovalId::new("appr-old");
+    runtime
+        .journal
+        .record_parked(
+            &id,
+            &parked_effect(),
+            dispatched_at - 3_600_000,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+    runtime.journal.record_resolved(&id).await.unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::ApprovalResolved {
+                approval_id: id,
+                verdict: Verdict::Deny,
+                by: Actor {
+                    kind: ActorKind::Operator,
+                    id: "owner".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approval = only_approval(&body);
+    let resolved_at = approval["atMillis"].as_u64().unwrap();
+    let waited = approval["waitedMillis"].as_u64().unwrap();
+    assert_eq!(
+        waited,
+        resolved_at - dispatched_at,
+        "the pre-dispatch hour must not be charged to this run",
+    );
+    assert!(waited < 3_600_000, "the clamp did not apply: {waited}");
+    assert_eq!(approval["label"], "Approval denied");
+}
+
+/// A task parked on an operator *right now* reports it, even though no
+/// resolution event exists yet.
+///
+/// This is the state the screen most needs to surface — "your agent is stopped,
+/// waiting on you" — and it is invisible in the event log by construction: the
+/// approval has not been resolved, so nothing has been appended. It comes from
+/// the still-pending queue instead, scoped to the open run window.
+#[tokio::test]
+async fn a_currently_parked_approval_surfaces_as_a_live_wait() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    let parked_at = dispatched_at + 10;
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-live"),
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["waitingSince"].as_u64().unwrap(),
+        parked_at,
+        "the live wait must start at the park instant",
+    );
+    // Nothing resolved, so nothing reached the timeline.
+    assert!(
+        body["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] != "approval"),
+        "an unresolved approval must not fake a timeline row",
+    );
+}
+
+/// A task that never waited reports no waiting at all — not a zero.
+///
+/// Both fields are `skip_serializing_if = "Option::is_none"`, so their absence
+/// is what lets the console omit the figure entirely. If either were serialized
+/// as `0`, every task on the board would grow a permanent "Waiting 0s", which
+/// the issue calls out by name.
+#[tokio::test]
+async fn a_task_that_never_waited_reports_no_waiting_fields() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, _) = dispatched_task(&state, &company).await;
+
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::DeskTaskCompleted {
+                task_id: "t-1".into(),
+                desk: "ceo".into(),
+                output: "shipped".into(),
+                column: "in_review".into(),
+                artifact_ids: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body.get("waitingSince").is_none(),
+        "a task with nothing parked must not report a live wait",
+    );
+    for entry in body["timeline"].as_array().unwrap() {
+        assert!(
+            entry.get("waitedMillis").is_none(),
+            "a non-approval row must never carry a wait: {entry:?}",
+        );
+    }
+}
+
+// ── Issue #333: a task's Approvals tab shows that task's approvals ──────────
+//
+// The tab used to filter the *timeline* for `kind == "approval"`, which meant
+// it could only ever show a resolution that fell inside the run window — and
+// showed nothing at all for the state that matters most, an approval parked
+// right now with the card stopped behind it. These pin the real query: the
+// task id the runtime journal records with every parked effect.
+
+/// **The acceptance test**: an approval raised while working a task appears on
+/// that task's Approvals tab while it is still parked.
+///
+/// This is the QA repro — a request sitting on the main Approvals page while
+/// the originating card's own tab read "No approvals in this run" — and it is
+/// unreachable through the timeline by construction: nothing is appended to the
+/// event log until somebody decides.
+#[tokio::test]
+async fn a_parked_approval_appears_on_its_own_task() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    let parked_at = dispatched_at + 10;
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-mine"),
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["id"], "appr-mine");
+    assert_eq!(approvals[0]["status"], "pending");
+    assert_eq!(approvals[0]["atMillis"].as_u64().unwrap(), parked_at);
+    // #468 shrank this projection to what the card's one waiting line reads.
+    // `kind`, `resolvedAtMillis` and `waitedMillis` left with the Approvals tab.
+    for gone in ["kind", "resolvedAtMillis", "waitedMillis"] {
+        assert!(
+            approvals[0].get(gone).is_none(),
+            "`{gone}` was dropped with the Approvals tab (#468)",
+        );
+    }
+    // The timeline is untouched — a parked approval still has no event.
+    assert!(
+        body["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|e| e["kind"] != "approval"),
+    );
+}
+
+/// **The acceptance test that the old window could not pass**: two cards worked
+/// in the same window keep their own approvals.
+///
+/// Under the window correlation both rows landed on both tabs, because the only
+/// question asked was "did this resolve while that card was running". The join
+/// is an id now, so a card's tab shows its own sign-off and nothing else.
+#[tokio::test]
+async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // A second card, dispatched into the same open window as `t-1`.
+    runtime
+        .tasks()
+        .upsert(
+            &company,
+            &TaskRecord {
+                id: "t-2".into(),
+                title: "Also ship it".into(),
+                note: None,
+                column: "in_progress".into(),
+                priority: "medium".into(),
+                assignee: "ceo".into(),
+                updated_at_millis: 1,
+                origin_chat_id: None,
+                parent_task_id: None,
+                output: None,
+                plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::TaskDispatched {
+                task_id: "t-2".into(),
+                run_id: None,
+            },
+        )
+        .await
+        .unwrap();
+
+    // One approval each, both parked and resolved inside both windows.
+    for (id, owner) in [("appr-one", "t-1"), ("appr-two", "t-2")] {
+        let id = ApprovalId::new(id);
+        runtime
+            .journal
+            .record_parked(
+                &id,
+                &parked_effect(),
+                dispatched_at + 5,
+                TaskLink::Task { id: owner.into() },
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        runtime.journal.record_resolved(&id).await.unwrap();
+        runtime
+            .events()
+            .append(
+                &company,
+                CompanyEvent::ApprovalResolved {
+                    approval_id: id,
+                    verdict: Verdict::Approve,
+                    by: Actor {
+                        kind: ActorKind::User,
+                        id: "u-1".into(),
+                    },
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    for (task, own, other) in [
+        ("t-1", "appr-one", "appr-two"),
+        ("t-2", "appr-two", "appr-one"),
+    ] {
+        let (status, body) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/tasks/{task}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        let ids: Vec<&str> = body["approvals"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|a| a["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, vec![own], "{task} must own exactly its own approval");
+        assert!(!ids.contains(&other));
+        // And the timeline agrees — one surface, one correlation.
+        let rows: Vec<&Value> = body["timeline"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["kind"] == "approval")
+            .collect();
+        assert_eq!(rows.len(), 1, "{task}: {rows:?}");
+    }
+}
+
+/// A resolved approval keeps its row on the tab, carrying the verdict and the
+/// wait it caused. The same resolution the main Approvals page performed, seen
+/// from the card: approving on either surface reflects on both.
+#[tokio::test]
+async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    let id = ApprovalId::new("appr-done");
+    let parked_at = dispatched_at + 20;
+    runtime
+        .journal
+        .record_parked(
+            &id,
+            &parked_effect(),
+            parked_at,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+    runtime.journal.record_resolved(&id).await.unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::ApprovalResolved {
+                approval_id: id,
+                verdict: Verdict::Deny,
+                by: Actor {
+                    kind: ActorKind::Operator,
+                    id: "owner".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    let row = &approvals[0];
+    assert_eq!(row["status"], "denied");
+    // The row is anchored at the *park*, so approvals read in the order things
+    // were asked rather than the order they were answered.
+    assert_eq!(row["atMillis"].as_u64().unwrap(), parked_at);
+    // The park→resolve span moved off this row with the Approvals tab (#468).
+    // It is unchanged, and still asserted here — on the `approval` timeline
+    // entry, which is where it now lives. Dropping the assertion along with the
+    // field would have quietly retired the arithmetic's only coverage.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
+    assert!(resolved_at > parked_at);
+    assert_eq!(
+        entry["waitedMillis"].as_u64().unwrap(),
+        resolved_at - parked_at,
+    );
+    // Nothing is parked any more, so the card is not still waiting.
+    assert!(body.get("waitingSince").is_none());
+    // The join must not become a new identity leak.
+    let raw = serde_json::to_string(&body["approvals"]).unwrap();
+    assert!(!raw.contains("owner"), "operator identity leaked: {raw}");
+}
+
+/// A task with no approvals reports an empty list, not a fabricated one — the
+/// honest empty state the console renders.
+///
+/// Covers *another card's* approval parked mid-window. The case where the
+/// approval belongs to nothing at all is
+/// [`an_unlinked_approval_is_not_absorbed_by_the_running_card`], which is a
+/// different fact and was the one the old window got wrong.
+#[tokio::test]
+async fn a_task_with_no_approvals_of_its_own_reports_an_empty_list() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // Parked for a different card entirely, while this one is mid-run.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &parked_effect(),
+            dispatched_at + 5,
+            TaskLink::Task {
+                id: "t-other".into(),
+            },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["approvals"].as_array().unwrap().is_empty(),
+        "{:?}",
+        body["approvals"],
+    );
+    assert!(
+        body.get("waitingSince").is_none(),
+        "another card's approval must not make this one read as waiting",
+    );
+}
+
+/// An approval that belongs to **no** card — a workflow delivery, a chat turn,
+/// a scheduler tick — parked while a card is mid-run must not be absorbed by
+/// that card (#333 review follow-up).
+///
+/// This is the case the first cut of the ownership test got wrong. It tested
+/// `origins.get(id).and_then(|o| o.task_id)`, which is `None` both for a park
+/// that recorded no card *and* for a pre-#333 park that could not record one —
+/// so every unlinked park since #333 fell through to the run window and landed
+/// on whatever happened to be running, dragging `waitingSince` with it.
+#[tokio::test]
+async fn an_unlinked_approval_is_not_absorbed_by_the_running_card() {
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // The shape `workflows::delivery` writes: parked mid-window, owned by
+    // nothing, and recorded as such.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-delivery"),
+            &parked_effect(),
+            dispatched_at + 5,
+            TaskLink::Unlinked,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        body["approvals"].as_array().unwrap().is_empty(),
+        "an approval owned by no card must not appear on a card: {:?}",
+        body["approvals"],
+    );
+    assert!(
+        body.get("waitingSince").is_none(),
+        "nor may it make that card read as waiting on the operator",
+    );
+}
+
+/// The two correlation keys, in the order the read side resolves them: the
+/// attempt (`run_id`, #242) is authoritative wherever it is present, and the
+/// parked card link (#333) is the fallback for every park with no attempt
+/// behind it.
+///
+/// Neither key is a superset of the other, which is why both are kept. A
+/// `RunRecord` names its card, so a run id resolves to a task — but a task id
+/// can never say which *attempt* parked an approval, and #183 settled that
+/// repeat trips through review are normal. Meanwhile `run_id` is `None` by
+/// design for a chat turn, a workflow delivery, or the hosted brain's gate, so
+/// it cannot be the only key either.
+#[tokio::test]
+async fn the_attempt_id_outranks_the_card_link_when_both_are_present() {
+    use crate::ports::runs::NewRun;
+    use crate::ports::types::ApprovalId;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // Two attempts at this card, and one at another — the case a card-level key
+    // alone cannot tell apart.
+    for (id, task) in [("run-a", "t-1"), ("run-b", "t-1"), ("run-c", "t-other")] {
+        runtime
+            .runs()
+            .create_run(
+                &company,
+                NewRun {
+                    id: id.to_string(),
+                    task_id: task.to_string(),
+                    agent_id: "ceo".to_string(),
+                },
+            )
+            .await
+            .unwrap();
+    }
+
+    let under_run = |run: &str| {
+        let mut effect = parked_effect();
+        effect.run_id = Some(run.to_string());
+        effect
+    };
+
+    // Parked under this card's *second* attempt, and stamped Unlinked at the
+    // card level. The run id is authoritative, so it still lands here.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-attempt-2"),
+            &under_run("run-b"),
+            dispatched_at + 5,
+            TaskLink::Unlinked,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    // Parked under another card's attempt, but stamped with *our* card. The run
+    // id outranks the link, so it must not appear.
+    runtime
+        .journal
+        .record_parked(
+            &ApprovalId::new("appr-elsewhere"),
+            &under_run("run-c"),
+            dispatched_at + 6,
+            TaskLink::Task { id: "t-1".into() },
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(
+        approvals[0]["id"], "appr-attempt-2",
+        "the attempt id decides ownership, not the card link",
+    );
+}
+
+/// An approval parked by a build older than #333 carries no link at all. It
+/// keeps the pre-#333 run-window correlation rather than vanishing, so existing
+/// history still renders.
+///
+/// The legacy line is written **raw and replayed**, not produced by
+/// `record_parked` — which is the point. Since #333 there is no way to record a
+/// park without a link, so the only source of a missing one is a file written
+/// by an older host, and that is exactly what this pins. Contrast
+/// [`an_unlinked_approval_is_not_absorbed_by_the_running_card`]: same "no task
+/// id", opposite outcome, because one is unrecorded and the other is recorded.
+#[tokio::test]
+async fn a_pre_333_approval_falls_back_to_the_run_window() {
+    use crate::ports::types::{Actor, ActorKind, ApprovalId, CompanyEvent, Verdict};
+    use crate::store::paths::Bundle;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let (runtime, dispatched_at) = dispatched_task(&state, &company).await;
+
+    // A journal line as an older host wrote it: no `task` key whatsoever.
+    let legacy = json!({
+        "record": "ApprovalParked",
+        "id": "appr-legacy",
+        "effect": parked_effect(),
+        "at_millis": dispatched_at + 5,
+    });
+    let path = Bundle::new(&home, runtime.id()).journal_jsonl();
+    tokio::fs::write(&path, format!("{legacy}\n"))
+        .await
+        .unwrap();
+    runtime.journal.load().await.unwrap();
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["id"], "appr-legacy");
+    assert_eq!(
+        body["waitingSince"].as_u64().unwrap(),
+        dispatched_at + 5,
+        "the legacy live-wait behaviour is unchanged",
+    );
+
+    let id = ApprovalId::new("appr-legacy");
+    runtime.journal.record_resolved(&id).await.unwrap();
+    runtime
+        .events()
+        .append(
+            &company,
+            CompanyEvent::ApprovalResolved {
+                approval_id: id,
+                verdict: Verdict::Approve,
+                by: Actor {
+                    kind: ActorKind::User,
+                    id: "u-1".into(),
+                },
+            },
+        )
+        .await
+        .unwrap();
+
+    let (_, body) = send(&state, "GET", "/api/v1/company/tasks/t-1", None).await;
+    let approvals = body["approvals"].as_array().unwrap();
+    assert_eq!(approvals.len(), 1, "{approvals:?}");
+    assert_eq!(approvals[0]["id"], "appr-legacy");
+    assert_eq!(approvals[0]["status"], "approved");
+    // As above (#468): the span lives on the timeline entry now, and the legacy
+    // clamping behaviour is asserted there rather than dropped.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
+    assert_eq!(
+        entry["waitedMillis"].as_u64().unwrap(),
+        resolved_at.saturating_sub(dispatched_at + 5),
+        "the resolved legacy row keeps the original park-to-resolve wait",
+    );
+}
+
+/// #185 review follow-up: the lineage forest is enforced at the write boundary.
+///
+/// Without this a card could be its own parent (appearing as both parent and
+/// child of itself in `task_detail`), point at a card that does not exist, or
+/// close a `t1 → t2 → t1` loop — all persisted silently.
+#[tokio::test]
+async fn parent_task_id_rejects_self_unknown_and_cycles() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let create = |title: &str| {
+        let title = title.to_string();
+        async move { json!({ "title": title }) }
+    };
+    let (_, a) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(create("A").await),
+    )
+    .await;
+    let (_, b) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(create("B").await),
+    )
+    .await;
+    let (a_id, b_id) = (
+        a["id"].as_str().unwrap().to_string(),
+        b["id"].as_str().unwrap().to_string(),
+    );
+
+    // Unknown parent on create.
+    let (status, _) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "C", "parentTaskId": "nope" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // Self-parenting on patch.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{a_id}"),
+        Some(json!({ "parentTaskId": a_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // A legitimate edge: B's parent is A.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{b_id}"),
+        Some(json!({ "parentTaskId": a_id })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // …which makes A → B a cycle.
+    let (status, _) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{a_id}"),
+        Some(json!({ "parentTaskId": b_id })),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "A → B → A must be rejected"
+    );
+}
+
+/// #185 review follow-up: validation is only as good as its atomicity.
+///
+/// Each half of `A → B` / `B → A` is individually legal against a board that
+/// has neither edge yet. Read → validate → write therefore has to be one
+/// critical section: without it both requests can validate against a snapshot
+/// taken before the other wrote, and the pair persists the very cycle
+/// `validate_parent` exists to reject.
+///
+/// With the writes serialized this is deterministic rather than probabilistic —
+/// whichever request takes the lock second sees the first one's edge and is
+/// rejected — so the assertion is *exactly* one success, not "usually one".
+#[tokio::test]
+async fn concurrent_reparents_cannot_race_a_cycle_onto_the_board() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = std::sync::Arc::new(state_with_company(&home).await);
+
+    let mut ids = Vec::new();
+    for title in ["A", "B"] {
+        let (_, card) = send(
+            &state,
+            "POST",
+            "/api/v1/company/tasks",
+            Some(json!({ "title": title })),
+        )
+        .await;
+        ids.push(card["id"].as_str().unwrap().to_string());
+    }
+    let (a_id, b_id) = (ids[0].clone(), ids[1].clone());
+
+    // Fire both halves of the would-be cycle at once.
+    let reparent = |child: String, parent: String| {
+        let state = state.clone();
+        tokio::spawn(async move {
+            send(
+                &state,
+                "PATCH",
+                &format!("/api/v1/company/tasks/{child}"),
+                Some(json!({ "parentTaskId": parent })),
+            )
+            .await
+            .0
+        })
+    };
+    let first = reparent(b_id.clone(), a_id.clone());
+    let second = reparent(a_id.clone(), b_id.clone());
+    let (first, second) = (first.await.unwrap(), second.await.unwrap());
+
+    let outcomes = [first, second];
+    assert_eq!(
+        outcomes.iter().filter(|s| **s == StatusCode::OK).count(),
+        1,
+        "exactly one re-parent may win: {outcomes:?}"
+    );
+    assert_eq!(
+        outcomes
+            .iter()
+            .filter(|s| **s == StatusCode::BAD_REQUEST)
+            .count(),
+        1,
+        "the loser must be rejected as a cycle, not silently applied: {outcomes:?}"
+    );
+
+    // And the board itself is a forest: the two cards cannot both have parents.
+    let (_, board) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    let parented = board
+        .as_array()
+        .expect("board is a list")
+        .iter()
+        .filter(|c| c["parentTaskId"].is_string())
+        .count();
+    assert_eq!(parented, 1, "a cycle reached the board: {board}");
+}
+
+// ---------------------------------------------------------------------------
+// Who may decide on the company's behalf (issue #403)
+// ---------------------------------------------------------------------------
+
+/// Sends with an explicit cookie, so the role boundary can be driven with a
+/// member session rather than the harness admin.
+async fn send_cookie(
+    state: &AppState,
+    method: &str,
+    uri: &str,
+    body: Option<Value>,
+    cookie: &str,
+) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("cookie", cookie);
+    let request = match body {
+        Some(body) => request
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+        None => request.body(Body::empty()).unwrap(),
+    };
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if bytes.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// Every route that decides what this company reaches the outside world *as* —
+/// which credential it presents, which third-party account its agents act
+/// through, where its mail and its model calls go — refuses a member.
+///
+/// One table rather than a test per module, on purpose. The gap issue #403
+/// reported was not that one route forgot a check; it was that a whole plane
+/// shared an extractor whose name did not suggest "any member may write". A
+/// per-module test would have let the next route added to that plane be added
+/// without one. This list is the plane, and a new route joins it here.
+///
+/// The assertion is `403` specifically, not merely "not 200": a `404` or a
+/// `409` would also be non-200 while meaning the route simply did not run, and
+/// that would pass a test which proves nothing.
+#[tokio::test]
+async fn a_member_cannot_change_what_the_company_reaches_the_world_as() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+    let member =
+        crate::server::test_support::seed_session(&state, "acme", crate::ports::UserRole::Member)
+            .await;
+
+    let cases: Vec<(&str, &str, Option<Value>)> = vec![
+        // The company's Composio identity, and the accounts its agents use.
+        (
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "x" })),
+        ),
+        (
+            "POST",
+            "/api/v1/company/composio/authorize",
+            Some(json!({ "toolkit": "gmail" })),
+        ),
+        // The model every agent thinks with, and the key it is billed against.
+        (
+            "PUT",
+            "/api/v1/company/inference",
+            Some(json!({ "provider": "openai_compatible", "baseUrl": "https://example.test" })),
+        ),
+        ("DELETE", "/api/v1/company/inference", None),
+        // The company's outbound mail identity — and a send from its address.
+        (
+            "PUT",
+            "/api/v1/company/smtp",
+            Some(
+                json!({ "provider": "smtp", "host": "mail.example.test", "port": 587,
+                         "username": "u", "password": "p", "from": "a@example.test" }),
+            ),
+        ),
+        (
+            "POST",
+            "/api/v1/company/smtp/test",
+            Some(json!({ "to": "elsewhere@example.test" })),
+        ),
+        (
+            "PUT",
+            "/api/v1/company/domain",
+            Some(json!({"domain": "x.test"})),
+        ),
+        // The Telegram bot the company speaks as, and where its updates land.
+        (
+            "PUT",
+            "/api/v1/company/channels/telegram",
+            Some(json!({ "botToken": "x" })),
+        ),
+        ("DELETE", "/api/v1/company/channels/telegram", None),
+        ("POST", "/api/v1/company/channels/telegram/webhook", None),
+        // Which tool servers exist, and the credentials they carry.
+        (
+            "POST",
+            "/api/v1/company/mcp/servers",
+            Some(json!({ "name": "evil", "endpoint": "https://example.test" })),
+        ),
+        (
+            "PUT",
+            "/api/v1/company/mcp/servers/anything",
+            Some(json!({ "endpoint": "https://example.test" })),
+        ),
+        ("DELETE", "/api/v1/company/mcp/servers/anything", None),
+        (
+            "POST",
+            "/api/v1/company/mcp/servers/anything/oauth/start",
+            None,
+        ),
+    ];
+
+    for (method, uri, body) in cases {
+        let (status, response) = send_cookie(&state, method, uri, body, &member).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} let a member through: {response}"
+        );
+        assert_eq!(
+            response["code"], "forbidden",
+            "{method} {uri} refused without saying why: {response}"
+        );
+    }
+}
+
+/// The other side, on the same table: the harness admin is refused by none of
+/// them on role grounds.
+///
+/// Several answer `409`/`404`/`502` for their own reasons — no feature in this
+/// build, no such server, no reachable host — and that is the point. What must
+/// never appear is `403`, which would mean the guard caught the wrong person
+/// and the fix had quietly removed the capability instead of assigning it.
+#[tokio::test]
+async fn an_admin_is_refused_by_none_of_them() {
+    let home_dir = home();
+    let state = state_with_company(home_dir.path()).await;
+
+    let cases: Vec<(&str, &str, Option<Value>)> = vec![
+        (
+            "PUT",
+            "/api/v1/company/composio/token",
+            Some(json!({ "token": "x" })),
+        ),
+        (
+            "PUT",
+            "/api/v1/company/domain",
+            Some(json!({"domain": "x.test"})),
+        ),
+        (
+            "PUT",
+            "/api/v1/company/channels/telegram",
+            Some(json!({ "botToken": "x" })),
+        ),
+        (
+            "POST",
+            "/api/v1/company/mcp/servers",
+            Some(json!({ "name": "svc", "endpoint": "https://example.test" })),
+        ),
+    ];
+
+    for (method, uri, body) in cases {
+        let (status, response) = send(&state, method, uri, body).await;
+        assert_ne!(
+            status,
+            StatusCode::FORBIDDEN,
+            "{method} {uri} refused an admin: {response}"
+        );
+    }
+}
+
+/// Issue #552: a published deliverable lives on two surfaces, and the console's
+/// workspace `PUT` is where an operator edits one. Saving that note must record
+/// an **operator version** on the artifact chain, because that edit is exactly
+/// the datum `human_edit_diff` exists to answer — and overwriting only the node
+/// would leave the history claiming the agent's draft shipped unchanged.
+///
+/// The ordering is asserted too, by refusing the node write: an artifact
+/// stamped with a node id the tree does not have makes the chain append
+/// succeed and the node write fail, and the version must still be there
+/// afterwards. Chain-ahead-of-node is the survivable direction and
+/// node-ahead-of-chain is the silent one, so a failed save must land on the
+/// first.
+#[tokio::test]
+async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A note in the tree…
+    let (status, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "the agent's draft"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    // …that is the projection of a published artifact.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(artifact["versions"].as_array().unwrap().len(), 2);
+    assert_eq!(artifact["versions"][1]["body"], "the operator's rewrite");
+    assert_eq!(artifact["versions"][1]["author"], "operator");
+    assert_eq!(
+        artifact["versions"][1]["note"], "operator edit before approval",
+        "the wording the console recognises, shared with the append route"
+    );
+    assert_eq!(
+        artifact["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version must inherit the node, or the NEXT save mirrors nothing"
+    );
+    assert!(
+        artifact["humanEditDiff"].is_object(),
+        "the whole point: a console edit of a deliverable is now diffable"
+    );
+
+    // And the node itself carries the operator's text.
+    let (node, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(body, "the operator's rewrite");
+    assert_eq!(
+        node.updated_by,
+        crate::ports::workspace::WorkspaceOrigin::Operator
+    );
+
+    // -- and now the ordering, with the node write refused ------------------
+    //
+    // A deliverable whose node the operator deleted still carries that node's
+    // id on its latest version, so the reverse lookup matches and the append
+    // runs — then the write fails, because the node is gone. That is the
+    // failure this route's ordering was chosen for, and it is reachable
+    // without a mock: the refusal comes from the real store.
+    let mut orphaned = ArtifactRecord::new(
+        "art-2",
+        "t-1",
+        "Retired spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("retired.md");
+    orphaned.stamp_workspace_node("node-the-operator-deleted");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &orphaned)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-the-operator-deleted",
+        Some(json!({"content": "an edit the tree cannot take"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "the node write must fail — there is no such node"
+    );
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        2,
+        "the version must survive the refused node write: chain-ahead-of-node is \
+         the direction that heals, and this is the ordering that guarantees it"
+    );
+    assert_eq!(
+        artifact["versions"][1]["body"],
+        "an edit the tree cannot take"
+    );
+}
+
+/// Nearly every note in the tree is an ordinary note, not a deliverable.
+/// Saving one must append nothing anywhere — the reverse lookup answering
+/// "no artifact owns this" is the common case, and deliberately silent.
+#[tokio::test]
+async fn saving_an_unpublished_note_appends_no_artifact_version() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A published artifact exists, but points at a DIFFERENT node.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "deliverable",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("some-other-node");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "still just a note"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        1,
+        "an ordinary note's save must not touch an unrelated artifact"
+    );
+}
+
+/// The other direction of the same invariant: appending a version through the
+/// Artifacts tab must push the new body into the deliverable's workspace note,
+/// or the tree keeps serving a draft the history has superseded.
+#[tokio::test]
+async fn appending_an_artifact_version_updates_its_workspace_note() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "v1"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "v1",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts/art-1/versions",
+        Some(json!({"body": "v2, edited in the Artifacts tab"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        appended["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version keeps naming the node it lives in"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note exists");
+    assert_eq!(
+        body, "v2, edited in the Artifacts tab",
+        "the shared tree must not keep serving a superseded draft"
+    );
+}
+
+/// An artifact with no workspace note — a legacy capture, or one recorded
+/// while no tree was wired — appends exactly as it always did, with no node
+/// write attempted and nothing invented for it.
+#[tokio::test]
+async fn appending_to_an_unmirrored_artifact_touches_no_note() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({"taskId": "t-1", "title": "Draft", "body": "v1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/artifacts/{id}/versions"),
+        Some(json!({"body": "v2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(appended["versions"].as_array().unwrap().len(), 2);
+    assert!(
+        appended["versions"][1].get("workspaceNodeId").is_none(),
+        "nothing may invent a node for an artifact that has none"
+    );
+}
+
+/// An artifact store with one chosen fault, so a test can ask for exactly the
+/// failure it means: unreadable (`list`) or unwritable (`upsert`).
+struct FaultyArtifacts {
+    listed: Vec<crate::ports::artifacts::ArtifactRecord>,
+    list_fails: bool,
+    upsert_fails: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::ports::artifacts::ArtifactStore for FaultyArtifacts {
+    async fn list(
+        &self,
+        _: &CompanyId,
+        _: Option<&str>,
+    ) -> crate::Result<Vec<crate::ports::artifacts::ArtifactRecord>> {
+        if self.list_fails {
+            return Err(crate::error::OpenCompanyError::Store(
+                "the artifact store is down".into(),
+            ));
+        }
+        Ok(self.listed.clone())
+    }
+    async fn get(
+        &self,
+        _: &CompanyId,
+        _: &str,
+    ) -> crate::Result<Option<crate::ports::artifacts::ArtifactRecord>> {
+        Ok(None)
+    }
+    async fn upsert(
+        &self,
+        _: &CompanyId,
+        _: &crate::ports::artifacts::ArtifactRecord,
+    ) -> crate::Result<()> {
+        if self.upsert_fails {
+            return Err(crate::error::OpenCompanyError::Store(
+                "the disk is full".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn delete(&self, _: &CompanyId, _: &str) -> crate::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// [`state_with_company`] with the artifact store swapped for a faulty one, so
+/// the workspace `PUT` can be exercised against a store that will not answer.
+async fn state_with_faulty_artifacts(
+    home: &std::path::Path,
+    artifacts: FaultyArtifacts,
+) -> (AppState, CompanyId) {
+    let state = state_with_company(home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(company.clone())
+        .with_artifacts(std::sync::Arc::new(artifacts))
+        .build()
+        .await
+        .expect("runtime");
+    // `insert` replaces, so the routes now resolve through the faulty store
+    // while the seeded admin on `state` carries over untouched.
+    state
+        .registry()
+        .insert(company.clone(), std::sync::Arc::new(runtime));
+    (state, company)
+}
+
+/// Issue #552 made every note save consult the artifact store, and an ordinary
+/// note must not inherit that store's health.
+///
+/// Nearly the whole tree is ordinary notes. They own no artifact chain, and
+/// their save touches the artifact store for one reason only — to ask whether
+/// they are a deliverable. When that question cannot be answered, refusing the
+/// save would discard an operator's typing to protect a chain the note does not
+/// have.
+#[tokio::test]
+async fn an_ordinary_note_still_saves_when_the_artifact_store_cannot_be_read() {
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, company) = state_with_faulty_artifacts(
+        &home,
+        FaultyArtifacts {
+            listed: Vec::new(),
+            list_fails: true,
+            upsert_fails: false,
+        },
+    )
+    .await;
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator kept typing"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unreadable artifact store must not reject a plain note's save"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(
+        body, "the operator kept typing",
+        "the edit must actually land, not merely report success"
+    );
+}
+
+/// The other direction, and the one the availability fix must not have cost:
+/// once the store *has* answered and named this node a published deliverable,
+/// a version that cannot be recorded still refuses the save.
+///
+/// This is the fail-closed guarantee the module exists for. A node written
+/// behind a version that was never appended is the silent, permanent direction
+/// — `human_edit_diff` would answer for a draft the operator had already
+/// rewritten.
+#[tokio::test]
+async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord};
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+
+    // The store answers the lookup — this node IS a deliverable — but refuses
+    // the append.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("node-published");
+    let (state, company) = state_with_faulty_artifacts(
+        &home,
+        FaultyArtifacts {
+            listed: vec![published],
+            list_fails: false,
+            upsert_fails: true,
+        },
+    )
+    .await;
+    let runtime = state.registry().get(&company).expect("company");
+
+    // The node the artifact points at, created directly so its id is the one
+    // the record was stamped with.
+    WorkspaceStore::create(
+        runtime.workspace().as_ref(),
+        &company,
+        &WorkspaceNode {
+            id: "node-published".to_string(),
+            name: "launch.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+        },
+        Some("the agent's draft"),
+    )
+    .await
+    .expect("seed the node");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-published",
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a deliverable whose version cannot be recorded must not have its node written"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, "node-published")
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(
+        body, "the agent's draft",
+        "the node must be untouched — writing it would strand the chain behind it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The plan → workflow bridge: apply / reject a proposal (issue #580)
+// ---------------------------------------------------------------------------
+
+/// Seeds a card sitting In Review with a `workflow` deliverable and the given
+/// proposal graph, straight through the task store (the builder pass that would
+/// normally mint it is behind the `openhuman` feature). Returns the card id.
+async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    let id = crate::ports::generate_id();
+    let record = TaskRecord {
+        id: id.clone(),
+        title: "Automate the weekly digest".to_string(),
+        note: None,
+        column: "in_review".to_string(),
+        priority: "medium".to_string(),
+        assignee: "ceo".to_string(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: None,
+        output: None,
+        plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
+        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
+            summary: "Email the digest".to_string(),
+            ops,
+            generated_at_millis: 1,
+            run_id: "run-build-1".to_string(),
+        }),
+    };
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &record)
+        .await
+        .expect("seed the proposal card");
+    id
+}
+
+/// A valid two-node graph (trigger → agent) whose agent names a real roster
+/// teammate. `schedule` arms the trigger when `Some`.
+fn digest_ops(schedule: Option<&str>) -> Value {
+    let mut trigger = json!({ "id": "start", "kind": "trigger", "name": "Start" });
+    if let Some(cron) = schedule {
+        trigger["schedule"] = json!(cron);
+    }
+    json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "description": "Email the weekly digest",
+        "nodes": [
+            trigger,
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ceo" }
+        ],
+        "edges": [{ "from": "start", "to": "write" }]
+    })
+}
+
+/// Applying a manual-trigger proposal creates the workflow, stamps the card's
+/// output link to the build attempt, finishes the card in Done, and clears the
+/// proposal — the whole happy path in one assertion set.
+#[tokio::test]
+async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    // Done is reached — the create path is the human approval the epic requires.
+    assert_eq!(card["column"], "done");
+    // The proposal is consumed, and the card links to the workflow it created and
+    // to the attempt that built it (issue #339).
+    assert!(card.get("workflowProposal").is_none(), "{card}");
+    assert_eq!(card["output"]["runId"], "run-build-1");
+    assert_eq!(
+        card["output"]["workflows"][0]["workflowId"],
+        "weekly-digest"
+    );
+    assert_eq!(card["output"]["workflows"][0]["action"], "created");
+
+    // The workflow now exists in the company's list — and, with no schedule, it
+    // is armed (nothing to disarm).
+    let (status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let created = workflows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "weekly-digest")
+        .expect("the created workflow is listed");
+    assert_eq!(created["enabled"], true, "a manual trigger is not disarmed");
+}
+
+/// #276: applying a proposal whose trigger carries a schedule creates the
+/// workflow **switched off** — armed only by a person, never by approving the
+/// proposal.
+#[tokio::test]
+async fn applying_a_scheduled_proposal_lands_it_disarmed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(Some("0 9 * * 1"))).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "done");
+
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    let created = workflows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "weekly-digest")
+        .expect("the created workflow is listed");
+    assert_eq!(
+        created["enabled"], false,
+        "a scheduled graph lands disarmed until a person arms it (#276)"
+    );
+}
+
+/// Roster drift (the proposal names a teammate no longer on the roster) is
+/// refused by the create's roster check: the card **stays In Review** with its
+/// proposal intact, and the refusal is a 400 the operator sees.
+#[tokio::test]
+async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let ops = json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Start" },
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ghost" }
+        ],
+        "edges": [{ "from": "start", "to": "write" }]
+    });
+    let id = seed_proposal_card(&state, ops).await;
+
+    let (status, _body) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The card is untouched save for the reason on its note: still In Review,
+    // still carrying the proposal to retry once the roster is fixed.
+    let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(card["task"]["column"], "in_review");
+    assert!(card["task"].get("workflowProposal").is_some(), "{card}");
+
+    // …and no workflow was created.
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert!(
+        workflows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["id"] != "weekly-digest"),
+        "a refused proposal must not leave a workflow behind"
+    );
+}
+
+/// Rejecting a proposal returns the card to To-do and clears the proposal
+/// (decision D2c). The card keeps its `workflow` deliverable, so it can be built
+/// again.
+#[tokio::test]
+async fn rejecting_a_proposal_returns_the_card_to_todo() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/reject"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "todo");
+    assert!(card.get("workflowProposal").is_none(), "{card}");
+    assert_eq!(
+        card["deliverable"], "workflow",
+        "reject keeps the deliverable"
+    );
+}
+
+/// Applying or rejecting a card that has no proposal is a 400, not a silent
+/// no-op — the operator asked for an action on something that is not there.
+#[tokio::test]
+async fn applying_with_no_proposal_is_a_bad_request() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let (_status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "Plain card" })),
+    )
+    .await;
+    let id = task["id"].as_str().unwrap().to_string();
+
+    for verb in ["apply", "reject"] {
+        let (status, _body) = send(
+            &state,
+            "POST",
+            &format!("/api/v1/company/tasks/{id}/workflow-proposal/{verb}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{verb} with no proposal");
+    }
+}
+
+/// The create route accepts an explicit `deliverable`, and it round-trips on the
+/// board read — the operator's once-vs-workflow choice (D2a), with `once` staying
+/// off the wire so a plain card is byte-identical to a pre-#580 one.
+#[tokio::test]
+async fn a_card_can_be_created_as_a_workflow_deliverable() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, workflow_card) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "Automate onboarding", "deliverable": "workflow" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workflow_card["deliverable"], "workflow");
+
+    let (_status, once_card) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "One-off note" })),
+    )
+    .await;
+    assert!(
+        once_card.get("deliverable").is_none(),
+        "a once card stays off the wire: {once_card}"
+    );
+
+    // A patch can flip a once card to workflow before it is dragged into In
+    // Progress.
+    let id = once_card["id"].as_str().unwrap();
+    let (status, flipped) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({ "deliverable": "workflow" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(flipped["deliverable"], "workflow");
 }

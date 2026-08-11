@@ -7,6 +7,31 @@ name = "Agentic Software Company"
 output = "An entire SaaS product"
 human_role = "Product direction"
 
+[tools]
+# Full tool belt. `*` covers files/docs/shell/code/web/subagent; `media` and
+# `composio` are listed literally because `*` deliberately excludes those two
+# (real-money + per-tenant-credential) namespaces. media/composio/mcp also
+# require their Cargo features compiled into the tenant image, and each is
+# fail-closed at runtime until its credential/config is present (Composio
+# bearer, media backend, per-server MCP config).
+allow = ["*", "media", "composio"]
+
+# There is deliberately no `[tools.composio].toolkits` here. Absent means "open
+# mode": defer to the backend's own server-enforced allowlist, which is every
+# toolkit it permits — roughly a hundred — rather than a list this file has to
+# keep in step by hand.
+#
+# A non-empty list would be authoritative and offered verbatim: the backend
+# catalog is not consulted and nothing may widen it, because a fetch must never
+# hand a company providers it decided against. So setting it caps both the agent
+# belt and the Connections tab at whatever is typed here.
+#
+# It briefly was set, as a workaround for the console rendering zero provider
+# rows on an empty list (#397). That root cause is fixed — the host now answers
+# open mode with the live catalog — so re-adding a list here to make providers
+# appear would restore the cap it was meant to relieve. Narrow it only to
+# genuinely narrow this company.
+
 [[agent]]
 id = "product_manager"
 role = "Product Manager"

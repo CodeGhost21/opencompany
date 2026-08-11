@@ -15,12 +15,15 @@
 //! mocks in tests, real impls when a feature is on); the OAuth write routes are
 //! compiled only under the `oauth` feature and 404 otherwise.
 
+pub mod artifacts;
 pub mod capabilities;
 pub mod channels;
 pub mod composio;
+pub mod composio_toolkits;
 pub mod connections_read;
 pub mod domain;
 pub mod finances;
+pub mod imap;
 pub mod inbox;
 pub mod inference;
 pub mod language;
@@ -28,11 +31,18 @@ pub mod mail;
 pub mod mailer;
 pub mod mcp;
 pub mod memory;
+pub mod runs;
 pub mod scope;
 pub mod skills;
 pub mod smtp;
+pub mod task_export;
 pub mod tasks;
 pub mod team;
+/// Issue #264: one agent, opened — `GET`/`PATCH {scope}/team/{agent_id}`. The
+/// detail read (identity, tier, **resolved** tool grants, desks) and the edit
+/// for the fields the console owns. Attached to [`team`]'s existing
+/// `/team/{agent_id}` route rather than merged as its own. See [`team_agent`].
+mod team_agent;
 pub mod usage;
 pub mod workflows;
 pub mod workspace;
@@ -40,7 +50,7 @@ pub mod workspace;
 #[cfg(feature = "oauth")]
 pub mod connections;
 
-pub(crate) use scope::{ScopedCompany, scoped};
+pub(crate) use scope::{AdminScopedCompany, ScopedCompany, scoped};
 
 #[cfg(test)]
 mod test;
@@ -150,6 +160,9 @@ pub fn router() -> Router<AppState> {
         .merge(smtp::router())
         .merge(inbox::router())
         .merge(tasks::router())
+        .merge(task_export::router())
+        .merge(runs::router())
+        .merge(artifacts::router())
         .merge(memory::router())
         .merge(workspace::router())
         .merge(skills::router())
@@ -188,6 +201,64 @@ pub(crate) fn not_wired(what: &str) -> axum::response::Response {
         axum::Json(serde_json::json!({
             "error": format!("{what} is not wired in this deployment"),
             "code": "not_wired",
+        })),
+    )
+        .into_response()
+}
+
+/// A `409 restart_required` response for a surface that this build *does* have,
+/// but this company's running runtime does not — because the runtime was wired
+/// at boot, before the inference config that would have wired it existed
+/// (issue #266).
+///
+/// Deliberately not the `not_wired` 404: the console's bare-catch treats that as
+/// a permanent capability gap and degrades to a read-only view, which is the
+/// wrong answer for a state one restart clears. A distinct `code` lets the
+/// console say what to do instead of hiding the button.
+pub(crate) fn restart_required(what: &str) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({
+            "error": format!(
+                "{what} is not wired on this company's running runtime: it started with no \
+                 inference source. Restart the company to pick up the saved configuration."
+            ),
+            "code": "restart_required",
+        })),
+    )
+        .into_response()
+}
+
+/// A `409 inference_required` response for a workflow-run attempt on a company
+/// that has *never* configured an inference source — `workflow_runner()` is
+/// `None` because there is no brain to run yet, not because this deployment
+/// lacks execution and not because a saved config is stranded behind a boot
+/// decision (issue #514).
+///
+/// Deliberately neither of the sibling responses:
+///   - not the `not_wired` 404: the console's bare-catch treats that as a
+///     permanent capability gap and degrades to a read-only view — the wrong
+///     answer for a state the operator clears by configuring a provider (which
+///     triggers issue #290's rebuild-in-place; no restart needed);
+///   - not `restart_required`: nothing was ever saved to the strand, so there is
+///     no configuration for a restart to pick up.
+///
+/// The `code` is a contract the console keys its own copy on; the `error` prose
+/// is the fallback a curl user sees. It never says "deployment" or "not wired" —
+/// the deployment is fine.
+pub(crate) fn inference_required(what: &str) -> axum::response::Response {
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    (
+        StatusCode::CONFLICT,
+        axum::Json(serde_json::json!({
+            "error": format!(
+                "{what} needs an inference source, and none is configured for this \
+                 company. Set a provider in Settings → Inference, then run again."
+            ),
+            "code": "inference_required",
         })),
     )
         .into_response()

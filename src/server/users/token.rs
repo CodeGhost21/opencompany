@@ -48,6 +48,21 @@ pub const LOGIN_CODE_TTL_MILLIS: u64 = 15 * 60 * 1000;
 /// the lever for cutting a session short, not expiry.
 pub const SESSION_TTL_MILLIS: u64 = 14 * 24 * 60 * 60 * 1000;
 
+/// How long a paired device's session stays valid.
+///
+/// Much longer than a browser session, and for a different threat model. A
+/// browser session is short because a browser is a shared, long-lived,
+/// attack-exposed surface that its owner may walk away from. A paired device is
+/// a specific machine its owner deliberately enrolled, holding its token in the
+/// OS keychain rather than a cookie jar.
+///
+/// Absolute, like [`SESSION_TTL_MILLIS`], for the same reason: sliding expiry
+/// would be a store write per request. A year is long enough that re-pairing is
+/// not a recurring annoyance, and short enough that a device someone forgot
+/// they enrolled does not stay a credential forever. Revocation remains the
+/// lever for cutting one short.
+pub const DEVICE_TTL_MILLIS: u64 = 365 * 24 * 60 * 60 * 1000;
+
 /// How many random bytes back each secret. 32 bytes = 256 bits, which is why
 /// guessing is not a threat model and the codes need no attempt budget.
 const TOKEN_BYTES: usize = 32;

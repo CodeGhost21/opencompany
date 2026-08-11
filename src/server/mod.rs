@@ -1,11 +1,20 @@
 #[cfg(feature = "tinyplace")]
 pub mod a2a;
+/// The Agent Client Protocol surface (the `acp` feature).
+///
+/// The module's own docs reason about "a build without the feature"; this is
+/// that feature. `routes::RESERVED_PREFIXES` keeps `/acp` 404ing either way, so
+/// a client probing a host without it gets an honest answer rather than the
+/// console shell.
+#[cfg(feature = "acp")]
+pub mod acp;
 pub mod chat_history;
 pub mod cors;
 mod error;
 pub mod feedback;
 pub mod graphql;
 pub mod hooks;
+pub mod hub_identity;
 // Console MCP OAuth callback (issue #90): the unauthenticated browser-redirect
 // landing route. Gated on `mcp` (it needs the OAuth token-exchange path).
 #[cfg(feature = "mcp")]
@@ -22,4 +31,4 @@ pub(crate) mod test_support;
 pub mod webhook;
 
 pub use error::ApiError;
-pub use routes::{router, serve};
+pub use routes::{Serving, bind, router, serve, serve_on};
