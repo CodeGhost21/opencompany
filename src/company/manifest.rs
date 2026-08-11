@@ -386,7 +386,7 @@ impl CompanyManifest {
 
 /// True when `id` is non-empty, starts with a lowercase letter, and contains
 /// only lowercase letters, digits, and underscores.
-fn is_snake_case(id: &str) -> bool {
+pub(crate) fn is_snake_case(id: &str) -> bool {
     let mut chars = id.chars();
     match chars.next() {
         Some(first) if first.is_ascii_lowercase() => {}
