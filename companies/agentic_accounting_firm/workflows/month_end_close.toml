@@ -26,6 +26,8 @@ id = "gate"
 kind = "condition"
 name = "Filing due?"
 summary = "Branch on whether a tax filing is due."
+[node.config]
+field = "=item.filing_due"
 
 [[node]]
 id = "taxes"

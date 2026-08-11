@@ -33,6 +33,8 @@ id = "gate"
 kind = "condition"
 name = "Worth diligence?"
 summary = "Advance to diligence or pass."
+[node.config]
+field = "=item.worth_diligence"
 
 [[node]]
 id = "market"
