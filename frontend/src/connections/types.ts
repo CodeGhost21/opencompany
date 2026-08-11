@@ -81,6 +81,18 @@ export interface InstanceIdentity {
   storage?: string;
 }
 
+/**
+ * Where a connection came from, when that is not "someone typed an address".
+ *
+ * Only `embedded` so far: the host running inside this application. It is
+ * singular in a way no other connection is — there is exactly one per client,
+ * this client both starts it and knows its identity without asking, and its
+ * address is regenerated on every launch. That last property is why the
+ * marker has to be durable: recognising last launch's row as *this* host is
+ * what stops a dead one accumulating per run.
+ */
+export type ConnectionOrigin = "embedded";
+
 export interface Connection {
   id: ConnectionId;
   /**
@@ -103,6 +115,7 @@ export interface Connection {
   companies: string[];
   /** Why it is `down` or `unauthenticated`, for the connection's own row. */
   error?: string;
+  origin?: ConnectionOrigin;
 }
 
 /** The fields needed to construct a connection's client. */

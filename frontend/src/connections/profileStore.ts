@@ -22,17 +22,34 @@
 // in desktop localStorage is a shortcut it means to undo. This one does not
 // inherit the shortcut.
 
-import type { ConnectionId, Credential } from "./types";
+import type { ConnectionId, ConnectionOrigin, Credential } from "./types";
 
 const INDEX_KEY = "oc.connections.v1";
 
-/** The persisted half of a connection. Status and identity are re-probed. */
+/**
+ * The label this client gives the host running inside it.
+ *
+ * Exported because two places need to agree on it: the registry, which writes
+ * it, and {@link embeddedProfiles}, which recognises what older versions wrote.
+ */
+export const EMBEDDED_LABEL = "This computer";
+
+/** The persisted half of a connection. Status is re-probed. */
 export interface ConnectionProfile {
   id: ConnectionId;
   baseUrl: string;
   label: string;
   defaultCompany: string | null;
   credential: Credential;
+  /**
+   * The host's own `instance_id`, when this client knew it going in.
+   *
+   * Only the embedded host does: the core reads it off disk and hands it over
+   * IPC. For a remote host this stays absent, because the id arrives from
+   * `/spec` — after the point where it would have been useful for matching.
+   */
+  instanceId?: string;
+  origin?: ConnectionOrigin;
 }
 
 function storage(): Storage | null {
@@ -71,7 +88,12 @@ function isProfile(value: unknown): value is ConnectionProfile {
     typeof p.label === "string" &&
     (p.defaultCompany === null || typeof p.defaultCompany === "string") &&
     typeof p.credential === "object" &&
-    p.credential !== null
+    p.credential !== null &&
+    // Absent on every profile written before these existed, which is the
+    // common case on an upgrade — so missing is valid and only a *wrong* type
+    // disqualifies the entry.
+    (p.instanceId === undefined || typeof p.instanceId === "string") &&
+    (p.origin === undefined || p.origin === "embedded")
   );
 }
 
@@ -103,6 +125,37 @@ export function findProfile(
   const normalized = baseUrl.replace(/\/$/, "");
   return readProfiles().find(
     (p) => p.baseUrl === normalized && p.defaultCompany === defaultCompany,
+  );
+}
+
+/**
+ * Every profile that is — or once was — the host running inside this client.
+ *
+ * `origin` says so outright for anything this version wrote. Older versions
+ * recorded nothing that distinguished the embedded host from a host someone
+ * typed in, so the second clause recognises them by the signature the bug left
+ * behind: the label this client gives its own host, at a loopback address.
+ *
+ * Narrow on purpose, because the consequence of a false positive is deleting a
+ * connection an operator added. A host added by hand is labelled by `hostLabel`
+ * — `127.0.0.1:8080`, never this string — and only a profile carrying *neither*
+ * new field is old enough to need guessing about at all.
+ */
+export function embeddedProfiles(): ConnectionProfile[] {
+  return readProfiles().filter(
+    (p) => p.origin === "embedded" || isLegacyEmbedded(p),
+  );
+}
+
+/** `http://127.0.0.1:<port>`, the only address the embedded host ever had. */
+const LOOPBACK_URL = /^http:\/\/127\.0\.0\.1:\d+$/;
+
+function isLegacyEmbedded(profile: ConnectionProfile): boolean {
+  return (
+    profile.origin === undefined &&
+    profile.instanceId === undefined &&
+    profile.label === EMBEDDED_LABEL &&
+    LOOPBACK_URL.test(profile.baseUrl)
   );
 }
 

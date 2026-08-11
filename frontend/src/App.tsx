@@ -12,6 +12,7 @@ import {
 import { resolveConfig } from "@/config";
 import {
   addConnection,
+  adoptEmbeddedHost,
   clientFor,
   probe,
   restoreConnections,
@@ -178,15 +179,19 @@ function Console() {
    * the desktop still shows every remote host, which is the point of holding
    * several.
    *
-   * A connection like any other. Added after the first paint because the
-   * address arrives over IPC; the probe effect below picks it up from the id
-   * list, so nothing here has to drive it.
+   * Added after the first paint because the address arrives over IPC; the probe
+   * effect below picks it up from the id list, so nothing here has to drive it.
+   *
+   * Registered through `adoptEmbeddedHost` rather than `addConnection`, because
+   * this is the one host whose address is *expected* to have changed since last
+   * launch — recognising it by that address is what left a dead row behind on
+   * every run (#615).
    */
   useEffect(() => {
     let cancelled = false;
     void embeddedHost().then((host) => {
       if (cancelled || !host) return;
-      addConnection({ baseUrl: host.baseUrl, label: "This computer" });
+      adoptEmbeddedHost({ baseUrl: host.baseUrl, instanceId: host.instanceId });
     });
     return () => {
       cancelled = true;
