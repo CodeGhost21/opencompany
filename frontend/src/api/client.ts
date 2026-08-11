@@ -7,6 +7,7 @@
 //     and calls use `/api/v1/companies/{id}/*`.
 
 import type { ConsoleConfig } from "../config";
+import type { TaskDeliverable } from "./tasks";
 import { defaultTransport } from "./transport";
 import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
@@ -240,10 +241,21 @@ export class OpenCompanyClient {
      * id — callers strip the `h` prefix with `toHostMessageId` first.
      */
     parent?: string | null,
+    /**
+     * The once-vs-workflow choice for the card this line opens (issue #580).
+     * Only `"workflow"` reaches the wire: `"once"` (and the default) is sent as
+     * *nothing at all*, so an ordinary message keeps the exact body shape it had
+     * before #580 — the same omitted-field compatibility rule the deliverable
+     * field follows everywhere (see `CreateTask.deliverable`).
+     */
+    deliverable?: TaskDeliverable,
   ): Promise<ChatResponse> {
-    const body: { text: string; chat?: string; parent?: string } = { text };
+    const body: { text: string; chat?: string; parent?: string; deliverable?: TaskDeliverable } = {
+      text,
+    };
     if (chat) body.chat = chat;
     if (parent) body.parent = parent;
+    if (deliverable === "workflow") body.deliverable = deliverable;
     return this.request<ChatResponse>("POST", `${this.scope(company)}/chat`, body);
   }
 
