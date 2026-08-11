@@ -3044,10 +3044,17 @@ description = "Builds the product."
         }
     }
 
-    /// A console-added MCP server reaches the agent on the NEXT `ensure` — the
-    /// roster is rebuilt because the effective set re-resolved from the LIVE
-    /// secret store (not the boot snapshot) changed its fingerprint. This is the
-    /// Parallel-Search / BrowserBase freshness bug, proven end-to-end.
+    /// A console-added MCP server reaches the agent on the NEXT `ensure`, with no
+    /// restart — the roster rebuilds because the effective set, re-resolved from
+    /// the LIVE secret store (not the boot snapshot), changed its fingerprint.
+    /// This is the Parallel-Search / BrowserBase freshness bug proven end-to-end,
+    /// and the CI guard for issue #566: the effective-MCP fingerprint is a *term*
+    /// of [`HarnessPool::ensure`]'s staleness check. Both directions are pinned —
+    /// an unchanged set holds the fingerprint (no needless rebuild), an MCP-only
+    /// change moves it (rebuilt in place, without a restart). A refactor that
+    /// drops the term makes the post-change `ensure` early-return without storing
+    /// the new fingerprint: the value stops moving across the mutation and the
+    /// `assert_ne!` fails, rather than the restart requirement quietly returning.
     #[tokio::test]
     async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
@@ -3096,6 +3103,16 @@ description = "Builds the product."
             .await
             .expect("fingerprinted");
 
+        // Stability direction: with no axis changed, a redundant `ensure` is a
+        // no-op — the gate reuses the cached roster and the fingerprint holds, so
+        // the change-direction assertion below can't pass by coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.mcp_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an unchanged MCP set must not move the fingerprint"
+        );
+
         // Console-add a runtime MCP server directly into the live secret store.
         crate::company::mcp::save_runtime_index(
             &rec.id,
@@ -3115,22 +3132,27 @@ description = "Builds the product."
         .await
         .unwrap();
 
-        // Next ensure re-resolves from the live store → fingerprint changes →
-        // roster rebuilt, so the new server reaches the agent without a restart.
-        pool.ensure(&rec, &deps).await.expect("second ensure");
+        // Change direction: the next ensure re-resolves from the live store →
+        // fingerprint changes → roster rebuilt, so the new server reaches the
+        // agent without a restart.
+        pool.ensure(&rec, &deps).await.expect("post-add ensure");
         let after = pool
             .mcp_fingerprint_of(&rec.id)
             .await
             .expect("fingerprinted");
-        assert_ne!(before, after, "adding a server must change the fingerprint");
+        assert_ne!(
+            before, after,
+            "an MCP-only change must move the staleness fingerprint (issue #566)"
+        );
         assert_eq!(
             pool.resident_companies().await,
             1,
-            "same company, rebuilt in place"
+            "same company, rebuilt in place — not a new residency"
         );
 
-        // A third ensure with no change is a no-op (fingerprint stable).
-        pool.ensure(&rec, &deps).await.expect("third ensure");
+        // Stability after the change too: a further ensure with no new change is
+        // a no-op and the fingerprint holds at its post-change value.
+        pool.ensure(&rec, &deps).await.expect("final no-op ensure");
         assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
     }
 
