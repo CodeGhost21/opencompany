@@ -2661,6 +2661,62 @@ async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
     );
 }
 
+/// Issue #568: a **disabled** server reaches nobody, however wide the grants.
+/// `registry_for_agent` filters on `decl.enabled && grants_cover_server(..)`, so
+/// an agent holding `mcp:docs` is handed no such tool while the server is off —
+/// reporting it as reachable would be the console/harness disagreement this
+/// feature exists to remove. Asserted on both readers: the mutating response
+/// that turns the server off, and the later list.
+#[tokio::test]
+async fn mcp_reachability_is_empty_for_a_disabled_server() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let reach = |body: &serde_json::Value| -> Vec<String> {
+        body["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Enabled: the one agent's grant covers it.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reach(&list[0]), vec!["ceo".to_string()]);
+
+    // Disabling it empties reachability in the mutating response itself.
+    let (status, updated) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/mcp/servers/docs",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["server"]["enabled"], false);
+    assert!(
+        reach(&updated["server"]).is_empty(),
+        "a disabled server is handed to no agent, so it is reachable by none"
+    );
+
+    // And the list agrees on the next read — the grant is unchanged, the server is off.
+    let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(list[0]["enabled"], false);
+    assert!(
+        reach(&list[0]).is_empty(),
+        "the list reader applies the same enabled filter as the harness"
+    );
+}
+
 /// Without the `openhuman` feature there is no MCP transport, so live discovery
 /// is "not wired". (Under the feature it would attempt a real network call.)
 #[cfg(not(feature = "openhuman"))]

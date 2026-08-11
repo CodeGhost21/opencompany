@@ -444,10 +444,14 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
                         </span>
                       </div>
                       <p className="truncate text-xs text-muted-foreground">{server.endpoint}</p>
-                      {/* Reachability (issue #568): who can actually call this server. A
-                          healthy server no agent reaches is almost always a misconfiguration,
-                          so the empty case is flagged loudly rather than shown as a blank list. */}
+                      {/* Reachability (issue #568): who can actually call this server. An
+                          enabled server no agent reaches is almost always a misconfiguration,
+                          so that empty case is flagged loudly rather than shown as a blank list.
+                          A disabled server is empty by construction — the harness hands out no
+                          tool for it whatever the grants say — so the loud state is scoped to
+                          enabled servers; flagging an off server would cry wolf on intent. */}
                       {server.reachableBy !== undefined &&
+                        server.enabled &&
                         (server.reachableBy.length === 0 ? (
                           <p
                             data-testid="mcp-reachability-none"

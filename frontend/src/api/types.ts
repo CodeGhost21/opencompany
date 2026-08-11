@@ -753,9 +753,12 @@ export interface McpServer {
   authConfigured: boolean;
   /**
    * Ids of the company's agents whose effective tool grants cover this server —
-   * who can actually call it (issue #568). An empty array means no teammate can
-   * reach it, a probable misconfiguration the console flags loudly. Optional
-   * only for forward-compat with an older backend that does not send the field;
+   * who can actually call it (issue #568). On an **enabled** server an empty
+   * array means no teammate can reach it, a probable misconfiguration the
+   * console flags loudly. A **disabled** server is always empty (the harness
+   * hands out no tool for it whatever the grants say), so the console reads the
+   * empty case against `enabled` and stays quiet there. Optional only for
+   * forward-compat with an older backend that does not send the field;
    * `undefined` (unknown) is treated differently from `[]` (known-empty).
    */
   reachableBy?: string[];

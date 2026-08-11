@@ -76,9 +76,12 @@ struct McpServerDto {
     /// through the shared
     /// [`grants_cover_server`](crate::runtime::tools::grants_cover_server), so the
     /// console cannot disagree with the harness about reachability. **An empty
-    /// list is meaningful**: a live, healthy server no teammate can reach is
-    /// almost always a misconfiguration, and the console flags it rather than
-    /// showing an empty list silently. Always serialized (even when empty).
+    /// list is meaningful**: an *enabled*, healthy server no teammate can reach
+    /// is almost always a misconfiguration, and the console flags it rather than
+    /// showing an empty list silently. A **disabled** server is always empty —
+    /// the harness hands out no tool for it whatever the grants say — so the
+    /// console reads the empty case against `enabled` and stays quiet there.
+    /// Always serialized (even when empty).
     reachable_by: Vec<String>,
     /// The last recorded probe outcome (scrubbed), or `None` when never probed.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -289,13 +292,22 @@ fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
     grants
 }
 
-/// The ids of the agents whose effective `grants` reach the server `name`
-/// (issue #568), read through the shared [`grants_cover_server`] so this agrees
-/// with the harness registry. Empty ⇒ no teammate can reach the server.
-fn reachers_of(roster_grants: &[(String, Vec<String>)], name: &str) -> Vec<String> {
+/// The ids of the agents whose effective `grants` reach `decl` (issue #568),
+/// read through the shared [`grants_cover_server`] so this agrees with the
+/// harness registry. Empty ⇒ no teammate can reach the server.
+///
+/// A **disabled** server reaches nobody regardless of grants: `registry_for_agent`
+/// filters on `decl.enabled && grants_cover_server(..)`, so an agent granted
+/// `mcp:<slug>` still gets no such tool while the server is off. Mirroring both
+/// halves of that filter here is what keeps the console from claiming a
+/// reachability the harness does not hand out.
+fn reachers_of(roster_grants: &[(String, Vec<String>)], decl: &mcp::McpServerDecl) -> Vec<String> {
+    if !decl.enabled {
+        return Vec::new();
+    }
     roster_grants
         .iter()
-        .filter(|(_, grants)| grants_cover_server(grants, name))
+        .filter(|(_, grants)| grants_cover_server(grants, &decl.name))
         .map(|(id, _)| id.clone())
         .collect()
 }
@@ -323,11 +335,7 @@ async fn list_servers(company: ScopedCompany) -> Result<Json<Vec<McpServerDto>>,
         let health = load_health(runtime.id(), &decl.name, runtime.secrets().as_ref())
             .await
             .map_err(ApiError)?;
-        out.push(dto_from_decl(
-            decl,
-            reachers_of(&grants, &decl.name),
-            health,
-        ));
+        out.push(dto_from_decl(decl, reachers_of(&grants, decl), health));
     }
     Ok(Json(out))
 }
@@ -550,7 +558,7 @@ async fn mutation_response(
     let reachable_by = record
         .as_ref()
         .map(roster_grants)
-        .map(|grants| reachers_of(&grants, name))
+        .map(|grants| reachers_of(&grants, decl))
         .unwrap_or_default();
     let health = load_health(runtime.id(), name, runtime.secrets().as_ref())
         .await
