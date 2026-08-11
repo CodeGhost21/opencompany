@@ -1927,6 +1927,38 @@ impl RuntimeBuilder {
             }
         };
 
+        // Issue #245: the company's repository mirror cache, rooted at the same
+        // `companies/<slug>/` prefix the bundle uses so a company's whole
+        // footprint sits in one subtree — and therefore inside the one quota
+        // walk `DataLayout::usage_bytes` already does.
+        //
+        // Built here rather than lazily in the route because the location is a
+        // property of *this* runtime's home, and a route that had to derive it
+        // would be the second place that knows where a company's bytes live.
+        //
+        // The cache is capped by the same `tree_quota_bytes` that bounds the
+        // workspace tree: both answer "how much may one company hold on this
+        // host", and a mirror is company-held binary payload like any other. It
+        // needs no new knob, and a hosted tenant that already sets one gets the
+        // cache covered without touching its config.
+        let repos = {
+            let manager = crate::runtime::RepoManager::new(
+                id.clone(),
+                Bundle::new(home.clone(), &id).repos_dir(),
+                secrets.clone(),
+            )
+            .with_quota(self.workspace_quota.tree_quota_bytes);
+            // The forge REST client (pull-request metadata + diff). Without the
+            // feature there is no HTTP client to give it, and the PR route says
+            // so rather than answering with an empty diff. Shadowed rather than
+            // reassigned, the same way `ops::router` folds in its feature-gated
+            // fragment.
+            #[cfg(feature = "github")]
+            let manager =
+                manager.with_host(std::sync::Arc::new(crate::runtime::HttpRepoHost::new()));
+            std::sync::Arc::new(manager)
+        };
+
         let mut runtime = CompanyRuntime::new(
             id.clone(),
             brain,
@@ -1952,6 +1984,7 @@ impl RuntimeBuilder {
         // (`companies/<name>`); record it so read resolvers can find committed
         // skills/workflows content on the serve path.
         runtime.set_source_dir(self.seed_dir.clone());
+        runtime.set_repos(repos);
         // Install-wide MCP defaults (issue #527) — set before anything resolves
         // the effective server set, so the first resolution already sees them.
         runtime.set_default_mcp_servers(self.default_mcp_servers.clone());

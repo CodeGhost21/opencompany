@@ -229,6 +229,18 @@ pub struct CompanyRuntime {
     /// which is what makes a wedged cron fire and an agent-initiated run as
     /// stoppable from the console as a Run-button one.
     pub(crate) run_supervisor: crate::runtime::RunSupervisor,
+    /// Issue #245: the company's bound repositories and their host-side mirror
+    /// cache, when the runtime was built over a filesystem home.
+    ///
+    /// `None` is a real state, not an omission: the manager is rooted at
+    /// `companies/<slug>/repos/`, so a runtime assembled from injected ports
+    /// with no home (a test harness, an embedding) has no cache to manage and
+    /// the ops routes answer "not wired" rather than inventing a location.
+    ///
+    /// Compiled in every build. Nothing here is agent-facing — there is no
+    /// grant and no tool in this tier — so it needs no feature gate, and the
+    /// forge HTTP client it can optionally hold is the only part that does.
+    pub(crate) repos: Option<Arc<crate::runtime::RepoManager>>,
     /// Issue #243: the live single-use grants minted when an operator approves a
     /// tool call an agent was blocked from making.
     ///
@@ -361,6 +373,7 @@ impl CompanyRuntime {
             workflow_runner: None,
             steer: crate::company::steer::InflightRegistry::new(),
             run_supervisor: crate::runtime::RunSupervisor::new(),
+            repos: None,
             grants,
             continuations: ContinuationQueue::default(),
             serial: Arc::new(TokioMutex::new(())),
@@ -388,6 +401,20 @@ impl CompanyRuntime {
     /// `None` in platform-provisioned mode.
     pub fn source_dir(&self) -> Option<&Path> {
         self.source_dir.as_deref()
+    }
+
+    /// Issue #245: attach the repository manager after construction, wired by
+    /// the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from the same
+    /// filesystem home the company's bundle hangs off.
+    pub fn set_repos(&mut self, repos: Arc<crate::runtime::RepoManager>) {
+        self.repos = Some(repos);
+    }
+
+    /// The company's bound repositories, if a mirror cache is wired. `None` on
+    /// a runtime built without a filesystem home, where the ops routes report
+    /// the surface as not wired.
+    pub fn repos(&self) -> Option<&Arc<crate::runtime::RepoManager>> {
+        self.repos.as_ref()
     }
 
     /// Issue #29: attach the workflow runner after construction. Wired by the
