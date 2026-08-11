@@ -1599,9 +1599,15 @@ async fn the_tree_projects_a_binary_nodes_mime_size_and_digest() {
     assert_eq!(sha.len(), 64, "the store's sha256, hex-encoded");
 }
 
-/// A prose note leaves all three null. The console reads `mime`'s **presence**
-/// as "render or download this instead of editing it", so a projection that
-/// invented an empty string here would put every note behind a download card.
+/// A folder and a prose note both leave all three null. The console reads
+/// `mime`'s **presence** as "render or download this instead of editing it", so
+/// a projection that invented an empty string here would put every note behind
+/// a download card.
+///
+/// Both are asserted because only one of them is a real test of the rule: a
+/// folder can never carry a payload, so its nulls are structural, whereas a note
+/// is a `File` exactly like the binary above and `mime` is the single field
+/// telling them apart.
 #[tokio::test]
 async fn a_prose_note_projects_no_binary_metadata() {
     let home_dir = home();
@@ -1613,20 +1619,54 @@ async fn a_prose_note_projects_no_binary_metadata() {
         .await
         .unwrap();
 
+    // A folder is the easy half. The note is the half that matters: it is a
+    // `File` like the payload above, so `mime`'s absence is the *only* thing
+    // separating the two, and a projection that reached for a default here
+    // would put every note in the company behind a download card.
+    let note = crate::ports::workspace::WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: "Charter.md".to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: None,
+        updated_at_millis: 1_700_000_000_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    workspace
+        .create(&id, &note, Some("# Charter\n\nprose, not bytes.\n"))
+        .await
+        .unwrap();
+
     let value = query(
         router(state),
-        r#"{"query":"{ company(id:\"acme\"){ workspaceTree { name mime size sha256 } } }"}"#,
+        r#"{"query":"{ company(id:\"acme\"){ workspaceTree { name kind mime size sha256 } } }"}"#,
     )
     .await;
     assert!(value["errors"].is_null(), "{value}");
     let tree = value["data"]["company"]["workspaceTree"]
         .as_array()
         .unwrap_or_else(|| panic!("the tree resolves: {value}"));
-    let folder = tree
-        .iter()
-        .find(|node| node["name"] == serde_json::json!("maya"))
-        .unwrap();
+    let find = |name: &str| {
+        tree.iter()
+            .find(|node| node["name"] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("`{name}` is in the tree: {value}"))
+            .clone()
+    };
+
+    let folder = find("maya");
     assert!(folder["mime"].is_null(), "{folder}");
     assert!(folder["size"].is_null(), "{folder}");
     assert!(folder["sha256"].is_null(), "{folder}");
+
+    let note = find("Charter.md");
+    assert_eq!(
+        note["kind"], "file",
+        "a note is a file, not a folder: {note}"
+    );
+    assert!(note["mime"].is_null(), "{note}");
+    assert!(note["size"].is_null(), "{note}");
+    assert!(note["sha256"].is_null(), "{note}");
 }
