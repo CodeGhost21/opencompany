@@ -531,6 +531,42 @@ async fn an_out_of_vocabulary_kind_settles_to_todo() {
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
 }
 
+/// The model does not get a vote on approval gating: whatever `requires_approval`
+/// it emits — `true` on one node, `false` on another — the host strips before the
+/// proposal is stored, so a builder-authored node inherits the platform default
+/// (#460) rather than the model's choice. Both are dropped in the stored `ops`.
+#[tokio::test]
+async fn the_host_strips_model_chosen_approval_gating() {
+    let reply = r#"{"automatable":true,"summary":"gated","workflow":{"name":"Gated",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start","requires_approval":true},
+                 {"id":"draft","kind":"agent","name":"Draft","agent":"maya","requires_approval":false}],
+        "edges":[{"from":"start","to":"draft"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-approval", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-approval").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-approval".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-approval").await;
+    assert_eq!(after.column, COLUMN_IN_REVIEW);
+    let spec: WorkflowGraphSpec =
+        serde_json::from_value(after.workflow_proposal.expect("proposal").ops).unwrap();
+    assert!(
+        spec.nodes.iter().all(|n| n.requires_approval.is_none()),
+        "the host drops the model's requires_approval on every node (true and false alike)"
+    );
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Succeeded);
+}
+
 /// An operator moving the card out from under the pass wins: the pass discards
 /// its result (no proposal, the card stays where the operator put it) and the
 /// attempt settles Cancelled — the tokens stay metered because they were spent.

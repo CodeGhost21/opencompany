@@ -335,6 +335,14 @@ pub async fn run_workflow_build_pass(
             // The host assigns the id — a safe, unique stem — so the model cannot
             // pick a colliding or unsafe one and doom the proposal at apply.
             spec.id = safe_workflow_id(&spec.name, &card.title, &evidence.existing_ids);
+            // The model does not get a vote on approval gating — the host drops
+            // the field so a builder-authored node inherits the platform default
+            // (#460) rather than whatever the model happened to emit. Approval is
+            // a security decision the host owns, not the model that read the
+            // user-written card text.
+            for node in &mut spec.nodes {
+                node.requires_approval = None;
+            }
             (summary, spec)
         }
     };
