@@ -281,6 +281,13 @@ pub struct RuntimeBuilder {
     secrets: Option<Arc<dyn SecretStore>>,
     inbox: Option<Arc<dyn InboxStore>>,
     mail: Option<CompanyMail>,
+    /// The deployment's standing bootstrap-admin address
+    /// (`AppConfig::bootstrap_admin`), pre-normalized, when the platform injects
+    /// one (issue #661 / M8). Threaded onto the workflow delivery bundle so an
+    /// `owner` report on a fresh tenant reaches the company's creator before
+    /// their first sign-in mints a user record. `None` everywhere but the hosted
+    /// serve path.
+    bootstrap_admin: Option<String>,
     tasks: Option<Arc<dyn TaskStore>>,
     workspace: Option<Arc<dyn WorkspaceStore>>,
     /// Issue #553: the byte limits the workspace is held to. Defaults to a
@@ -379,6 +386,7 @@ impl RuntimeBuilder {
             secrets: None,
             inbox: None,
             mail: None,
+            bootstrap_admin: None,
             tasks: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
@@ -798,6 +806,15 @@ impl RuntimeBuilder {
     /// (email send is opt-in / hosted-only).
     pub fn with_mail(mut self, mail: CompanyMail) -> Self {
         self.mail = Some(mail);
+        self
+    }
+
+    /// Wires the deployment's standing bootstrap-admin address (issue #661 / M8),
+    /// pre-normalized by `AppConfig::bootstrap_admin`. Absent by default: only
+    /// the hosted serve path injects one, and `None` is a clean no-op that leaves
+    /// `owner` delivery resolving admins from the user store alone.
+    pub fn with_bootstrap_admin(mut self, bootstrap_admin: Option<String>) -> Self {
+        self.bootstrap_admin = bootstrap_admin;
         self
     }
 
@@ -1800,6 +1817,12 @@ impl RuntimeBuilder {
                                     mail: self.mail.clone(),
                                     inbox: inbox.clone(),
                                     users: ops.users.clone(),
+                                    // Issue #661 / M8: the deployment's standing
+                                    // bootstrap admin, so an `owner` report on a
+                                    // fresh tenant reaches the company's creator
+                                    // before their first sign-in mints a user
+                                    // record. `None` off the hosted serve path.
+                                    bootstrap_admin: self.bootstrap_admin.clone(),
                                     channels: channels.clone(),
                                     // Issue #227: the same gate and journal the
                                     // runtime gets below — one approvals queue,

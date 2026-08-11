@@ -227,6 +227,7 @@ pub(super) fn deps(base_url: String, dir: &std::path::Path) -> (HarnessDeps, Arc
             mail: None,
             inbox: Arc::new(FsInboxStore::new(dir)),
             users: Arc::new(FsOps::new(dir)),
+            bootstrap_admin: None,
             channels: Vec::new(),
             parking: Some(DeliveryParking {
                 approvals: gate,
