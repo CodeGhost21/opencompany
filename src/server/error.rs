@@ -50,6 +50,12 @@ impl ApiError {
             OpenCompanyError::Quiescing(_) => StatusCode::SERVICE_UNAVAILABLE,
             OpenCompanyError::ToolNotGranted(_) => StatusCode::FORBIDDEN,
             OpenCompanyError::BudgetExceeded(_) => StatusCode::PAYMENT_REQUIRED,
+            // 413, matching what axum's `DefaultBodyLimit` returns when the
+            // upload route rejects an over-cap body before a handler runs. The
+            // two limits are the same number, so answering with two different
+            // statuses depending on which one noticed first would make the API
+            // look inconsistent for one cause.
+            OpenCompanyError::WorkspaceQuota(_) => StatusCode::PAYLOAD_TOO_LARGE,
             // tiny.place transport: an unreachable backend degrades to 503 so
             // callers retry; any other protocol failure is an upstream 502.
             OpenCompanyError::Tinyplace { code, .. } if code == "unreachable" => {

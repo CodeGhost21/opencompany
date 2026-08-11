@@ -226,6 +226,20 @@ pub struct WorkspaceSection {
     /// Soft quota on the `tmp/` scratch directory, in gibibytes. Absent or
     /// `<= 0` means unlimited.
     pub tmp_quota_gb: Option<f64>,
+    /// Hard quota on the total **binary payload** one company's workspace tree
+    /// may hold, in gibibytes. Absent or `<= 0` means unlimited (issue #553).
+    ///
+    /// Unlike the two soft quotas above — which only warn, because hard
+    /// enforcement of a whole data directory belongs to the container /
+    /// StorageClass layer — this one is enforced at the store: a write that
+    /// would cross it is refused before anything is stored. It can be, because
+    /// the runtime knows the size of every payload it is asked to keep.
+    pub tree_quota_gb: Option<f64>,
+    /// Hard cap on a single workspace file, in mebibytes. Defaults to 256 MiB.
+    ///
+    /// Also the upload route's request body limit, so an over-cap upload is
+    /// rejected at the edge rather than buffered and then refused.
+    pub max_blob_mb: Option<f64>,
 }
 
 impl WorkspaceSection {
@@ -235,6 +249,14 @@ impl WorkspaceSection {
             clear_tmp_on_startup: self.clear_tmp_on_startup.unwrap_or(true),
             storage_quota_bytes: gib_to_bytes(self.storage_quota_gb),
             tmp_quota_bytes: gib_to_bytes(self.tmp_quota_gb),
+            quota: crate::runtime::WorkspaceQuota {
+                max_blob_bytes: self
+                    .max_blob_mb
+                    .filter(|m| *m > 0.0)
+                    .map(|m| (m * 1024.0 * 1024.0) as u64)
+                    .unwrap_or(crate::runtime::DEFAULT_MAX_BLOB_BYTES),
+                tree_quota_bytes: gib_to_bytes(self.tree_quota_gb),
+            },
         }
     }
 }
@@ -255,6 +277,8 @@ pub struct WorkspaceConfig {
     pub storage_quota_bytes: Option<u64>,
     /// Soft `tmp/` quota in bytes; `None` is unlimited.
     pub tmp_quota_bytes: Option<u64>,
+    /// The workspace tree's **enforced** byte limits (issue #553).
+    pub quota: crate::runtime::WorkspaceQuota,
 }
 
 impl Default for WorkspaceConfig {
@@ -263,6 +287,7 @@ impl Default for WorkspaceConfig {
             clear_tmp_on_startup: true,
             storage_quota_bytes: None,
             tmp_quota_bytes: None,
+            quota: crate::runtime::WorkspaceQuota::default(),
         }
     }
 }
