@@ -275,14 +275,26 @@ The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle
 clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
 storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
 tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
+tree_quota_gb = 2             # HARD cap on the note tree's binary payloads (#553)
+max_blob_mb = 256             # HARD cap on one workspace file (default 256)
 ```
 
-**Quotas are soft/advisory in the binary.** At boot `serve` measures the
-workspace (and `tmp/`) and emits an operator-visible `tracing::warn` when either
-exceeds its configured quota. **Hard enforcement** — blocking writes at the
-limit — is the container/StorageClass layer's job (an EFS access point cap or a
-k8s `ResourceQuota`), which is where the deploy manifests wire it; the binary
-surfaces the condition rather than intercepting every write.
+**The first two quotas are soft/advisory in the binary.** At boot `serve`
+measures the workspace (and `tmp/`) and emits an operator-visible
+`tracing::warn` when either exceeds its configured quota. **Hard enforcement**
+of a whole data directory is the container/StorageClass layer's job (an EFS
+access point cap or a k8s `ResourceQuota`), which is where the deploy manifests
+wire it; the binary surfaces the condition rather than intercepting every write.
+
+**`tree_quota_gb` and `max_blob_mb` are hard, and enforced at the store.** They
+can be, because since #553 the runtime knows the size of every payload it is
+asked to keep: `QuotaEnforcedWorkspace` wraps the workspace store at the single
+assembly site and refuses an over-limit binary write **before** anything is
+stored, so a refusal leaves no partial blob, no node and no orphan. Only
+payloads are counted — prose notes are not, because the threat model is media.
+Refusals answer 413 and name the used and allowed totals. `max_blob_mb` is also
+the upload route's request body limit, so an over-cap upload is rejected at the
+edge instead of being buffered and then refused.
 
 Large-file S3 offload remains a follow-up (needs an S3 client + credentials).
 
