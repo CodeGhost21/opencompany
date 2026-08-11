@@ -2359,6 +2359,16 @@ fn mcp_manifest() -> CompanyManifest {
 /// Boots an fs-backed company from a caller-supplied manifest (mirrors
 /// `state_with_company`, which pins the default manifest).
 async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) -> AppState {
+    state_with_manifest_and_defaults(home, manifest, Vec::new()).await
+}
+
+/// Like [`state_with_manifest`], but with install-wide default MCP servers
+/// configured (issue #527), for asserting the default-override guards.
+async fn state_with_manifest_and_defaults(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    defaults: Vec<crate::company::McpServer>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -2381,6 +2391,7 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
         .unwrap();
     let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
         .with_id(id.clone())
+        .with_default_mcp_servers(defaults)
         .build()
         .await
         .unwrap();
@@ -2717,6 +2728,58 @@ async fn mcp_reachability_is_empty_for_a_disabled_server() {
         reach(&list[0]).is_empty(),
         "the list reader applies the same enabled filter as the harness"
     );
+}
+
+/// An install default is disabled by its *first* runtime override: no prior
+/// runtime entry exists to patch, so `update_server` must fall back to the
+/// default declaration as its patch base rather than 404 (issue #527).
+#[tokio::test]
+async fn mcp_default_server_can_be_disabled_with_its_first_override() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let default = crate::company::McpServer {
+        name: "deepwiki".to_string(),
+        endpoint: "https://deepwiki.example/mcp".to_string(),
+        ..Default::default()
+    };
+    let state = state_with_manifest_and_defaults(&home, manifest(), vec![default]).await;
+
+    // Cold, the default is visible and badged `default`.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list[0]["name"], "deepwiki");
+    assert_eq!(list[0]["source"], "default");
+
+    // The first override disables it — the override persists alongside the
+    // default, keeping the effective body but flipping `enabled` off.
+    let (status, updated) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/mcp/servers/deepwiki",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["server"]["enabled"], false);
+    assert_eq!(
+        updated["server"]["source"], "default",
+        "an override inherits the default badge, so delete still refuses it"
+    );
+
+    // Delete still refuses: the declaration lives in the install config, and the
+    // disable override is the supported toggle.
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        "/api/v1/company/mcp/servers/deepwiki",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+
+    // The disable took: listing reflects `enabled: false`.
+    let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(list[0]["enabled"], false);
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery

@@ -317,6 +317,7 @@ fn brain_with(
         skills: None,
         skills_source_dir: None,
         skills_registry: Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,

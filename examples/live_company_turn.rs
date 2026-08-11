@@ -110,6 +110,7 @@ async fn main() -> anyhow::Result<()> {
         skills: None,
         skills_source_dir: None,
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,

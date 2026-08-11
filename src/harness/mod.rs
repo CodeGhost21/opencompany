@@ -224,6 +224,11 @@ pub struct HarnessDeps {
     /// builder resolves these ahead of time; each agent then filters the set by
     /// its `mcp:*` tool grants. Empty leaves the agent with no MCP bridge tools.
     pub mcp_servers: Vec<McpServerDecl>,
+    /// Install-wide default MCP servers (issue #527), carried so the live
+    /// re-resolution in [`Harness::resolve_effective_mcp`] merges the same three
+    /// layers the boot-time resolution did. Without it a console edit would
+    /// re-resolve to manifest ∪ runtime and silently drop every default.
+    pub default_mcp_servers: Vec<crate::company::McpServer>,
     /// The company's durable [`FactStore`], surfaced to the orchestrator agent
     /// through the `query_company` read tool (issue #53). `None` leaves the
     /// orchestrator without the facts half of its insight surface (the chat path
@@ -1144,6 +1149,7 @@ impl HarnessPool {
             Some(secrets) => {
                 let mut decls = crate::company::mcp::resolve_effective(
                     &company.id,
+                    &deps.default_mcp_servers,
                     &company.manifest.mcp_servers,
                     secrets.as_ref(),
                 )
@@ -2257,6 +2263,7 @@ description = "Builds the product."
                 skills: None,
                 skills_source_dir: None,
                 skills_registry: std::sync::Arc::from([]),
+                default_mcp_servers: Vec::new(),
                 mcp_servers: Vec::new(),
                 facts: None,
                 events: None,
@@ -2325,6 +2332,7 @@ description = "Builds the product."
             skills: None,
             skills_source_dir: Some(source.path().to_path_buf()),
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2930,6 +2938,7 @@ description = "Builds the product."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -3102,6 +3111,7 @@ description = "Builds the product."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -3434,6 +3444,7 @@ description = "Builds the product."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -3597,6 +3608,7 @@ description = "Sets direction."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -3743,6 +3755,7 @@ description = "Sets direction."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
