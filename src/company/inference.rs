@@ -635,6 +635,72 @@ mod tests {
         assert_eq!(bearer(&decl).await.as_deref(), Some("platform-key"));
     }
 
+    /// Issue #585 adds a second writer to `key_configured` — an admin setting the
+    /// company's key from the console — alongside the platform default the
+    /// manager injects. #636's `effective_status` split exists precisely to keep
+    /// the console's `keyConfigured` reporting *tenant* config and never the
+    /// platform token. Nothing asserted the two stay distinguishable, so this
+    /// does: on one company, the same call answers differently depending on
+    /// which source is in play.
+    #[tokio::test]
+    async fn a_console_key_and_the_platform_default_are_distinguishable() {
+        let company = CompanyId::new("acme");
+        let secrets = MemSecrets::default();
+        let platform = EnvDefault {
+            base_url: "https://env.example/openai/v1".into(),
+            credential: Credential::from_value("platform-key"),
+        };
+        save_runtime_config(
+            &company,
+            &secrets,
+            &RuntimeInference {
+                provider: "managed".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // Nothing tenant-scoped is stored yet. The platform-aware resolve is
+        // credentialled — that is the value the console must NOT surface — while
+        // the tenant-only resolve the read route uses reports "no key".
+        let with_platform =
+            resolve_effective(&company, &Inference::default(), Some(&platform), &secrets)
+                .await
+                .unwrap()
+                .expect("platform default resolves");
+        let tenant_only = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("runtime config resolves");
+        assert!(
+            with_platform.key_configured(),
+            "the platform token is a real credential"
+        );
+        assert!(
+            !tenant_only.key_configured(),
+            "an injected platform token must never light up the console's `keyConfigured`"
+        );
+
+        // An admin sets the company's key. Now both agree — and the bearer the
+        // agents present is the tenant's, not the platform's.
+        store_key(&company, &secrets, "company-key").await.unwrap();
+        let with_platform =
+            resolve_effective(&company, &Inference::default(), Some(&platform), &secrets)
+                .await
+                .unwrap()
+                .expect("platform default resolves");
+        let tenant_only = resolve_effective(&company, &Inference::default(), None, &secrets)
+            .await
+            .unwrap()
+            .expect("runtime config resolves");
+        assert!(
+            tenant_only.key_configured(),
+            "a console-set key is tenant config"
+        );
+        assert_eq!(bearer(&with_platform).await.as_deref(), Some("company-key"));
+    }
+
     #[tokio::test]
     async fn no_source_resolves_to_none() {
         let company = CompanyId::new("acme");
