@@ -22,6 +22,11 @@ Supporting docs:
     trace, and who writes it
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
+  - [workflow-events.md](workflow-events.md) — the workflow-run progress
+    brackets (`WorkflowRunStarted` / `WorkflowNodeStarted` /
+    `WorkflowNodeFinished` / `WorkflowRunFinished`), run-id correlation, the
+    interrupted-run sweep, and operator stop/cancel semantics (issues
+    #371/#382/#383/#398)
 - [artifacts.md](artifacts.md) — what makes something a deliverable: the
   explicit-publish rule, `(task, source)` identity, body caps and reference
   bodies, and the single follow-up nudge

@@ -82,6 +82,21 @@ impl Confinement {
     /// tree is caught by exactly the same comparison, which is the point: a
     /// write to `<root>/link/escape.txt` where `link` leaves the root must be
     /// refused, and it is only visible after resolution.
+    ///
+    /// ## The dangling link
+    ///
+    /// Resolving the parent is not sufficient on its own, because a *dangling*
+    /// symlink does not canonicalize. `<root>/link -> /outside/planted.txt`
+    /// with no `planted.txt` yet fails `path.canonicalize()`, takes the
+    /// does-not-exist-yet branch, and its parent is the root — so every check
+    /// passes and the returned path is `<root>/link`. `fs::write` then follows
+    /// the link and creates the file outside the root, which is the escape this
+    /// module exists to refuse. The final component is therefore checked with
+    /// `symlink_metadata`, which does not follow.
+    ///
+    /// What remains, and is not closeable here: a link planted between this
+    /// resolution and the caller's `open`. Closing that needs `O_NOFOLLOW` on
+    /// the write itself, which is the caller's syscall to make.
     pub fn resolve_write(&self, path: &Path) -> Result<PathBuf, ConfineError> {
         self.require_absolute(path)?;
         if let Ok(resolved) = path.canonicalize() {
@@ -102,7 +117,17 @@ impl Confinement {
         let name = path.file_name().ok_or(ConfineError::NoParent)?;
         let parent = parent.canonicalize().map_err(|_| ConfineError::NoParent)?;
         self.require_inside(&parent)?;
-        Ok(parent.join(name))
+
+        // The final component reached here because it did not canonicalize.
+        // That is usually "no such file", which is the ordinary case for a
+        // write — but it is also what a dangling symlink looks like, and a
+        // write through one lands wherever it points. `symlink_metadata` is the
+        // one stat that does not follow, so it can tell the two apart.
+        let target = parent.join(name);
+        if std::fs::symlink_metadata(&target).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            return Err(ConfineError::Escapes);
+        }
+        Ok(target)
     }
 
     fn require_absolute(&self, path: &Path) -> Result<(), ConfineError> {
@@ -210,6 +235,39 @@ mod test {
             c.resolve_write(&link.join("planted.txt")),
             Err(ConfineError::Escapes)
         );
+    }
+
+    #[test]
+    fn a_write_through_a_dangling_symlink_is_refused() {
+        // The case the parent-resolution branch does NOT catch on its own. A
+        // link whose target does not exist yet fails `canonicalize`, so the
+        // path looks exactly like an ordinary new file — and its parent really
+        // is the root. Without the `symlink_metadata` check this returns
+        // `Ok(<root>/planted.txt)` and the caller's `fs::write` follows the
+        // link out of the tree and creates the file there.
+        let f = fixture();
+        let link = f.root.join("planted.txt");
+        let escapee = f.outside.join("planted.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&escapee, &link).unwrap();
+        #[cfg(not(unix))]
+        return;
+
+        assert!(
+            !escapee.exists(),
+            "the link must dangle for this to be the case"
+        );
+        let c = confine(&f);
+        assert_eq!(c.resolve_write(&link), Err(ConfineError::Escapes));
+
+        // And the same link pointing back INSIDE the root is still refused
+        // rather than silently rewritten to its target: this layer resolves
+        // paths, and quietly retargeting a write is a decision, not a
+        // resolution.
+        let inward = f.root.join("inward.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(f.root.join("src/fresh.rs"), &inward).unwrap();
+        assert_eq!(c.resolve_write(&inward), Err(ConfineError::Escapes));
     }
 
     #[test]
