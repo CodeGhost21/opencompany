@@ -371,6 +371,16 @@ const DECLARED: &[Declared] = &[
     // tree without ever asking.
     d("workspace_list", EffectGroup::Other, Reach::Nothing),
     d("workspace_read", EffectGroup::Other, Reach::Nothing),
+    // `workspace_search` (issue #607) is a read of the same tree by the same
+    // rules — it can surface nothing `workspace_read` could not already be asked
+    // for, and it exists precisely so that asking costs one call instead of one
+    // per candidate. Anything stricter would price the cheap path above the
+    // expensive one it replaces.
+    //
+    // Note which grant it rides, because the name invites the wrong guess: the
+    // `workspace` READ grant, never the metered `search` grant. `web_search`
+    // spends money at a backend; this reads the company's own notes.
+    d("workspace_search", EffectGroup::Other, Reach::Nothing),
     d("workspace_create", EffectGroup::Other, Reach::Consequence),
     d("workspace_write", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
@@ -1157,6 +1167,7 @@ mod tests {
             "memory_recall",
             "workspace_list",
             "workspace_read",
+            "workspace_search",
             "media_list_models",
             "composio_list_toolkits",
             "composio_list_connections",
@@ -1468,6 +1479,7 @@ mod tests {
             search::WEB_SEARCH_TOOL,
             workspace_tools::WORKSPACE_LIST_TOOL,
             workspace_tools::WORKSPACE_READ_TOOL,
+            workspace_tools::WORKSPACE_SEARCH_TOOL,
             workspace_tools::WORKSPACE_CREATE_TOOL,
             workspace_tools::WORKSPACE_WRITE_TOOL,
             crate::harness::composio_catalog::LIST_TOOLS_TOOL,
