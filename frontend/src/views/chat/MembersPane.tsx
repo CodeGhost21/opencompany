@@ -185,7 +185,7 @@ export function MembersPane({
 /** A section heading inside the pane's scroll body. */
 function SectionLabel({ children, className }: { children: ReactNode; className?: string }) {
   return (
-    <h3 className={cn("px-2 pb-1 text-[11px] font-medium uppercase tracking-wide", className)}>
+    <h3 className={cn("px-2 pb-1 text-2xs font-medium uppercase tracking-wide", className)}>
       {children}
     </h3>
   );
@@ -233,7 +233,7 @@ function MemberRow({
           <span className="flex items-center gap-1">
             <span className="truncate text-sm font-medium">{member.name}</span>
             {lead && (
-              <span className="shrink-0 rounded border px-1 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+              <span className="shrink-0 rounded border px-1 text-3xs font-medium uppercase tracking-wide text-muted-foreground">
                 Lead
               </span>
             )}
@@ -306,7 +306,7 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
   const cap = member.budgetUsdDaily;
   const attribution =
     setByLabel && member.budgetSetAtMillis !== undefined ? (
-      <span data-testid="team-budget-attribution" className="block truncate text-[10px] text-muted-foreground">
+      <span data-testid="team-budget-attribution" className="block truncate text-3xs text-muted-foreground">
         {cap === undefined ? "Uncapped by" : "Set by"} {setByLabel} ·{" "}
         {new Date(member.budgetSetAtMillis).toLocaleDateString()}
       </span>
@@ -324,7 +324,7 @@ function DailyBudgetLine({ member, setByLabel }: { member: TeamMember; setByLabe
     <span className="block">
       <span
         data-testid="team-budget"
-        className={cn("block truncate text-[10px]", overBudget ? "text-destructive" : "text-muted-foreground")}
+        className={cn("block truncate text-3xs", overBudget ? "text-destructive" : "text-muted-foreground")}
       >
         {usd(cap)}/day · {usd(spent)} spent today
         {overBudget && " · paused"}

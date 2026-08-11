@@ -1187,7 +1187,7 @@ function Authorship({
   return (
     <span className="flex shrink-0 items-center gap-1.5" data-testid="workspace-authorship">
       {created && (
-        <Badge variant="outline" className={cn("text-[10px]", ORIGIN_STYLES[createdBy.kind])}>
+        <Badge variant="outline" className={cn("text-3xs", ORIGIN_STYLES[createdBy.kind])}>
           {created}
         </Badge>
       )}
@@ -1238,7 +1238,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           {node.createdBy.kind === "agent" && (
             <Badge
               variant="outline"
-              className={cn("shrink-0 px-1 py-0 text-[10px]", ORIGIN_STYLES.agent)}
+              className={cn("shrink-0 px-1 py-0 text-3xs", ORIGIN_STYLES.agent)}
               title={`Created by agent ${node.createdBy.id}`}
               data-testid="workspace-tree-agent-badge"
             >

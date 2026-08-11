@@ -35,7 +35,7 @@ export function NodeDetailPanel({
           </span>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">{node.name}</div>
-            <div className="truncate text-[11px] text-muted-foreground">{node.id}</div>
+            <div className="truncate text-2xs text-muted-foreground">{node.id}</div>
           </div>
         </div>
         <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
@@ -65,7 +65,7 @@ export function NodeDetailPanel({
         {node.schedule && (
           <DetailField label="Schedule">
             <p className="font-mono text-xs">{node.schedule}</p>
-            <p className="text-[10px] text-muted-foreground">5-field cron, UTC.</p>
+            <p className="text-3xs text-muted-foreground">5-field cron, UTC.</p>
           </DetailField>
         )}
 
@@ -83,7 +83,7 @@ export function NodeDetailPanel({
 
         {hasConfig && (
           <DetailField label="Config">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
               {JSON.stringify(node.config, null, 2)}
             </pre>
           </DetailField>
@@ -97,7 +97,7 @@ export function NodeDetailPanel({
 
         {node.retry && (
           <DetailField label="Retry">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
               {JSON.stringify(node.retry, null, 2)}
             </pre>
           </DetailField>
@@ -146,7 +146,7 @@ function describeDestination(destination: NonNullable<WorkflowNodeModel["destina
 function DetailField({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="space-y-1">
-      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-3xs uppercase tracking-wide text-muted-foreground">{label}</p>
       {children}
     </div>
   );

@@ -1380,7 +1380,7 @@ export function WorkflowsView({
               <History className="mr-1.5 size-4" />
               History
               {runs.length > 0 && (
-                <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-[10px] font-normal">
+                <Badge variant="secondary" className="ml-1.5 h-4 px-1.5 text-3xs font-normal">
                   {runs.length}
                 </Badge>
               )}

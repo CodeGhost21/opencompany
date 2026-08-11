@@ -171,7 +171,7 @@ export function AgentHarnessCard({
     <div className="flex h-full flex-col">
       <PanelHeader title={agent.name} sub={`${agent.role} · AI agent`} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
-        <p className="mb-3 text-[11px] leading-relaxed text-os-muted">{agent.description}</p>
+        <p className="mb-3 text-2xs leading-relaxed text-os-muted">{agent.description}</p>
 
         <SectionLabel icon={ListChecks}>instructions{task ? '' : ' · no SOP assigned'}</SectionLabel>
         {task ? (
@@ -181,8 +181,8 @@ export function AgentHarnessCard({
         ) : null}
         <ol className="mb-4 flex flex-col gap-1.5">
           {(task?.steps ?? []).map((s, i) => (
-            <li key={i} className="flex gap-2 text-[11px] leading-relaxed text-os-muted">
-              <span className="shrink-0 font-mono text-[10px] text-os-dim">{String(i + 1).padStart(2, '0')}</span>
+            <li key={i} className="flex gap-2 text-2xs leading-relaxed text-os-muted">
+              <span className="shrink-0 font-mono text-3xs text-os-dim">{String(i + 1).padStart(2, '0')}</span>
               {s}
             </li>
           ))}
@@ -237,7 +237,7 @@ export function AgentHarnessCard({
               className="mt-1 h-2 w-2 shrink-0 rounded-full"
               style={{ background: lastRun.ok ? 'var(--ok, #3df08c)' : 'var(--err, #ff6259)' }}
             />
-            <p className="text-[11px] leading-relaxed text-os-muted">
+            <p className="text-2xs leading-relaxed text-os-muted">
               {lastRun.summary}
               {runLabel && <span className="font-mono text-[9.5px] text-os-dim"> · {runLabel}</span>}
             </p>
@@ -262,7 +262,7 @@ export function ToolDetailCard({
     <div className="flex h-full flex-col">
       <PanelHeader title={wiki.name} sub={wiki.kind} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
-        <p className="mb-3 text-[11px] leading-relaxed text-os-muted">{wiki.summary}</p>
+        <p className="mb-3 text-2xs leading-relaxed text-os-muted">{wiki.summary}</p>
         <SectionLabel icon={FileText}>context · {wiki.path}</SectionLabel>
         <div className="mb-4 flex items-center gap-2">
           <WikiLink label={`${wiki.slug}.md`} mcp={wiki.mcp} />
@@ -273,7 +273,7 @@ export function ToolDetailCard({
         ) : (
           <div className="flex flex-col gap-1">
             {wiki.usedBy.map((n) => (
-              <span key={n} className="font-mono text-[11px] text-os-muted">{n}</span>
+              <span key={n} className="font-mono text-2xs text-os-muted">{n}</span>
             ))}
           </div>
         )}
@@ -308,7 +308,7 @@ export function MemoryNoteCard({
           </span>
         </div>
         {note.excerpt ? (
-          <p className="mb-3 text-[11px] leading-relaxed text-os-muted">{note.excerpt}</p>
+          <p className="mb-3 text-2xs leading-relaxed text-os-muted">{note.excerpt}</p>
         ) : (
           <p className="mb-3 font-mono text-[10.5px] text-os-dim">no excerpt</p>
         )}
@@ -339,7 +339,7 @@ export function SopTaskDetailCard({
     <div className="flex h-full flex-col">
       <PanelHeader title={task.title} sub="standard operating procedure" onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
-        {task.summary && <p className="mb-3 text-[11px] leading-relaxed text-os-muted">{task.summary}</p>}
+        {task.summary && <p className="mb-3 text-2xs leading-relaxed text-os-muted">{task.summary}</p>}
 
         <SectionLabel icon={UserCog}>done by</SectionLabel>
         <div className="mb-4">
@@ -354,8 +354,8 @@ export function SopTaskDetailCard({
         <SectionLabel icon={ListChecks}>the job, written out</SectionLabel>
         <ol className="mb-4 flex flex-col gap-1.5">
           {task.steps.map((s, i) => (
-            <li key={i} className="flex gap-2 text-[11px] leading-relaxed text-os-muted">
-              <span className="shrink-0 font-mono text-[10px] text-os-dim">{String(i + 1).padStart(2, '0')}</span>
+            <li key={i} className="flex gap-2 text-2xs leading-relaxed text-os-muted">
+              <span className="shrink-0 font-mono text-3xs text-os-dim">{String(i + 1).padStart(2, '0')}</span>
               {s}
             </li>
           ))}
@@ -391,7 +391,7 @@ export function GraphHumanDetailCard({
     <div className="flex h-full flex-col">
       <PanelHeader title={person.name} sub={`${person.role} · human`} color={color} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
-        <p className="mb-3 text-[11px] leading-relaxed text-os-muted">
+        <p className="mb-3 text-2xs leading-relaxed text-os-muted">
           Human employee in <span className="font-semibold">{deptName}</span> — one job, done by them alone.
         </p>
         <SectionLabel icon={ClipboardList}>their job</SectionLabel>
@@ -428,7 +428,7 @@ export function PersonDetailCard({
     <div className="flex h-full flex-col">
       <PanelHeader title={person.name} sub={person.role} color={color} onBack={onBack} onClose={onClose} />
       <div className="flex-1 overflow-y-auto px-3 py-2.5">
-        <p className="mb-3 text-[11px] leading-relaxed text-os-muted">
+        <p className="mb-3 text-2xs leading-relaxed text-os-muted">
           Leads <span className="font-semibold" style={{ color }}>{deptName}</span> — manages {agents.length} agent{agents.length === 1 ? '' : 's'}.
         </p>
         <SectionLabel icon={FileText}>context</SectionLabel>
@@ -436,7 +436,7 @@ export function PersonDetailCard({
         <SectionLabel icon={User}>manages</SectionLabel>
         <div className="flex flex-col gap-1">
           {agents.map((a) => (
-            <span key={a.id} className="font-mono text-[11px] text-os-muted">{a.name}</span>
+            <span key={a.id} className="font-mono text-2xs text-os-muted">{a.name}</span>
           ))}
         </div>
       </div>

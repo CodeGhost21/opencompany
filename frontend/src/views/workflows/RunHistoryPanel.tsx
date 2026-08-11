@@ -46,12 +46,12 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">Report delivery</span>
         {pending > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10">
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-sky-500/40 bg-sky-500/10">
             {pending} awaiting approval
           </Badge>
         )}
         {undelivered > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal border-red-500/40 bg-red-500/10">
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-red-500/40 bg-red-500/10">
             {undelivered} not delivered
           </Badge>
         )}
@@ -60,12 +60,12 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
         <div key={`${d.node}-${d.target ?? ""}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
           <Badge
             variant="outline"
-            className={`h-4 px-1.5 text-[10px] font-normal ${DELIVERY_TONE[d.status] ?? ""}`}
+            className={`h-4 px-1.5 text-3xs font-normal ${DELIVERY_TONE[d.status] ?? ""}`}
           >
             {d.status}
           </Badge>
-          <span className="font-mono text-[11px]">{d.node}</span>
-          <span className="text-[11px] text-muted-foreground">
+          <span className="font-mono text-2xs">{d.node}</span>
+          <span className="text-2xs text-muted-foreground">
             → {d.kind}
             {d.target ? ` ${d.target}` : ""} — {d.detail}
           </span>
@@ -86,7 +86,7 @@ export function LastRunChip({ run }: { run: WorkflowRunOutcome }) {
   return (
     <Badge
       variant="outline"
-      className="h-5 gap-1.5 px-2 text-[10px] font-normal"
+      className="h-5 gap-1.5 px-2 text-3xs font-normal"
       data-testid="workflow-last-run-chip"
       title={
         run.running
@@ -206,16 +206,16 @@ function RunHistoryRow({
     >
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <span className={`size-1.5 rounded-full ${tone.dot}`} />
-        <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+        <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
           {run.scheduled ? "scheduled" : "manual"}
         </Badge>
-        <span className="text-[11px] text-muted-foreground">
+        <span className="text-2xs text-muted-foreground">
           {new Date(run.atMillis).toLocaleString()} · {relativeTime(run.atMillis)}
         </span>
         {run.pendingApprovals.length > 0 && (
           <Badge
             variant="outline"
-            className="h-4 px-1.5 text-[10px] font-normal border-amber-500/40 bg-amber-500/10"
+            className="h-4 px-1.5 text-3xs font-normal border-amber-500/40 bg-amber-500/10"
           >
             {run.pendingApprovals.length} pending approval
             {run.pendingApprovals.length === 1 ? "" : "s"}
@@ -224,7 +224,7 @@ function RunHistoryRow({
         {run.running && (
           <Badge
             variant="outline"
-            className="h-4 px-1.5 text-[10px] font-normal border-sky-500/40 bg-sky-500/10"
+            className="h-4 px-1.5 text-3xs font-normal border-sky-500/40 bg-sky-500/10"
           >
             running
           </Badge>
@@ -233,7 +233,7 @@ function RunHistoryRow({
           <Button
             size="sm"
             variant="ghost"
-            className="ml-auto h-5 px-2 text-[10px]"
+            className="ml-auto h-5 px-2 text-3xs"
             onClick={onSelect}
             aria-pressed={selected}
             data-testid="workflow-run-overlay-toggle"
@@ -257,7 +257,7 @@ function RunHistoryRow({
         // The outcome that used to be quietest of all: a run that died left one
         // host-stdout warning and nothing an operator could ever find.
         <Alert variant="destructive" className="py-2">
-          <AlertDescription className="text-[11px]">
+          <AlertDescription className="text-2xs">
             {/* Name the node when the trail names one — the engine reports a
                 failing node as an errored step, so this is exact. When it does
                 not (a graph that would not compile, a capability that could not
@@ -273,7 +273,7 @@ function RunHistoryRow({
         // executing was dropped where it was rather than allowed to complete —
         // so a side effect it had started may be half-done.
         <p
-          className="text-[11px] text-muted-foreground"
+          className="text-2xs text-muted-foreground"
           data-testid="workflow-run-cancelled"
         >
           An operator stopped this run
@@ -288,7 +288,7 @@ function RunHistoryRow({
         // error, no cancellation and no deliveries yet, so it fell through to
         // the "Finished" line below and told the operator it was over. It is
         // not, and its reports have not been routed yet.
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           Still running — reports are routed when it finishes.
         </p>
       ) : run.deliveries.length > 0 ? (
@@ -296,7 +296,7 @@ function RunHistoryRow({
         // reads identically whether it's on screen now or a week old.
         <DeliveryRows deliveries={run.deliveries} />
       ) : (
-        <p className="text-[11px] text-muted-foreground">
+        <p className="text-2xs text-muted-foreground">
           Finished — this run routed no reports.
         </p>
       )}
@@ -309,7 +309,7 @@ function RunNodeChip({ node }: { node: WorkflowRunNode }) {
   const ok = node.status === "ok";
   return (
     <span
-      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[10px] ${
+      className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-3xs ${
         ok
           ? "border-emerald-500/40 bg-emerald-500/10"
           : "border-red-500/50 bg-red-500/10"

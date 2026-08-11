@@ -302,7 +302,7 @@ function DeskNode({
             <p className="flex items-center gap-2 truncate font-medium">
               {desk.name}
               {desk.provenance === "blueprint" && (
-                <Badge variant="secondary" className="shrink-0 text-[10px]">
+                <Badge variant="secondary" className="shrink-0 text-3xs">
                   Blueprint
                 </Badge>
               )}
@@ -420,7 +420,7 @@ function Seat({
         {/* A seat naming somebody the roster no longer has. Shown, not hidden:
             it is a fact about the structure only the operator can fix. */}
         {!seat.known && (
-          <Badge variant="outline" className="shrink-0 text-[10px]">
+          <Badge variant="outline" className="shrink-0 text-3xs">
             Not on the roster
           </Badge>
         )}
@@ -463,7 +463,7 @@ function Seat({
             <X className="size-3.5" />
           </Button>
         ) : (
-          <Badge variant="secondary" className="shrink-0 text-[10px]">
+          <Badge variant="secondary" className="shrink-0 text-3xs">
             Blueprint
           </Badge>
         )}

@@ -135,7 +135,7 @@ export function RunResultPanel({
           <summary className="cursor-pointer text-xs text-muted-foreground">
             Show raw engine output
           </summary>
-          <pre className="mt-1 rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+          <pre className="mt-1 rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
             {JSON.stringify(result.output, null, 2)}
           </pre>
         </details>
@@ -153,7 +153,7 @@ function NodeResultCard({ node }: { node: NodeResult }) {
       <div className="mb-1 flex items-center gap-2">
         <span className="truncate text-xs font-medium">{node.name}</span>
         {node.port !== null && (
-          <Badge variant="outline" className="h-4 px-1.5 text-[10px] font-normal">
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal">
             branch: {node.port}
           </Badge>
         )}
@@ -161,7 +161,7 @@ function NodeResultCard({ node }: { node: NodeResult }) {
       {node.messages.map((m, i) => (
         <div key={i} className={i > 0 ? "mt-2 border-t pt-2" : undefined}>
           {m.agentRef && (
-            <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+            <p className="mb-1 text-3xs uppercase tracking-wide text-muted-foreground">
               {m.agentRef}
             </p>
           )}
@@ -203,7 +203,7 @@ function NodeTimeline({
         <div key={`${n.nodeId}-${i}`} className="flex flex-wrap items-baseline gap-1.5">
           <Badge
             variant="outline"
-            className={`h-4 px-1.5 text-[10px] font-normal ${
+            className={`h-4 px-1.5 text-3xs font-normal ${
               n.status === "error"
                 ? "border-red-500/40 bg-red-500/10"
                 : "border-emerald-500/40 bg-emerald-500/10"
@@ -211,8 +211,8 @@ function NodeTimeline({
           >
             {n.status}
           </Badge>
-          <span className="text-[11px]">{nameById.get(n.nodeId) ?? n.nodeId}</span>
-          <span className="text-[11px] text-muted-foreground">{n.elapsedMs} ms</span>
+          <span className="text-2xs">{nameById.get(n.nodeId) ?? n.nodeId}</span>
+          <span className="text-2xs text-muted-foreground">{n.elapsedMs} ms</span>
         </div>
       ))}
     </div>

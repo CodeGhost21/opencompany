@@ -80,7 +80,7 @@ export function MessageRow({ entry, threadOpen, onOpenThread, onReact }: Props) 
     >
       <div className="w-9 shrink-0">
         {continuation ? (
-          <span className="hidden pt-0.5 text-right text-[10px] leading-5 text-muted-foreground tabular-nums group-hover/message:block">
+          <span className="hidden pt-0.5 text-right text-3xs leading-5 text-muted-foreground tabular-nums group-hover/message:block">
             {formatTime(message.at)}
           </span>
         ) : (
@@ -132,7 +132,7 @@ function AuthorLine({ sender, at }: { sender: Sender; at: number }) {
   return (
     <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 leading-5">
       <span className="truncate text-sm font-semibold tracking-tight">{sender.name}</span>
-      <span className="shrink-0 text-[11px] text-muted-foreground tabular-nums">
+      <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
         {formatTime(at)}
       </span>
     </div>
@@ -176,7 +176,7 @@ function Reactions({
           aria-label={`${chip.emoji} — ${chip.by.join(", ")}`}
         >
           <span aria-hidden>{chip.emoji}</span>
-          <span className="tabular-nums text-[11px] font-medium">{chip.count}</span>
+          <span className="tabular-nums text-2xs font-medium">{chip.count}</span>
         </button>
       ))}
     </div>

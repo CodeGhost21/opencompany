@@ -333,11 +333,11 @@ function ArtifactRow({ artifact, onOpen }: { artifact: ArtifactView; onOpen: () 
         <span className="flex min-w-0 flex-1 flex-col items-start">
           <span className="w-full truncate font-medium">{artifact.title}</span>
           {artifact.source ? (
-            <span className="w-full truncate font-mono text-[10px] text-muted-foreground">
+            <span className="w-full truncate font-mono text-3xs text-muted-foreground">
               {artifact.source}
             </span>
           ) : (
-            <span className="w-full truncate text-[10px] italic text-muted-foreground">
+            <span className="w-full truncate text-3xs italic text-muted-foreground">
               chat reply (legacy capture)
             </span>
           )}
@@ -346,10 +346,10 @@ function ArtifactRow({ artifact, onOpen }: { artifact: ArtifactView; onOpen: () 
         <Badge variant="outline" className="shrink-0 font-normal capitalize">
           {artifact.kind}
         </Badge>
-        <span className="shrink-0 text-[11px] text-muted-foreground">
+        <span className="shrink-0 text-2xs text-muted-foreground">
           {artifact.versions.length} {artifact.versions.length === 1 ? "version" : "versions"}
         </span>
-        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+        <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
           {whenOf(artifact.updatedAtMillis)}
         </span>
       </button>
@@ -361,7 +361,7 @@ function ArtifactRow({ artifact, onOpen }: { artifact: ArtifactView; onOpen: () 
 function EditedBadge({ diff }: { diff: ArtifactDiff }) {
   return (
     <span
-      className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium"
+      className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-muted px-2 py-0.5 text-2xs font-medium"
       title={`An operator edited v${diff.fromVersion} into v${diff.toVersion} — ${churnPercent(diff.churn)} of its lines changed`}
     >
       <UserRound className="size-3" />
@@ -497,19 +497,19 @@ function ArtifactDetail({
           </Badge>
         </div>
         {artifact.source ? (
-          <p className="mt-1.5 truncate font-mono text-[11px] text-muted-foreground">
+          <p className="mt-1.5 truncate font-mono text-2xs text-muted-foreground">
             {artifact.source}
           </p>
         ) : (
           // A legacy capture. Saying so plainly is the point: an operator
           // reading a refusal message should not have to work out why a blocker
           // is filed as a deliverable.
-          <p className="mt-1.5 text-[11px] italic text-muted-foreground">
+          <p className="mt-1.5 text-2xs italic text-muted-foreground">
             Captured from the agent's chat reply before deliverables were published explicitly —
             this is a record of what was said, not a file the agent produced.
           </p>
         )}
-        <p className="mt-2 text-[11px] text-muted-foreground">
+        <p className="mt-2 text-2xs text-muted-foreground">
           Created {whenOf(artifact.createdAtMillis)} · updated {whenOf(artifact.updatedAtMillis)}
         </p>
         {shown?.workspaceNodeId && (
@@ -525,7 +525,7 @@ function ArtifactDetail({
           // navigate prop is threaded down for one link.
           <button
             type="button"
-            className="mt-2 inline-flex items-center gap-1.5 text-[11px] font-medium text-primary hover:underline"
+            className="mt-2 inline-flex items-center gap-1.5 text-2xs font-medium text-primary hover:underline"
             onClick={() => {
               window.location.hash = `/workspace/${shown.workspaceNodeId}`;
             }}
@@ -571,7 +571,7 @@ function ArtifactDetail({
 
       {editing ? (
         <div className="rounded-xl border bg-card p-3">
-          <p className="mb-2 text-[11px] text-muted-foreground">
+          <p className="mb-2 text-2xs text-muted-foreground">
             Saving appends a new version authored by you. The agent's version is never
             overwritten — that is what keeps the diff answerable later.
           </p>
@@ -669,7 +669,7 @@ function VersionRail({
   }
   return (
     <div className="rounded-xl border bg-card/40 p-3">
-      <p className="mb-2 inline-flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <p className="mb-2 inline-flex items-center gap-1.5 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
         <History className="size-3.5" />
         Versions
       </p>
@@ -698,7 +698,7 @@ function VersionRail({
               <span className="min-w-0 flex-1 truncate text-muted-foreground">
                 {v.note ?? v.authorId}
               </span>
-              <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+              <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
                 {whenOf(v.createdAtMillis)}
               </span>
             </button>
@@ -731,7 +731,7 @@ function VersionBody({
   return (
     <div className="rounded-xl border bg-card p-3">
       <div className="mb-2 flex items-center gap-2">
-        <span className="text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+        <span className="text-2xs font-medium uppercase tracking-wide text-muted-foreground">
           v{version.version} · {version.author}
         </span>
         {canEdit && (
@@ -743,10 +743,10 @@ function VersionBody({
       </div>
       {reference ? (
         <div className="space-y-1">
-          <p className="break-all rounded-lg bg-muted px-2.5 py-2 font-mono text-[11px]">
+          <p className="break-all rounded-lg bg-muted px-2.5 py-2 font-mono text-2xs">
             {version.body}
           </p>
-          <p className="text-[11px] text-muted-foreground">
+          <p className="text-2xs text-muted-foreground">
             {artifact.kind === "image" ? "An image" : "A file"} reference — the host stores the
             location, not the bytes.
           </p>
@@ -797,7 +797,7 @@ function ComparePanel({
 
   return (
     <div className="rounded-xl border bg-card/40 p-3">
-      <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
         Compare versions
       </p>
       <div className="flex flex-wrap items-center gap-2">
@@ -830,7 +830,7 @@ function ComparePanel({
           {busy && <Loader2 className="mr-1.5 size-3.5 animate-spin" />}
           Compare
         </Button>
-        {same && <span className="text-[11px] text-muted-foreground">Pick two different versions.</span>}
+        {same && <span className="text-2xs text-muted-foreground">Pick two different versions.</span>}
       </div>
       {diff && (
         <div className="mt-3">
@@ -851,18 +851,18 @@ function DiffPanel({ title, note, diff }: { title: string; note: string; diff: A
     <div className="rounded-xl border bg-card">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 border-b px-3 py-2">
         <span className="text-xs font-medium">{title}</span>
-        <span className="text-[11px] text-muted-foreground">{note}</span>
-        <span className="ml-auto inline-flex items-center gap-2 text-[11px] tabular-nums">
+        <span className="text-2xs text-muted-foreground">{note}</span>
+        <span className="ml-auto inline-flex items-center gap-2 text-2xs tabular-nums">
           <span className="text-emerald-600 dark:text-emerald-400">+{diff.added}</span>
           <span className="text-rose-600 dark:text-rose-400">−{diff.removed}</span>
           <span className="text-muted-foreground">{churnPercent(diff.churn)} churn</span>
         </span>
       </div>
       {diff.lines.length === 0 ? (
-        <p className="px-3 py-3 text-[11px] text-muted-foreground">Both versions are empty.</p>
+        <p className="px-3 py-3 text-2xs text-muted-foreground">Both versions are empty.</p>
       ) : (
         <div className="overflow-x-auto">
-          <pre className="min-w-full py-1 font-mono text-[11px] leading-relaxed">
+          <pre className="min-w-full py-1 font-mono text-2xs leading-relaxed">
             {diff.lines.map((line, i) => (
               <div
                 key={i}

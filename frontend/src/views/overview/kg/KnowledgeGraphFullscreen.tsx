@@ -159,7 +159,7 @@ export function KnowledgeGraphFullscreen({
           <button
             onClick={onBack}
             aria-label={`Back to the ${currentDept?.name ?? 'graph'} pillar`}
-            className="flex shrink-0 items-center gap-1.5 border-b border-os-border px-3 py-2 text-left font-mono text-[10px] uppercase tracking-[0.14em] text-os-dim transition-colors hover:text-os-text"
+            className="flex shrink-0 items-center gap-1.5 border-b border-os-border px-3 py-2 text-left font-mono text-3xs uppercase tracking-[0.14em] text-os-dim transition-colors hover:text-os-text"
           >
             <ArrowLeft className="h-3 w-3 shrink-0" />
             <span className="truncate">

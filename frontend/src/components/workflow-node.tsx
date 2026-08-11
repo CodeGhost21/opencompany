@@ -68,7 +68,7 @@ export function WorkflowNode({ data, selected }: NodeProps) {
           </span>
         )}
       </div>
-      <div className="px-3 py-2 text-[11px] leading-snug text-muted-foreground">
+      <div className="px-3 py-2 text-2xs leading-snug text-muted-foreground">
         {d.summary}
         {typeof d.elapsedMs === "number" && (
           <span className="ml-1 font-mono opacity-70">· {formatElapsed(d.elapsedMs)}</span>

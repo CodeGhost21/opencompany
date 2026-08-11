@@ -649,7 +649,7 @@ function DetailHeader({
         {task.assignee && (
           <span className="inline-flex items-center gap-1.5">
             <span
-              className="flex size-5 items-center justify-center rounded-full bg-muted text-[10px] font-semibold"
+              className="flex size-5 items-center justify-center rounded-full bg-muted text-3xs font-semibold"
               aria-hidden
             >
               {initials(task.assignee)}
@@ -711,7 +711,7 @@ function DetailHeader({
           host older than #333 has no link and still falls back to the run
           window. Said plainly rather than left for a reader to discover. */}
       {showWaiting && (
-        <p className="mt-2 text-[11px] text-muted-foreground/70">
+        <p className="mt-2 text-2xs text-muted-foreground/70">
           Waiting counts this task&rsquo;s own approvals; sign-offs parked before they carried a
           task id fall back to its run window.
         </p>
@@ -834,7 +834,7 @@ function ControlBar({
               In flight
             </span>
             {pending !== null ? (
-              <span className="rounded-full bg-muted px-2 py-0.5 text-[11px] font-medium text-muted-foreground">
+              <span className="rounded-full bg-muted px-2 py-0.5 text-2xs font-medium text-muted-foreground">
                 {pending}…
               </span>
             ) : (
@@ -1035,7 +1035,7 @@ function LineageRail({
   if (!lineage.parent && lineage.children.length === 0) return null;
   return (
     <div className="rounded-xl border bg-card/40 p-3">
-      <p className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted-foreground">
+      <p className="mb-2 text-2xs font-medium uppercase tracking-wide text-muted-foreground">
         Lineage
       </p>
       <div className="space-y-1.5">
@@ -1053,7 +1053,7 @@ function LineageRail({
             </Badge>
           </button>
         )}
-        <div className="px-2.5 py-1 text-[11px] font-medium text-muted-foreground">
+        <div className="px-2.5 py-1 text-2xs font-medium text-muted-foreground">
           This task
         </div>
         {lineage.children.map((child) => (
@@ -1274,7 +1274,7 @@ function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
     <li
       className={cn(
         "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
-        "border-amber-400/60 bg-amber-50/60 text-[11px] text-amber-700",
+        "border-amber-400/60 bg-amber-50/60 text-2xs text-amber-700",
         "dark:border-amber-500/40 dark:bg-amber-950/20 dark:text-amber-400",
         live && "animate-pulse",
       )}
@@ -1304,11 +1304,11 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.detail && (
         <div>
           {entry.result && (
-            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
               Called with
             </div>
           )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+          <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-muted-foreground">
             {entry.detail}
           </pre>
         </div>
@@ -1316,11 +1316,11 @@ function StepBody({ entry }: { entry: TimelineEntry }) {
       {entry.result && (
         <div>
           {entry.detail && (
-            <div className="text-[10px] font-medium uppercase tracking-wide text-muted-foreground/70">
+            <div className="text-3xs font-medium uppercase tracking-wide text-muted-foreground/70">
               Result
             </div>
           )}
-          <pre className="whitespace-pre-wrap break-words font-mono text-[11px] text-muted-foreground">
+          <pre className="whitespace-pre-wrap break-words font-mono text-2xs text-muted-foreground">
             {entry.result}
             {entry.truncated && " (cut short)"}
           </pre>
@@ -1341,7 +1341,7 @@ function StepStateChip({
   return (
     <span
       className={cn(
-        "shrink-0 rounded px-1 py-px text-[10px] font-medium",
+        "shrink-0 rounded px-1 py-px text-3xs font-medium",
         tone === "amber"
           ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
           : "bg-rose-500/15 text-rose-700 dark:text-rose-400",
@@ -1402,20 +1402,20 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
             gated call never ran, so its 0ms is the absence of a measurement
             rather than a fast one (#411). */}
         {group.count === 1 && first.status === "awaiting_approval" ? (
-          <span className="shrink-0 text-[11px] text-muted-foreground">
+          <span className="shrink-0 text-2xs text-muted-foreground">
             didn't run
           </span>
         ) : (
           group.count === 1 &&
           first.elapsedMs !== undefined && (
-            <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
               {first.elapsedMs < 1000
                 ? `${first.elapsedMs}ms`
                 : formatDuration(first.elapsedMs)}
             </span>
           )
         )}
-        <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+        <span className="shrink-0 text-2xs tabular-nums text-muted-foreground">
           {timeOf(first.atMillis)}
         </span>
         {expandable &&
@@ -1429,7 +1429,7 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
         <div className="space-y-2 border-t px-3 py-2">
           {group.count > 1
             ? group.entries.map((e) => (
-                <div key={e.seq} className="text-[11px]">
+                <div key={e.seq} className="text-2xs">
                   <div className="mb-0.5 text-muted-foreground">
                     {timeOf(e.atMillis)}
                   </div>
@@ -1618,7 +1618,7 @@ function AttemptRow({
           {elapsed !== null && (
             <span
               className={cn(
-                "shrink-0 tabular-nums text-[11px] text-muted-foreground",
+                "shrink-0 tabular-nums text-2xs text-muted-foreground",
                 isRunOpen(run) && "text-foreground",
               )}
             >
@@ -1628,14 +1628,14 @@ function AttemptRow({
           )}
           <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />
         </div>
-        <div className="flex w-full items-center gap-2 pl-5 text-[11px] text-muted-foreground">
+        <div className="flex w-full items-center gap-2 pl-5 text-2xs text-muted-foreground">
           <span className="tabular-nums">{timeOf(run.createdAtMillis)}</span>
           <span aria-hidden>·</span>
           <span>{stepSummary(run)}</span>
           {run.stepCountCapped && <span>(trace capped)</span>}
         </div>
         {run.error && (
-          <p className="w-full truncate pl-5 text-[11px] text-rose-600 dark:text-rose-400">
+          <p className="w-full truncate pl-5 text-2xs text-rose-600 dark:text-rose-400">
             {run.error}
           </p>
         )}
@@ -1750,7 +1750,7 @@ function RunDrawer({
                   </Alert>
                 )}
                 {run.stepCountCapped && (
-                  <p className="text-[11px] text-muted-foreground">
+                  <p className="text-2xs text-muted-foreground">
                     This attempt hit the per-run trace ceiling, so what follows
                     is the start of the run, not all of it.
                   </p>
@@ -2107,7 +2107,7 @@ function DiscussionTab({
                 m.redacted ? "border-dashed bg-muted/40" : "bg-card",
               )}
             >
-              <div className="flex items-center gap-2 text-[11px] text-muted-foreground">
+              <div className="flex items-center gap-2 text-2xs text-muted-foreground">
                 <MessagesSquare className="size-3.5 shrink-0" aria-hidden />
                 <span className="min-w-0 flex-1 truncate font-medium text-foreground">
                   {m.author}
@@ -2306,7 +2306,7 @@ function RetryButton({
             </p>
           )}
           {named > 0 && (
-            <p className="text-[11px] text-muted-foreground">
+            <p className="text-2xs text-muted-foreground">
               Each is recorded the moment it was committed, so one that was interrupted still
               appears — nothing is ever retried on its own.
             </p>
