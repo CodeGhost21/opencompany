@@ -272,6 +272,56 @@ async fn a_pasted_composio_token_still_outranks_the_company_key() {
     assert_eq!(dto["credentialSource"], "company", "{dto}");
 }
 
+/// The two read planes answer **different questions**, and a company holding
+/// both credentials is where that stops being pedantry.
+///
+/// `GET …/credential` reports whose identity the company *has*; `GET …/composio`
+/// reports what a Composio call *presents*, which its BYO token overrides. Both
+/// are correct simultaneously, and any refactor that "unifies" them would have
+/// to break one of these two assertions.
+#[tokio::test]
+async fn the_credential_plane_and_the_composio_plane_may_honestly_disagree() {
+    let home_dir = home();
+    let state = state_with_manifest(home_dir.path(), "disagree", GRANTED).await;
+
+    send(
+        &state,
+        "disagree",
+        "PUT",
+        "/api/v1/company/credential",
+        Some(json!({ "key": KEY })),
+    )
+    .await;
+    send(
+        &state,
+        "disagree",
+        "PUT",
+        "/api/v1/company/composio/token",
+        Some(json!({ "token": "byo-composio-token" })),
+    )
+    .await;
+
+    let (_, credential, _) = send(
+        &state,
+        "disagree",
+        "GET",
+        "/api/v1/company/credential",
+        None,
+    )
+    .await;
+    let (_, composio, _) = send(&state, "disagree", "GET", "/api/v1/company/composio", None).await;
+
+    assert_eq!(
+        credential["source"], "company",
+        "the company's own identity is set, whatever Composio presents: {credential}"
+    );
+    assert_eq!(
+        composio["credentialSource"], "static",
+        "a Composio call presents the BYO token, whatever identity the company holds: {composio}"
+    );
+    assert_eq!(credential["configured"], true);
+}
+
 /// The write is admin-only, for the same reason the Composio token write is:
 /// this key repoints the company's entire brokered surface at whatever account
 /// the caller controls, and it is the company's wallet.
@@ -348,11 +398,21 @@ async fn setting_and_clearing_are_journaled_with_an_actor() {
         })
         .collect();
     assert!(
-        changes.contains(&("credential_set".to_string(), true)),
+        changes.contains(&("company_key_set".to_string(), true)),
         "a set must be journaled with who did it: {changes:?}"
     );
     assert!(
-        changes.contains(&("credential_cleared".to_string(), true)),
+        changes.contains(&("company_key_cleared".to_string(), true)),
         "a clear must be told apart from a set: {changes:?}"
+    );
+    // …and it must not borrow the Composio token's vocabulary. Both routes
+    // append `ToolAccessChanged` to one log, so if this route spoke
+    // `credential_set` an auditor could not tell a rotation of the company's
+    // whole identity from a swap of one integration's token.
+    assert!(
+        !changes
+            .iter()
+            .any(|(change, _)| change == "credential_set" || change == "credential_cleared"),
+        "no Composio write happened here, so no Composio audit word may appear: {changes:?}"
     );
 }

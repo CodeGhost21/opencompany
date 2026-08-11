@@ -393,12 +393,15 @@ export function ComposioSection({ client, company, canManage }: Props) {
             <Card>
               <CardContent className="space-y-2 py-4">
                 <p className="text-xs font-medium text-muted-foreground">Sign in per provider</p>
+                {/* Branches on `canManage` like the intro above it. A member has
+                    neither the credential field nor the paste card, so telling
+                    them to "set the credential or paste a token below" points at
+                    controls that are not on their screen. */}
                 {noCredential && (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    No credential is available for this company yet, so there is nothing to
-                    authorize against. Set the company&apos;s TinyHumans credential — one key
-                    authorizes every provider the platform brokers — or paste a Composio token
-                    below to use a Composio account of your own.
+                    {canManage
+                      ? "No credential is available for this company yet, so there is nothing to authorize against. Set the company's TinyHumans credential — one key authorizes the providers the platform brokers — or paste a Composio token below to use a Composio account of your own."
+                      : "No credential is available for this company yet, so there is nothing to authorize against. An admin has to set the company's credential before providers can be connected."}
                   </p>
                 )}
                 {degraded ? (
@@ -611,7 +614,12 @@ export function ComposioSection({ client, company, canManage }: Props) {
             </Card>
           )}
 
-          {canManage && attested && !showTokenCard && (
+          {/* Gated on `credentialed`, not `attested`: a company brokered through
+              its own TinyHumans key is equally "already credentialled", so it
+              equally needs a way back to the BYO card. Gating this on `attested`
+              alone left a company-key admin with the paste card hidden and no
+              control to reveal it — the override became unreachable. */}
+          {canManage && credentialed && !showTokenCard && (
             <Button variant="outline" size="sm" onClick={() => setShowOverride(true)}>
               <KeyRound className="size-4" />
               Use your own Composio account instead
@@ -621,13 +629,25 @@ export function ComposioSection({ client, company, canManage }: Props) {
           {showTokenCard && (
             <Card>
               <CardContent className="space-y-4 py-4">
-                {attested && (
+                {/* The explainer has to name what the token would displace,
+                    and that differs by tier: an attested company falls back to
+                    the pod's cluster identity, a company-key one falls back to
+                    its own credential. Saying "cluster identity" to the latter
+                    would describe a fallback it does not have. */}
+                {companyKey ? (
+                  <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+                    Optional. This company&apos;s own TinyHumans credential already authorizes
+                    Composio. A token set here replaces it for Composio only — use it when the
+                    company has a separate Composio account. Clear it to go back to the company
+                    credential.
+                  </p>
+                ) : attested ? (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
                     Optional. A token set here overrides the instance identity for this company only
                     — use it when the company has its own Composio account. Clear it to go back to
                     the cluster identity.
                   </p>
-                )}
+                ) : null}
                 <div className="space-y-1">
                   <Label htmlFor="composio-token" className="text-xs">
                     Composio token {byoToken ? "— set (paste a new value to rotate)" : ""}

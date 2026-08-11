@@ -178,8 +178,22 @@ fn catalog_cache_key(runtime: &CompanyRuntime) -> String {
 async fn fetch_catalog(runtime: &CompanyRuntime) -> Result<Vec<CatalogEntry>, String> {
     // No credential of any tier means there is nothing to dial the backend
     // with. Say that, rather than spending the timeout to discover it.
-    let config = resolve_tenant(runtime).await.map_err(|_| {
-        "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+    //
+    // But say only that when it is what happened. `resolve_tenant` answers
+    // `Conflict` for "nothing configured" and propagates anything else — a
+    // secret-store read failure among them. Collapsing every error into "no
+    // credential yet" would tell an operator whose store hiccupped that they
+    // never set a key, which is the confident-wrong-answer this credential work
+    // exists to remove (see `company_key::resolve`).
+    let config = resolve_tenant(runtime).await.map_err(|err| {
+        if matches!(err.0, crate::error::OpenCompanyError::Conflict(_)) {
+            "this company has no Composio credential yet, so the catalog cannot be read".to_string()
+        } else {
+            format!(
+                "this company's Composio credential could not be resolved: {}",
+                err.0
+            )
+        }
     })?;
     let fetch = crate::harness::composio::list_catalog_toolkits(&config);
     match tokio::time::timeout(composio_toolkits::FETCH_TIMEOUT, fetch).await {
@@ -339,8 +353,6 @@ struct ConnectionDto {
     connected: bool,
 }
 
-/// Which tier a company's Composio credential comes from, mirroring the harness
-/// resolver's precedence: the company's **own Composio** token wins, else its
 /// Which tier a company's Composio credential comes from.
 ///
 /// Asks the resolver itself rather than restating its precedence. The console

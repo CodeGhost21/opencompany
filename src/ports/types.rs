@@ -475,7 +475,17 @@ pub enum CompanyEvent {
     /// else.
     ToolAccessChanged {
         /// What changed, as a stable wire word: `credential_set`,
-        /// `credential_cleared`, or `provider_authorization_started`.
+        /// `credential_cleared`, `company_key_set`, `company_key_cleared`, or
+        /// `provider_authorization_started`.
+        ///
+        /// The `credential_*` pair is the **Composio** token
+        /// ([`ops::composio`](crate::server::ops::composio)); the `company_key_*`
+        /// pair is the company's own TinyHumans identity
+        /// ([`ops::company_key`](crate::server::ops::company_key), issue #586).
+        /// Two vocabularies rather than one because the changes have different
+        /// blast radii — swapping a Composio token repoints one integration,
+        /// rotating the company key repoints every surface wired to it — and an
+        /// audit reader has to be able to tell them apart.
         ///
         /// The last is deliberately *started*, not *completed*: Composio runs
         /// the OAuth on its own side with no callback here, so all this host

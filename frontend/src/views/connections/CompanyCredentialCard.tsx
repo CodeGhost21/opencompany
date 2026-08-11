@@ -8,6 +8,7 @@ import {
   setCompanyCredential,
   type CompanyCredentialStatus,
 } from "@/api/credential";
+import { ApiError } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
@@ -32,8 +33,8 @@ interface Props {
 /**
  * The company's own TinyHumans credential (issue #586).
  *
- * One key, set once by the admin, and every surface the platform brokers rides
- * it — Composio today, whatever the backend fronts next. This is what replaces
+ * One key, set once by the admin, and every surface wired to it presents it —
+ * Composio today, whatever is wired next. This is what replaces
  * per-tenant provider apps and per-surface tokens: a company with a key set can
  * connect a provider without registering anything, and a provider connected
  * that way belongs to the company rather than to the member who connected it.
@@ -47,7 +48,8 @@ interface Props {
  * had to receive.
  */
 export function CompanyCredentialCard({ client, company, canManage, onChanged }: Props) {
-  const [load, setLoad] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [load, setLoad] = useState<"loading" | "ready" | "unavailable" | "error">("loading");
+  const [error, setError] = useState<string | null>(null);
   const [status, setStatus] = useState<CompanyCredentialStatus | null>(null);
   const [key, setKey] = useState("");
   const [busy, setBusy] = useState<"save" | "clear" | null>(null);
@@ -55,11 +57,25 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
   const refresh = useCallback(async () => {
     try {
       setStatus(await getCompanyCredential(client, company));
+      setError(null);
       setLoad("ready");
-    } catch {
-      // A host predating this route simply 404s. Render nothing rather than an
-      // error: the console still works, this company just has no such plane.
-      setLoad("unavailable");
+    } catch (err) {
+      // Only a genuinely absent route hides the card. A host predating this
+      // plane 404s, and rendering nothing is right there — the console still
+      // works, this company just has no such surface.
+      //
+      // Anything else must NOT be swallowed. The status route now surfaces a
+      // secret-store read failure as a 5xx rather than reporting a confident
+      // "not configured" (see `company_key::resolve`), and hiding the card on
+      // that would throw away the very distinction that fix exists to draw:
+      // the operator would see no credential UI at all and conclude the feature
+      // is absent, rather than that the host could not answer.
+      if (err instanceof ApiError && err.status === 404) {
+        setLoad("unavailable");
+        return;
+      }
+      setError(err instanceof ApiError ? err.message : "Couldn't read the company credential.");
+      setLoad("error");
     }
   }, [client, company]);
 
@@ -79,9 +95,16 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
         description: result.note,
       });
       onChanged?.();
-    } catch {
+    } catch (err) {
+      // Show the host's own reason when it sent one — an admin-only refusal or a
+      // store failure says something specific, and replacing it with a generic
+      // "couldn't save" throws away the only actionable part.
       toast.error(
-        mode === "save" ? "Couldn't save the credential." : "Couldn't clear the credential.",
+        err instanceof ApiError
+          ? err.message
+          : mode === "save"
+          ? "Couldn't save the credential."
+          : "Couldn't clear the credential.",
       );
     } finally {
       setBusy(null);
@@ -111,6 +134,18 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
 
       {load === "loading" ? (
         <Skeleton className="h-32 rounded-xl" />
+      ) : load === "error" ? (
+        // Say the host could not answer. Rendering the card's "Not set" state
+        // here would be a confident claim built on no data.
+        <Card>
+          <CardContent className="py-4">
+            <p className="text-xs text-muted-foreground">
+              {error ?? "Couldn't read the company credential."}{" "}
+              This is not the same as having none set — the host could not answer, so the current
+              credential is unknown.
+            </p>
+          </CardContent>
+        </Card>
       ) : (
         <Card>
           <CardContent className="space-y-4 py-4">

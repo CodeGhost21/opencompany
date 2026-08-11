@@ -147,7 +147,13 @@ export function ConnectionsView({ client, company }: Props) {
     return () => {
       live = false;
     };
-  }, [client, company]);
+    // `credentialGeneration` is load-bearing, not decoration: this probe feeds
+    // `reach.hasCredential` and `attested`, both of which are downstream of the
+    // company credential. Setting a key flips `credentialSource` from `none` to
+    // `company`, and without a re-probe the grid would keep every tile on the
+    // "no credential" route while the Composio section right below it correctly
+    // reported the opposite (issue #586).
+  }, [client, company, credentialGeneration]);
 
   useEffect(() => {
     const timers = pollTimers.current;

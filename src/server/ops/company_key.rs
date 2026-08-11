@@ -110,8 +110,17 @@ struct SetKey {
 
 /// Resolves the credential status DTO for a company.
 ///
-/// `source` comes from the **same** resolver the harness and the Composio routes
-/// use, so the console can never report a tier the agents are not actually on.
+/// `source` is the company's **TinyHumans identity**, straight from
+/// [`company_key::resolve`](crate::company::company_key::resolve): its own key,
+/// else this instance's platform identity, else nothing.
+///
+/// That is deliberately **not** the same answer `GET …/composio` gives. The
+/// Composio route prepends its BYO `composio/token` tier, so a company holding
+/// both reads `company` here and `static` there — and both are correct, because
+/// they answer different questions: this route reports whose identity the
+/// company *has*, the Composio one reports what a Composio call *presents*.
+/// Claiming parity between them would be wrong in exactly the case where the
+/// distinction matters.
 async fn effective_status(runtime: &CompanyRuntime) -> Result<CredentialStatusDto, ApiError> {
     let secrets = runtime.secrets();
     let configured = key_configured(runtime.id(), secrets.as_ref())
@@ -160,10 +169,18 @@ async fn set_key(
     // After the store, so the journal records a completed change. An empty value
     // is a clear, not a set — worth telling apart in an audit trail, since one
     // grants access and the other withdraws it.
+    //
+    // Namespaced `company_key_*` rather than reusing `ops::composio`'s
+    // `credential_set` / `credential_cleared`. Both routes append
+    // `ToolAccessChanged` to the same log, and with one shared vocabulary a
+    // reader could not tell "the admin rotated the company's identity" from
+    // "the admin swapped the Composio token" — two changes with different blast
+    // radii. An audit line that cannot name what changed is most of the way to
+    // not having one.
     let change = if body.key.trim().is_empty() {
-        "credential_cleared"
+        "company_key_cleared"
     } else {
-        "credential_set"
+        "company_key_set"
     };
     journal(&company, change).await?;
     Ok(Json(MutationResponse {
