@@ -202,15 +202,20 @@ export function ConnectionsView({ client, company }: Props) {
       return;
     }
     const { connectUrl } = await startComposioAuthorize(client, company, toolkit);
-    // A blocked popup returns null. Without this the operator is told to finish
-    // in a tab that was never opened, and the tile then spins for the full two
-    // minutes before the poll gives up on a sign-in that never started.
-    const tab = window.open(connectUrl, "_blank", "noopener,noreferrer");
-    if (!tab) {
-      setBusy((b) => (b === p.id ? null : b));
-      toast.error(`Couldn't open the ${p.name} sign-in tab. Allow popups and try again.`);
-      return;
-    }
+    // `noopener` keeps the Composio tab from reaching back through
+    // `window.opener` — it is a third-party page carrying an OAuth flow, so it
+    // stays. The cost is that the handle is ALWAYS null: with `noopener` (or
+    // `noreferrer`) set, `window.open` returns null on success exactly as it
+    // does when a popup is blocked.
+    //
+    // So a null check here cannot detect a blocked popup — it fires on every
+    // successful open. This was reviewed as "handle a blocked popup", written
+    // that way, and caught in manual testing: the tab opened and the operator
+    // was told it had not. Detecting the block would mean dropping `noopener`
+    // and trading a real security property for a nicer error, which is the
+    // wrong trade on a tab we hand an OAuth URL to. `ComposioSection.signIn`
+    // opens the same URL the same way and likewise does not check.
+    window.open(connectUrl, "_blank", "noopener,noreferrer");
     toast.message(`Complete ${p.name} sign-in in the new tab.`);
     const deadline = Date.now() + 120_000;
     const poll = async () => {
