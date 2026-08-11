@@ -469,10 +469,12 @@ impl DelegationQueue {
     #[must_use = "a refused delegation must be reported to the model, not dropped"]
     pub fn push_within_cap(&self, delegation: Delegation, cap: usize) -> Staged {
         match self.claim_state() {
-            DrainClaim::Unclaimed => return Staged::NoDrain,
+            DrainClaim::Unclaimed => return Staged::NoDrain(NoDrainReason::Unwired),
             // Issue #267: the operator asked a question. A hand-off is how one
             // gets answered, so it stages; the pure board writes do not.
-            DrainClaim::Answering if !delegation.answers() => return Staged::NoDrain,
+            DrainClaim::Answering if !delegation.answers() => {
+                return Staged::NoDrain(NoDrainReason::Triage);
+            }
             DrainClaim::Answering | DrainClaim::Full => {}
         }
         let mut guard = self.inner.lock().expect("delegation queue");
@@ -564,13 +566,49 @@ impl DelegationQueue {
 pub enum Staged {
     /// Queued; some drain site will execute it as this turn completes.
     Queued,
-    /// Nothing that would execute *this* delegation has claimed the queue —
-    /// either because nobody claimed it at all (issue #453) or because the
-    /// claim is narrowed to answering and this is a pure board write
-    /// (issue #267, [`DrainClaim::Answering`]).
-    NoDrain,
+    /// Nothing that would execute *this* delegation has claimed the queue. The
+    /// [`NoDrainReason`] says which of the two very different causes it was.
+    NoDrain(NoDrainReason),
     /// This turn has already queued [`MAX_DELEGATIONS_PER_TURN`].
     OverCap,
+}
+
+/// Why a delegation found nothing that would drain it (issues #453, #267).
+///
+/// One refusal used to speak for both of these, and they are not the same
+/// condition: one is a context that can never do board work, the other is a
+/// fully capable company reading *this message* as a question. Sharing a
+/// sentence made the refusal wrong for the second case — "board actions are
+/// unavailable in this context" is false when they would have worked on a
+/// differently-phrased message — and, worse, made the two indistinguishable in
+/// the logs, so the rate at which the triage gate fires could not be measured
+/// after shipping a keyword classifier with teeth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoDrainReason {
+    /// No drain site claimed the queue at all ([`DrainClaim::Unclaimed`]):
+    /// nothing in this context can carry out board work, for any message.
+    Unwired,
+    /// The queue is claimed for answering ([`DrainClaim::Answering`]): the
+    /// operator's message triaged as a question, so board writes are held back
+    /// for **this message only** (issue #267).
+    Triage,
+}
+
+impl NoDrainReason {
+    /// The value the `reason` log field carries, so the two causes can be
+    /// counted apart in production.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unwired => "no_drain_wired",
+            Self::Triage => "triaged_as_question",
+        }
+    }
+}
+
+impl std::fmt::Display for NoDrainReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 /// What the live claim on a [`DelegationQueue`] permits (issues #453, #267).
@@ -1234,7 +1272,9 @@ impl Tool for SpawnTaskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => return Ok(ToolResult::error(no_drain(SPAWN_TASK_TOOL, &effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(SPAWN_TASK_TOOL, &effect, why)));
+            }
         }
         Ok(ToolResult::success(format!(
             "Queued a task card: \"{title}\". It will be opened on the board this turn."
@@ -1359,8 +1399,12 @@ impl Tool for DelegateToDeskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => {
-                return Ok(ToolResult::error(no_drain(DELEGATE_TO_DESK_TOOL, &effect)));
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(
+                    DELEGATE_TO_DESK_TOOL,
+                    &effect,
+                    why,
+                )));
             }
         }
         Ok(ToolResult::success(format!(
@@ -1441,7 +1485,9 @@ impl Tool for AssignTaskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => return Ok(ToolResult::error(no_drain(ASSIGN_TASK_TOOL, &effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(ASSIGN_TASK_TOOL, &effect, why)));
+            }
         }
         // Staged truth, not the past tense (issue #453). Nothing has been
         // written yet; the drain this turn's claim promises is what writes it.
@@ -1526,7 +1572,9 @@ impl Tool for ReviewTaskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => return Ok(ToolResult::error(no_drain(REVIEW_TASK_TOOL, &effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(REVIEW_TASK_TOOL, &effect, why)));
+            }
         }
         // Issue #453: the card has NOT moved yet. It moves when the drain runs,
         // and the drain runs because this turn is claimed — which is what makes
@@ -1563,7 +1611,7 @@ operator which items you got to and which you did not, and raise the rest in you
 }
 
 /// The refusal a delegation tool returns when **nothing will drain** what it
-/// would queue (issue #453) — modelled on
+/// would queue (issues #453, #267) — modelled on
 /// [`cannot_publish_here`](crate::harness::publish) one module over.
 ///
 /// It has to do two jobs, and they are not the two [`over_cap`] does. It must
@@ -1572,17 +1620,53 @@ operator which items you got to and which you did not, and raise the rest in you
 /// the failure this replaces was one the agent could not detect: it was told the
 /// card had moved, so it told the operator the card had moved, and the next
 /// turn's `clear()` threw the delegation away.
-fn no_drain(tool: &str, effect: &str) -> String {
+///
+/// # One sentence could not do both causes
+///
+/// It was written for a genuinely inert context and then inherited, unchanged,
+/// by [`NoDrainReason::Triage`] — a **fully capable** company whose triage read
+/// this message as a question. There, "nothing here can carry out board work"
+/// and "board actions are unavailable in this context" are both false as the
+/// operator will hear them: board actions work fine, and would have worked on a
+/// differently-phrased message. Paired with a triage miss the experience was
+/// *ask for a landing page → "I could not do it; board actions are
+/// unavailable"*, with no hint that rephrasing would work.
+///
+/// So the triage case gets its own text, which says what was actually read,
+/// keeps the do-not-report-it-as-done half that both causes need, and gives the
+/// model something recoverable to offer: restate it as a request.
+///
+/// # The log field is the measurement
+///
+/// `reason` is on the warn as well as in the message. The triage gate ships a
+/// keyword classifier with teeth, and its residual miss rate is exactly the
+/// number worth having afterwards — with both causes emitting identical text
+/// there was no way to count one without the other. Kept at `warn` rather than
+/// demoted to `info`: a refusal here means either the model over-reached on a
+/// question or the triage misread a request, and both are worth seeing.
+fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
     tracing::warn!(
         tool = %tool,
-        "[delegation] a delegation tool was called from a turn with no claimed drain; refusing \
-         rather than queuing into a queue nothing will drain"
+        reason = %reason,
+        "[delegation] a delegation tool found no drain that would execute it; refusing in the \
+         model's own turn rather than queuing into a queue nothing will drain"
     );
-    format!(
-        "Refused: nothing here can carry out board work, so {effect}. Board actions are \
-         unavailable in this context. Do not retry — it will fail the same way — and do NOT report \
-         the action as done or describe the card as moved. Say plainly that you could not do it."
-    )
+    match reason {
+        NoDrainReason::Unwired => format!(
+            "Refused: nothing here can carry out board work, so {effect}. Board actions are \
+             unavailable in this context. Do not retry — it will fail the same way — and do NOT \
+             report the action as done or describe the card as moved. Say plainly that you could \
+             not do it."
+        ),
+        NoDrainReason::Triage => format!(
+            "Refused: this message was read as a question rather than a request to do work, so \
+             {effect}. Board writes are held back for this message only — answer it from what you \
+             can read, and hand it to a desk if somebody else knows better. Do not retry this \
+             call; it will fail the same way. Do NOT report the action as done or describe the \
+             card as moved. If the operator did mean it as work, say so plainly and ask them to \
+             restate it as a direct request."
+        ),
+    }
 }
 
 /// Reads a required non-empty string argument, trimmed.
@@ -3355,7 +3439,7 @@ mod tests {
                 },
                 MAX_DELEGATIONS_PER_TURN,
             ),
-            Staged::NoDrain,
+            Staged::NoDrain(NoDrainReason::Unwired),
             "an EMPTY unclaimed queue is still a queue nothing drains"
         );
         assert_eq!(queue.queued(), 0);
@@ -3461,6 +3545,119 @@ mod tests {
             assert!(!text.contains("delegations"), "{name}: {text}");
         }
         assert_eq!(queue.queued(), 0, "nothing may be staged by a refusal");
+    }
+
+    /// **Issue #267 review, finding 3.** The two no-drain causes stop sharing a
+    /// sentence.
+    ///
+    /// Written for a genuinely inert context, the refusal was then inherited by
+    /// a fully capable company whose triage read the message as a question —
+    /// where "board actions are unavailable in this context" is simply false as
+    /// the operator will hear it. Paired with a triage miss the experience was
+    /// *ask for a landing page → "I could not do it; board actions are
+    /// unavailable"*, with nothing to suggest that rephrasing would work.
+    ///
+    /// The halves both causes need stay on both; what differs is what the model
+    /// is told happened, and what it can offer next.
+    #[tokio::test]
+    async fn the_triage_refusal_says_it_read_a_question_and_offers_a_way_forward() {
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim_answering();
+        let refused = SpawnTaskTool::new(queue.clone())
+            .execute(json!({ "title": "Build the landing page" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.text());
+        let text = refused.text();
+
+        assert!(
+            text.contains("read as a question"),
+            "it must name what actually happened: {text}"
+        );
+        assert!(
+            text.contains("this message only"),
+            "…and scope it to this message, not to the whole context: {text}"
+        );
+        assert!(
+            text.contains("restate it"),
+            "…and leave the model something recoverable to offer: {text}"
+        );
+        // The two claims that are false here, and were the whole complaint.
+        assert!(
+            !text.contains("nothing here can carry out board work"),
+            "a capable company must not claim it cannot do board work: {text}"
+        );
+        assert!(
+            !text.contains("unavailable in this context"),
+            "the context is fine; the message was a question: {text}"
+        );
+        // …while everything both causes owe the model survives.
+        assert!(text.contains("Do not retry"), "{text}");
+        assert!(text.contains("report the action as done"), "{text}");
+        assert!(
+            text.contains("the card \"Build the landing page\" was NOT opened"),
+            "the tool's own effect clause is untouched: {text}"
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// …and the inert-context refusal keeps saying the thing that is true only
+    /// of it, so the split is a split rather than a rename.
+    #[tokio::test]
+    async fn the_unwired_refusal_still_says_the_context_cannot_do_board_work() {
+        let queue = DelegationQueue::default();
+        let refused = SpawnTaskTool::new(queue.clone())
+            .execute(json!({ "title": "Ship it" }))
+            .await
+            .expect("execute");
+        let text = refused.text();
+        assert!(refused.is_error, "{text}");
+        assert!(
+            text.contains("nothing here can carry out board work"),
+            "{text}"
+        );
+        assert!(!text.contains("read as a question"), "{text}");
+    }
+
+    /// The measurement finding 3 asks for: the two causes are distinguishable
+    /// as data, not only as prose. Without this the rate at which the triage
+    /// gate fires — the residual miss rate of a keyword classifier with teeth —
+    /// could not be counted apart from a genuinely unwired context.
+    #[test]
+    fn the_two_no_drain_causes_are_countable_apart() {
+        let queue = DelegationQueue::default();
+        let spawn = || Delegation::SpawnTask {
+            title: "Build the landing page".to_string(),
+            note: None,
+            assignee: None,
+        };
+        assert_eq!(
+            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN),
+            Staged::NoDrain(NoDrainReason::Unwired)
+        );
+        let claim = queue.claim_answering();
+        assert_eq!(
+            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN),
+            Staged::NoDrain(NoDrainReason::Triage)
+        );
+        // …and a hand-off is not refused at all under the same claim, because it
+        // is how the question gets answered (finding 2).
+        assert_eq!(
+            queue.push_within_cap(
+                Delegation::DelegateToDesk {
+                    desk: "eng".to_string(),
+                    instruction: "what did you ship?".to_string(),
+                },
+                MAX_DELEGATIONS_PER_TURN,
+            ),
+            Staged::Queued
+        );
+        drop(claim);
+        assert_ne!(
+            NoDrainReason::Unwired.as_str(),
+            NoDrainReason::Triage.as_str(),
+            "the log field must separate them"
+        );
     }
 
     /// The defect #419 names: the tool told the model "it will be opened on the

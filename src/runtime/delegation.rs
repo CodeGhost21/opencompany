@@ -2791,8 +2791,11 @@ members = ["engineer"]
         );
         assert_eq!(
             turns.staged(),
-            vec![orchestrator::Staged::NoDrain],
-            "the refusal must be the do-not-retry one, not the try-again-next-turn one"
+            vec![orchestrator::Staged::NoDrain(
+                orchestrator::NoDrainReason::Triage
+            )],
+            "the refusal must be the do-not-retry one, and it must name the triage as the \
+             cause rather than blaming a context that cannot do board work"
         );
         assert!(
             fx.cards().await.is_empty(),
@@ -2839,7 +2842,10 @@ members = ["engineer"]
 
         assert_eq!(
             turns.staged(),
-            vec![orchestrator::Staged::NoDrain, orchestrator::Staged::NoDrain],
+            vec![
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Triage),
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Triage),
+            ],
             "neither lifecycle write may stage on a question turn"
         );
     }
