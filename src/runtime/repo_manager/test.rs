@@ -24,6 +24,17 @@ use crate::ports::types::CompanyId;
 /// The token every credential test looks for afterwards.
 const SENTINEL: &str = "github_pat_SENTINEL";
 
+/// The URL the `bind` tests submit, and the key it derives to.
+///
+/// Derived rather than written out: the key carries a hash of the coordinates,
+/// and a test that hard-codes it asserts nothing when the derivation changes —
+/// `get_now(…).is_none()` on a key no code produces passes for the wrong reason.
+const WIDGETS_URL: &str = "https://github.com/acme/widgets";
+
+fn widgets_key() -> String {
+    parse_repo_url(WIDGETS_URL).unwrap().key()
+}
+
 /// An in-memory [`SecretStore`]. Also the second half of the credential audit:
 /// what a test asserts about the filesystem is only half the story, and this
 /// makes the *stored* side inspectable too.
@@ -484,7 +495,7 @@ async fn a_classic_pat_is_refused_with_a_usable_instruction() {
     let (mgr, secrets) = manager(&scratch);
     let err = mgr
         .bind(BindRequest {
-            url: "https://github.com/acme/widgets".into(),
+            url: WIDGETS_URL.into(),
             token: "ghp_classicclassicclassic".into(),
             branches: vec![],
         })
@@ -501,7 +512,7 @@ async fn a_classic_pat_is_refused_with_a_usable_instruction() {
     // sitting in the secret store afterwards.
     assert!(
         secrets
-            .get_now("acme", &repo_token_key("acme-widgets"))
+            .get_now("acme", &repo_token_key(&widgets_key()))
             .is_none()
     );
 }
@@ -559,13 +570,13 @@ async fn binding_the_same_repository_twice_is_a_conflict() {
     let (mgr, secrets) = manager(&scratch);
     // Bound under the key `https://github.com/acme/widgets` derives, so the
     // real `bind` below collides with it.
-    mgr.bind_local(&url, "acme-widgets", vec!["main".into()])
+    mgr.bind_local(&url, &widgets_key(), vec!["main".into()])
         .await
         .unwrap();
 
     let err = mgr
         .bind(BindRequest {
-            url: "https://github.com/acme/widgets".into(),
+            url: WIDGETS_URL.into(),
             token: SENTINEL.into(),
             branches: vec![],
         })
@@ -578,7 +589,7 @@ async fn binding_the_same_repository_twice_is_a_conflict() {
     // attempt cannot overwrite the working binding's token with the new one.
     assert!(
         secrets
-            .get_now("acme", &repo_token_key("acme-widgets"))
+            .get_now("acme", &repo_token_key(&widgets_key()))
             .is_none(),
         "a refused rebind must not have touched the stored credential"
     );
@@ -599,7 +610,7 @@ async fn a_failed_bind_leaves_no_credential_and_no_mirror() {
 
     let err = mgr
         .bind(BindRequest {
-            url: "https://github.com/acme/widgets".into(),
+            url: WIDGETS_URL.into(),
             token: SENTINEL.into(),
             branches: vec!["main".into()],
         })
@@ -613,12 +624,12 @@ async fn a_failed_bind_leaves_no_credential_and_no_mirror() {
     assert!(mgr.list().await.unwrap().is_empty(), "no binding persisted");
     assert_eq!(
         secrets
-            .get_now("acme", &repo_token_key("acme-widgets"))
+            .get_now("acme", &repo_token_key(&widgets_key()))
             .as_deref(),
         Some(""),
         "the credential written before the failure must be blanked"
     );
-    assert!(!mgr.mirror_path("acme-widgets").exists());
+    assert!(!mgr.mirror_path(&widgets_key()).exists());
 }
 
 #[tokio::test]
@@ -632,7 +643,7 @@ async fn an_advertised_size_over_quota_is_refused_before_any_transfer() {
 
     let err = mgr
         .bind(BindRequest {
-            url: "https://github.com/acme/widgets".into(),
+            url: WIDGETS_URL.into(),
             token: SENTINEL.into(),
             branches: vec!["main".into()],
         })
@@ -643,7 +654,7 @@ async fn an_advertised_size_over_quota_is_refused_before_any_transfer() {
         "{err:?}"
     );
     assert!(
-        !mgr.mirror_path("acme-widgets").exists(),
+        !mgr.mirror_path(&widgets_key()).exists(),
         "nothing should have been transferred"
     );
 }

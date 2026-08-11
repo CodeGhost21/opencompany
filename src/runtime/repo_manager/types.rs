@@ -49,16 +49,44 @@ impl RepoCoordinates {
         format!("https://{SUPPORTED_HOST}/{}/{}", self.owner, self.repo)
     }
 
-    /// The stable cache key (`owner-repo`, lowercased). Used as a single path
-    /// component under the mirror cache and as the id in the REST surface, so
-    /// it is constrained to `[a-z0-9-]` — see [`parse_repo_url`], which is the
-    /// only constructor.
+    /// The stable cache key: a readable slug plus a short hash of the
+    /// coordinates. Used as a single path component under the mirror cache and
+    /// as the id in the REST surface, so it is constrained to `[a-z0-9-]` — see
+    /// [`parse_repo_url`], which is the only constructor.
+    ///
+    /// **The hash is not decoration.** The slug alone is not injective, and this
+    /// key names the credential: `repos/token/<key>`, the mirror directory, the
+    /// index entry and the revoke route. Owner and repository names legitimately
+    /// carry `.`, `_` and `-`, all of which the slug flattens to `-`, so
+    /// `acme/data.pipeline`, `acme/data_pipeline` and `acme/data-pipeline` all
+    /// slug to `acme-data-pipeline` — and so do `a-b/c` and `a/b-c`, from
+    /// opposite sides of the separator. Two different repositories sharing one
+    /// key means one operator's token is used to fetch the other's source.
+    ///
+    /// [`repo_identity`] is what restores the distinction: it hashes the
+    /// coordinates *before* any flattening, over a string only one pair of
+    /// coordinates can produce.
+    ///
+    /// Bounded by construction: [`parse_repo_url`] caps each part at 100
+    /// characters, so a key is at most 214 bytes and `<key>.git` at most 218 —
+    /// inside every filesystem's component limit.
     pub fn key(&self) -> String {
-        format!("{}-{}", slugify(&self.owner), slugify(&self.repo))
+        format!(
+            "{}-{}-{}",
+            slugify(&self.owner),
+            slugify(&self.repo),
+            repo_identity(&self.owner, &self.repo)
+        )
     }
 }
 
 /// Lowercases and replaces every character outside `[a-z0-9]` with `-`.
+///
+/// Lossy on purpose — this is the *readable* half of a key, and a mirror
+/// directory an operator may have to look at should be legible. [`key`] carries
+/// the distinguishing half separately.
+///
+/// [`key`]: RepoCoordinates::key
 fn slugify(part: &str) -> String {
     part.chars()
         .map(|c| {
@@ -66,6 +94,40 @@ fn slugify(part: &str) -> String {
             if c.is_ascii_alphanumeric() { c } else { '-' }
         })
         .collect()
+}
+
+/// A short, stable, URL-safe identifier for one repository's coordinates.
+///
+/// The hashed string is `<owner>/<repo>`, ASCII-lowercased. Both properties are
+/// load-bearing:
+///
+/// * **The `/`.** [`parse_repo_url`] refuses a `/` inside either part, so
+///   exactly one pair of coordinates can produce any given string here. That is
+///   what makes distinct repositories hash distinctly — `a-b/c` and `a/b-c` are
+///   different inputs, where their slugs are not.
+/// * **Lowercased.** GitHub resolves owner and repository case-insensitively,
+///   so `Acme/Widgets` and `acme/widgets` are one repository and must land on
+///   one key — otherwise binding the same repository twice, spelled differently,
+///   would install two credentials and two mirrors instead of being refused as
+///   the duplicate it is.
+///
+/// Twelve hex characters is 48 bits, which is not a security parameter and does
+/// not need to be: a collision does not merge two bindings, it makes the second
+/// bind fail as a [`Conflict`](crate::error::OpenCompanyError::Conflict) that
+/// names the key. The failure mode is a refusal an operator can see, not a
+/// credential quietly shared.
+fn repo_identity(owner: &str, repo: &str) -> String {
+    short_sha256(&format!(
+        "{}/{}",
+        owner.to_ascii_lowercase(),
+        repo.to_ascii_lowercase()
+    ))
+}
+
+/// The first 12 hex characters of the SHA-256 of `input`.
+fn short_sha256(input: &str) -> String {
+    let digest = Sha256::digest(input.as_bytes());
+    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
 }
 
 /// Parses and validates a submitted repository URL.
@@ -166,8 +228,7 @@ pub fn classify_token(token: &str) -> TokenKind {
 /// 40-plus-character random token by brute force, and far too short to be
 /// mistaken for one.
 pub fn fingerprint(token: &str) -> String {
-    let digest = Sha256::digest(token.as_bytes());
-    digest.iter().take(6).map(|b| format!("{b:02x}")).collect()
+    short_sha256(token)
 }
 
 /// What an operator submits to bind a repository. **Carries the credential**,
@@ -301,7 +362,7 @@ mod test {
         let coords = parse_repo_url("https://github.com/tinyhumansai/opencompany").unwrap();
         assert_eq!(coords.owner, "tinyhumansai");
         assert_eq!(coords.repo, "opencompany");
-        assert_eq!(coords.key(), "tinyhumansai-opencompany");
+        assert_eq!(coords.key(), "tinyhumansai-opencompany-065c771079f9");
         assert_eq!(
             coords.canonical_url(),
             "https://github.com/tinyhumansai/opencompany"
@@ -343,11 +404,74 @@ mod test {
     fn a_parsed_key_is_always_one_safe_path_component() {
         let coords = parse_repo_url("https://github.com/Acme.Corp/My_Widgets.v2").unwrap();
         let key = coords.key();
-        assert_eq!(key, "acme-corp-my-widgets-v2");
+        assert_eq!(key, "acme-corp-my-widgets-v2-86dbcf155254");
         assert!(
             key.chars()
                 .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-'),
             "{key} must be [a-z0-9-]"
+        );
+
+        // The longest key the parser can admit still fits a path component,
+        // with the mirror's `.git` suffix on it. 100 + 1 + 100 + 1 + 12 = 214.
+        let long = "a".repeat(100);
+        let longest = parse_repo_url(&format!("https://github.com/{long}/{long}"))
+            .unwrap()
+            .key();
+        assert_eq!(longest.len(), 214);
+        assert!(
+            longest.len() + ".git".len() <= 255,
+            "a mirror directory must be a legal filename: {}",
+            longest.len()
+        );
+    }
+
+    #[test]
+    fn distinct_repositories_never_share_a_key() {
+        // Every pair here slugs to one string, and the key names the *token*:
+        // `repos/token/<key>`. Collapsing two repositories into one key means
+        // fetching one repository under the other's credential.
+        let colliding = [
+            // Punctuation the slug flattens.
+            "https://github.com/acme/data.pipeline",
+            "https://github.com/acme/data_pipeline",
+            "https://github.com/acme/data-pipeline",
+            // The separator itself: `a-b/c` and `a/b-c` both slug to `a-b-c`.
+            "https://github.com/a-b/c",
+            "https://github.com/a/b-c",
+        ];
+        let keys: Vec<String> = colliding
+            .iter()
+            .map(|url| parse_repo_url(url).unwrap().key())
+            .collect();
+        let mut unique = keys.clone();
+        unique.sort();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            colliding.len(),
+            "these repositories must not share a key: {keys:?}"
+        );
+
+        // The readable half really does collide — this is what the hash is for,
+        // stated so a future edit cannot conclude the suffix is redundant.
+        assert!(keys[0].starts_with("acme-data-pipeline-"), "{keys:?}");
+        assert!(keys[1].starts_with("acme-data-pipeline-"), "{keys:?}");
+        assert!(keys[3].starts_with("a-b-c-"), "{keys:?}");
+        assert!(keys[4].starts_with("a-b-c-"), "{keys:?}");
+    }
+
+    #[test]
+    fn one_repository_spelled_two_ways_is_one_key() {
+        // GitHub resolves owner and repository case-insensitively, so these are
+        // the same repository. They must land on one key, or a rebind installs a
+        // second credential and a second mirror instead of being refused.
+        assert_eq!(
+            parse_repo_url("https://github.com/Acme/Widgets")
+                .unwrap()
+                .key(),
+            parse_repo_url("https://github.com/acme/widgets")
+                .unwrap()
+                .key(),
         );
     }
 

@@ -21,8 +21,8 @@
 //! * **stdin, rather than a dedicated inherited descriptor.** Passing `git` an
 //!   extra open descriptor means `pre_exec` and a `dup2`, i.e. `unsafe` plus a
 //!   new `libc` dependency, to obtain a pipe with exactly the properties stdin
-//!   already has. The commands run here (`fetch`, `ls-remote`, `clone`, `init`,
-//!   `config`, `rev-parse`) read nothing from stdin, so it is free, and the
+//!   already has. The commands run here (`init`, `remote`, `config`,
+//!   `ls-remote`, `fetch`) read nothing from stdin, so it is free, and the
 //!   helper inherits it because `git` passes its own stdio through.
 //! * **`printf`/`echo` are shell builtins.** The helper never passes the token
 //!   to an external program, which would put it back in an argv.

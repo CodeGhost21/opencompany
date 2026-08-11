@@ -308,9 +308,15 @@ mod test {
 
         // The credential the operator pasted must not be sitting in the store
         // after a refusal — that is the whole reason the check is at intake.
+        // The key is derived, not written out: a hard-coded one that no longer
+        // matches the derivation would make this assertion pass vacuously.
+        let key =
+            crate::runtime::repo_manager::types::parse_repo_url("https://github.com/acme/widgets")
+                .unwrap()
+                .key();
         let stored = runtime
             .secrets()
-            .get(runtime.id(), &repo_token_key("acme-widgets"))
+            .get(runtime.id(), &repo_token_key(&key))
             .await
             .unwrap();
         assert!(stored.is_none(), "a refused credential was stored");

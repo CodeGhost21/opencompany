@@ -58,6 +58,37 @@ The split is what makes the read surface safe by construction rather than by
 discipline: listing bindings reads the index document and nothing else, so no
 read path has token bytes available to leak even by accident.
 
+### The key
+
+One string names the credential, the mirror directory, the index entry and the
+revoke route, so it has to be **injective**: two repositories that share a key
+share a token, and one operator's credential is then used to fetch the other's
+source.
+
+`<slug(owner)>-<slug(repo)>-<12 hex>`, where the slug lowercases and flattens
+everything outside `[a-z0-9]` to `-`, and the hash is over
+`<owner>/<repo>` ASCII-lowercased.
+
+The slug alone is not injective and cannot be made so while staying readable:
+owner and repository names legitimately carry `.`, `_` and `-`, so
+`acme/data.pipeline`, `acme/data_pipeline` and `acme/data-pipeline` all flatten
+to `acme-data-pipeline`, and `a-b/c` and `a/b-c` collide across the separator.
+The hash restores the distinction because it runs *before* any flattening, over
+a string only one pair of coordinates can produce — the URL parser refuses a `/`
+inside either part, so the `/` in the hashed string is unambiguous.
+
+Lowercasing the hash input is equally deliberate: GitHub resolves owner and
+repository case-insensitively, so `Acme/Widgets` and `acme/widgets` are one
+repository and must land on one key — otherwise binding it twice, spelled
+differently, installs two credentials instead of being refused as the duplicate
+it is.
+
+Twelve hex characters is 48 bits, and is not a security parameter. A collision
+would not merge two bindings: the second bind fails with a conflict naming the
+key, which is a refusal an operator can see. Each part is capped at 100
+characters by the parser, so a key is at most 214 bytes and `<key>.git` at most
+218 — a legal filename everywhere.
+
 The fingerprint is the first 12 hex characters of the token's SHA-256. It is
 enough to see that a credential is installed, to notice a rotation, and to tell
 two bindings apart; it is far too short to attack a random 40-plus-character
@@ -84,8 +115,8 @@ Two deliberate details:
 - **stdin, not a dedicated inherited descriptor.** Handing git an extra open
   descriptor means `pre_exec` and a `dup2` — `unsafe` plus a new `libc`
   dependency — to obtain a pipe with exactly the properties stdin already has.
-  Every command run here (`fetch`, `ls-remote`, `clone`, `init`, `config`,
-  `rev-parse`) reads nothing from stdin.
+  Every command run here (`init`, `remote`, `config`, `ls-remote`, `fetch`)
+  reads nothing from stdin.
 - **The helper uses shell builtins only.** Passing the token to an external
   program would put it straight back into an argv.
 
