@@ -121,12 +121,31 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
     ]
 }
 
+/// A populated `[policy]` override, so every store's round-trip proves a
+/// console-set tier survives persistence (issue #562).
+///
+/// Both fields are `Some`, and `always_approve` is deliberately **not** the
+/// manifest default — a round-trip that stored the manifest's own list would
+/// pass whether or not the override had been persisted at all.
+fn sample_policy_override() -> crate::ports::types::PolicyOverride {
+    use crate::ports::types::{Actor, ActorKind, PolicyOverride};
+    PolicyOverride {
+        mode: Some("auto".to_string()),
+        always_approve: Some(vec!["payment.send".to_string()]),
+        set_by: Actor {
+            kind: ActorKind::User,
+            id: "user-conformance".to_string(),
+        },
+        at_millis: 1_700_000_000_002,
+    }
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
-/// (issue #343), a paused workflow id (issue #276), and stamped with the sample
-/// template provenance (so round-trips assert it survives persistence, issue
-/// #85).
+/// (issue #343), a `[policy]` override (issue #562), a paused workflow id
+/// (issue #276), and stamped with the sample template provenance (so round-trips
+/// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -142,6 +161,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
+        overlay_policy: Some(sample_policy_override()),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }

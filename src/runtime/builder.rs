@@ -1417,6 +1417,25 @@ impl RuntimeBuilder {
             .as_ref()
             .map(|r| r.overlay_budgets.clone())
             .unwrap_or_default();
+        // Issue #562: the operator's `[policy]` override. Carried across the
+        // rebuild for the same reason as the caps above — but note carefully
+        // that this is NOT a weakening of the seed-authoritative rule stated at
+        // the save below. That rule is about `record.manifest`, which is still
+        // re-persisted from the seed with only `[workflows].enabled` merged; an
+        // operator who tightens `[policy]` in version control still has that
+        // land in the manifest on the next rebuild.
+        //
+        // This is the separate, attributed override that
+        // `CompanyRecord::effective_policy` resolves *ahead* of the manifest.
+        // Dropping it here would silently revert a console tier change on every
+        // restart, which is the failure this issue exists to end — and it would
+        // do so invisibly, since nothing in the console would show the tier had
+        // moved back.
+        //
+        // The trade this makes is real and is documented on `PolicyOverride`: a
+        // loosened tier set here outlives a `company.toml` edit, so clearing it
+        // is an explicit operation rather than a side effect of a redeploy.
+        let overlay_policy = existing.as_ref().and_then(|r| r.overlay_policy.clone());
         // Issue #276: the workflows the operator switched off. This is the field
         // that makes the pause switch durable, and it is carried across the
         // rebuild for a sharper reason than the two above: `merge_enabled_workflows`
@@ -1770,6 +1789,7 @@ impl RuntimeBuilder {
                                 overlay_desks: overlay_desks.clone(),
                                 overlay_workflows: overlay_workflows.clone(),
                                 overlay_budgets: overlay_budgets.clone(),
+                                overlay_policy: overlay_policy.clone(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
                             };
@@ -1901,6 +1921,7 @@ impl RuntimeBuilder {
                 overlay_desks,
                 overlay_workflows,
                 overlay_budgets,
+                overlay_policy,
                 disabled_workflows,
                 template_provenance,
             })
@@ -3833,6 +3854,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             })
