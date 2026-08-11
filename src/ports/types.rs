@@ -1134,6 +1134,49 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
+    /// A call inside a `sub_workflow` child ran **without** being offered for
+    /// approval, on a company whose policy would have parked the same call at
+    /// the top level (issue #617).
+    ///
+    /// # Why this is a journal line and not a fix
+    ///
+    /// A child graph is resolved and run *inside* the engine, so its nodes never
+    /// reach the gate pass that #460 and #614 added. Gating them is not
+    /// available: tinyflows cannot resume a child across the sub-workflow
+    /// boundary, and a paused child halts the parent with an unresumable error —
+    /// so marking the child's node would convert a run that works into one that
+    /// fails with no card to decide. Until the engine can resume across that
+    /// boundary, the honest thing is to keep running and **say so**.
+    ///
+    /// That is what this records. An operator auditing what the company was
+    /// asked to approve would otherwise see a hole with nothing explaining it;
+    /// this turns the hole into a line naming the child, the node and the call.
+    /// It is an audit record of a known limitation, not a decision anybody made.
+    ///
+    /// Journaled best-effort at child *resolution*, so it lands whether or not
+    /// the child's node is ultimately reached — the point is that the call was
+    /// never offered, and a run that stops earlier for another reason does not
+    /// make that less true. Deliberately **not** written for a dry run, which
+    /// executes nothing.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowChildCallNotOffered {
+        /// The graph the run started from — the one an operator recognises.
+        workflow_id: String,
+        /// The child graph the call actually sits in. Equal to `workflow_id`
+        /// only if a workflow references itself, which the cycle guard rejects.
+        child_workflow_id: String,
+        /// The run that resolved the child.
+        run_id: String,
+        /// The node inside the child that makes the call.
+        node: String,
+        /// The tool it would run — a `tool_call` node's slug, or `http_request`.
+        tool: String,
+        /// The policy's own words for why this call would have been parked at
+        /// the top level, so the line says what the operator was not asked.
+        reason: String,
+    },
 }
 
 impl CompanyEvent {
@@ -1172,6 +1215,7 @@ impl CompanyEvent {
             Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
             Self::WorkflowEnabledChanged { .. } => "WorkflowEnabledChanged",
             Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
+            Self::WorkflowChildCallNotOffered { .. } => "WorkflowChildCallNotOffered",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
@@ -1279,6 +1323,17 @@ impl CompanyEvent {
             // next re-run, which is the exact failure the variant exists to
             // prevent. See its own docs.
             | Self::WorkflowReportDelivered { .. } => Permanent,
+            // Issue #617: permanent, and it is the clearest kind of evidence
+            // this enum carries — the record that a consequential call ran
+            // WITHOUT the operator being asked. Pruning it would delete the only
+            // trace that the company acted unapproved, which is precisely the
+            // question an approvals audit exists to answer. It fails the "is
+            // this evidence" test in the strongest possible direction.
+            //
+            // Nothing reads it back today, and that does not soften the class:
+            // the reader is a person reviewing what happened, not a boot-time
+            // fold.
+            Self::WorkflowChildCallNotOffered { .. } => Permanent,
         }
     }
 }

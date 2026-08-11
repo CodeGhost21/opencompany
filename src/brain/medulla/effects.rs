@@ -416,6 +416,24 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             format!("Workflow {workflow_id} delivered its {kind} report from node {node}"),
             "workflow.report_delivered",
         ),
+        // Issue #617. Structural only, like every arm here: the child graph,
+        // the node and the tool. The policy's `reason` is deliberately NOT
+        // carried onto the wire — it is a sentence built for an operator's
+        // approval card, and this surface is a short non-sensitive one-liner.
+        CompanyEvent::WorkflowChildCallNotOffered {
+            child_workflow_id,
+            node,
+            tool,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!(
+                "Workflow child {child_workflow_id} ran {tool} at node {node} without offering \
+                 it for approval"
+            ),
+            "workflow.child_call_not_offered",
+        ),
     };
     WireEvent {
         seq,

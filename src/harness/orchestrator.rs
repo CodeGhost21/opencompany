@@ -1062,6 +1062,14 @@ fn summarize_event(event: &CompanyEvent) -> String {
             kind,
             ..
         } => format!("workflow {workflow_id} delivered {kind} report from node {node}"),
+        // Issue #617. Structural only, and without the policy's `reason` for
+        // the same rule the arms above follow.
+        CompanyEvent::WorkflowChildCallNotOffered {
+            child_workflow_id,
+            node,
+            tool,
+            ..
+        } => format!("workflow child {child_workflow_id} ran {tool} at node {node} unapproved"),
     }
 }
 
