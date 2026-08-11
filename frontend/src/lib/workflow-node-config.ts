@@ -18,6 +18,12 @@
 //   output_parser { schema, auto_fix }
 //   sub_workflow  { workflow_id }
 //
+// `condition` is a core palette kind (not one of the withheld five), but the
+// host now REQUIRES `config.field` at author time (#661 M1) — the engine
+// truthiness-tests that expression, and without it a condition always routed
+// `true`. So it carries a form too: `condition { field }` (the `yes`/`no`
+// branches are EDGE labels, not config).
+//
 // Keys the host REJECTS inside `config` — `on_error`, `retry`,
 // `requires_approval`, `schedule`, `destination`, `agent_ref` — are first-class
 // node fields and are never emitted here (see `src/company/workflow_file.rs`).
@@ -56,6 +62,16 @@ export interface ConfigFieldSpec {
  * `config` (if any) rides through an edit untouched, as before.
  */
 export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
+  condition: [
+    {
+      key: "field",
+      label: "Field",
+      control: "line",
+      required: true,
+      placeholder: "=item.approved",
+      hint: "The boolean expression the branch tests. The `yes` edge takes the true branch, `no` the false.",
+    },
+  ],
   tool_call: [
     {
       key: "slug",

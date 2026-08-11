@@ -27,20 +27,30 @@ import {
  */
 
 describe("hasConfigForm", () => {
-  it("covers exactly the five withheld kinds", () => {
+  it("covers the five withheld kinds plus condition (#661 M1)", () => {
     for (const kind of [
       "tool_call",
       "http_request",
       "switch",
       "output_parser",
       "sub_workflow",
+      // `condition` is a core palette kind, but the host now REQUIRES
+      // `config.field` at author time (#661 M1), so it carries a form too.
+      "condition",
     ]) {
       expect(hasConfigForm(kind), kind).toBe(true);
     }
-    for (const kind of ["trigger", "agent", "condition", "merge", "transform", "output"]) {
+    for (const kind of ["trigger", "agent", "merge", "transform", "output"]) {
       expect(hasConfigForm(kind), kind).toBe(false);
       expect(configFieldSpecs(kind)).toEqual([]);
     }
+  });
+
+  it("condition exposes a single required `field` (#661 M1)", () => {
+    const specs = configFieldSpecs("condition");
+    expect(specs).toHaveLength(1);
+    expect(specs[0].key).toBe("field");
+    expect(specs[0].required).toBe(true);
   });
 });
 
