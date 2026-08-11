@@ -1,10 +1,15 @@
 //! Translate a company [`WorkflowFile`] into a tinyflows
 //! [`WorkflowGraph`](tinyflows::model::WorkflowGraph).
 //!
-//! OpenCompany's on-disk model is a validated six-kind node/edge graph (see
-//! [`crate::company::workflow_file`]); tinyflows' runnable model is a
-//! twelve-kind graph. The mapping is mostly one-to-one, with two deliberate
-//! choices:
+//! OpenCompany's on-disk model is a validated node/edge graph whose accepted
+//! node kinds are the
+//! [`WORKFLOW_NODE_KINDS`](crate::company::workflow_file::WORKFLOW_NODE_KINDS)
+//! authoring set (see [`crate::company::workflow_file`]); tinyflows' runnable
+//! model carries the wider `NODE_KINDS` engine catalog. Every accepted kind
+//! lowers into that catalog, but the parser deliberately refuses the
+//! engine-only kinds — the authoring contract and the rejected set are spelled
+//! out in `docs/spec/runtime/workflow-vocabulary.md`. The mapping is mostly
+//! one-to-one, with two deliberate choices:
 //!
 //! * **`output` → [`Transform`](tinyflows::model::NodeKind::Transform)** —
 //!   tinyflows has no `output` kind. A `transform` node with no `set` config is
@@ -29,10 +34,10 @@
 //! node config, which the engine's `agent` node routes to the injected
 //! `AgentRunner` — that is how a step lands on the harness pool (see
 //! [`super::caps`]). `tool_call` and `http_request` nodes are mapped
-//! structurally; executing them end-to-end (real tool/HTTP semantics) is a
-//! documented follow-on — [`super::caps`] wires them to explicit "not yet wired"
-//! capabilities so an unreached node is inert and a reached one fails loudly
-//! rather than silently.
+//! structurally and both execute for real: a `tool_call` node runs a Cell A
+//! toolbelt tool, fail-closed on the company's `[tools].allow` grants, and an
+//! `http_request` node routes through the SSRF-guarded `GuardedHttpClient` —
+//! both wired in [`super::caps`].
 
 use std::collections::HashSet;
 
