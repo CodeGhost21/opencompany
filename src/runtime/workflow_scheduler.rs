@@ -361,6 +361,22 @@ impl WorkflowScheduler {
             // reached through the runtime resolved this tick.
             let store = runtime.schedule_fires().clone();
 
+            // Issue #661: the per-company in-flight run cap (issue #401). Read
+            // here so a fire can be admitted against it BEFORE it durably claims
+            // its minute. The authoritative admission is `RunSupervisor::begin`
+            // inside `spawn.spawn`'s task (see `spawn_scheduled_run`), which the
+            // scheduler reaches only AFTER `claim_fire` has already committed —
+            // so a company at its cap would claim the minute, have the run
+            // rejected there, and (because catch-up reads a claimed minute as
+            // fired) lose the occurrence for good. This cheap pre-check against
+            // the same predicate `begin` enforces (`len() >= limit`) lets a
+            // capped fire skip WITHOUT claiming, so the schedule retries on the
+            // next tick once a slot frees. The check is advisory — `begin` stays
+            // the authority under its lock — so the pre-existing skip-at-cap log
+            // in `spawn_scheduled_run` still covers the narrow race where a slot
+            // fills between this read and that `begin`.
+            let supervisor = runtime.run_supervisor().clone();
+
             for (file, cron, expr) in scheduled {
                 let key = (company.clone(), file.id.clone());
                 // The restart-stable durable identity for this workflow's cron.
@@ -382,7 +398,26 @@ impl WorkflowScheduler {
                                 // a same-minute steady-state fire below suppresses
                                 // WITHOUT claiming (the minute is suppressed, not
                                 // burned) rather than running a second copy.
-                                if let Some(claim) = self.claim(&key) {
+                                //
+                                // Issue #661: the make-up run also routes through
+                                // `spawn_scheduled_run` → `begin`, so at the #401
+                                // in-flight cap it would durably claim `missed` and
+                                // then have the run rejected — burning the make-up
+                                // exactly like the steady-state leak above. Defer
+                                // instead: drop the first-sight latch so the next
+                                // tick re-attempts catch-up once a slot frees,
+                                // leaving `missed` unclaimed.
+                                if supervisor.len() >= supervisor.limit() {
+                                    self.caught_up.remove(&key);
+                                    tracing::info!(
+                                        %company,
+                                        workflow = %file.id,
+                                        schedule = %cron,
+                                        limit = supervisor.limit(),
+                                        missed_minute = missed,
+                                        "workflow scheduler: company at its in-flight run cap, deferring restart catch-up to a later tick"
+                                    );
+                                } else if let Some(claim) = self.claim(&key) {
                                     match store.claim_fire(&company, &schedule_id, missed).await {
                                         Ok(true) => {
                                             let input = json!({
@@ -430,6 +465,25 @@ impl WorkflowScheduler {
                 }
 
                 if !expr.matches(&civil) {
+                    continue;
+                }
+
+                // Issue #661: admit against the #401 in-flight run cap BEFORE
+                // claiming the minute. If the company is already at its cap the
+                // run would be rejected by `begin` anyway — but only after
+                // `claim_fire` below had durably burned this minute, so the
+                // occurrence would be lost with no journaled outcome. Skipping
+                // here leaves the minute UNCLAIMED (nothing marked in
+                // `last_fired`, no overlap claim taken, no durable claim), so the
+                // schedule's next tick retries it naturally once a slot frees.
+                if supervisor.len() >= supervisor.limit() {
+                    tracing::info!(
+                        %company,
+                        workflow = %file.id,
+                        schedule = %cron,
+                        limit = supervisor.limit(),
+                        "workflow scheduler: company at its in-flight run cap, leaving this minute unclaimed to retry on the next tick"
+                    );
                     continue;
                 }
 
@@ -695,11 +749,17 @@ fn spawn_scheduled_run(
         // Issue #542: a scheduled run is always for real — `false`.
         //
         // Issue #401: `spawn` refuses when the company is at its in-flight run
-        // ceiling. A scheduled fire is SKIPPED, not queued: log it, drop the
-        // overlap `_claim` (on return below), and leave the durable minute
-        // burned — this minute is forfeited, and the schedule's next tick is the
-        // natural retry once a slot frees. A cron fire nobody is waiting on has
-        // nowhere to surface a 429, so the host log is the record.
+        // ceiling. A scheduled fire is SKIPPED, not queued: log it and drop the
+        // overlap `_claim` (on return below).
+        //
+        // Issue #661: the caller now pre-checks the same cap BEFORE `claim_fire`
+        // (see `tick`), so the common at-cap case skips there and the minute is
+        // never claimed — no longer burned. This arm remains as the authority and
+        // the safety net for the narrow race where a slot fills between that
+        // advisory read and this `begin`: only then is a minute already claimed
+        // and forfeited, and the schedule's next tick is the natural retry once a
+        // slot frees. A cron fire nobody is waiting on has nowhere to surface a
+        // 429, so the host log is the record.
         let (_run_id, handle) = match spawn.spawn(workflow, input, true, false) {
             Ok(started) => started,
             Err(err) => {
@@ -1137,6 +1197,21 @@ to = "done"
         runner: Option<Arc<dyn WorkflowRunner>>,
         lifecycle: &str,
     ) -> CompanyRegistry {
+        company_with_overlays_capped(home, id, overlays, runner, lifecycle, None).await
+    }
+
+    /// [`company_with_overlays`] with an optional per-company in-flight run cap
+    /// (issue #401 / #661). `cap = Some(n)` overrides the runtime's default
+    /// [`RunSupervisor`] with one that admits at most `n` concurrent runs, so a
+    /// test can drive the scheduler's at-cap path by holding `n` `begin` guards.
+    async fn company_with_overlays_capped(
+        home: &std::path::Path,
+        id: &str,
+        overlays: Vec<OverlayWorkflow>,
+        runner: Option<Arc<dyn WorkflowRunner>>,
+        lifecycle: &str,
+        cap: Option<usize>,
+    ) -> CompanyRegistry {
         let company = CompanyId::new(id);
         let mut runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
             .with_id(company.clone())
@@ -1147,6 +1222,9 @@ to = "done"
             runtime.source_dir().is_none(),
             "the overlay-only case must have no source dir"
         );
+        if let Some(cap) = cap {
+            runtime.set_run_supervisor(crate::runtime::RunSupervisor::with_limit(cap));
+        }
         if let Some(runner) = runner {
             runtime.set_workflow_runner(runner);
         }
@@ -2803,6 +2881,155 @@ to = "done"
                 .await
                 .unwrap(),
             Some(minute_at(2026, 7, 13, 9, 0))
+        );
+    }
+
+    /// Issue #661: a steady-state fire that would be rejected by the #401
+    /// in-flight run cap must leave its minute UNCLAIMED, so a later tick with
+    /// freed capacity still fires it. Before the fix the scheduler claimed the
+    /// minute and only THEN had the run rejected inside its spawned task, so
+    /// catch-up read the minute as already fired and the occurrence was lost for
+    /// good — durably claimed, never run, and invisible to the operator.
+    #[tokio::test]
+    async fn a_fire_at_the_in_flight_cap_leaves_the_minute_unclaimed_to_retry() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays_capped(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+            Some(1),
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+
+        // Fill the single slot with a stand-in in-flight run, so the company is
+        // at its cap exactly as it would be with a real run underway.
+        let supervisor = runtime.run_supervisor().clone();
+        let (_ctx, filler) = supervisor
+            .begin("filler", false)
+            .expect("fills the cap of 1");
+        assert_eq!(
+            supervisor.len(),
+            supervisor.limit(),
+            "the company is at its cap"
+        );
+
+        // Every minute matches `* * * * *`.
+        let fired_at = millis_at(2026, 7, 13, 9, 0);
+        let clock = Arc::new(FakeClock::new(fired_at));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+
+        // At cap: nothing fires, and — the point of the fix — the minute is NOT
+        // durably claimed, so catch-up cannot later mistake it for fired.
+        assert_eq!(scheduler.tick().await, 0, "a capped fire starts no run");
+        assert!(started.lock().unwrap().is_empty(), "no run was recorded");
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            None,
+            "a fire rejected by the cap must NOT claim the minute"
+        );
+
+        // Free the slot; the SAME minute now fires, proving the occurrence was
+        // only deferred, never lost.
+        drop(filler);
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "the freed slot lets the deferred fire land"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(fired_at / MINUTE_MS),
+            "the admitted fire now claims the minute exactly once"
+        );
+    }
+
+    /// Issue #661: the restart catch-up make-up is subject to the same cap. At
+    /// the #401 in-flight cap on first sight it must DEFER — dropping the
+    /// first-sight latch and leaving the missed minute unclaimed — so a later
+    /// tick re-attempts it once a slot frees, rather than claiming the missed
+    /// minute and losing the make-up when `begin` rejects the run.
+    #[tokio::test]
+    async fn a_catch_up_at_the_in_flight_cap_is_deferred_not_burned() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays_capped(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+            Some(1),
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        // Anchor two Mondays back; the most recent missed Monday is 2026-07-13.
+        let anchor = minute_at(2026, 7, 6, 9, 0);
+        runtime
+            .schedule_fires()
+            .claim_fire(&company, "workflow-digest", anchor)
+            .await
+            .unwrap();
+
+        // Fill the single slot so the company is at its cap.
+        let supervisor = runtime.run_supervisor().clone();
+        let (_ctx, filler) = supervisor
+            .begin("filler", false)
+            .expect("fills the cap of 1");
+
+        // "Now" is a Tuesday: the current minute never matches, isolating the
+        // catch-up as the only possible fire.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+
+        // At cap on first sight: catch-up is deferred, nothing fires, and the
+        // missed minute is NOT claimed (the anchor stays where it was).
+        assert_eq!(scheduler.tick().await, 0, "a capped catch-up starts no run");
+        assert!(started.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(anchor),
+            "the missed minute must not be claimed while deferred"
+        );
+
+        // Free the slot; because the first-sight latch was dropped, the next tick
+        // re-attempts the catch-up and it now lands.
+        drop(filler);
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "the deferred catch-up fires once a slot frees"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        assert_eq!(started.lock().unwrap()[0].input["catchUp"], true);
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(minute_at(2026, 7, 13, 9, 0)),
+            "the made-up minute is claimed only once it actually runs"
         );
     }
 
