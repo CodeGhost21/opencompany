@@ -67,7 +67,7 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
     Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
-    create_company_workflow, list_workflows_union, load_workflow_union,
+    WorkflowNodeKind, create_company_workflow, list_workflows_union, load_workflow_union,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
@@ -2672,6 +2672,29 @@ impl Tool for ReadRunOutputTool {
 /// `create_company_workflow` core the REST route and the builder use, so they
 /// inherit that core's validation rather than adding any of their own.
 ///
+/// **`tool_call` args are LITERAL only — no templated `=`-expressions (issue
+/// #674).** At runtime a workflow `tool_call` node has *saved-node* position:
+/// #614's more-permissive rule (not #338's unbounded-reach agent rule) governs
+/// it, justified because a saved node passed TWO operator gates — a manifest
+/// `[tools].allow` grant AND an operator authoring the node. But a node this
+/// tool authors was authored by the *agent*, not an operator, so it reaches
+/// runtime with only ONE operator gate (the grant) while still being treated as
+/// a saved node. `config.args` passes through verbatim and `=`-expressions in
+/// args are a live runtime feature (see `workflows::gate`'s
+/// `every_reachable_workflow_tool_is_classified_by_name_alone`), so an agent
+/// could author `tool_call{slug:"shell", args:{command:"=<expr over upstream
+/// output>"}}` — clearing every author-time gate, taking saved-node position,
+/// with model-chosen templated args: exactly #674's carve-out for
+/// templated-from-upstream args, which are not pre-declared and must follow the
+/// stricter agent rule. To keep the two-operator-gate model intact, the
+/// [`TryFrom`] below **rejects any `tool_call` node whose `config` carries a
+/// string beginning with `=`** (tinyflows' `is_expression` convention). Literal
+/// args only here; templated wiring stays with the console + `POST …/workflows`,
+/// where an operator picks the args. NOTE: #674's templated-args carve-out is
+/// framed for saved (operator-authored) nodes; that it needs revisiting for
+/// agent-authored nodes *generally* — not only this tool — is flagged, not fixed
+/// here.
+///
 /// Whether agents should be able to schedule themselves is an open product
 /// question. If the answer becomes yes, add the policy field here and to
 /// [`RawWorkflow`] construction below — the model and validation already support
@@ -2729,26 +2752,110 @@ struct CreateWorkflowArgEdge {
     label: Option<String>,
 }
 
+/// The dotted location of the first `=`-expression string found anywhere in
+/// `value`, or `None` when it holds only literal values.
+///
+/// Matches tinyflows' `expr::is_expression` convention exactly — a string that
+/// *starts with* `=` (no whitespace trim) is an expression the engine would
+/// resolve at run time. Walks nested objects and arrays; array elements are
+/// numeric segments, so a hit reads like `args.cc.0` — the same shape
+/// tinyflows' `NullResolution.location` uses.
+fn first_expression_location(value: &serde_json::Value, path: &str) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if s.starts_with('=') => Some(path.to_string()),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, child)| {
+            let next = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            first_expression_location(child, &next)
+        }),
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
+            let next = if path.is_empty() {
+                index.to_string()
+            } else {
+                format!("{path}.{index}")
+            };
+            first_expression_location(child, &next)
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a JSON `null` appears anywhere inside `value` (recursively).
+///
+/// The JSON→TOML conversion in [`TryFrom`] fails for more than one reason — a
+/// `null` (TOML has no null) but also, e.g., an integer outside `i64` range — so
+/// the caller uses this to only append the "drop null-valued keys" remedy when a
+/// null is actually the cause, and otherwise lets the raw converter error speak.
+fn json_contains_null(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.values().any(json_contains_null),
+        serde_json::Value::Array(items) => items.iter().any(json_contains_null),
+        _ => false,
+    }
+}
+
 impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
-    /// A prosumer-language conversion error — the only fallible step is a node's
-    /// JSON `config`, which is refused when it can't be represented in TOML. The
-    /// caller maps it straight onto a [`ToolResult::error`].
+    /// A prosumer-language conversion error. Every fallible step is a node's JSON
+    /// `config`: a non-object shape, a templated `=`-expression on a `tool_call`
+    /// (issue #674 — see the struct doc), or a value TOML cannot store (e.g. a
+    /// `null`). The caller maps each straight onto a [`ToolResult::error`].
     type Error = String;
 
     fn try_from(args: CreateWorkflowArgs) -> Result<Self, String> {
         let mut nodes = Vec::with_capacity(args.nodes.len());
         for n in args.nodes {
-            // JSON config → TOML value. TOML has no `null`, so a `null` anywhere
-            // in the config is a caller error, not a 500 on write — the same rule
-            // the REST create route and the workflow builder apply.
             let config = match n.config {
-                Some(json) => Some(toml::Value::try_from(json).map_err(|err| {
-                    format!(
-                        "node `{}` has config that can't be stored ({err}) — TOML has no null; \
-                         drop null-valued keys.",
-                        n.id
-                    )
-                })?),
+                Some(json) => {
+                    // The schema types `config` as an object; a scalar or array
+                    // (e.g. `"config": "web_fetch"`) would otherwise persist as an
+                    // inert TOML value — silently on an `http_request`/`condition`
+                    // node. Refuse it here as an agent-actionable error.
+                    if !json.is_object() {
+                        return Err(format!(
+                            "node `{}` has a non-object `config` — `config` must be a JSON object \
+                             (e.g. `{{\"slug\": \"web_fetch\"}}`), not a bare string, number, or \
+                             list.",
+                            n.id
+                        ));
+                    }
+                    // Issue #674 boundary: an agent-authored `tool_call` carries
+                    // saved-node runtime position, so templated `=`-expression
+                    // args would clear every author-time gate with model-chosen
+                    // values (see the struct doc). Literal args only — reject any
+                    // `=`-prefixed string anywhere in the config.
+                    if n.kind == WorkflowNodeKind::ToolCall.as_str()
+                        && let Some(location) = first_expression_location(&json, "")
+                    {
+                        return Err(format!(
+                            "node `{}` puts a templated `=`-expression at `config.{location}` — an \
+                             agent-authored `tool_call` accepts LITERAL args only, not \
+                             `=`-expressions over upstream output. Use the console (or `POST \
+                             …/workflows`) for templated wiring, where an operator picks the args.",
+                            n.id
+                        ));
+                    }
+                    // JSON config → TOML value. TOML has no `null`, so a `null`
+                    // anywhere in the config is a caller error, not a 500 on
+                    // write — the same rule the REST create route and the workflow
+                    // builder apply. Other conversion failures (e.g. an integer
+                    // outside `i64` range) get the converter's own message, with
+                    // the null hint appended only when a null is the cause.
+                    Some(toml::Value::try_from(&json).map_err(|err| {
+                        if json_contains_null(&json) {
+                            format!(
+                                "node `{}` has config that can't be stored ({err}) — TOML has no \
+                                 null; drop null-valued keys.",
+                                n.id
+                            )
+                        } else {
+                            format!("node `{}` has config that can't be stored ({err}).", n.id)
+                        }
+                    })?)
+                }
                 None => None,
             };
             nodes.push(RawNode {
