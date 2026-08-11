@@ -19,8 +19,13 @@
 //! [`triage_message`] is **Layer A**: it lives in the REST chat handler, is
 //! compiled into every build, and fronts both cognition brains. Its answer is
 //! also what the harness delegation seam uses to gate door 2 (Layer B) — an
-//! [`MessageTriage::Answer`] turn does not claim the delegation queue, so the
-//! model's board-writing tools refuse in its own turn.
+//! [`MessageTriage::Answer`] turn claims the delegation queue for *answering
+//! only*, so the model's board-writing tools refuse in its own turn.
+//!
+//! The gate is a narrowing, not a withdrawal. `delegate_to_desk` still runs on
+//! an `Answer` turn — it is how a question the orchestrator cannot answer alone
+//! reaches a desk that can — and what stands down is its *card*. So the layer
+//! removes the ability to write and never the ability to reply.
 //!
 //! # Positive triage, and a deliberate lean toward answering
 //!

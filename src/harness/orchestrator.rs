@@ -300,6 +300,24 @@ pub enum Delegation {
     },
 }
 
+impl Delegation {
+    /// Whether this delegation is a way of **answering** the operator, rather
+    /// than only a write to the board (issue #267).
+    ///
+    /// Only [`DelegateToDesk`](Self::DelegateToDesk) is. It runs a teammate's
+    /// turn and hands their reply back for the orchestrator to relay, so it is
+    /// how a question the orchestrator cannot answer alone reaches somebody who
+    /// can — "what did the design desk ship this week?" is unanswerable without
+    /// it. [`SpawnTask`](Self::SpawnTask), [`AssignTask`](Self::AssignTask) and
+    /// [`ReviewTask`](Self::ReviewTask) change the board and return nothing to
+    /// say, so they have no answering role and stay refused on a question turn.
+    ///
+    /// This is what [`DrainClaim::Answering`] filters on.
+    pub fn answers(&self) -> bool {
+        matches!(self, Self::DelegateToDesk { .. })
+    }
+}
+
 /// A shared, in-memory queue the delegation tools push onto and the harness
 /// brain drains. Cheap to [`Clone`] (a shared handle); the same underlying
 /// queue is seen by the tools captured into the orchestrator agent and by the
@@ -332,10 +350,10 @@ pub enum Delegation {
 #[derive(Clone, Default)]
 pub struct DelegationQueue {
     inner: Arc<Mutex<Vec<Delegation>>>,
-    /// Whether some drain site has promised to drain what is staged here
-    /// (issue #453). `false` — nothing drains — is the default and the
+    /// What the live claim on this queue permits (issues #453, #267).
+    /// [`DrainClaim::Unclaimed`] — nothing drains — is the default and the
     /// fail-safe direction.
-    committed: Arc<Mutex<bool>>,
+    committed: Arc<Mutex<DrainClaim>>,
     /// Desk keys a `delegate_to_desk` call named that the company does not have
     /// (issue #272).
     ///
@@ -366,9 +384,18 @@ impl DelegationQueue {
             .push(delegation);
     }
 
-    /// Whether a drain site has committed to draining this queue (issue #453).
-    pub fn drain_committed(&self) -> bool {
+    /// What the live claim on this queue permits (issues #453, #267).
+    pub fn claim_state(&self) -> DrainClaim {
         *self.committed.lock().expect("delegation commitment")
+    }
+
+    /// Whether a drain site has committed to draining this queue (issue #453).
+    ///
+    /// True for **both** claim kinds: an answering claim drains exactly like a
+    /// full one, it merely narrows what may be staged. Callers that need the
+    /// distinction want [`claim_state`](Self::claim_state).
+    pub fn drain_committed(&self) -> bool {
+        self.claim_state() != DrainClaim::Unclaimed
     }
 
     /// Claims this queue for a drain site that promises to drain it, for as long
@@ -383,8 +410,29 @@ impl DelegationQueue {
     /// the claim's scope *is* the window in which delegating works.
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
     pub fn claim(&self) -> DelegationClaim {
+        self.claim_as(DrainClaim::Full)
+    }
+
+    /// Claims this queue for a turn whose operator message triaged as a
+    /// question (issue #267).
+    ///
+    /// Identical to [`claim`](Self::claim) in every way that matters to the
+    /// drain — it runs, and it runs the same code — but only delegations that
+    /// [`answer`](Delegation::answers) may be staged under it. The three pure
+    /// board writes are refused at the tool boundary in the model's own turn.
+    ///
+    /// This exists because withholding the claim outright was too blunt: it
+    /// took `delegate_to_desk` away too, and that tool is how a question the
+    /// orchestrator cannot answer alone gets routed to a desk that can.
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim_answering(&self) -> DelegationClaim {
+        self.claim_as(DrainClaim::Answering)
+    }
+
+    /// The shared body of the two claim constructors.
+    fn claim_as(&self, state: DrainClaim) -> DelegationClaim {
         self.clear();
-        *self.committed.lock().expect("delegation commitment") = true;
+        *self.committed.lock().expect("delegation commitment") = state;
         DelegationClaim {
             queue: self.clone(),
         }
@@ -420,8 +468,12 @@ impl DelegationQueue {
     /// therefore distinct [`Staged`] variants and never collapsed.
     #[must_use = "a refused delegation must be reported to the model, not dropped"]
     pub fn push_within_cap(&self, delegation: Delegation, cap: usize) -> Staged {
-        if !self.drain_committed() {
-            return Staged::NoDrain;
+        match self.claim_state() {
+            DrainClaim::Unclaimed => return Staged::NoDrain,
+            // Issue #267: the operator asked a question. A hand-off is how one
+            // gets answered, so it stages; the pure board writes do not.
+            DrainClaim::Answering if !delegation.answers() => return Staged::NoDrain,
+            DrainClaim::Answering | DrainClaim::Full => {}
         }
         let mut guard = self.inner.lock().expect("delegation queue");
         if guard.len() >= cap {
@@ -512,10 +564,35 @@ impl DelegationQueue {
 pub enum Staged {
     /// Queued; some drain site will execute it as this turn completes.
     Queued,
-    /// Nothing has claimed the queue, so nothing would ever execute it.
+    /// Nothing that would execute *this* delegation has claimed the queue —
+    /// either because nobody claimed it at all (issue #453) or because the
+    /// claim is narrowed to answering and this is a pure board write
+    /// (issue #267, [`DrainClaim::Answering`]).
     NoDrain,
     /// This turn has already queued [`MAX_DELEGATIONS_PER_TURN`].
     OverCap,
+}
+
+/// What the live claim on a [`DelegationQueue`] permits (issues #453, #267).
+///
+/// The gate on a question turn is a *narrowing* rather than a withdrawal, and
+/// this is where the difference lives. Before #267's review the answering case
+/// was expressed by simply not claiming, which could only say "no board work at
+/// all" — and that took `delegate_to_desk` with it, leaving the orchestrator
+/// unable to consult a desk about the very question it was asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DrainClaim {
+    /// No drain site has claimed the queue: nothing may be staged, because
+    /// nothing would ever execute it. The default and the fail-safe direction.
+    #[default]
+    Unclaimed,
+    /// A drain site has claimed the queue and will execute anything staged.
+    Full,
+    /// A drain site has claimed the queue for a turn whose operator message
+    /// triaged as [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage)
+    /// (issue #267). The drain runs exactly as under [`Full`](Self::Full); only
+    /// delegations that [`answer`](Delegation::answers) may be staged.
+    Answering,
 }
 
 /// The live claim on a [`DelegationQueue`] — proof that some drain site is
@@ -537,7 +614,7 @@ pub struct DelegationClaim {
 
 impl Drop for DelegationClaim {
     fn drop(&mut self) {
-        *self.queue.committed.lock().expect("delegation commitment") = false;
+        *self.queue.committed.lock().expect("delegation commitment") = DrainClaim::Unclaimed;
         self.queue.clear();
     }
 }

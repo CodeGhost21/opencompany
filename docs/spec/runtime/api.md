@@ -439,12 +439,15 @@ scope; SSE (`/chat` streaming, the `/events` work feed) is not yet wired.
   `company::task_intent::triage_message` (#267) into `Track` (an instruction —
   the route opens a `todo` card), `Answer` (a question or read — no card), or
   `Chatter` (greetings, and anything ambiguous — no card). `Answer` is also the
-  only class that *gates*: the harness withholds the issue-#453 delegation
-  claim for that turn, so the model's own `spawn_task` / `delegate_to_desk` /
-  `assign_task` / `review_task` fail at the tool boundary with the do-not-retry
-  refusal, while `query_company` / `run_workflow` / `read_run_output` run inline
-  and are untouched — the turn loses the ability to *write*, never the ability
-  to answer. Ambiguity falls to `Chatter`, which neither cards nor gates: a
+  only class that *gates*: the harness narrows the issue-#453 delegation claim
+  to answering for that turn, so the model's own `spawn_task` / `assign_task` /
+  `review_task` fail at the tool boundary with the do-not-retry refusal.
+  `delegate_to_desk` is deliberately **not** refused — it is how a question the
+  orchestrator cannot answer alone reaches a desk that can — so it runs the
+  desk lead and relays their reply, and only its board card stands down.
+  `query_company` / `run_workflow` / `read_run_output` run inline and are
+  untouched throughout. The turn loses the ability to *write*, never the
+  ability to answer. Ambiguity falls to `Chatter`, which neither cards nor gates: a
   missed card costs one follow-up message, a spurious card pollutes the board
   permanently. The gate is harness-only — `HostedMedullaBrain` has no
   delegation stack to gate (#176) — while the triage itself is compiled into
