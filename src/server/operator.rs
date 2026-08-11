@@ -4713,6 +4713,7 @@ mod test {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         }))
         .expect("desk_task_completed is an attention signal");
         assert_eq!(v["type"], serde_json::json!("desk_task_completed"));

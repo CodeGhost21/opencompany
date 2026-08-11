@@ -4336,6 +4336,7 @@ members = ["nobody"]
                 output: "shipped".to_string(),
                 column: "done".to_string(),
                 artifact_ids: Vec::new(),
+                origin_chat_id: None,
             },
             at_millis: 30,
         });
