@@ -774,7 +774,8 @@ impl ToolPolicy for ApprovalPolicy {
         if self.mode == PolicyMode::Readonly && is_external_effect(tool, &request.arguments) {
             return ToolPolicyDecision::deny(format!(
                 "'{tool}' mutates or reaches outside; this desk is read-only, \
-                 so an earlier approval does not apply"
+                 so an earlier approval does not apply{}",
+                readonly_denial_suffix(tool)
             ));
         }
 
@@ -887,7 +888,8 @@ impl ToolPolicy for ApprovalPolicy {
             PolicyMode::Readonly => {
                 if reach.denied_under_readonly() {
                     ToolPolicyDecision::deny(format!(
-                        "'{tool}' mutates or reaches outside; this desk is read-only"
+                        "'{tool}' mutates or reaches outside; this desk is read-only{}",
+                        readonly_denial_suffix(tool)
                     ))
                 } else {
                     ToolPolicyDecision::Allow
@@ -895,6 +897,20 @@ impl ToolPolicy for ApprovalPolicy {
             }
         }
     }
+}
+
+/// The ", because …" a `readonly` denial carries when the tool's name argues
+/// against its classification (issue #459), or an empty string.
+///
+/// `readonly` denying `read_workspace_state` is the case this exists for: the
+/// operator sees a tier that promises reads still work refuse something called
+/// `read_*`, and "mutates or reaches outside" alone reads as a bug in the tier.
+/// The reason lives in [`crate::policy::consequence::denial_reason`], next to
+/// the classification it explains, so the two cannot drift.
+fn readonly_denial_suffix(tool: &str) -> String {
+    crate::policy::consequence::denial_reason(tool)
+        .map(|why| format!(" — {why}"))
+        .unwrap_or_default()
 }
 
 /// Does this tool call mutate state or reach an external counterparty?
@@ -2811,6 +2827,44 @@ mod tests {
             ),
             "`readonly` promises nothing runs; a git config key can name a command"
         );
+    }
+
+    /// …and the `readonly` denial says **why**, because this is the one an
+    /// operator ends up confused by.
+    ///
+    /// `read_workspace_state` used to run on a `readonly` desk, so a company
+    /// that sat there gets a refusal on what was a normal first move — and a
+    /// tier that promises reads still work refusing something called `read_*`
+    /// reads as a bug in the tier unless the message names git. The
+    /// `supervised` park explains itself by producing a card to approve; this
+    /// one has to carry its reason.
+    #[tokio::test]
+    async fn the_readonly_denial_of_a_read_shaped_tool_says_why() {
+        let ToolPolicyDecision::Deny { reason } = policy("readonly", &[], None)
+            .check(&request("read_workspace_state", serde_json::json!({})))
+            .await
+        else {
+            panic!("`readonly` denies it");
+        };
+        assert!(
+            reason.contains("git"),
+            "an operator must be able to tell this from a mis-classification: {reason}"
+        );
+        assert!(
+            reason.contains("workspace"),
+            "and where the config it obeys comes from: {reason}"
+        );
+
+        // A tool whose name already argues for the verdict carries no such
+        // clause — every denial ending in an explanation is an explanation
+        // nobody reads.
+        let ToolPolicyDecision::Deny { reason } = policy("readonly", &[], None)
+            .check(&request("shell", serde_json::json!({})))
+            .await
+        else {
+            panic!("`readonly` denies shell");
+        };
+        assert!(!reason.contains("git"), "{reason}");
     }
 
     /// A standing grant admits any arguments, which was a fair summary of a

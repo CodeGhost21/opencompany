@@ -221,6 +221,12 @@ const DECLARED: &[Declared] = &[
     // `shell` shape wearing a read's name, and `namespace_of` already maps it
     // into the `shell` namespace for capability gating.
     //
+    // This is a consistency fix rather than a judgement call: `git_operations`
+    // below is already `Reach::Consequence`, and its `run_git_command_in` is
+    // the same unscrubbed `Command::new("git")`. The identical primitive was
+    // gated in one tool and open in the other; `read_workspace_state` was the
+    // odd one out.
+    //
     // THIS IS A STOPGAP, and deliberately the blunt one: it costs an approval
     // on a routine orientation step. The fix that restores the ergonomics is
     // upstream, in openhuman's `run_git`
@@ -232,6 +238,12 @@ const DECLARED: &[Declared] = &[
     // byte-identical on openhuman `main` today, so there is no pin to bump to.
     // Revert this to `Reach::Nothing` once a hardened `run_git` is vendored,
     // and not before.
+    //
+    // The revert condition is tracked where the work has to happen —
+    // tinyhumansai/openhuman#5494 — not only in this comment. A stopgap whose
+    // removal condition lives as prose next to the stopgap, in a different repo
+    // from its fix, is how these become permanent: nothing surfaces it when
+    // somebody bumps the openhuman pin.
     d(
         "read_workspace_state",
         EffectGroup::Other,
@@ -391,6 +403,28 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
             standing: found.standing,
         },
         None => undeclared(&name),
+    }
+}
+
+/// Why a tool whose *name* reads like a read is nonetheless gated (issue #459).
+///
+/// `None` for almost everything, and that is right: "'shell' mutates or reaches
+/// outside" needs no elaboration, and neither does `http_request`. The entries
+/// here are the tools where the classification contradicts the name, so the
+/// denial is the one an operator reads twice — `readonly` refusing something
+/// called `read_*` looks like a bug in the tier, and without a reason the
+/// operator has no way to tell it from one.
+///
+/// Appended to the `readonly` denial, which is where a confused operator ends
+/// up: the `supervised` park explains itself by offering a card to approve.
+pub fn denial_reason(tool: &str) -> Option<&'static str> {
+    match tool.to_ascii_lowercase().as_str() {
+        "read_workspace_state" => Some(
+            "it runs `git status` and `git log` in the agent's workspace, and git \
+             takes its configuration from that same directory — so it is gated \
+             like `shell` rather than like a read",
+        ),
+        _ => None,
     }
 }
 
