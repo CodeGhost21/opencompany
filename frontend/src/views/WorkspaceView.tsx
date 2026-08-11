@@ -24,6 +24,7 @@ import { toast } from "sonner";
 import { ApiError } from "@/api/types";
 import type { OpenCompanyClient } from "@/api/client";
 import {
+  blobCacheKey,
   createNode,
   deleteNode as deleteNodeApi,
   fetchBlobUrl,
@@ -1494,6 +1495,7 @@ function BinaryNodeView({
   const [url, setUrl] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const isImage = (node.mime ?? "").startsWith("image/");
+  const blobKey = blobCacheKey(node);
 
   useEffect(() => {
     let revoked = false;
@@ -1519,7 +1521,10 @@ function BinaryNodeView({
       revoked = true;
       if (current) URL.revokeObjectURL(current);
     };
-  }, [client, company, node.id]);
+    // `blobKey`, not `node.id`, is what makes a re-publish visible: it folds in
+    // the digest, so bytes replaced in place re-fetch (issue #669). The rule
+    // lives in `blobCacheKey` and is asserted there.
+  }, [client, company, node.id, blobKey]);
 
   return (
     <div className="mx-auto max-w-3xl px-6 py-6" data-testid="workspace-binary">
