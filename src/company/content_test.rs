@@ -257,10 +257,12 @@ fn the_repo_skill_registry_parses() {
 /// teammate — which is exactly how the marketing agency preset shipped pointing
 /// `research` at an unwired slug (halt) and `publish` at a nonexistent HTTP node.
 ///
-/// This translates each graph the way the engine will and asserts the two facts
-/// that decide whether a run halts: every `tool_call` slug resolves to a real
-/// toolbelt namespace ([`namespace_of`]), and every `agent` ref is on that
-/// company's roster.
+/// This translates each graph the way the engine will, **compiles** it onto the
+/// tinyflows engine (so a graph that parses but can't compile — an unbounded
+/// guarded cycle, say — is caught at load, not first run; issue #661), and
+/// asserts the two facts that decide whether a run halts: every `tool_call` slug
+/// resolves to a real toolbelt namespace ([`namespace_of`]), and every `agent`
+/// ref is on that company's roster.
 ///
 /// Gated on `openhuman` because `translate` and `namespace_of` live behind that
 /// feature; the `Rust (openhuman, tinycortex)` CI lane runs it.
@@ -285,6 +287,18 @@ fn every_bundled_workflow_is_runnable_against_its_roster() {
             let workflow =
                 parse_workflow(&text).unwrap_or_else(|err| panic!("{}: {err}", file.display()));
             let graph = translate(&workflow);
+
+            // Beyond parse+translate, every seed must COMPILE onto the tinyflows
+            // engine (issue #661). Compile is the pass that rejects an unbounded
+            // guarded cycle (`IllegalCycle`) and other structural faults a bare
+            // parse misses — a seed that parses but cannot compile would fail at
+            // first run, not at load, so the whole company's workflows break.
+            tinyflows::compiler::compile(&graph).unwrap_or_else(|err| {
+                panic!(
+                    "{}: translated graph does not compile: {err}",
+                    file.display()
+                )
+            });
 
             for node in &graph.nodes {
                 match node.kind {
