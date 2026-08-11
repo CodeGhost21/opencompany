@@ -25,15 +25,15 @@ import { cn } from "@/lib/utils";
 // coloured dot alone puts the whole signal on hue, which a colourblind reader
 // or a glance at the collapsed rail can miss.
 const TONE_DOT: Record<string, string> = {
-  live: "bg-emerald-500",
-  idle: "bg-amber-500",
-  stopped: "bg-rose-500",
+  live: "bg-status-done",
+  idle: "bg-status-blocked",
+  stopped: "bg-status-failed",
 };
 
 const TONE_TEXT: Record<string, string> = {
-  live: "text-emerald-600 dark:text-emerald-400",
-  idle: "text-amber-600 dark:text-amber-400",
-  stopped: "text-rose-600 dark:text-rose-400",
+  live: "text-status-done-text",
+  idle: "text-status-blocked-text",
+  stopped: "text-status-failed-text",
 };
 
 // Discord's brand blurple, lifted a step in dark mode so it clears the

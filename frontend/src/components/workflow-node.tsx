@@ -18,9 +18,9 @@ const RUN_STATE_LABEL: Record<NodeRunState, string> = {
 /** Badge tint per run state — read alongside the ring, never instead of it, so
  * the state does not rely on colour alone. */
 const RUN_STATE_BADGE: Record<NodeRunState, string> = {
-  running: "bg-sky-500/15 text-sky-700 dark:text-sky-300",
-  ok: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-300",
-  error: "bg-red-500/15 text-red-700 dark:text-red-300",
+  running: "bg-status-running-soft text-status-running-text",
+  ok: "bg-status-done-soft text-status-done-text",
+  error: "bg-status-failed-soft text-status-failed-text",
 };
 
 /** A custom xyflow node: emoji + colored header, name, and a one-line summary.

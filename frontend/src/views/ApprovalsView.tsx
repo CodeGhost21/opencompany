@@ -555,7 +555,7 @@ function ApprovalCard({
 function EmptyApprovals({ onGoToConversation }: { onGoToConversation: () => void }) {
   return (
     <div className="mt-16 flex flex-col items-center gap-3 text-center">
-      <div className="flex size-12 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+      <div className="flex size-12 items-center justify-center rounded-2xl bg-status-done-soft text-status-done-text">
         <ShieldCheck className="size-6" />
       </div>
       <div className="space-y-1">

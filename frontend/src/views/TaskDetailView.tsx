@@ -243,7 +243,7 @@ function planTabCount(plan: TaskPlan): { count: number; tone: string } | null {
   if (blocking > 0) return { count: blocking, tone: "text-destructive" };
   const unresolved = approval + unchecked;
   if (unresolved > 0) {
-    return { count: unresolved, tone: "text-amber-600 dark:text-amber-400" };
+    return { count: unresolved, tone: "text-status-blocked-text" };
   }
   return null;
 }
@@ -666,7 +666,7 @@ function DetailHeader({
                   Worked {formatDuration(workingMs)}
                 </span>
                 {worked!.live && (
-                  <span className="inline-flex items-center gap-1 text-emerald-600 dark:text-emerald-400">
+                  <span className="inline-flex items-center gap-1 text-status-done-text">
                     <span
                       className="size-1.5 animate-pulse rounded-full bg-current"
                       aria-hidden
@@ -682,12 +682,12 @@ function DetailHeader({
         )}
         {showWaiting && (
           <span className="inline-flex items-center gap-1.5">
-            <Hourglass className="size-3.5 text-amber-600 dark:text-amber-400" />
-            <span className="font-medium text-amber-700 dark:text-amber-400">
+            <Hourglass className="size-3.5 text-status-blocked-text" />
+            <span className="font-medium text-status-blocked-text">
               Waiting {formatDuration(waitedMs)}
             </span>
             {waiting!.live && (
-              <span className="inline-flex items-center gap-1 text-amber-600 dark:text-amber-400">
+              <span className="inline-flex items-center gap-1 text-status-blocked-text">
                 <span
                   className="size-1.5 animate-pulse rounded-full bg-current"
                   aria-hidden
@@ -826,7 +826,7 @@ function ControlBar({
       <div className="flex flex-wrap items-center gap-2">
         {inflight ? (
           <>
-            <span className="mr-1 inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            <span className="mr-1 inline-flex items-center gap-1.5 text-xs font-medium text-status-done-text">
               <span
                 className="size-1.5 animate-pulse rounded-full bg-current"
                 aria-hidden
@@ -1196,17 +1196,17 @@ function rowIcon(kind: TimelineKind, status?: StepStatus): ReactElement {
 
 function kindTone(kind: TimelineKind, status?: StepStatus): string {
   // Outcome first, for the same reason `rowIcon` reads it first.
-  if (status === "running") return "text-sky-600 dark:text-sky-400";
+  if (status === "running") return "text-status-running-text";
   if (status === "awaiting_approval")
-    return "text-amber-600 dark:text-amber-400";
-  if (status === "error") return "text-rose-600 dark:text-rose-400";
+    return "text-status-blocked-text";
+  if (status === "error") return "text-status-failed-text";
   switch (kind) {
     case "completed":
-      return "text-emerald-600 dark:text-emerald-400";
+      return "text-status-done-text";
     case "tool_failed":
-      return "text-rose-600 dark:text-rose-400";
+      return "text-status-failed-text";
     case "approval":
-      return "text-amber-600 dark:text-amber-400";
+      return "text-status-blocked-text";
     default:
       return "text-muted-foreground";
   }
@@ -1274,8 +1274,8 @@ function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
     <li
       className={cn(
         "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
-        "border-amber-400/60 bg-amber-50/60 text-2xs text-amber-700",
-        "dark:border-amber-500/40 dark:bg-amber-950/20 dark:text-amber-400",
+        "border-status-blocked/60 bg-status-blocked-soft text-2xs text-status-blocked-text",
+        "border-status-blocked/40 bg-status-blocked-soft text-status-blocked-text",
         live && "animate-pulse",
       )}
       style={{ minHeight: height }}
@@ -1343,8 +1343,8 @@ function StepStateChip({
       className={cn(
         "shrink-0 rounded px-1 py-px text-3xs font-medium",
         tone === "amber"
-          ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
-          : "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+          ? "bg-status-blocked-soft text-status-blocked-text"
+          : "bg-status-failed-soft text-status-failed-text",
       )}
     >
       {children}
@@ -1455,16 +1455,16 @@ function TimelineRow({ group }: { group: TimelineGroup }) {
 function runStatusTone(status: RunStatus): string {
   switch (status) {
     case "succeeded":
-      return "border-emerald-500/40 text-emerald-700 dark:text-emerald-400";
+      return "border-status-done/40 text-status-done-text";
     case "failed":
-      return "border-rose-500/40 text-rose-700 dark:text-rose-400";
+      return "border-status-failed/40 text-status-failed-text";
     case "cancelled":
       return "border-muted-foreground/30 text-muted-foreground";
     case "waiting_approval":
     case "paused":
-      return "border-amber-500/40 text-amber-700 dark:text-amber-400";
+      return "border-status-blocked/40 text-status-blocked-text";
     default:
-      return "border-sky-500/40 text-sky-700 dark:text-sky-400";
+      return "border-status-running/40 text-status-running-text";
   }
 }
 
@@ -1542,7 +1542,7 @@ function AttemptsTab({
         fault.
       </p>
       {missing && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+        <p className="rounded-md border border-status-blocked/40 bg-status-blocked-soft px-3 py-2 text-xs text-muted-foreground">
           The attempt that link points at is no longer in this card's history.
           Its other attempts are below.
         </p>
@@ -1635,7 +1635,7 @@ function AttemptRow({
           {run.stepCountCapped && <span>(trace capped)</span>}
         </div>
         {run.error && (
-          <p className="w-full truncate pl-5 text-2xs text-rose-600 dark:text-rose-400">
+          <p className="w-full truncate pl-5 text-2xs text-status-failed-text">
             {run.error}
           </p>
         )}
@@ -1812,9 +1812,9 @@ function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; no
   const { waited } = pending;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-amber-300/60 bg-amber-50 px-3 py-2 text-xs dark:border-amber-400/30 dark:bg-amber-950/30">
-      <Hourglass className="size-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
-      <span className="min-w-0 flex-1 text-amber-800 dark:text-amber-300">
+    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/60 bg-status-blocked px-3 py-2 text-xs border-status-blocked/30 bg-status-blocked-soft">
+      <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
+      <span className="min-w-0 flex-1 text-status-blocked-text">
         {pending.count === 1
           ? "Waiting on an approval"
           : `Waiting on ${pending.count} approvals`}{" "}
@@ -1822,7 +1822,7 @@ function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; no
       </span>
       <a
         href="#/approvals"
-        className="shrink-0 font-medium text-amber-800 underline-offset-2 hover:underline dark:text-amber-300"
+        className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline text-status-blocked-text"
         aria-label={
           pending.count === 1
             ? "Review this task's pending approval on the Approvals page"
@@ -2286,7 +2286,7 @@ function RetryButton({
                 // so the index carries the uniqueness the pair cannot.
                 <li key={`${e.kind}-${e.atMillis}-${i}`} className="flex items-start gap-2">
                   <AlertCircle
-                    className="mt-px size-3.5 shrink-0 text-amber-600 dark:text-amber-400"
+                    className="mt-px size-3.5 shrink-0 text-status-blocked-text"
                     aria-hidden
                   />
                   <span className="min-w-0 flex-1">{effectDone(e.kind, e.amountUsd)}</span>

@@ -687,7 +687,7 @@ function PlanBadgeRow({ plan }: { plan: TaskPlan }) {
   const unresolved = approval + unchecked;
   if (unresolved > 0) {
     return (
-      <div className="mt-2 flex items-center gap-1.5 text-2xs text-amber-600 dark:text-amber-400">
+      <div className="mt-2 flex items-center gap-1.5 text-2xs text-status-blocked-text">
         <CircleHelp className="size-3 shrink-0" />
         <span>
           Planned — {unresolved} to be aware of

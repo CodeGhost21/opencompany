@@ -350,7 +350,7 @@ function RegistryCard({
             </span>
           </div>
           {installed ? (
-            <span className="inline-flex items-center gap-1 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+            <span className="inline-flex items-center gap-1 text-xs font-medium text-status-done-text">
               <Check className="size-3.5" /> Installed
             </span>
           ) : (

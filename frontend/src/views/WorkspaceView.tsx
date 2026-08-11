@@ -1158,7 +1158,7 @@ function Tree(props: TreeProps) {
 
 /** Badge styling per origin, mirroring `ORIGIN_STYLES` in `api/memory.ts`. */
 const ORIGIN_STYLES: Record<WorkspaceOrigin["kind"], string> = {
-  agent: "border-teal-500/30 bg-teal-500/10 text-teal-600 dark:text-teal-400",
+  agent: "border-tone-3/30 bg-tone-3/10 text-tone-3-text",
   seed: "border-border bg-muted text-muted-foreground",
   operator: "border-border bg-muted text-muted-foreground",
 };
@@ -1225,7 +1225,7 @@ function TreeRow({ node, ...props }: TreeProps & { node: FsNode }) {
           {isFolder ? (
             <>
               {isOpen ? <ChevronDown className="size-3.5 shrink-0 text-muted-foreground" /> : <ChevronRight className="size-3.5 shrink-0 text-muted-foreground" />}
-              {isOpen ? <FolderOpen className="size-4 shrink-0 text-sky-500" /> : <Folder className="size-4 shrink-0 text-sky-500" />}
+              {isOpen ? <FolderOpen className="size-4 shrink-0 text-tone-2" /> : <Folder className="size-4 shrink-0 text-tone-2" />}
             </>
           ) : (
             <FileText className="ml-3.5 size-4 shrink-0 text-muted-foreground" />
@@ -1472,7 +1472,7 @@ function DestRow({ label, disabled, onClick }: { label: string; disabled?: boole
       onClick={onClick}
       className="flex w-full items-center gap-2 rounded-lg px-2.5 py-2 text-left text-sm hover:bg-accent disabled:pointer-events-none disabled:opacity-40"
     >
-      <Folder className="size-4 text-sky-500" />
+      <Folder className="size-4 text-tone-2" />
       <span className="truncate">{label}</span>
       {disabled && <span className="ml-auto text-xs text-muted-foreground">Here</span>}
     </button>

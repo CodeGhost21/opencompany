@@ -293,11 +293,11 @@ export function ComposioSection({ client, company, canManage }: Props) {
                 {status.granted ? "granted" : "not granted"}
               </Badge>
               {attested ? (
-                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <ShieldCheck className="size-3" /> Linked via cluster identity — nothing stored
                 </span>
               ) : byoToken ? (
-                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <Check className="size-3" /> token set
                 </span>
               ) : (
@@ -328,7 +328,7 @@ export function ComposioSection({ client, company, canManage }: Props) {
                   // The host could not read Composio's catalog. Say so — a
                   // built-in list rendered like a fetched one is a claim we
                   // cannot back (issue #397).
-                  <p className="flex items-start gap-2 rounded-md bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-400">
+                  <p className="flex items-start gap-2 rounded-md bg-status-blocked-soft p-2 text-xs text-status-blocked-text">
                     <AlertTriangle className="mt-px size-3 shrink-0" />
                     <span>{degraded}</span>
                   </p>
@@ -360,7 +360,7 @@ export function ComposioSection({ client, company, canManage }: Props) {
                       <li key={row.slug} className="flex items-center justify-between py-2">
                         <span className="text-sm">{row.label}</span>
                         {row.connected ? (
-                          <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                          <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                             <Check className="size-3" /> connected
                           </span>
                         ) : !canManage ? (

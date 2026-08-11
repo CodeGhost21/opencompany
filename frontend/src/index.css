@@ -163,6 +163,35 @@
     --status-failed-text: var(--red-text);
     --status-failed-soft: color-mix(in oklab, var(--red-mark) 12%, transparent);
 
+    /*
+     * Identity tones.
+     *
+     * A categorical palette for *who*, not *what state*: the tile behind a
+     * desk's initials, a teammate's avatar, a thread's tint. Assigned by
+     * hash, so a name keeps its colour across reloads and carries no meaning
+     * beyond "not the other one".
+     *
+     * Deliberately avoids amber, green and red. Identity used to be drawn
+     * from the same Tailwind palette as status, which meant a desk could be
+     * tinted the exact green that means "done" and another the red that
+     * means "failed" — the collision the brand doc warns about, sitting in
+     * the product. These five hues stay clear of the three status colours
+     * where a misread actually costs something.
+     *
+     * Form separates them from the rest: identity is a *tile with initials*,
+     * status is a *pill or dot with a label*. They never take the same shape.
+     */
+    --tone-1: oklch(0.6056 0.2189 292.72); /* #8B5CF6 violet  */
+    --tone-1-text: oklch(0.4907 0.2412 292.58); /* #6D28D9  6.93:1 */
+    --tone-2: oklch(0.6231 0.188 259.81); /* #3B82F6 blue    */
+    --tone-2-text: oklch(0.4882 0.2172 264.38); /* #1D4ED8  6.54:1 */
+    --tone-3: oklch(0.7038 0.123 182.5); /* #14B8A6 teal    */
+    --tone-3-text: oklch(0.5109 0.0861 186.39); /* #0F766E  5.34:1 */
+    --tone-4: oklch(0.6668 0.2591 322.15); /* #D946EF fuchsia */
+    --tone-4-text: oklch(0.518 0.2258 323.95); /* #A21CAF  6.17:1 */
+    --tone-5: oklch(0.5544 0.0407 257.42); /* #64748B slate   */
+    --tone-5-text: oklch(0.4455 0.0374 257.28); /* #475569  7.39:1 */
+
     /* Charts. Brand leads slot 1, then the sequence walks the hue circle
        so neighbouring series never collide. Ordered by how often a series
        count occurs: the two-series case gets indigo/cyan, which are also
@@ -283,6 +312,15 @@
     --chart-4: var(--amber-bright);
     --chart-5: var(--pink-bright);
 
+    /* Identity tones: the mark holds, the ink lifts. On near-black the
+       light-mode text weights read as bruises, so each takes its bright
+       counterpart — measured 10.6–13.2:1 against the canvas. */
+    --tone-1-text: oklch(0.8112 0.1013 293.57); /* #C4B5FD */
+    --tone-2-text: oklch(0.8091 0.0956 251.81); /* #93C5FD */
+    --tone-3-text: oklch(0.8549 0.1251 181.07); /* #5EEAD4 */
+    --tone-4-text: oklch(0.833 0.1322 321.43); /* #F0ABFC */
+    --tone-5-text: oklch(0.869 0.0198 252.89); /* #CBD5E1 */
+
     --sidebar: var(--gray-925);
     --sidebar-foreground: var(--gray-50);
     --sidebar-primary: var(--brand-400);
@@ -377,6 +415,17 @@
     --color-status-failed: var(--status-failed);
     --color-status-failed-text: var(--status-failed-text);
     --color-status-failed-soft: var(--status-failed-soft);
+
+    --color-tone-1: var(--tone-1);
+    --color-tone-1-text: var(--tone-1-text);
+    --color-tone-2: var(--tone-2);
+    --color-tone-2-text: var(--tone-2-text);
+    --color-tone-3: var(--tone-3);
+    --color-tone-3-text: var(--tone-3-text);
+    --color-tone-4: var(--tone-4);
+    --color-tone-4-text: var(--tone-4-text);
+    --color-tone-5: var(--tone-5);
+    --color-tone-5-text: var(--tone-5-text);
 
     --color-chart-1: var(--chart-1);
     --color-chart-2: var(--chart-2);

@@ -144,7 +144,7 @@ export function CronPreviewLine({
   if (preview.error) {
     if (suppressError) return null;
     return (
-      <p className="text-3xs leading-snug text-amber-600 dark:text-amber-400">
+      <p className="text-3xs leading-snug text-status-blocked-text">
         {preview.error}
       </p>
     );

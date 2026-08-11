@@ -282,7 +282,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
       {undelivered > 0 && (
         <Badge
           variant="outline"
-          className="h-4 px-1.5 text-3xs font-normal border-red-500/40 bg-red-500/10"
+          className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft"
         >
           {undelivered} not delivered
         </Badge>
@@ -290,7 +290,7 @@ function HealthLine({ runs, runsLoaded }: { runs: WorkflowRunOutcome[]; runsLoad
       {pending > 0 && (
         <Badge
           variant="outline"
-          className="h-4 px-1.5 text-3xs font-normal border-sky-500/40 bg-sky-500/10"
+          className="h-4 px-1.5 text-3xs font-normal border-status-running/40 bg-status-running-soft"
         >
           {pending} awaiting approval
         </Badge>

@@ -42,10 +42,10 @@ interface Props {
 /** How a connection's state reads, and what colour says so. */
 const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
   connecting: { label: "Connecting…", dot: "bg-muted-foreground/50" },
-  live: { label: "Connected", dot: "bg-emerald-500" },
-  degraded: { label: "Partly available", dot: "bg-amber-500" },
+  live: { label: "Connected", dot: "bg-status-done" },
+  degraded: { label: "Partly available", dot: "bg-status-blocked" },
   down: { label: "Unreachable", dot: "bg-destructive" },
-  unauthenticated: { label: "Sign-in needed", dot: "bg-amber-500" },
+  unauthenticated: { label: "Sign-in needed", dot: "bg-status-blocked" },
 };
 
 export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {

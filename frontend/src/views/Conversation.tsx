@@ -961,13 +961,18 @@ function senderOf(m: ChatMessage, contact: ThreadContact): Sender {
   return { key: `contact:${contact.name}`, name: contact.name, kind: contact.kind, tone: contact.tone };
 }
 
+/**
+ * Speaker tints — identity, not state. Keys are legacy slot names; see
+ * `TEAM_TONES` in `@/lib/team`, which this mirrors and which explains why
+ * the palette stays clear of the status hues.
+ */
 const TONES: Record<string, string> = {
-  sky: "bg-sky-500/15 text-sky-600 dark:text-sky-400",
-  violet: "bg-violet-500/15 text-violet-600 dark:text-violet-400",
-  amber: "bg-amber-500/15 text-amber-600 dark:text-amber-400",
-  emerald: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400",
-  rose: "bg-rose-500/15 text-rose-600 dark:text-rose-400",
-  cyan: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400",
+  sky: "bg-tone-2/15 text-tone-2-text",
+  violet: "bg-tone-1/15 text-tone-1-text",
+  amber: "bg-tone-5/15 text-tone-5-text",
+  emerald: "bg-tone-3/15 text-tone-3-text",
+  rose: "bg-tone-4/15 text-tone-4-text",
+  cyan: "bg-tone-2/15 text-tone-2-text",
 };
 const TONE_KEYS = Object.keys(TONES);
 

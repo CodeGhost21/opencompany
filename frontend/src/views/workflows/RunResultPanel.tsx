@@ -69,24 +69,28 @@ export function RunResultPanel({
           {isDry && (
             <Badge
               variant="outline"
-              className="border-violet-500/40 bg-violet-500/10"
+              /* Brand, not a status hue. A dry run is a *mode the operator
+                 chose*, and it sits beside three genuine status badges — in
+                 amber, cyan and red — where a fourth state colour would read
+                 as a fourth outcome. */
+              className="border-primary/40 bg-primary/10 text-primary"
               data-testid="workflow-run-dry-badge"
             >
               Test run — nothing was sent, no tokens spent
             </Badge>
           )}
           {pendingDeliveryCount > 0 && (
-            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10">
+            <Badge variant="outline" className="border-status-running/40 bg-status-running-soft">
               {pendingDeliveryCount} report{pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
             </Badge>
           )}
           {undeliveredCount > 0 && (
-            <Badge variant="outline" className="border-red-500/40 bg-red-500/10">
+            <Badge variant="outline" className="border-status-failed/40 bg-status-failed-soft">
               {undeliveredCount} report{undeliveredCount === 1 ? "" : "s"} not delivered
             </Badge>
           )}
           {result.pendingApprovals.length > 0 && (
-            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10">
+            <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft">
               {result.pendingApprovals.length} pending approval
               {result.pendingApprovals.length === 1 ? "" : "s"}
             </Badge>
@@ -205,8 +209,8 @@ function NodeTimeline({
             variant="outline"
             className={`h-4 px-1.5 text-3xs font-normal ${
               n.status === "error"
-                ? "border-red-500/40 bg-red-500/10"
-                : "border-emerald-500/40 bg-emerald-500/10"
+                ? "border-status-failed/40 bg-status-failed-soft"
+                : "border-status-done/40 bg-status-done-soft"
             }`}
           >
             {n.status}

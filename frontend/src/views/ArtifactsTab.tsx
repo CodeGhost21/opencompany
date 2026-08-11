@@ -263,7 +263,7 @@ export function ArtifactsTab({
       )}
 
       {linkTargetGone && (
-        <p className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs text-muted-foreground">
+        <p className="rounded-md border border-status-blocked/40 bg-status-blocked-soft px-3 py-2 text-xs text-muted-foreground">
           The deliverable that link points at is no longer on this card. It may
           have been deleted since. What the task still has is below.
         </p>
@@ -365,8 +365,8 @@ function EditedBadge({ diff }: { diff: ArtifactDiff }) {
       title={`An operator edited v${diff.fromVersion} into v${diff.toVersion} — ${churnPercent(diff.churn)} of its lines changed`}
     >
       <UserRound className="size-3" />
-      <span className="tabular-nums text-emerald-600 dark:text-emerald-400">+{diff.added}</span>
-      <span className="tabular-nums text-rose-600 dark:text-rose-400">−{diff.removed}</span>
+      <span className="tabular-nums text-status-done-text">+{diff.added}</span>
+      <span className="tabular-nums text-status-failed-text">−{diff.removed}</span>
     </span>
   );
 }
@@ -542,7 +542,7 @@ function ArtifactDetail({
         // at what the task produced — and this is the "says so" half, naming
         // the newer revision and who wrote it rather than leaving the reader to
         // notice the version rail.
-        <div className="rounded-md border border-amber-500/40 bg-amber-500/5 px-3 py-2 text-xs">
+        <div className="rounded-md border border-status-blocked/40 bg-status-blocked-soft px-3 py-2 text-xs">
           <p className="text-muted-foreground">
             Showing <span className="font-medium text-foreground">v{pinnedVersion}</span> — the
             version this run produced. v{latest.version} exists
@@ -690,7 +690,7 @@ function VersionRail({
                 variant="outline"
                 className={cn(
                   "shrink-0 font-normal capitalize",
-                  v.author === "operator" && "border-amber-500/40 text-amber-600 dark:text-amber-400",
+                  v.author === "operator" && "border-status-blocked/40 text-status-blocked-text",
                 )}
               >
                 {v.author}
@@ -853,8 +853,8 @@ function DiffPanel({ title, note, diff }: { title: string; note: string; diff: A
         <span className="text-xs font-medium">{title}</span>
         <span className="text-2xs text-muted-foreground">{note}</span>
         <span className="ml-auto inline-flex items-center gap-2 text-2xs tabular-nums">
-          <span className="text-emerald-600 dark:text-emerald-400">+{diff.added}</span>
-          <span className="text-rose-600 dark:text-rose-400">−{diff.removed}</span>
+          <span className="text-status-done-text">+{diff.added}</span>
+          <span className="text-status-failed-text">−{diff.removed}</span>
           <span className="text-muted-foreground">{churnPercent(diff.churn)} churn</span>
         </span>
       </div>
@@ -868,8 +868,8 @@ function DiffPanel({ title, note, diff }: { title: string; note: string; diff: A
                 key={i}
                 className={cn(
                   "px-3 whitespace-pre-wrap break-words",
-                  line.op === "insert" && "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300",
-                  line.op === "delete" && "bg-rose-500/10 text-rose-700 dark:text-rose-300",
+                  line.op === "insert" && "bg-status-done-soft text-status-done-text",
+                  line.op === "delete" && "bg-status-failed-soft text-status-failed-text",
                   line.op === "equal" && "text-muted-foreground",
                 )}
               >

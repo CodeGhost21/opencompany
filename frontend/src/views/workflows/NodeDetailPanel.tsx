@@ -49,12 +49,12 @@ export function NodeDetailPanel({
             {node.kind}
           </Badge>
           {node.requiresApproval && (
-            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 font-normal">
+            <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft font-normal">
               requires approval
             </Badge>
           )}
           {node.schedule && (
-            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10 font-normal">
+            <Badge variant="outline" className="border-status-running/40 bg-status-running-soft font-normal">
               scheduled
             </Badge>
           )}

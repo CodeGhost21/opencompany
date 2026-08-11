@@ -62,7 +62,7 @@ export function StepTimeline({
           hasError
             ? "text-destructive"
             : parked > 0
-              ? "text-amber-600 dark:text-amber-400"
+              ? "text-status-blocked-text"
               : "text-muted-foreground",
         )}
       >
@@ -95,7 +95,7 @@ function StepRow({ step }: { step: TurnStep }) {
         error
           ? "text-destructive"
           : parked
-            ? "text-amber-600 dark:text-amber-400"
+            ? "text-status-blocked-text"
             : "text-muted-foreground",
       )}
     >
@@ -139,8 +139,8 @@ function StepChip({
       className={cn(
         "flex shrink-0 items-center gap-1 rounded px-1 py-px text-3xs font-medium",
         tone === "amber"
-          ? "bg-amber-500/15 text-amber-700 dark:text-amber-400"
-          : "bg-rose-500/15 text-rose-700 dark:text-rose-400",
+          ? "bg-status-blocked-soft text-status-blocked-text"
+          : "bg-status-failed-soft text-status-failed-text",
       )}
     >
       {children}

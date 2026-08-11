@@ -274,7 +274,7 @@ export function InferenceSection({
                     {status.source}
                   </Badge>
                   {status.keyConfigured && (
-                    <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                    <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                       <Check className="size-3" /> key set
                     </span>
                   )}
@@ -305,7 +305,7 @@ export function InferenceSection({
                     is the surface that stays until the restart happens. */}
                 {status.restartRequired && (
                   <div
-                    className="flex items-start gap-1.5 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-600 dark:text-amber-400"
+                    className="flex items-start gap-1.5 rounded-lg border border-status-blocked/40 bg-status-blocked-soft px-3 py-2 text-xs text-status-blocked-text"
                     data-testid="inference-restart-required"
                   >
                     <RotateCcw className="mt-px size-3.5 shrink-0" />
@@ -329,7 +329,7 @@ export function InferenceSection({
                   </ul>
                 )}
                 {test.kind === "ok" && (
-                  <p className="flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <p className="flex items-center gap-1 text-xs text-status-done-text">
                     <Check className="size-3" /> {test.note}
                   </p>
                 )}

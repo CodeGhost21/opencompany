@@ -23,11 +23,11 @@ import { pendingCount, relativeTime, runTone, undeliveredCount } from "./run-hea
  * act on, so they get the loud treatment. `pending` is neither: the report is
  * waiting in Approvals, so it reads as informational, not as a failure. */
 const DELIVERY_TONE: Record<DeliveryStatus, string> = {
-  sent: "border-emerald-500/40 bg-emerald-500/10",
-  pending: "border-sky-500/40 bg-sky-500/10",
-  skipped: "border-amber-500/40 bg-amber-500/10",
-  denied: "border-red-500/40 bg-red-500/10",
-  failed: "border-red-500/40 bg-red-500/10",
+  sent: "border-status-done/40 bg-status-done-soft",
+  pending: "border-status-running/40 bg-status-running-soft",
+  skipped: "border-status-blocked/40 bg-status-blocked-soft",
+  denied: "border-status-failed/40 bg-status-failed-soft",
+  failed: "border-status-failed/40 bg-status-failed-soft",
 };
 
 /** The delivery block of the run drawer: one line per attempt to route an
@@ -46,12 +46,12 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">Report delivery</span>
         {pending > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-sky-500/40 bg-sky-500/10">
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-status-running/40 bg-status-running-soft">
             {pending} awaiting approval
           </Badge>
         )}
         {undelivered > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-red-500/40 bg-red-500/10">
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-status-failed/40 bg-status-failed-soft">
             {undelivered} not delivered
           </Badge>
         )}
@@ -215,7 +215,7 @@ function RunHistoryRow({
         {run.pendingApprovals.length > 0 && (
           <Badge
             variant="outline"
-            className="h-4 px-1.5 text-3xs font-normal border-amber-500/40 bg-amber-500/10"
+            className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft"
           >
             {run.pendingApprovals.length} pending approval
             {run.pendingApprovals.length === 1 ? "" : "s"}
@@ -224,7 +224,7 @@ function RunHistoryRow({
         {run.running && (
           <Badge
             variant="outline"
-            className="h-4 px-1.5 text-3xs font-normal border-sky-500/40 bg-sky-500/10"
+            className="h-4 px-1.5 text-3xs font-normal border-status-running/40 bg-status-running-soft"
           >
             running
           </Badge>
@@ -311,11 +311,11 @@ function RunNodeChip({ node }: { node: WorkflowRunNode }) {
     <span
       className={`inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-3xs ${
         ok
-          ? "border-emerald-500/40 bg-emerald-500/10"
-          : "border-red-500/50 bg-red-500/10"
+          ? "border-status-done/40 bg-status-done-soft"
+          : "border-status-failed/50 bg-status-failed-soft"
       }`}
     >
-      <span className={`size-1.5 rounded-full ${ok ? "bg-emerald-500" : "bg-red-500"}`} />
+      <span className={`size-1.5 rounded-full ${ok ? "bg-status-done" : "bg-status-failed"}`} />
       <span className="font-medium">{node.nodeId}</span>
       <span className="font-mono opacity-70">
         {node.elapsedMs < 1000 ? `${node.elapsedMs}ms` : `${(node.elapsedMs / 1000).toFixed(1)}s`}

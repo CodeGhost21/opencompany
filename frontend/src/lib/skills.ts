@@ -7,10 +7,17 @@
 
 export type SkillCategory = "Marketing" | "Research" | "Ops" | "Content" | "Finance";
 
+/**
+ * One tint per category — identity, not state.
+ *
+ * The identity palette (`--tone-*`), not the status one: a skill filed under
+ * Content is not "done", and one under Finance is not "failed", which is
+ * exactly what the emerald and rose these replaced were saying.
+ */
 export const CATEGORY_STYLES: Record<SkillCategory, string> = {
-  Marketing: "border-violet-500/30 bg-violet-500/10 text-violet-600 dark:text-violet-400",
-  Research: "border-sky-500/30 bg-sky-500/10 text-sky-600 dark:text-sky-400",
-  Ops: "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-400",
-  Content: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400",
-  Finance: "border-rose-500/30 bg-rose-500/10 text-rose-600 dark:text-rose-400",
+  Marketing: "border-tone-1/30 bg-tone-1/10 text-tone-1-text",
+  Research: "border-tone-2/30 bg-tone-2/10 text-tone-2-text",
+  Ops: "border-tone-5/30 bg-tone-5/10 text-tone-5-text",
+  Content: "border-tone-3/30 bg-tone-3/10 text-tone-3-text",
+  Finance: "border-tone-4/30 bg-tone-4/10 text-tone-4-text",
 };
