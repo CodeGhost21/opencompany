@@ -171,7 +171,14 @@ impl ProxyRegistry {
     /// the desktop came to open on an unreachable connection every launch
     /// (issue #613).
     pub async fn upsert(&self, id: ConnectionId, connection: Connection) -> Result<(), ProxyError> {
-        if reqwest::Url::parse(&connection.base_url).is_err() {
+        // Parsing alone is too weak a test. `mailto:someone@example.com` and
+        // `ftp://host` are both valid urls and neither is something this client
+        // can send an OpenCompany request to — so the scheme is checked, and
+        // the authority with it, because a scheme without a host is the same
+        // relative-url problem wearing a prefix.
+        let addressable = reqwest::Url::parse(&connection.base_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
+        if !addressable {
             return Err(ProxyError::UnusableBaseUrl(connection.base_url));
         }
         self.connections.write().await.insert(id, connection);
@@ -553,7 +560,16 @@ mod test {
     #[tokio::test]
     async fn a_base_url_that_names_no_host_is_refused_at_registration() {
         let registry = ProxyRegistry::new();
-        for base in ["", "   ", "/api/v1", "acme.test"] {
+        for base in [
+            "",
+            "   ",
+            "/api/v1",
+            "acme.test",
+            // Valid urls, both of them, and neither is a host this client can
+            // send a request to. Parsing is not the question; addressability is.
+            "mailto:user@example.com",
+            "ftp://host",
+        ] {
             let error = registry
                 .upsert(
                     "primary".into(),

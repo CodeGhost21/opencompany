@@ -265,6 +265,36 @@ describe("a same-origin profile", () => {
     expect(readProfiles().map((p) => p.baseUrl)).toEqual(["http://127.0.0.1:65364"]);
   });
 
+  it("takes a scheme-less host down with it, because that is what people type", () => {
+    // "Add a host" does no validation, so `localhost:8080` becomes a row and is
+    // written down. It joins to a relative url in Rust exactly as `""` does, and
+    // without this it would be restored on every launch forever — the same
+    // permanence the empty-base row had, reached by a path a person can walk.
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-typed",
+          baseUrl: "localhost:8080",
+          label: "localhost:8080",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+        {
+          id: "conn-real",
+          baseUrl: "https://acme.example.com",
+          label: "Acme",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+    desktop(true);
+
+    expect(restoreConnections()).toEqual(["conn-real"]);
+    expect(readProfiles().map((p) => p.baseUrl)).toEqual(["https://acme.example.com"]);
+  });
+
   it("is still a host in a browser, where the origin serves one", () => {
     // The other half of the rule, and the one that must not change: this is how
     // every web deployment finds its host.

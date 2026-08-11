@@ -353,11 +353,19 @@ function Console() {
    * person opening the desktop means. A launch that lands on someone's remote
    * host because they added it last Tuesday is the same bug as #613 wearing
    * different clothes.
+   *
+   * Which is also why the last fall-through waits for `resolved`. Until the
+   * core answers, "no embedded host" and "not asked yet" are indistinguishable
+   * from the list alone, and taking the first entry in the meantime opens a
+   * remembered host — mounting its console and issuing its requests — only to
+   * replace it a moment later. A brief wrong host is a smaller version of the
+   * same bug, so the desktop holds its startup state instead. A browser never
+   * waits: `resolved` starts `true` there, because there is nothing to ask.
    */
   const active =
     connections.find((c) => c.id === selected) ??
     connections.find((c) => c.id === embedded.id) ??
-    connections[0];
+    (embedded.resolved ? connections[0] : undefined);
   const client = active ? clientFor(active.id) : undefined;
 
   return (

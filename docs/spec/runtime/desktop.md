@@ -40,21 +40,28 @@ Anything reading or writing that state must depend on **both** — a callback th
 closes over the scope but depends only on the company will write under the host
 the operator just switched away from.
 
-### There is no host at the desktop's own origin
+### On the desktop a base url is absolute or it is nothing
 
-`resolveConfig()` falls back to an empty base url, which means *same origin*.
-That is how every browser deployment finds its host — `opencompany serve` mounts
-the console at the origin serving the assets — and it is meaningless in a
-webview, whose origin is `tauri://localhost`. `isAddressableBaseUrl()` is the
-one place that says so, and both the bootstrap add in `App.tsx` and
-`restoreConnections()` ask it.
+A browser can be given anything, including the empty string, which means *same
+origin* — that is how every web deployment finds its host, since
+`opencompany serve` mounts the console at the origin serving the assets.
 
-The failure it prevents is not a network one. `join` is textual, so an empty
-base yields a *relative* url and `reqwest` refuses it at `send` — the request
-never reaches a socket, and the console reports "couldn't reach a company host
-at this origin" about a host that was never addressed. `ProxyRegistry::upsert`
-now rejects such a base url at registration for the same reason: it is the last
-moment at which the caller is still on the stack.
+The desktop is the runtime with a rule. `ProxyTransport` hands the base url to
+Rust, which joins it to a path by concatenation, so anything without an
+authority yields a *relative* url and `reqwest` refuses it at `send`. The
+request never reaches a socket, and the console reports "couldn't reach a
+company host" about a host that was never addressed.
+`isAddressableBaseUrl()` is the one place that says so — both the bootstrap add
+in `App.tsx` and `restoreConnections()` ask it, and `ProxyRegistry::upsert`
+enforces the same thing from below, at the last moment the caller is still on
+the stack.
+
+The empty string is the form
+[#613](https://github.com/tinyhumansai/opencompany/issues/613) reported, and
+only the shortest one: `/api` and `localhost:8080` fail identically, and the
+second is what someone types into "Add a host". Parsing is not enough either —
+`URL` accepts `tauri://localhost` and `file:///x`, and neither is a company
+host — so the check is `http:` or `https:`.
 
 Two consequences follow, and both are load-bearing
 ([#613](https://github.com/tinyhumansai/opencompany/issues/613)):

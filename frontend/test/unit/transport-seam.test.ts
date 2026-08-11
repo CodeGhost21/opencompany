@@ -271,16 +271,33 @@ describe("picking a transport", () => {
    * Rust, where it joins to a *relative* url `reqwest` refuses. One string,
    * addressable in one runtime and not the other (issue #613).
    */
-  it("calls the same-origin base url addressable only in a browser", () => {
+  it("lets a browser address anything, including its own origin", () => {
+    // The web build's whole discovery mechanism. Nothing here may narrow.
     (globalThis as { window?: unknown }).window = {};
-    expect(isAddressableBaseUrl("")).toBe(true);
+    for (const base of ["", "https://acme.test", "/api", "localhost:8080"]) {
+      expect(isAddressableBaseUrl(base)).toBe(true);
+    }
+  });
 
+  it("holds the desktop to an absolute http(s) host", () => {
     (globalThis as { window?: unknown }).window = {
       __TAURI__: { invoke: () => Promise.resolve(), Channel: class {} },
     };
-    expect(isAddressableBaseUrl("")).toBe(false);
-    // A desktop given a real host is unaffected — what it cannot address is its
-    // own origin, not a configured url.
+
     expect(isAddressableBaseUrl("http://127.0.0.1:65364")).toBe(true);
+    expect(isAddressableBaseUrl("https://acme.example.com")).toBe(true);
+
+    // Every one of these joins to a relative url in Rust and dies at `send()`
+    // with the same opaque "could not be reached". The empty string is the one
+    // #613 reported; it is not the only one, and `localhost:8080` is what a
+    // person actually types into "Add a host".
+    for (const relative of ["", "/", "/api/v1", "localhost:8080", "acme.example.com"]) {
+      expect(isAddressableBaseUrl(relative)).toBe(false);
+    }
+
+    // Parseable is not addressable: `URL` accepts both of these, and a company
+    // host is neither.
+    expect(isAddressableBaseUrl("tauri://localhost")).toBe(false);
+    expect(isAddressableBaseUrl("file:///Users/someone/console")).toBe(false);
   });
 });

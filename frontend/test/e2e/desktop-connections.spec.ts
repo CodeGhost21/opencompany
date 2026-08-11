@@ -25,6 +25,15 @@ import { expect, test, type Page } from "@playwright/test";
 interface BridgeConfig {
   /** What `oc_embedded` answers. `null` is a desktop whose host did not start. */
   embedded: string | null;
+  /**
+   * How long the core takes to answer, in milliseconds.
+   *
+   * Real IPC to a host that has already bound is fast enough that the window
+   * between first paint and the embedded host arriving cannot be observed
+   * reliably. Widening it deliberately is what makes that window testable —
+   * and it is a real window on a cold start, when the host is still binding.
+   */
+  discoveryDelayMs?: number;
 }
 
 /** One `oc_connect` the console made, as the test reads them back. */
@@ -61,6 +70,16 @@ async function asDesktop(page: Page, config: BridgeConfig) {
     const hosts = new Map<string, string>();
     window.__ocRegistered = registered;
 
+    /** `ProxyRegistry::upsert`'s rule, restated: absolute http(s) or nothing. */
+    const isAddressable = (baseUrl: string): boolean => {
+      try {
+        const url = new URL(baseUrl);
+        return (url.protocol === "http:" || url.protocol === "https:") && url.host !== "";
+      } catch {
+        return false;
+      }
+    };
+
     (window as unknown as { __TAURI__: unknown }).__TAURI__ = {
       Channel: class {
         onmessage: ((message: string) => void) | null = null;
@@ -70,7 +89,19 @@ async function asDesktop(page: Page, config: BridgeConfig) {
           case "oc_connect": {
             const id = args.connectionId as string;
             const baseUrl = args.baseUrl as string;
+            // Recorded before it is judged, and deliberately: this array is the
+            // test's window onto what the console *tried* to register. Keeping
+            // only what was accepted would let the stub filter out the very row
+            // #613 is about, and the assertion would then pass on a build that
+            // still adds it.
             registered.push({ connectionId: id, baseUrl });
+            // Rejected at registration, where `ProxyRegistry::upsert` rejects
+            // it, rather than at the first request. The console swallows this
+            // into a resolved promise and the request that follows fails with
+            // `no such connection` — which is exactly what the desktop does.
+            if (!isAddressable(baseUrl)) {
+              throw new Error(`not an absolute host url: "${baseUrl}"`);
+            }
             hosts.set(id, baseUrl);
             return undefined;
           }
@@ -78,17 +109,20 @@ async function asDesktop(page: Page, config: BridgeConfig) {
             hosts.delete(args.connectionId as string);
             return undefined;
           }
-          case "oc_embedded":
+          case "oc_embedded": {
+            if (cfg.discoveryDelayMs) {
+              await new Promise((resolve) => setTimeout(resolve, cfg.discoveryDelayMs));
+            }
             return cfg.embedded === null
               ? null
               : { baseUrl: cfg.embedded, dataDir: "/tmp/e2e-desktop" };
+          }
           case "oc_request": {
             const id = args.connectionId as string;
+            // Only ever a host `oc_connect` accepted, so no second check is
+            // needed here — an unaddressable base never reached this map.
             const base = hosts.get(id);
             if (base === undefined) throw new Error(`no such connection: ${id}`);
-            // `ProxyRegistry::upsert` refuses these at registration; refusing
-            // here too keeps the stub from being kinder than the core.
-            if (!/^https?:\/\//.test(base)) throw new Error(`not an absolute host url: "${base}"`);
             const req = args.request as {
               method: string;
               path: string;
@@ -229,6 +263,48 @@ test("a remembered host does not take the launch just by being older", async ({
   await expect(
     page.locator('[data-testid^="connection-row-"][aria-current="true"]'),
   ).toHaveAttribute("data-status", "live");
+});
+
+test("a desktop waits for its own host rather than borrowing a remembered one", async ({
+  page,
+  baseURL,
+}) => {
+  // While the core is still answering, "there is no embedded host" and "it has
+  // not been asked yet" look identical from the connection list — so falling to
+  // the first entry in the meantime opens a remembered host, mounts its console
+  // and issues its requests, only to replace it a moment later. Briefly opening
+  // the wrong host is the same bug as #613, just shorter.
+  await asDesktop(page, {
+    embedded: new URL(baseURL ?? "http://127.0.0.1:8123").origin,
+    discoveryDelayMs: 1_500,
+  });
+  await page.addInitScript((remote: string) => {
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-remembered-remote",
+          baseUrl: remote,
+          label: "Remembered remote",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+  }, DEAD_REMOTE);
+  await page.goto("/#/tasks");
+
+  // The startup state, held rather than skipped past. The remembered host is
+  // registered by now — it is restored at first paint — so this is a choice not
+  // to show it, not an absence of anything to show.
+  await expect(page.getByTestId("no-connection-starting")).toBeVisible();
+  await expect(page.getByTestId("connection-error")).toHaveCount(0);
+
+  // And when the core does answer, the embedded host is what opens.
+  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+  await expect(page.getByTestId("connection-error")).toHaveCount(0);
 });
 
 test("a desktop whose host did not start says so, and can still add one", async ({ page }) => {

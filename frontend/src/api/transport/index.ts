@@ -38,25 +38,36 @@ export function isDesktopRuntime(): boolean {
 /**
  * Whether a base url names a host this runtime can actually reach.
  *
- * An empty base url means *same origin*, and that is a real host only in a
- * browser: `opencompany serve` mounts the console at the origin serving these
- * assets, so `BrowserTransport` resolves `/api/v1/…` against a document origin
- * that answers. In the desktop the document origin is `tauri://localhost`.
- * Nothing serves an API there and nothing ever will — and the request does not
- * even reach a socket to fail: `ProxyTransport` hands the base url to Rust,
- * where joining it to a path yields a *relative* url `reqwest` cannot request.
+ * A browser can reach anything it is given, including the empty string, which
+ * means *same origin*: `opencompany serve` mounts the console at the origin
+ * serving these assets, so `BrowserTransport` resolves `/api/v1/…` against a
+ * document origin that answers. Nothing about that path changes here.
  *
- * So this is a property of the transport rather than a preference. The same
- * empty string is a working host in one shell and an unaddressable one in the
- * other, which is why the check is a runtime one and lives beside
- * `defaultTransport` — the two decisions are the same decision.
+ * The desktop is the runtime with a rule, and the rule is **absolute or
+ * nothing**. `ProxyTransport` hands the base url to Rust, which joins it to a
+ * path by concatenation — so anything without an authority yields a *relative*
+ * url, and `reqwest` refuses those at `send()`. The request never reaches a
+ * socket, and the console says "could not be reached" about a host it never
+ * addressed. That is issue #613, whose reported form was the empty
+ * string — the shortest relative url, and only the shortest. `"/api"` and
+ * `"localhost:8080"` fail identically, and the second is what a person types
+ * into "Add a host".
  *
- * See issue #613: the desktop added such a connection on launch, selected it,
- * and showed "Couldn't reach a company host at this origin" every time, while
- * its embedded host sat healthy and unselected in the rail.
+ * The protocol check is not belt and braces: `URL` parses `tauri://localhost`
+ * and `file:///x` without complaint, and neither is a company host.
+ *
+ * A runtime check rather than a build flag, and beside `defaultTransport`
+ * because the two are one decision — what a base url means depends on which
+ * transport is going to carry it.
  */
 export function isAddressableBaseUrl(baseUrl: string): boolean {
-  return baseUrl !== "" || !isDesktopRuntime();
+  if (!isDesktopRuntime()) return true;
+  try {
+    const { protocol } = new URL(baseUrl);
+    return protocol === "http:" || protocol === "https:";
+  } catch {
+    return false;
+  }
 }
 
 /**
