@@ -1,8 +1,11 @@
 // The workflow creator (issue #69): a plain form editor — not a drag canvas —
 // that builds a `WorkflowGraph` and posts it via `createWorkflow`. Node kinds
-// are restricted to the ones the engine actually executes today
-// (`CREATABLE_NODE_KINDS`); `tool_call`/`http_request` stay off the palette
-// until they're wired (see `src/workflows/caps.rs`).
+// are the ones the engine executes and the console can author from a form
+// (`CREATABLE_NODE_KINDS`). The five that need kind-specific config —
+// `tool_call`, `http_request`, `switch`, `output_parser`, `sub_workflow` —
+// grew their controls in issue #541; each renders `NodeConfigFields`, whose
+// spec table (`@/lib/workflow-node-config`) is the single source of the engine
+// keys each kind emits.
 //
 // It is also the EDITOR (issue #259): pass a `workflow` and the same form
 // hydrates from that saved graph and saves through `updateWorkflow`, carrying
@@ -17,15 +20,27 @@ import {
   CREATABLE_NODE_KINDS,
   DESTINATION_KINDS,
   createWorkflow,
+  listWorkflows,
   updateWorkflow,
   type WorkflowDestination,
   type WorkflowEdge,
   type WorkflowGraph,
   type WorkflowNode,
+  type WorkflowSummary,
 } from "@/api/workflows";
+import {
+  blankConfigDraft,
+  configDraftFrom,
+  configDraftProblem,
+  configFieldSpecs,
+  configFieldProblem,
+  configFromDraft,
+  hasConfigForm,
+} from "@/lib/workflow-node-config";
 import type { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
 import { CronPreviewLine } from "@/views/CronPreviewLine";
+import { NodeConfigFields } from "@/views/workflows/NodeConfigFields";
 import type { TeamMemberDto } from "@/api/types";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -78,8 +93,20 @@ interface DraftNode {
    * They ride on the ROW, not on the node id, so they follow the row when its
    * id is edited. `config` is the exception: it is kind-specific, so
    * {@link changeKind} drops it along with every other kind-conditional field.
+   *
+   * `config` here carries the raw overlay only for kinds WITHOUT a config form.
+   * The five form kinds (issue #541) instead hold their config in
+   * {@link configDraft} (the form strings) and {@link configExtra} (keys with
+   * no control, preserved verbatim — the same anti-data-loss guard, but per
+   * key). `submit()` rebuilds their `config` from those two.
    */
   config?: unknown;
+  /** Per-field config strings for a form kind, keyed by engine key (#541).
+   * Empty `{}` for kinds without a form. */
+  configDraft: Record<string, string>;
+  /** A form kind's config keys the form has no control for, kept verbatim so an
+   * edit never drops an orchestrator-authored `connection_ref`/`execution`/… */
+  configExtra?: Record<string, unknown>;
   onError?: string;
   retry?: WorkflowNode["retry"];
   requiresApproval?: boolean;
@@ -179,8 +206,10 @@ interface DraftEdge {
 }
 
 /** The node fields that validate on blur (issue #261) — the ones with a real
- * contract, which are the ones authors get wrong. */
-type ValidatedField = "schedule" | "destinationTarget";
+ * contract, which are the ones authors get wrong. `config:${key}` covers the
+ * kind-specific config fields (issue #541), filed under the field's engine key
+ * (e.g. `config:slug`). */
+type ValidatedField = "schedule" | "destinationTarget" | `config:${string}`;
 
 /** The key a field's error is filed under.
  *
@@ -226,11 +255,14 @@ function changeKind(kind: string): Partial<DraftNode> {
     schedule: "",
     destinationKind: "",
     destinationTarget: "",
-    // Kind-specific by definition (a `switch`'s cases, a `sub_workflow`'s
-    // target), so it means nothing on the new kind — and unlike the fields
-    // above there is no control that could ever show what was dropped. The
-    // kind-agnostic policies (`onError`, `retry`, `requiresApproval`) are kept.
+    // Kind-specific by definition (a `switch`'s branch key, a `sub_workflow`'s
+    // target), so it means nothing on the new kind. `config` is the raw overlay
+    // for form-less kinds; `configDraft`/`configExtra` are the form kinds'
+    // (#541). All three reset to the new kind's blank state — the kind-agnostic
+    // policies (`onError`, `retry`, `requiresApproval`) are kept.
     config: undefined,
+    configDraft: blankConfigDraft(kind),
+    configExtra: undefined,
   };
 }
 
@@ -246,6 +278,7 @@ function blankNode(fields: Partial<DraftNode> = {}): DraftNode {
     schedule: "",
     destinationKind: "",
     destinationTarget: "",
+    configDraft: {},
     ...fields,
   };
 }
@@ -263,22 +296,28 @@ function starterNodes(): DraftNode[] {
  * error map, and a complaint raised on one graph would render on the next.
  */
 function draftNodes(graph: WorkflowGraph): DraftNode[] {
-  return graph.nodes.map((n) =>
-    blankNode({
+  return graph.nodes.map((n) => {
+    const common = {
       id: n.id,
       kind: n.kind,
       name: n.name,
       summary: n.summary ?? "",
       agent: n.agent ?? "",
       schedule: n.schedule ?? "",
-      destinationKind: n.destination?.kind ?? "",
+      destinationKind: (n.destination?.kind ?? "") as DraftNode["destinationKind"],
       destinationTarget: n.destination?.target ?? "",
-      config: n.config,
       onError: n.onError,
       retry: n.retry,
       requiresApproval: n.requiresApproval,
-    }),
-  );
+    };
+    // A form kind (#541) hydrates its config into per-field strings plus a
+    // preserved `extra` bag; a form-less kind keeps the raw overlay in `config`.
+    if (hasConfigForm(n.kind)) {
+      const { draft, extra } = configDraftFrom(n.kind, n.config);
+      return blankNode({ ...common, configDraft: draft, configExtra: extra });
+    }
+    return blankNode({ ...common, config: n.config, configDraft: {} });
+  });
 }
 
 /** The saved graph's edges as draft rows, on the same fresh-key rule. */
@@ -337,6 +376,10 @@ export function WorkflowCreateDialog({
   const [nodes, setNodes] = useState<DraftNode[]>(starterNodes());
   const [edges, setEdges] = useState<DraftEdge[]>([]);
   const [roster, setRoster] = useState<TeamMemberDto[]>([]);
+  /** The company's workflows, for the `sub_workflow` config picker (#541). The
+   * graph's own id is dropped at render time — a sub-workflow can't call
+   * itself. Degrades to a free-text id field when the host offers no list. */
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   /** Per-field problems raised on blur (issue #261), keyed by
@@ -378,6 +421,17 @@ export function WorkflowCreateDialog({
         if (live) setRoster([]);
       }
     })();
+    // The sub_workflow picker's options (issue #541). Same degrade-on-failure
+    // shape as the roster: a host that can't list workflows leaves the field a
+    // free-text id, never blocks authoring.
+    (async () => {
+      try {
+        const list = await listWorkflows(client, company);
+        if (live) setWorkflows(list);
+      } catch {
+        if (live) setWorkflows([]);
+      }
+    })();
     return () => {
       live = false;
     };
@@ -414,7 +468,37 @@ export function WorkflowCreateDialog({
           changed = true;
         }
       }
+      // A kind change resets the config draft (see `changeKind`), so this row's
+      // config-field errors point at fields that are gone — drop them too.
+      if ("kind" in fields) {
+        const prefix = `${key}:config:`;
+        for (const k of Object.keys(next)) {
+          if (k.startsWith(prefix)) {
+            delete next[k];
+            changed = true;
+          }
+        }
+      }
       return changed ? next : prev;
+    });
+  }
+
+  /** Updates one config field's draft string and clears its own blur error —
+   * the author is fixing it, same reasoning as {@link updateNode}. Kept
+   * separate because config fields nest under `configDraft`, keyed by their
+   * engine key rather than being top-level `DraftNode` fields (issue #541). */
+  function updateConfigField(nodeKey: string, key: string, value: string) {
+    setNodes((rows) =>
+      rows.map((r) =>
+        r.key === nodeKey ? { ...r, configDraft: { ...r.configDraft, [key]: value } } : r,
+      ),
+    );
+    setFieldErrors((prev) => {
+      const k = errorKey(nodeKey, `config:${key}`);
+      if (!(k in prev)) return prev;
+      const next = { ...prev };
+      delete next[k];
+      return next;
     });
   }
 
@@ -429,10 +513,16 @@ export function WorkflowCreateDialog({
     if (!value.trim()) return;
     const node = nodes.find((n) => n.key === nodeKey);
     if (!node) return;
-    const problem =
-      field === "schedule"
-        ? scheduleProblem(value)
-        : destinationTargetProblem(node.destinationKind, value);
+    let problem: string | null = null;
+    if (field === "schedule") {
+      problem = scheduleProblem(value);
+    } else if (field === "destinationTarget") {
+      problem = destinationTargetProblem(node.destinationKind, value);
+    } else if (field.startsWith("config:")) {
+      const key = field.slice("config:".length);
+      const spec = configFieldSpecs(node.kind).find((s) => s.key === key);
+      if (spec) problem = configFieldProblem(spec, value);
+    }
     if (problem) {
       setFieldErrors((prev) => ({ ...prev, [errorKey(nodeKey, field)]: problem }));
     }
@@ -500,6 +590,11 @@ export function WorkflowCreateDialog({
         n.destinationTarget,
       );
       if (destinationProblem) return `Node \`${nodeLabel(n)}\`: ${destinationProblem}`;
+      // Kind-specific config (issue #541): required keys, malformed JSON, the
+      // switch field-or-expression rule, a sub_workflow pointed at its own id.
+      // Only ever checks a form kind, so it is a check on visible state.
+      const configProblem = configDraftProblem(n.kind, n.id, n.configDraft);
+      if (configProblem) return `Node \`${nodeLabel(n)}\`: ${configProblem}`;
     }
     const triggerCount = nodes.filter((n) => n.kind === "trigger").length;
     if (triggerCount !== 1) {
@@ -549,10 +644,14 @@ export function WorkflowCreateDialog({
                       : n.destinationTarget.trim() || undefined,
                 }
               : undefined,
-          // Whatever the form has no control for, straight back out again — an
-          // edit must not delete what it cannot show. Always `undefined` on a
-          // create, and `undefined` is omitted from the JSON body.
-          config: n.config,
+          // Config: a form kind (#541) rebuilds it from its per-field draft
+          // plus the preserved `extra` bag (so an edit keeps orchestrator keys
+          // it has no control for); a form-less kind passes its raw overlay
+          // straight back out — an edit must not delete what it cannot show.
+          // `undefined` is omitted from the JSON body.
+          config: hasConfigForm(n.kind)
+            ? configFromDraft(n.kind, n.configDraft, n.configExtra)
+            : n.config,
           onError: n.onError,
           retry: n.retry,
           requiresApproval: n.requiresApproval,
@@ -679,11 +778,19 @@ export function WorkflowCreateDialog({
                 client={client}
                 company={company}
                 roster={roster}
+                workflows={workflows}
                 errors={{
                   schedule: fieldErrors[errorKey(n.key, "schedule")],
                   destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
                 }}
+                configErrors={Object.fromEntries(
+                  configFieldSpecs(n.kind).map((s) => [
+                    s.key,
+                    fieldErrors[errorKey(n.key, `config:${s.key}`)],
+                  ]),
+                )}
                 onValidateField={(field, value) => validateField(n.key, field, value)}
+                onConfigChange={(key, value) => updateConfigField(n.key, key, value)}
                 onChange={(fields) => updateNode(n.key, fields)}
                 onRemove={() => removeNode(n.key)}
               />
@@ -771,8 +878,11 @@ function NodeRow({
   client,
   company,
   roster,
+  workflows,
   errors,
+  configErrors,
   onValidateField,
+  onConfigChange,
   onChange,
   onRemove,
 }: {
@@ -782,9 +892,14 @@ function NodeRow({
   client: OpenCompanyClient;
   company: string | null;
   roster: TeamMemberDto[];
+  /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
+  workflows: WorkflowSummary[];
   /** Blur-time problems for this row's validated fields, if any. */
   errors: Partial<Record<ValidatedField, string>>;
+  /** Blur-time problems for this row's config fields, keyed by engine key. */
+  configErrors: Record<string, string | undefined>;
   onValidateField: (field: ValidatedField, value: string) => void;
+  onConfigChange: (key: string, value: string) => void;
   onChange: (fields: Partial<DraftNode>) => void;
   onRemove: () => void;
 }) {
@@ -923,6 +1038,21 @@ function NodeRow({
               </p>
             )}
           </>
+        )}
+        {/* The five kinds that need config to run (issue #541). Rendered here,
+            alongside the trigger's schedule and the output's destination, so a
+            node's kind-specific controls all live in the same column. */}
+        {hasConfigForm(node.kind) && (
+          <NodeConfigFields
+            idPrefix={rowId}
+            kind={node.kind}
+            draft={node.configDraft}
+            errors={configErrors}
+            workflows={workflows}
+            selfId={node.id}
+            onChange={onConfigChange}
+            onValidate={(key, value) => onValidateField(`config:${key}`, value)}
+          />
         )}
       </div>
       <Button

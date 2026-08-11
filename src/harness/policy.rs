@@ -1274,10 +1274,11 @@ mod tests {
         );
     }
 
-    /// The company workspace (issue #237): the two read tools reach only this
-    /// company's own note tree and must be allowed in every mode, while
-    /// `workspace_write` overwrites operator-owned guidance and must park under
-    /// supervised / be denied under readonly.
+    /// The company workspace (issues #237, #551): the two read tools reach only
+    /// this company's own note tree and must be allowed in every mode, while
+    /// `workspace_write` (overwrites shared guidance) and `workspace_create`
+    /// (adds to the tree everyone reads) must park under supervised / be denied
+    /// under readonly.
     ///
     /// This is the ACTUAL gate on a workspace write. Issue #237 proposed that
     /// declaring `PermissionLevel::Write` would keep the `ApprovalPolicy` as
@@ -1299,15 +1300,17 @@ mod tests {
                 "{tool} only reads this company's own workspace and must be allowed"
             );
         }
-        assert!(
-            matches!(
-                supervised
-                    .check(&request("workspace_write", serde_json::json!({})))
-                    .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
-            "workspace_write must park under supervised"
-        );
+        for tool in ["workspace_write", "workspace_create"] {
+            assert!(
+                matches!(
+                    supervised
+                        .check(&request(tool, serde_json::json!({})))
+                        .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "{tool} must park under supervised"
+            );
+        }
 
         let readonly = policy("readonly", &[], None);
         for tool in ["workspace_list", "workspace_read"] {
@@ -1317,25 +1320,28 @@ mod tests {
                 "{tool} must stay available to a read-only desk"
             );
         }
-        assert!(
-            matches!(
-                readonly
-                    .check(&request("workspace_write", serde_json::json!({})))
-                    .await,
-                ToolPolicyDecision::Deny { .. }
-            ),
-            "workspace_write must be denied under readonly"
-        );
+        for tool in ["workspace_write", "workspace_create"] {
+            assert!(
+                matches!(
+                    readonly.check(&request(tool, serde_json::json!({}))).await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "{tool} must be denied under readonly"
+            );
+        }
 
         // Under `full` there is no per-call gate at all — which is precisely
         // why `workspace_write` carries a required `expected_updated_at`
-        // compare-and-swap token of its own.
+        // compare-and-swap token of its own, and why `workspace_create` refuses
+        // a path that already resolves rather than overwriting it.
         let full = policy("full", &[], None);
-        assert_eq!(
-            full.check(&request("workspace_write", serde_json::json!({})))
-                .await,
-            ToolPolicyDecision::Allow
-        );
+        for tool in ["workspace_write", "workspace_create"] {
+            assert_eq!(
+                full.check(&request(tool, serde_json::json!({}))).await,
+                ToolPolicyDecision::Allow,
+                "{tool} under full mode"
+            );
+        }
     }
 
     /// The operator's escape hatch: `always_approve` wins over every tier, so a
@@ -2599,6 +2605,7 @@ mod tests {
             "curl",
             "web_fetch",
             "workspace_write",
+            "workspace_create",
             // Anything a remote server chooses to advertise.
             "mcp_registry_tool_call",
             "mcp_call_tool",
@@ -2943,16 +2950,18 @@ mod tests {
         assert!(!grantable("deploy_site", &args));
     }
 
-    /// `workspace_write` keeps its `Other` label on the card — there is no
-    /// consequence word to name — while being refused a standing scope. That
-    /// separation is the point of issue #444: the label and the permission are
-    /// different questions.
+    /// The two workspace mutations keep their `Other` label on the card — there
+    /// is no consequence word to name — while being refused a standing scope.
+    /// That separation is the point of issue #444: the label and the permission
+    /// are different questions.
     #[test]
-    fn workspace_write_is_labelled_other_and_is_still_not_grantable() {
+    fn workspace_mutations_are_labelled_other_and_are_still_not_grantable() {
         let args = serde_json::json!({});
-        assert_eq!(classify_group("workspace_write", &args), EffectGroup::Other);
-        assert!(classify_group("workspace_write", &args).is_unclassified());
-        assert!(!grantable("workspace_write", &args));
-        assert!(is_external_effect("workspace_write", &args));
+        for tool in ["workspace_write", "workspace_create"] {
+            assert_eq!(classify_group(tool, &args), EffectGroup::Other, "{tool}");
+            assert!(classify_group(tool, &args).is_unclassified(), "{tool}");
+            assert!(!grantable(tool, &args), "{tool}");
+            assert!(is_external_effect(tool, &args), "{tool}");
+        }
     }
 }

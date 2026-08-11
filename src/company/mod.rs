@@ -43,6 +43,11 @@ mod workflow_file;
 // REST route is in the default build, and one shared scan is what keeps the two
 // read surfaces from drifting.
 pub(crate) mod workspace_links;
+// The workspace's `Agents/` + `Desks/` system roots, and the folders minted
+// beneath them on first use (issue #551). Always compiled and openhuman-free:
+// the scaffold is called from the runtime builder at boot, which is in the
+// default build, and it touches nothing but the `WorkspaceStore` port.
+pub mod workspace_scaffold;
 pub mod workspace_seed;
 
 use std::path::Path;

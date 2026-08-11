@@ -146,7 +146,7 @@ use std::sync::Arc;
 use sha2::{Digest, Sha256};
 
 use crate::company::{
-    RawWorkflow, WorkflowFile, list_workflows_union, parse_workflow, render_workflow,
+    RawNode, RawWorkflow, WorkflowFile, list_workflows_union, parse_workflow, render_workflow,
 };
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
@@ -208,36 +208,11 @@ pub(crate) async fn create_company_workflow(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
 
-    // Cross-check every `agent` node against the company's effective roster
-    // (manifest agents ∪ operator overlay teammates). `parse_workflow` checks
-    // the graph's own shape but has no roster to validate names against.
-    let roster: HashSet<&str> = record
-        .manifest
-        .agents
-        .iter()
-        .map(|a| a.id.as_str())
-        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
-        .collect();
-    for node in &draft.nodes {
-        if node.kind != "agent" {
-            continue;
-        }
-        match node.agent.as_deref() {
-            Some(agent_id) if roster.contains(agent_id) => {}
-            Some(agent_id) => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
-                    node.id
-                )));
-            }
-            None => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` is an agent node but names no teammate.",
-                    node.id
-                )));
-            }
-        }
-    }
+    // Cross-check every `agent` node against the company's effective roster and
+    // every `tool_call` node against the company's wired+granted tools.
+    // `parse_workflow` checks the graph's own shape but has no record to validate
+    // names against — the same helper gates create and update identically.
+    validate_draft_against_record(&draft, &record)?;
 
     // Id uniqueness against every id this company already answers for: the seed
     // files, the record's overlay bodies, and the manifest-enabled ids. The
@@ -461,6 +436,153 @@ fn validate_draft_shape(draft: &RawWorkflow) -> Result<()> {
     Ok(())
 }
 
+/// Cross-checks a draft graph against the company `record`: every `agent` node
+/// names a real roster teammate (manifest agents ∪ operator overlay teammates),
+/// and every `tool_call` node names a wired, granted tool. Shared verbatim by
+/// [`create_company_workflow`] and [`update_company_workflow`] so a bad draft is
+/// refused on exactly the same terms whichever surface authored it, and runs
+/// **inside the write lock** because the roster and grants both come from the
+/// loaded record.
+///
+/// This is an author-time convenience, not the enforcement point. The run-time
+/// gate in [`WorkflowToolInvoker::invoke`](crate::workflows::caps) stays the
+/// backstop: `[tools].allow` grants can be revoked after a graph is saved, and
+/// seed / legacy graphs never pass through this create path at all — so passing
+/// here means the draft was coherent when written, not that a run is forever
+/// permitted.
+fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
+    let roster: HashSet<&str> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|a| a.id.as_str())
+        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
+        .collect();
+
+    for node in &draft.nodes {
+        match node.kind.as_str() {
+            "agent" => match node.agent.as_deref() {
+                Some(agent_id) if roster.contains(agent_id) => {}
+                Some(agent_id) => {
+                    return Err(OpenCompanyError::InvalidRequest(format!(
+                        "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
+                        node.id
+                    )));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(format!(
+                        "node `{}` is an agent node but names no teammate.",
+                        node.id
+                    )));
+                }
+            },
+            "tool_call" => validate_tool_call_node(node, record)?,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Author-time `tool_call` check: the slug must be a non-empty `config.slug`
+/// string, and — under the `openhuman` feature — it must name a wired toolbelt
+/// namespace the company's `[tools].allow` actually grants. These are the same
+/// two gates [`WorkflowToolInvoker::invoke`](crate::workflows::caps) applies at
+/// run time (`namespace_of` for "is it a wired tool", then the grant-glob rule
+/// with the priced `search` family requiring an explicit grant), surfaced at
+/// save so an author hears about an unwired or ungranted slug now instead of at
+/// first run.
+///
+/// The namespace/grant half is `cfg(feature = "openhuman")` because
+/// `namespace_of` / `grants_cover` live behind that feature; the slug-presence
+/// half is unconditional. Under the default build only the presence check runs
+/// and the run-time gate remains the backstop — `record` is still consumed
+/// (the roster check in the caller always reads it), so the helper compiles
+/// warning-free with and without the feature.
+fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()> {
+    // (a) UNGATED — a tool_call must name a non-empty `slug` string in `config`.
+    let raw_slug = node
+        .config
+        .as_ref()
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("slug"))
+        .and_then(toml::Value::as_str);
+    // Absent, or empty / whitespace-only, names no tool at all.
+    let Some(slug) = raw_slug.filter(|slug| !slug.trim().is_empty()) else {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "node `{}` is a tool_call but names no `slug` — set `config.slug` to the tool to run.",
+            node.id
+        )));
+    };
+    // The slug is stored and looked up at run time EXACTLY as written —
+    // `render_workflow` persists the raw config, and `WorkflowToolInvoker` indexes
+    // tools by literal `name()`. So a padded slug like `" csv_export "` would sail
+    // through a trim-normalized check here yet be persisted (and looked up) padded,
+    // halting the run on the very lookup this save-time gate promised to prevent.
+    // Reject the padding rather than silently trimming, so the validated string
+    // and the persisted/runtime string are the same literal.
+    if slug != slug.trim() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "node `{}` has a tool_call `slug` with leading or trailing whitespace (`{slug}`) — \
+             set `config.slug` to the exact tool name.",
+            node.id
+        )));
+    }
+
+    #[cfg(feature = "openhuman")]
+    {
+        // (b) The slug must map to a wired toolbelt namespace — mirroring the
+        // run-time gate's "not a wired workflow tool".
+        let Some(namespace) = crate::harness::toolbelt::namespace_of(slug) else {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}`, which is not a wired workflow tool.",
+                node.id
+            )));
+        };
+        // (b.1) The slug's namespace must be one the workflow `tool_call` invoker
+        // actually wires (`WORKFLOW_TOOL_NAMESPACES` == shell/code/web/search).
+        // `media` and `composio` map to a namespace but are agent-turn families the
+        // invoker never builds, so a run passes the grant gate and then ALWAYS
+        // misses the tool lookup ("not available in company workflows"). Reject them
+        // here so this gate mirrors the run-time outcome instead of green-lighting a
+        // slug that can never execute.
+        if !crate::workflows::caps::WORKFLOW_TOOL_NAMESPACES.contains(&namespace) {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}` (namespace `{namespace}`), which workflow \
+                 `tool_call` nodes cannot run — `{namespace}` is an agent-turn tool family, not a \
+                 workflow tool.",
+                node.id
+            )));
+        }
+        // (c) The company's `[tools].allow` must grant that namespace. The priced
+        // `search` family needs an EXPLICIT `search` grant — a `*` wildcard never
+        // confers it — while every other namespace uses the ordinary grant-glob
+        // intersection, exactly the split `WorkflowToolInvoker::invoke` enforces.
+        let grants = &record.manifest.tools.allow;
+        let granted = if namespace == "search" {
+            crate::company::grants_search_explicit(grants)
+        } else {
+            crate::harness::build::grants_cover(grants, namespace)
+        };
+        if !granted {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}` (namespace `{namespace}`), which this company's \
+                 `[tools].allow` does not grant — grant it in `[tools].allow`.",
+                node.id
+            )));
+        }
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        // Under the default build the namespace/grant resolution is not compiled
+        // in; the slug-presence check above still runs and the run-time gate
+        // stays the backstop. Consume both bindings so neither warns.
+        let _ = (slug, record);
+    }
+
+    Ok(())
+}
+
 /// An opaque version token for a stored overlay body: the hex SHA-256 of the
 /// TOML exactly as persisted.
 ///
@@ -607,35 +729,10 @@ pub(crate) async fn update_company_workflow(
     // Optimistic concurrency, inside the lock and before any mutation.
     check_expected_version(expected_version, &record.overlay_workflows[index].toml)?;
 
-    // Same roster cross-check as create: `parse_workflow` validates the graph's
-    // own shape but has no roster to check `agent` node names against.
-    let roster: HashSet<&str> = record
-        .manifest
-        .agents
-        .iter()
-        .map(|a| a.id.as_str())
-        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
-        .collect();
-    for node in &draft.nodes {
-        if node.kind != "agent" {
-            continue;
-        }
-        match node.agent.as_deref() {
-            Some(agent_id) if roster.contains(agent_id) => {}
-            Some(agent_id) => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
-                    node.id
-                )));
-            }
-            None => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` is an agent node but names no teammate.",
-                    node.id
-                )));
-            }
-        }
-    }
+    // Same record cross-check as create (roster + tool_call grants):
+    // `parse_workflow` validates the graph's own shape but has no record to check
+    // `agent`/`tool_call` node names against.
+    validate_draft_against_record(&draft, &record)?;
 
     // Display-name uniqueness, MINUS this workflow's own current name — a
     // re-save that doesn't rename must not collide with itself. Every other
@@ -2194,6 +2291,309 @@ to = "done"
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "{a}"
         );
+    }
+
+    // --- #540: author-time tool_call validation ----------------------------
+
+    /// A manifest with the `assistant` roster agent AND an explicit
+    /// `[tools].allow`, so tool_call grant coverage can be exercised precisely.
+    ///
+    /// Only the tool_call grant-coverage tests use this, and every one of them
+    /// is gated on `openhuman` (the tool catalogue lives behind that feature);
+    /// without the gate the helper is dead code at default features and trips
+    /// `-D warnings` in the default `Rust` CI lane.
+    #[cfg(feature = "openhuman")]
+    fn manifest_with_allow(allow: &[&str]) -> CompanyManifest {
+        let list = allow
+            .iter()
+            .map(|grant| format!("\"{grant}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        toml::from_str(&format!(
+            "[company]\nname = \"Acme\"\n[tools]\nallow = [{list}]\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n"
+        ))
+        .expect("valid manifest")
+    }
+
+    /// A `trigger → tool_call` draft. `slug` of `None` omits `config` entirely,
+    /// so the ungated slug-presence check fires.
+    fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
+        let config = slug.map(|slug| {
+            let mut table = toml::map::Map::new();
+            table.insert("slug".to_string(), toml::Value::String(slug.to_string()));
+            toml::Value::Table(table)
+        });
+        RawWorkflow {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "call".to_string(),
+                    kind: "tool_call".to_string(),
+                    name: "Call".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "call".to_string(),
+                label: None,
+            }],
+        }
+    }
+
+    /// UNGATED: a tool_call with no `slug` is refused before any feature-specific
+    /// namespace resolution, so it fails the same way in every build.
+    #[tokio::test]
+    async fn tool_call_without_slug_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", None),
+        )
+        .await
+        .expect_err("tool_call with no slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("no `slug`"), "{err}");
+    }
+
+    /// A slug that maps to no toolbelt namespace is unwired — the run would halt
+    /// on it, so the save is refused with the run gate's own wording.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_bogus_slug_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("totally_bogus")),
+        )
+        .await
+        .expect_err("unwired slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a wired workflow tool"),
+            "{err}"
+        );
+    }
+
+    /// A wired slug whose namespace the company's `[tools].allow` does not cover
+    /// is refused; granting that namespace lets the same slug through.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_slug_outside_the_granted_namespace_is_invalid() {
+        let company = CompanyId::new("acme");
+        // `web.*` grants `web` but NOT `code`; `csv_export` is a `code` tool.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["web.*"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("csv_export")),
+        )
+        .await
+        .expect_err("code slug not granted");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("does not grant"), "{err}");
+
+        // Positive control: grant `code` and the same slug is accepted.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf2", "WF2", Some("csv_export")),
+        )
+        .await
+        .expect("code slug is granted");
+    }
+
+    /// Mirrors `caps/tools.rs`'s
+    /// `the_search_namespace_requires_an_explicit_grant_not_a_wildcard`: the
+    /// catch-all `*` never confers the priced `search` family, but an explicit
+    /// `search` grant does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn the_search_namespace_needs_an_explicit_grant_not_a_wildcard() {
+        let company = CompanyId::new("acme");
+        // `*` covers ordinary namespaces but must NOT buy a managed search call.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["*"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("web_search")),
+        )
+        .await
+        .expect_err("wildcard never confers search");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("does not grant"), "{err}");
+
+        // An explicit `search` grant alongside the belt passes.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["*", "search"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf2", "WF2", Some("web_search")),
+        )
+        .await
+        .expect("explicit search grant is honored");
+    }
+
+    /// The shared helper gates BOTH surfaces: an update into a graph with an
+    /// unwired tool_call slug is refused the same way a create is.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn update_gates_tool_calls_through_the_shared_helper() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(&company, None, &store, None, valid_draft("wf", "WF"))
+            .await
+            .expect("seed create");
+
+        let err = update_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("totally_bogus")),
+            None,
+        )
+        .await
+        .expect_err("update must gate tool_calls too");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a wired workflow tool"),
+            "{err}"
+        );
+    }
+
+    /// A slug padded with leading/trailing whitespace is rejected outright rather
+    /// than silently trimmed: the persisted config and the run-time lookup are
+    /// literal, so a padded slug that "passed" a trim-normalized check would halt
+    /// the run on the very lookup this save-time gate promised to catch.
+    /// (Regression, #540.)
+    #[tokio::test]
+    async fn tool_call_with_a_whitespace_padded_slug_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some(" csv_export ")),
+        )
+        .await
+        .expect_err("padded slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("whitespace"), "{err}");
+    }
+
+    /// `media` and `composio` are agent-turn tool families the workflow invoker
+    /// never wires (see `WORKFLOW_TOOL_NAMESPACES`), so a `tool_call` naming one
+    /// would clear the run-time grant gate and then ALWAYS miss the lookup.
+    /// Author-time validation rejects it up front even when the namespace is
+    /// explicitly granted, so the save mirrors the run. (Regression, #540.)
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_in_an_agent_turn_only_family_is_rejected() {
+        let company = CompanyId::new("acme");
+        // Grant BOTH families explicitly, so the rejection is about the workflow
+        // surface — not a missing grant.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["media", "composio"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("media_generate_image")),
+        )
+        .await
+        .expect_err("media is not a workflow tool family");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("cannot run"), "{err}");
     }
 
     // --- issue #276: arming, disarming, and the switch -----------------------

@@ -126,15 +126,17 @@ destroying the diff.
 ### WorkspaceStore
 
 The Obsidian-style note tree (`src/ports/workspace.rs`), seeded from the
-company's `workspace/**` on first use.
+company's `workspace/**` on first use and thereafter written by both the
+operator (console/REST) and the company's agents (`workspace_create` /
+`workspace_write`).
 
 ```rust
 pub trait WorkspaceStore: Send + Sync {
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>>;
     async fn read(&self, company: &CompanyId, id: &str)
         -> Result<Option<(WorkspaceNode, String)>>;
-    async fn write(&self, company: &CompanyId, id: &str, content: &str)
-        -> Result<WorkspaceNode>;
+    async fn write(&self, company: &CompanyId, id: &str, content: &str,
+                   author: WorkspaceOrigin) -> Result<WorkspaceNode>;
     async fn create(&self, /* parent, name, kind, content */) -> Result<WorkspaceNode>;
     async fn rename_move(&self, /* id, new_name, new_parent */) -> Result<WorkspaceNode>;
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
@@ -144,6 +146,39 @@ pub trait WorkspaceStore: Send + Sync {
 
 Nodes are folders or files (`NodeKind`); `[[wikilink]]` backlinks are derived
 at read time by the GraphQL layer.
+
+**Authorship (#326).** Every `WorkspaceNode` carries `created_by` and
+`updated_by`, both a `WorkspaceOrigin` ∈ `seed | operator | agent{id}`. `write`
+takes the author and stamps `updated_by`; `create` receives a fully-formed node
+whose caller sets both. `rename_move` deliberately touches **neither**, so an
+operator reorganising the tree cannot mask who wrote the body that is stored.
+Backends persist the node as opaque JSON and both fields are
+`#[serde(default)]`, so a node written before the fields existed loads as
+`operator` — no column, no migration. `assert_workspace_store` pins the
+round-trip, the write stamp, and the rename non-stamp across all three
+backends.
+
+**`Agents/` and `Desks/` (#551).** `company::workspace_scaffold` owns the
+workspace's two reserved system roots and the folders beneath them, on two
+different schedules:
+
+* `ensure_workspace_scaffold` adopt-or-creates the `Agents` and `Desks` roots,
+  **empty**, from one seam: `RuntimeBuilder::build` (boot). It takes no roster
+  — a company with no agents gets both — so an existing company picks them up
+  on its next boot. Idempotent; one tree read.
+* `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create
+  `Agents/<agent-id>/` and `Desks/<desk-id>/` **on demand**, returning the node
+  id, called when that agent or desk first produces something. A folder means
+  "this member produced something"; an eager folder per roster member would be
+  a claim the tree cannot back. `workspace_create` calls the agent minter when
+  an agent writes into its own home; #552's publish path is the next caller.
+
+Both are fail-closed: a name collision (a *file* of that name, or several nodes
+sharing it) is never resolved by creating a duplicate that would make the path
+permanently ambiguous. The scaffold warns and skips, since nothing waits on its
+result; a minter returns the collision as an error, since its caller needs the
+id. The folder is an organizational and attribution unit only; agents may
+create and write **anywhere** in their company's tree.
 
 ### FactStore
 

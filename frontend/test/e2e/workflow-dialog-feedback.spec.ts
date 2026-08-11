@@ -67,7 +67,7 @@ async function emailOutputRow(page: Page) {
 
   const kind = dialog.getByLabel("Node kind").nth(1);
   await kind.click();
-  await page.getByRole("option", { name: /^Output/ }).click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
 
   const destination = dialog.getByLabel("Send report to");
   await destination.click();
@@ -144,7 +144,7 @@ test("changing a node's kind clears the field AND its error, leaving no orphan",
 
   // Switching back gives a clean field, not a resurrected value or error.
   await kind.click();
-  await page.getByRole("option", { name: /^Output/ }).click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
   await expect(dialog.getByLabel("Send report to")).toBeVisible();
   await expect(dialog.getByText(/is not an email address/)).toHaveCount(0);
 });
@@ -256,9 +256,19 @@ test("a valid workflow still saves", async ({ page }) => {
   await dialog.getByLabel("Node name").nth(1).fill("Ship it");
   const kind = dialog.getByLabel("Node kind").nth(1);
   await kind.click();
-  await page.getByRole("option", { name: /^Output/ }).click();
+  await page.getByRole("option", { name: /^Output(?! parser)/ }).click();
   await dialog.getByLabel("Send report to").click();
   await page.getByRole("option", { name: /^Owner/ }).click();
+
+  // Connect the trigger to the output. Two rows are not a workflow until an
+  // edge joins them: an `output` no `trigger` can reach never fires, and the
+  // host's reachability check (issue #540) now rejects that graph as unsound.
+  // This edge is what makes the draft a genuinely-valid workflow that saves.
+  await dialog.getByRole("button", { name: "Add edge" }).click();
+  await dialog.getByLabel("Edge from").click();
+  await page.getByRole("option", { name: "start", exact: true }).click();
+  await dialog.getByLabel("Edge to").click();
+  await page.getByRole("option", { name: "done", exact: true }).click();
 
   await dialog.getByRole("button", { name: "Create workflow" }).click();
   await expect(dialog).toBeHidden({ timeout: 30_000 });

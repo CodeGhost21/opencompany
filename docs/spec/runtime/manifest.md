@@ -256,18 +256,38 @@ prompt = "Weekly review and operator digest"
     The Usage view surfaces a `Web searches` KPI plus a search status row
     (active / paused at cap 0 / awaiting credential / not granted / not in this
     build).
-  - **`workspace`** (issue #237) grants the company's shared note tree — the
-    operator-owned `Standards/` / `Playbooks/` / `Product/` documents seeded
-    from `companies/<name>/workspace/**`. It is **split**, unlike every other
-    namespace: *reads* (`workspace_list`, `workspace_read`) follow the ordinary
-    rule, so a catch-all `*` confers them; *writes* (`workspace_write`) need an
-    **explicit** `workspace` or `workspace.write` entry in `[tools].allow`,
-    because a write mutates guidance every other agent then treats as the
-    company's source of truth. `workspace.read` is therefore a genuinely
-    read-only grant. Writes overwrite one **existing** note only and require an
+  - **`workspace`** (issues #237, #551) grants the company's shared note tree —
+    the `Standards/` / `Playbooks/` / `Product/` documents seeded from
+    `companies/<name>/workspace/**`, plus whatever the operator and the agents
+    have written since. It is **split**, unlike every other namespace: *reads*
+    (`workspace_list`, `workspace_read`) follow the ordinary rule, so a
+    catch-all `*` confers them; *mutations* (`workspace_write`,
+    `workspace_create`) need an **explicit** `workspace` or `workspace.write`
+    entry in `[tools].allow`, because they change a tree every other agent then
+    treats as the company's source of truth. `workspace.read` is therefore a
+    genuinely read-only grant. Create and write ride the one flag on purpose:
+    overwriting an existing standard is strictly more destructive than adding a
+    note beside it, so a grant permitting the first has already permitted the
+    second. `workspace_write` overwrites one **existing** note and requires an
     `expected_updated_at` revision token taken from a prior read, so a note
     edited in the console since the agent read it is refused rather than
-    clobbered; creating, renaming and deleting notes stay operator-only. Both
+    clobbered. `workspace_create` adds one folder or note at a path that is
+    **free** and whose parent folder already exists — never an overwrite, never
+    a `mkdir -p`. The single exception is the agent's own
+    `Agents/<agent-id>/`, which is created on demand when the agent writes
+    directly into it, because that folder is minted on first use rather than
+    provisioned at boot and this call is the only thing that ever brings it into
+    existence. Renaming and deleting stay operator-only.
+
+    Agent writes are **unconfined**: an agent may create or edit anywhere in its
+    company's tree. Confining creation while leaving overwrite free would
+    protect nothing. What keeps the tree navigable instead is steering plus
+    attribution — the persona brief names the agent's own reserved folder
+    `Agents/<agent-id>/` (minted the first time that agent puts something in it;
+    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    home for what it produces and marks shared
+    guidance as something to edit only on purpose, and every node records who
+    created it and who last wrote it (issue #326), which the console shows. Both
     sides are capped at the agent harness's own per-tool-result byte budget
     minus the framing a read wraps a body in (issue #417) — 12 KiB today,
     derived rather than chosen so a full read always survives the harness cut

@@ -570,17 +570,17 @@ export function setWorkflowEnabled(
 }
 
 /**
- * The node kinds the form creator's palette offers. These are the kinds that
- * are meaningful to author from a bare form — no per-node config required to do
- * something useful: `merge` fans several inputs into one stream and `transform`
- * passes items through (a config-less `set` is an identity pass-through).
+ * The node kinds the form creator's palette offers.
  *
- * Deliberately withheld until the P4 config forms land: `tool_call`,
- * `http_request`, `switch`, `output_parser`, and `sub_workflow` all need config
- * (a slug, a URL, case labels, a schema, a `workflow_id`) to run — creating one
- * from a bare palette would silently produce a node that errors at run time — so
- * the creator doesn't offer them yet. All of these kinds still render on the
- * canvas and can be authored by hand in `workflows/<id>.toml`.
+ * The first six author from a bare form — `trigger` starts the graph, `agent`
+ * runs a teammate, `condition` branches, `merge` fans inputs into one stream,
+ * `transform` reshapes items, and `output` reports back. The last five need
+ * kind-specific config to run (a slug, a URL, a branch key, a schema, a
+ * `workflow_id`); they were withheld until the config forms landed, and now
+ * carry them — each renders `NodeConfigFields`, whose spec table
+ * (`@/lib/workflow-node-config`) is the single source of the engine keys it
+ * emits (issue #541). Every one of these kinds also renders on the canvas and
+ * can be authored by hand in `workflows/<id>.toml`.
  */
 /**
  * What a trigger's cron expression actually means, per the host's parser
@@ -638,4 +638,9 @@ export const CREATABLE_NODE_KINDS: { value: string; label: string }[] = [
   { value: "merge", label: "Merge — combines several inputs into one" },
   { value: "transform", label: "Transform — reshapes the data" },
   { value: "output", label: "Output — reports the result back" },
+  { value: "tool_call", label: "Tool call — runs a tool by slug" },
+  { value: "http_request", label: "HTTP request — calls a URL" },
+  { value: "switch", label: "Switch — routes to a labeled branch" },
+  { value: "output_parser", label: "Output parser — coerces to a schema" },
+  { value: "sub_workflow", label: "Sub-workflow — runs another workflow" },
 ];

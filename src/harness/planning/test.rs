@@ -315,13 +315,15 @@ fn caps_are_codepoint_safe() {
 /// terminates instead of hanging the pass.
 #[test]
 fn workspace_paths_render_and_terminate() {
-    use crate::ports::workspace::{NodeKind, WorkspaceNode};
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
     let node = |id: &str, name: &str, parent: Option<&str>, kind| WorkspaceNode {
         id: id.to_string(),
         name: name.to_string(),
         kind,
         parent_id: parent.map(str::to_string),
         updated_at_millis: 0,
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
     };
     let paths = workspace_paths(vec![
         node("1", "Standards", None, NodeKind::Folder),

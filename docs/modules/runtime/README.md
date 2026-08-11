@@ -129,9 +129,30 @@ The workspace store seeds a new company from its `companies/<name>/workspace/**`
 template on first use (`WorkspaceStore::is_empty` gates the seed); skills read
 the company's `skills/<id>/SKILL.md` plus the repo-level shared registry.
 
+Boot also scaffolds the two reserved system roots, `Agents/` and `Desks/`
+(issue #551), via `company::workspace_scaffold::ensure_workspace_scaffold`.
+That call is gated on "this is not a rebuild" and on **nothing else** —
+deliberately not on `seed_dir`, since a provisioned tenant and the desktop
+build have no company bundle to seed from and their workspace needs the same
+shape; deliberately not on `is_empty`, since that gate exists to make operator
+deletions stick against re-seeding, and an existing company only ever picks the
+roots up on a later boot; and deliberately not on the roster, since the roots
+are part of what a workspace is. It is idempotent, so it costs one tree read
+per boot.
+
+The roots are created **empty**. `Agents/<agent-id>/` and `Desks/<desk-id>/`
+are minted on demand by `ensure_agent_folder` / `ensure_desk_folder`, at the
+moment that agent or desk first produces something — a folder per roster member
+would fill the tree with empty directories for teammates who have done nothing.
+The minters find-or-create the root they need, so they double as the repair
+path if boot's fail-soft create ever misses. There is deliberately no
+roster-rebuild seam: `HarnessPool::ensure` writes nothing to the workspace,
+because a member folder is no longer a function of the roster.
+
 The builder threads that same `WorkspaceStore` handle onto `HarnessDeps`
-(`workspace`), so agents read the operator's note tree through the tools in
-`harness::workspace_tools` (issue #237) rather than being blind to it. One
-handle, three writers — console REST, GraphQL, and a granted agent — so an
-operator edit is what the next turn reads, with no rebuild. `None` fails
-closed: no workspace tools are wired.
+(`workspace`), so agents read and write the shared note tree through the tools
+in `harness::workspace_tools` (issues #237, #551) rather than being blind to it.
+One handle, three writers — console REST, GraphQL, and a granted agent — so an
+operator edit is what the next turn reads, with no rebuild, and an agent's note
+is in the tab the operator is already looking at. Each write records its author
+(issue #326). `None` fails closed: no workspace tools are wired.

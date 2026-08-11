@@ -37,7 +37,7 @@ use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::provider::{HostedProvider, HostedProviderConfig};
 use crate::harness::{HarnessDeps, HarnessPool};
 use crate::ports::types::{CompanyId, CompanyRecord};
-use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
+use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 use crate::store::{FsCompanyStore, FsContextStore, FsOps};
 
 /// What the scripted model does on each successive call.
@@ -184,6 +184,8 @@ fn folder(id: &str, name: &str) -> WorkspaceNode {
         kind: NodeKind::Folder,
         parent_id: None,
         updated_at_millis: crate::ports::now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
     }
 }
 
@@ -194,6 +196,8 @@ fn note(id: &str, name: &str, parent: &str) -> WorkspaceNode {
         kind: NodeKind::File,
         parent_id: Some(parent.to_string()),
         updated_at_millis: crate::ports::now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
     }
 }
 
@@ -582,7 +586,12 @@ async fn an_edit_between_turns_changes_what_the_next_turn_reads() {
 
     // The operator edits the note in the console — the same store handle.
     store
-        .write(&record.id, "n-eng", "# Engineering\nDeploy on green only.")
+        .write(
+            &record.id,
+            "n-eng",
+            "# Engineering\nDeploy on green only.",
+            WorkspaceOrigin::Operator,
+        )
         .await
         .unwrap();
 

@@ -64,7 +64,7 @@ pub use workflow_runner::{
     DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowRun, WorkflowRunContext,
     WorkflowRunNodeRow, WorkflowRunner,
 };
-pub use workspace::{NodeKind, WorkspaceNode, WorkspaceStore};
+pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 #[cfg(test)]
 mod test {

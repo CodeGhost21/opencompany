@@ -168,6 +168,23 @@ only — bodies are fetched per file, so a navigation read does not grow with th
 size of the workspace. Reading a folder id as a file is a `404`, never an empty
 note.
 
+Both workspace `GET`s — and the `POST` / `PATCH` node bodies — carry
+`createdBy` and `updatedBy` (#326), each `{"kind":"seed"|"operator"|"agent",
+"id"?}` with `id` present exactly when `kind` is `agent`. `createdBy` is fixed
+at creation; `updatedBy` follows content writes only, so an operator rename does
+not repaint an agent's authorship. The console renders the creator as a badge
+and the last writer only when the two differ. Both fields are always serialized,
+and a node predating the field reads back as `operator`. The `PUT` write route
+stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
+which is fixed at agent-build time and never taken from tool arguments. Agents
+reach the same tree through `workspace_list` / `workspace_read` /
+`workspace_create` / `workspace_write`, and a created note has its default home
+in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
+brief steers toward, not a boundary the routes enforce. Boot scaffolds the
+`Agents/` and `Desks/` roots empty; an individual `Agents/<agent-id>/` is minted
+the first time that agent writes into it, so a tree read on a fresh company
+shows the two roots and no member folders.
+
 Team writes are an **operator overlay** persisted through the store, merged
 into the manifest roster at read time — the version-controlled `company.toml`
 is never rewritten. Overlay teammates are addressable: since issue #71 the

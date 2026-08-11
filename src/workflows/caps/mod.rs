@@ -69,6 +69,7 @@ use crate::ports::types::{CompanyId, CompanyRecord};
 use self::http::GuardedHttpClient;
 use self::resolver::StoreWorkflowResolver;
 use self::state::{CompanyStateStore, NoopState};
+pub(crate) use self::tools::WORKFLOW_TOOL_NAMESPACES;
 use self::tools::WorkflowToolInvoker;
 
 /// The four effectful capability slots [`build_capabilities`] chooses by mode:
