@@ -2542,6 +2542,12 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
+    // The mutating response carries reachability too (issue #568), so the console
+    // reflects who can reach the server right after an edit, not only on reload.
+    assert!(
+        updated["server"]["reachableBy"].is_array(),
+        "a mutating response also carries reachableBy"
+    );
 }
 
 /// Issue #568: each listed server carries the ids of the agents whose *effective*
