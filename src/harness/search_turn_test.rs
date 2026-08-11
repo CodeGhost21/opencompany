@@ -287,6 +287,7 @@ async fn harness(
         mcp_failures: McpFailureQueue::default(),
         pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
         workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+        run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

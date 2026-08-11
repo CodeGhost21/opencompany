@@ -64,13 +64,38 @@ fn mongo_err(e: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("mongodb error: {e}"))
 }
 
-/// The port contract's "read everything" sentinel (`usize::MAX`) means no
-/// limit; everything else maps onto the driver's `i64` limit.
-fn find_limit(limit: usize) -> Option<i64> {
-    if limit > i64::MAX as usize {
-        None
-    } else {
-        Some(limit as i64)
+/// How a port-contract limit maps onto a MongoDB `find`.
+///
+/// An enum with a distinct `Empty` arm, rather than the `Option<i64>` this used
+/// to be, because the two vocabularies disagree about ZERO and the disagreement
+/// is silent. `find().limit(0)` is MongoDB's *no limit* sentinel; every port in
+/// `crate::ports` means "an empty page" by a limit of zero, as the fs and sqlite
+/// backends implement it. Passing the number straight through therefore returned
+/// the WHOLE collection at the exact input where the caller asked for nothing.
+///
+/// Issue #555: that is how `list_runs` drifted from the other two backends, and
+/// it went unseen because `conformance.rs` — which asserts precisely this case —
+/// had never run against MongoDB in CI. `read_events_from`, `recent_traces` and
+/// `list_inbox` carried the same latent inversion; only the eviction path
+/// happened to guard it with an `if n > 0`.
+///
+/// So the zero case is a variant the compiler makes every call site, present and
+/// future, decide about — it cannot be forgotten into the driver's meaning again.
+enum FindLimit {
+    /// The caller asked for nothing. MUST NOT reach `find().limit()`.
+    Empty,
+    /// The port contract's "read everything" sentinel (`usize::MAX`), or any
+    /// value too large for the driver's `i64`.
+    Unlimited,
+    /// At most this many documents.
+    AtMost(i64),
+}
+
+fn find_limit(limit: usize) -> FindLimit {
+    match limit {
+        0 => FindLimit::Empty,
+        n if n > i64::MAX as usize => FindLimit::Unlimited,
+        n => FindLimit::AtMost(n as i64),
     }
 }
 
@@ -121,7 +146,7 @@ impl MongoStore {
         // Not every index can be unique: a user holds many sessions, and an
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
-        let plans: [(&str, IndexModel); 28] = [
+        let plans: [(&str, IndexModel); 30] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -175,6 +200,16 @@ impl MongoStore {
                 "run_steps",
                 unique(doc! {"company_id": 1, "run_id": 1, "step_seq": 1}),
             ),
+            // Issue #274: one row per snapshot; the compound index backs both the
+            // per-workflow list (newest-first) and the prune.
+            (
+                "workflow_revisions",
+                unique(doc! {"company_id": 1, "revision_id": 1}),
+            ),
+            (
+                "workflow_revisions",
+                nonunique(doc! {"company_id": 1, "workflow_id": 1, "created_ms": -1}),
+            ),
         ];
         for (name, index) in plans {
             self.collection(name)
@@ -184,6 +219,17 @@ impl MongoStore {
         }
         self.collection("owners")
             .create_index(unique(doc! {"company_id": 1}))
+            .await
+            .map_err(mongo_err)?;
+        // Issue #241: the cross-replica arbiter. This unique compound index is
+        // what turns two replicas racing one schedule minute into one winning
+        // `insert_one` and one `E11000` — the case that actually matters, since
+        // hosted replicas share the tenant database. Created outside the array
+        // above so adding it does not disturb that array's fixed length.
+        self.collection("schedule_fires")
+            .create_index(unique(
+                doc! {"company_id": 1, "schedule_id": 1, "scheduled_for": 1},
+            ))
             .await
             .map_err(mongo_err)?;
         Ok(())
@@ -417,8 +463,10 @@ impl EventLog for MongoStore {
                 "seq": {"$gte": seq.value() as i64},
             })
             .sort(doc! {"seq": 1});
-        if let Some(limit) = find_limit(limit) {
-            find = find.limit(limit);
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -508,8 +556,10 @@ impl MemoryStore for MongoStore {
         let mut find = traces
             .find(doc! {"company_id": id.as_ref()})
             .sort(doc! {"seq": -1});
-        if let Some(limit) = find_limit(limit) {
-            find = find.limit(limit);
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -545,17 +595,25 @@ impl MemoryStore for MongoStore {
         let removed = match policy {
             EvictionPolicy::KeepRecent { n } => {
                 // Collect the seqs to keep (newest n), delete the rest.
+                //
+                // `KeepRecent { n: 0 }` keeps nothing, so there is no query to
+                // run — and must never become `find().limit(0)`, which would
+                // keep EVERYTHING and evict none of it. This arm is the old
+                // `if n > 0` guard, now stated in the shared vocabulary.
                 let mut keep = Vec::new();
-                if n > 0 {
-                    let mut find = traces
-                        .find(doc! {"company_id": id.as_ref()})
-                        .sort(doc! {"seq": -1});
-                    if let Some(limit) = find_limit(n) {
-                        find = find.limit(limit);
-                    }
-                    let mut cursor = find.await.map_err(mongo_err)?;
-                    while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-                        keep.push(get_i64(&doc, "seq")?);
+                match find_limit(n) {
+                    FindLimit::Empty => {}
+                    limit => {
+                        let mut find = traces
+                            .find(doc! {"company_id": id.as_ref()})
+                            .sort(doc! {"seq": -1});
+                        if let FindLimit::AtMost(n) = limit {
+                            find = find.limit(n);
+                        }
+                        let mut cursor = find.await.map_err(mongo_err)?;
+                        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+                            keep.push(get_i64(&doc, "seq")?);
+                        }
                     }
                 }
                 traces
@@ -811,8 +869,10 @@ impl crate::ports::inbox::InboxStore for MongoStore {
             .find(doc! {"company_id": company.as_ref(), "inbox": key})
             .sort(doc! {"seq": 1})
             .skip(offset as u64);
-        if let Some(limit) = find_limit(limit) {
-            find = find.limit(limit);
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -1418,6 +1478,108 @@ impl crate::ports::artifacts::ArtifactStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRevisionStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::workflow_revisions::WorkflowRevisionStore for MongoStore {
+    async fn push_revision(
+        &self,
+        company: &CompanyId,
+        revision: &crate::ports::workflow_revisions::WorkflowRevisionRecord,
+    ) -> Result<()> {
+        use crate::ports::workflow_revisions::MAX_WORKFLOW_REVISIONS;
+        let coll = self.collection("workflow_revisions");
+        coll.insert_one(doc! {
+            "company_id": company.as_ref(),
+            "revision_id": &revision.id,
+            "workflow_id": &revision.workflow_id,
+            "revision_json": serde_json::to_string(revision)?,
+            "created_ms": revision.created_at_millis as i64,
+        })
+        .await
+        .map_err(mongo_err)?;
+
+        // Prune to the cap: collect this workflow's revision ids newest-first and
+        // delete everything past `MAX`. Two statements rather than one because
+        // MongoDB has no "delete all but the newest N" operator; the compound
+        // index keeps the read cheap, and an interleaved second push only ever
+        // trims further, never resurrects a pruned row.
+        let mut cursor = coll
+            .find(doc! {"company_id": company.as_ref(), "workflow_id": &revision.workflow_id})
+            .sort(doc! {"created_ms": -1, "revision_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut ids: Vec<String> = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            ids.push(get_str(&doc, "revision_id")?);
+        }
+        if ids.len() > MAX_WORKFLOW_REVISIONS {
+            let stale: Vec<&String> = ids.iter().skip(MAX_WORKFLOW_REVISIONS).collect();
+            coll.delete_many(doc! {
+                "company_id": company.as_ref(),
+                "workflow_id": &revision.workflow_id,
+                "revision_id": {"$in": stale},
+            })
+            .await
+            .map_err(mongo_err)?;
+        }
+        Ok(())
+    }
+
+    async fn list_revisions(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Result<Vec<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let mut cursor = self
+            .collection("workflow_revisions")
+            .find(doc! {"company_id": company.as_ref(), "workflow_id": workflow_id})
+            .sort(doc! {"created_ms": -1, "revision_id": -1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(serde_json::from_str(&get_str(&doc, "revision_json")?)?);
+        }
+        Ok(out)
+    }
+
+    async fn get_revision(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let found = self
+            .collection("workflow_revisions")
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "workflow_id": workflow_id,
+                "revision_id": revision_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(serde_json::from_str(&get_str(
+                &doc,
+                "revision_json",
+            )?)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_revisions(&self, company: &CompanyId, workflow_id: &str) -> Result<u64> {
+        let res = self
+            .collection("workflow_revisions")
+            .delete_many(doc! {"company_id": company.as_ref(), "workflow_id": workflow_id})
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.deleted_count)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -1539,10 +1701,12 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut find = runs
             .find(query)
             .sort(doc! {"created_ms": -1, "attempt": -1, "run_id": -1});
-        if let Some(limit) = filter.limit
-            && let Some(limit) = find_limit(limit)
-        {
-            find = find.limit(limit);
+        if let Some(limit) = filter.limit {
+            match find_limit(limit) {
+                FindLimit::Empty => return Ok(Vec::new()),
+                FindLimit::Unlimited => {}
+                FindLimit::AtMost(n) => find = find.limit(n),
+            }
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -1593,6 +1757,69 @@ impl crate::ports::runs::RunStore for MongoStore {
             out.push(serde_json::from_str(&get_str(&doc, "step_json")?)?);
         }
         Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::schedule_fires::ScheduleFireStore for MongoStore {
+    async fn claim_fire(
+        &self,
+        company: &CompanyId,
+        schedule_id: &str,
+        minute: u64,
+    ) -> Result<bool> {
+        // A plain `insert_one` against the unique `(company_id, schedule_id,
+        // scheduled_for)` index. Success means this caller won the race; an
+        // `E11000` duplicate-key means a peer — another replica, or this process
+        // before a restart — already claimed the instant, so the caller lost and
+        // must skip. Every OTHER driver error propagates: a claim store that
+        // cannot answer must fail closed at the scheduler, never be read as a win.
+        let result = self
+            .collection("schedule_fires")
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "schedule_id": schedule_id,
+                "scheduled_for": minute as i64,
+                "claimed_at_ms": now_millis() as i64,
+            })
+            .await;
+        match result {
+            Ok(_) => Ok(true),
+            Err(e) if is_duplicate_key(&e) => Ok(false),
+            Err(e) => Err(mongo_err(e)),
+        }
+    }
+
+    async fn latest_fire(&self, company: &CompanyId, schedule_id: &str) -> Result<Option<u64>> {
+        // The single newest row for this schedule, straight off the compound
+        // index — no aggregation needed. A schedule that never fired matches
+        // nothing and yields `None`, the no-anchor case.
+        let found = self
+            .collection("schedule_fires")
+            .find_one(doc! {"company_id": company.as_ref(), "schedule_id": schedule_id})
+            .sort(doc! {"scheduled_for": -1})
+            .await
+            .map_err(mongo_err)?;
+        match found {
+            Some(doc) => Ok(Some(get_i64(&doc, "scheduled_for")? as u64)),
+            None => Ok(None),
+        }
+    }
+
+    async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize> {
+        let result = self
+            .collection("schedule_fires")
+            .delete_many(doc! {
+                "company_id": company.as_ref(),
+                "scheduled_for": {"$lt": cutoff_minute as i64},
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count as usize)
     }
 }
 
@@ -1933,6 +2160,9 @@ fn mongo_workspace_descendants(
 /// The conformance suite needs a live server; there is no in-process MongoDB.
 /// Set `OPENCOMPANY_TEST_MONGODB_URI` (e.g. `mongodb://localhost:27017`) to
 /// run these; without it every test is a skip, keeping `cargo test` offline.
+///
+/// CI additionally sets `OPENCOMPANY_TEST_MONGODB_REQUIRED=1`, which turns that
+/// skip into a failure — see `required()` below.
 #[cfg(test)]
 mod test {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1942,10 +2172,99 @@ mod test {
 
     static DB_COUNTER: AtomicU64 = AtomicU64::new(0);
 
+    /// Whether a missing server must FAIL rather than skip. Issue #555.
+    ///
+    /// The `OPENCOMPANY_TEST_MONGODB_URI` skip above is right for a laptop with
+    /// no MongoDB — it keeps a default `cargo test` offline — and wrong for the
+    /// CI lane whose entire purpose is running this suite. There, an unset URI
+    /// is a misconfigured job, and the skip would report it as a pass: the
+    /// whole suite silently absent behind a green tick, which is the exact
+    /// defect this lane was added to fix, reintroduced one layer down.
+    ///
+    /// So CI sets this second variable and nothing else does. Set = the caller
+    /// has promised a reachable server, so not finding one is an error.
+    ///
+    /// `0` and the empty string read as unset, so the variable can be threaded
+    /// through a workflow matrix or a shell wrapper that always defines it.
+    fn required() -> bool {
+        std::env::var("OPENCOMPANY_TEST_MONGODB_REQUIRED")
+            .is_ok_and(|value| !value.is_empty() && value != "0")
+    }
+
+    /// The URI with any `user:password@` replaced by `***@`, for the panic
+    /// message below.
+    ///
+    /// The unreachable-server panic names the URI so the failure says *which*
+    /// server it could not reach — a bare "connection refused" in a CI log is
+    /// most of a debugging session. But a connection string carries its
+    /// credentials inline, and a panic lands in the CI log, the terminal
+    /// scrollback and any artifact that captures either. CI points at an
+    /// unauthenticated localhost, so nothing leaks there; a developer pointing
+    /// this suite at a real cluster is the case that would, and that is exactly
+    /// when the message is most useful. Redacting keeps the host and port,
+    /// which is the part worth printing.
+    fn redact_credentials(uri: &str) -> String {
+        let Some((scheme, rest)) = uri.split_once("://") else {
+            return uri.to_string();
+        };
+        // Userinfo, when present, precedes the first `/` of the path — so only
+        // an `@` before that boundary delimits it. A password may itself
+        // contain `@`, so split at the LAST one within the authority.
+        let authority_end = rest.find('/').unwrap_or(rest.len());
+        let (authority, tail) = rest.split_at(authority_end);
+        match authority.rfind('@') {
+            Some(at) => format!("{scheme}://***{}{tail}", &authority[at..]),
+            None => uri.to_string(),
+        }
+    }
+
+    #[test]
+    fn redaction_keeps_the_host_and_drops_the_credentials() {
+        // The CI shape: nothing to redact, nothing changed.
+        assert_eq!(
+            redact_credentials("mongodb://localhost:27017"),
+            "mongodb://localhost:27017"
+        );
+        // The shape that would leak.
+        assert_eq!(
+            redact_credentials("mongodb://user:hunter2@cluster.example:27017"),
+            "mongodb://***@cluster.example:27017"
+        );
+        // A password containing `@` — splitting at the FIRST one would leave
+        // the tail of the password in the message.
+        assert_eq!(
+            redact_credentials("mongodb://user:p@ss@cluster.example:27017"),
+            "mongodb://***@cluster.example:27017"
+        );
+        // An `@` in the path or query must not be mistaken for userinfo.
+        assert_eq!(
+            redact_credentials("mongodb://localhost:27017/db?replicaSet=a@b"),
+            "mongodb://localhost:27017/db?replicaSet=a@b"
+        );
+        // A credentialed URI that also carries a path keeps the path.
+        assert_eq!(
+            redact_credentials("mongodb+srv://u:p@host/admin?retryWrites=true"),
+            "mongodb+srv://***@host/admin?retryWrites=true"
+        );
+        // Not a URI at all: returned untouched rather than mangled.
+        assert_eq!(redact_credentials("localhost:27017"), "localhost:27017");
+    }
+
     async fn store() -> Option<Arc<MongoStore>> {
-        let Ok(uri) = std::env::var("OPENCOMPANY_TEST_MONGODB_URI") else {
-            eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
-            return None;
+        let uri = match std::env::var("OPENCOMPANY_TEST_MONGODB_URI") {
+            Ok(uri) => uri,
+            Err(_) => {
+                assert!(
+                    !required(),
+                    "OPENCOMPANY_TEST_MONGODB_REQUIRED is set but \
+                     OPENCOMPANY_TEST_MONGODB_URI is not. This lane exists to run the \
+                     MongoDB conformance suite against a real server, so a skip here is \
+                     a misconfigured job rather than a pass — point the URI at the \
+                     service container."
+                );
+                eprintln!("skipping: OPENCOMPANY_TEST_MONGODB_URI is not set");
+                return None;
+            }
         };
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1957,7 +2276,16 @@ mod test {
             nonce,
             DB_COUNTER.fetch_add(1, Ordering::Relaxed)
         );
-        let store = MongoStore::connect(&uri, &db).await.expect("connect");
+        // `connect` creates indexes, so it round-trips to the server rather
+        // than resolving lazily: an unreachable host fails HERE, after the
+        // driver's server-selection timeout, instead of much later inside
+        // whichever assertion happened to touch the database first.
+        let store = MongoStore::connect(&uri, &db).await.unwrap_or_else(|err| {
+            panic!(
+                "could not reach the MongoDB server at {}: {err}",
+                redact_credentials(&uri)
+            )
+        });
         Some(Arc::new(store))
     }
 
@@ -2123,9 +2451,23 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workflow_revision_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workflow_revision_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
     async fn conformance_run_reaper() {
         let Some(s) = store().await else { return };
         conformance::assert_run_reaper(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_schedule_fire_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_schedule_fire_store(s.clone()).await;
         drop_db(&s).await;
     }
 

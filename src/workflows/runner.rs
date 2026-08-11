@@ -37,6 +37,25 @@ pub(crate) const MAX_WORKFLOW_DEPTH: usize = 4;
 /// to keep a progress-reporting stall from ever becoming a *run* stall.
 const PROGRESS_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// How long a stopped run is given to wind down cleanly at a node boundary
+/// before the runner falls back to the hard abort (issue #398).
+///
+/// When an operator stops a run, the runner flips the engine's
+/// [`CancellationToken`](tinyflows::engine::CancellationToken): the engine checks
+/// it before each node and, once a node in flight finishes, winds the run down
+/// and returns a real (partial) [`RunOutcome`] with `cancelled` set. That is the
+/// clean path — the collected node trail is kept and nothing is dropped
+/// mid-await.
+///
+/// But a node wedged mid-await on a stalled external call never reaches the next
+/// boundary, so the token alone could hang the stop forever (see the
+/// `StallingProvider` test). This bound caps the wait: if the run has not wound
+/// down within it, the runner drops the engine future — the pre-#398 hard abort
+/// — so a wedged run stays killable. Generous enough that a healthy node
+/// crossing a boundary always makes it, short enough that a stuck stop is not an
+/// eternity.
+const CANCEL_HARD_ABORT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+
 tokio::task_local! {
     /// How many workflow runs are already on this call chain.
     ///
@@ -108,40 +127,64 @@ pub async fn run_workflow(
         .await
 }
 
-/// One node's finish, as the engine's observer callback hands it over to the
-/// async collector (issue #371).
+/// One per-node progress frame, as the engine's observer callbacks hand it over
+/// to the async collector (issue #371 for the finish, issue #382 for the start).
 ///
-/// Deliberately three scalars and no `ExecutionStep`: the engine's step carries
-/// the node's `output` items, and this hop exists partly to make it *impossible*
-/// for that payload to reach the journal — the same stance the live turn frames
-/// take on tool args. What is not carried cannot leak.
-struct NodeProgress {
-    node_id: String,
-    status: WorkflowNodeStatus,
-    elapsed_ms: u64,
+/// A node produces a [`Started`](Self::Started) frame just before its first
+/// attempt and a [`Finished`](Self::Finished) frame as it settles, both on the
+/// **same** channel, so the collector sees them in that order and a node's
+/// started event always journals ahead of its finished one.
+///
+/// Deliberately scalars and no `ExecutionStep`: the engine's step carries the
+/// node's `output` items, and this hop exists partly to make it *impossible* for
+/// that payload to reach the journal — the same stance the live turn frames take
+/// on tool args. A `Started` frame carries the node id alone; the node has not
+/// run, so there is no status or duration to carry either. What is not carried
+/// cannot leak.
+enum NodeProgress {
+    /// A node began executing (issue #382) — the opening bracket. Id only.
+    Started { node_id: String },
+    /// A node finished (issue #371) — its status and wall-clock duration.
+    Finished {
+        node_id: String,
+        status: WorkflowNodeStatus,
+        elapsed_ms: u64,
+    },
 }
 
 /// A [`RunObserver`](tinyflows::observability::RunObserver) that forwards each
-/// node finish onto an unbounded channel.
+/// node start and finish onto an unbounded channel.
 ///
 /// The channel is the whole reason this type exists. Observer callbacks are
 /// **synchronous** (the engine invokes them inline, across threads) while
 /// [`EventLog::append`] is async, so the callback cannot journal directly. It
 /// also must not block: a node handler stalled on a disk write would make
 /// observability change the run's timing, which is exactly what an observer is
-/// not allowed to do. Unbounded is safe at this volume — one message per
-/// non-trigger node, ~8 for a six-node graph — and it means a slow journal can
+/// not allowed to do. Unbounded is safe at this volume — two messages per
+/// non-trigger node, ~16 for a six-node graph — and it means a slow journal can
 /// never apply backpressure to the engine.
 struct ProgressObserver {
     tx: tokio::sync::mpsc::UnboundedSender<NodeProgress>,
 }
 
 impl tinyflows::observability::RunObserver for ProgressObserver {
+    fn on_step_start(&self, node_id: &str) {
+        // Issue #382: the node's opening bracket, sent on the SAME channel and
+        // therefore BEFORE its finish — the collector processes the channel in
+        // order, so a node's started event is always journaled ahead of its
+        // finished one. A closed receiver (the run is settling, or `deps.events`
+        // was never wired) drops the frame, exactly as the finish arm does:
+        // progress reporting must never disturb the run.
+        let _ = self.tx.send(NodeProgress::Started {
+            node_id: node_id.to_string(),
+        });
+    }
+
     fn on_step_finish(&self, step: &tinyflows::observability::ExecutionStep) {
         // A closed receiver means the collector already stopped (the run is
         // settling, or `deps.events` was never wired). Dropping the frame is
         // correct: progress reporting must never disturb the run.
-        let _ = self.tx.send(NodeProgress {
+        let _ = self.tx.send(NodeProgress::Finished {
             node_id: step.node_id.clone(),
             status: match step.status {
                 tinyflows::observability::StepStatus::Success => WorkflowNodeStatus::Ok,
@@ -164,7 +207,22 @@ async fn run_workflow_inner(
     input: Value,
     ctx: &WorkflowRunContext,
 ) -> Result<WorkflowRun> {
-    let graph = super::translate::translate(workflow);
+    let mut graph = super::translate::translate(workflow);
+    // Issue #460: the company's `ApprovalPolicy` decides which `tool_call`
+    // nodes stop for an operator, and says so by marking them with the engine's
+    // own `requires_approval` flag — so a gated tool call inherits #395's whole
+    // pause → park → resume path instead of needing a second one. BEFORE
+    // `compile`, because the flag is read off the compiled node config.
+    //
+    // Skipped for a dry run: every effect is stubbed, so there is nothing to
+    // approve, and pausing would stop the dry run walking the rest of the graph
+    // — the one thing it exists to do. See `super::gate` for why the gate is
+    // not in the invoker, and for the deviations this takes deliberately.
+    let gated = if ctx.dry_run {
+        Vec::new()
+    } else {
+        super::gate::apply_tool_call_gates(&mut graph, record, &workflow.id, &ctx.run_id).await
+    };
     let compiled = tinyflows::compiler::compile(&graph).map_err(map_engine_error)?;
     // Issue #371: the caller's run id, not a freshly minted one. Correlating the
     // run's progress events with the `WorkflowRunFinished` the caller journals
@@ -191,15 +249,32 @@ async fn run_workflow_inner(
     // (the default build, and every existing test) degrades the whole progress
     // path to a no-op — no started event, a `NoopObserver`, no collector.
     let events = deps.events.clone();
-    let capabilities =
-        super::caps::build_capabilities(pool, deps, record, &workflow.id, &run_id, run_request)
-            .await;
+    // Issue #542: the mode. A dry run walks the same real graph over stubbed
+    // effectful capabilities (see `caps::dry_run`) and, host-side, skips every
+    // durable effect around the engine — the started/finished/node journal
+    // writes, the delivery dispatch, and gate parking. Read once here.
+    let dry_run = ctx.dry_run;
+    let capabilities = super::caps::build_capabilities(
+        pool,
+        deps,
+        record,
+        &workflow.id,
+        &run_id,
+        run_request,
+        dry_run,
+    )
+    .await;
 
     // The opening bracket, appended BEFORE the engine call so a run killed
     // mid-flight leaves a start with no finish — which is precisely the shape
     // the boot sweep looks for. Best-effort, like every other journal write on
     // this path: losing the record is worth a log line, never a failed run.
-    if let Some(events) = events.as_ref() {
+    //
+    // Issue #542: skipped entirely for a dry run. A test run writes NOTHING
+    // durable — no started row, so no boot sweep ever adopts it and no `running`
+    // row ever appears in the history; the settled response body is its whole
+    // record.
+    if let Some(events) = events.as_ref().filter(|_| !dry_run) {
         let started = CompanyEvent::WorkflowRunStarted {
             workflow_id: workflow.id.clone(),
             run_id: run_id.clone(),
@@ -216,157 +291,247 @@ async fn run_workflow_inner(
         }
     }
 
-    // Drive the engine with an observer when there is somewhere to put the
-    // frames, and exactly as before when there is not.
-    let outcome = match events.as_ref() {
-        None => {
-            // Issue #383: even with nowhere to report progress, a run stays
-            // stoppable. `Box::pin` rather than `tokio::pin!` because the losing
-            // branch has to be **dropped**, and a `tokio::pin!`ed local lives to
-            // the end of its scope.
-            let mut engine = Box::pin(tinyflows::engine::run(&compiled, input, &capabilities));
-            tokio::select! {
-                biased;
-                () = ctx.cancel.cancelled() => {
-                    drop(engine);
-                    return Ok(cancelled_run());
-                }
-                outcome = &mut engine => outcome.map_err(map_engine_error)?,
-            }
-        }
-        Some(events) => {
-            let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NodeProgress>();
-            let collector = tokio::spawn({
-                let events = events.clone();
-                let company = record.id.clone();
-                let workflow_id = workflow.id.clone();
-                let run_id = run_id.clone();
-                async move {
-                    while let Some(progress) = rx.recv().await {
-                        let event = CompanyEvent::WorkflowNodeFinished {
-                            workflow_id: workflow_id.clone(),
-                            run_id: run_id.clone(),
-                            node_id: progress.node_id,
-                            status: progress.status,
-                            elapsed_ms: progress.elapsed_ms,
-                        };
-                        if let Err(err) = events.append(&company, event).await {
-                            tracing::warn!(
-                                %company,
-                                workflow = %workflow_id,
-                                %run_id,
-                                %err,
-                                "workflow: node progress event could not be journaled; the run is \
-                                 unaffected"
-                            );
+    // Issue #371 + #542: ALWAYS drive with a progress observer, so the per-node
+    // timeline is collected for **every** run — it feeds `WorkflowRun.nodes` on
+    // all paths, and for a dry run (which journals nothing) it is the only trail
+    // the run leaves. The collector accumulates one `WorkflowRunNodeRow` per
+    // node and, *additionally*, appends a `WorkflowNodeFinished` to the journal
+    // only when there is a journal AND this is not a dry run.
+    //
+    // The journal is passed to the collector only in that case; `None` there
+    // means "collect the rows, write nothing" — the shape the default build and
+    // every dry run take.
+    let journal_nodes = events.clone().filter(|_| !dry_run);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<NodeProgress>();
+    let collector = tokio::spawn({
+        let company = record.id.clone();
+        let workflow_id = workflow.id.clone();
+        let run_id = run_id.clone();
+        async move {
+            let mut rows: Vec<crate::ports::WorkflowRunNodeRow> = Vec::new();
+            while let Some(progress) = rx.recv().await {
+                match progress {
+                    // Issue #382: the node's opening bracket. Journaled only when
+                    // there is a journal AND this is not a dry run — the same
+                    // gate the finish arm applies. It contributes NO response
+                    // row: `WorkflowRun.nodes` stays finished-only, so a started
+                    // node with no finish never masquerades as a completed one.
+                    NodeProgress::Started { node_id } => {
+                        if let Some(events) = journal_nodes.as_ref() {
+                            let event = CompanyEvent::WorkflowNodeStarted {
+                                workflow_id: workflow_id.clone(),
+                                run_id: run_id.clone(),
+                                node_id,
+                            };
+                            if let Err(err) = events.append(&company, event).await {
+                                tracing::warn!(
+                                    %company,
+                                    workflow = %workflow_id,
+                                    %run_id,
+                                    %err,
+                                    "workflow: node-started progress event could not be journaled; \
+                                     the run is unaffected"
+                                );
+                            }
                         }
                     }
+                    NodeProgress::Finished {
+                        node_id,
+                        status,
+                        elapsed_ms,
+                    } => {
+                        if let Some(events) = journal_nodes.as_ref() {
+                            let event = CompanyEvent::WorkflowNodeFinished {
+                                workflow_id: workflow_id.clone(),
+                                run_id: run_id.clone(),
+                                node_id: node_id.clone(),
+                                status,
+                                elapsed_ms,
+                            };
+                            if let Err(err) = events.append(&company, event).await {
+                                tracing::warn!(
+                                    %company,
+                                    workflow = %workflow_id,
+                                    %run_id,
+                                    %err,
+                                    "workflow: node progress event could not be journaled; the run \
+                                     is unaffected"
+                                );
+                            }
+                        }
+                        // Collected for the response on every path — status is
+                        // `Copy`, `node_id` moves in after its clone (if any)
+                        // went to the event.
+                        rows.push(crate::ports::WorkflowRunNodeRow {
+                            node_id,
+                            status,
+                            elapsed_ms,
+                        });
+                    }
                 }
-            });
+            }
+            rows
+        }
+    });
 
-            let observer: Arc<dyn tinyflows::observability::RunObserver> =
-                Arc::new(ProgressObserver { tx });
-            // Issue #383: the engine call is raced against the run's stop signal
-            // instead of awaited outright.
-            //
-            // # Why a host-side select rather than the engine's own token
-            //
-            // tinyflows has a `CancellationToken`, and no public entry point
-            // takes one **with** an observer: `run_cancellable` hardcodes a
-            // `NoopObserver`, `run_with_observer` hardcodes a fresh token, and
-            // `build_and_run` — which takes both — is private. Using the token
-            // would therefore cost every cancellable run the per-node progress
-            // issue #371 just added, and fixing that properly means a change two
-            // submodules deep. Filed upstream instead; see `RunCancel`.
-            //
-            // # What this costs, stated honestly
-            //
-            // Dropping the future stops the run **mid-await** — it does not let
-            // the executing node finish. A node part way through an external
-            // side effect stays part way through it. That is the same class of
-            // outcome as the host being killed, which the boot sweep already
-            // settles; this is just operator-initiated and so more frequent.
-            // `Box::pin` because the losing branch must be droppable, which a
-            // `tokio::pin!`ed local is not.
-            let mut engine = Box::pin(tinyflows::engine::run_with_observer(
-                &compiled,
-                input,
-                &capabilities,
-                &observer,
-            ));
-            let outcome = tokio::select! {
-                biased;
-                () = ctx.cancel.cancelled() => None,
-                outcome = &mut engine => Some(outcome),
-            };
-            // **Drop the engine future before the observer, on both arms.** The
-            // engine holds observer `Arc` clones inside its per-node handlers;
-            // on the completion arm they are already gone (the graph died inside
-            // the call), but on the cancel arm the future still owns them, so
-            // dropping `observer` alone would NOT close the channel — the
-            // collector below would then block until the drain timeout on every
-            // single cancel, and the timeout would hide it.
-            //
-            // Today the **borrow checker enforces this ordering**: the engine
-            // future borrows `observer`, so removing this line does not compile.
-            // That is a happy accident of the current signature taking `&Arc`,
-            // not a guarantee — an engine that took the `Arc` by value would
-            // close the compile-time hole and re-open the runtime one, silently.
-            // `a_cancelled_run_settles_fast_keeping_only_its_completed_nodes`
-            // asserts a cancel-latency bound for exactly that case; it was
-            // verified to fail (at 10.004s, the full drain timeout) against a
-            // deliberately leaked observer clone.
-            drop(engine);
+    let observer: Arc<dyn tinyflows::observability::RunObserver> =
+        Arc::new(ProgressObserver { tx });
+    // Issue #383/#398: the engine call is raced against the run's stop signal.
+    //
+    // # The engine's own token, with a bounded hard-abort fallback
+    //
+    // tinyflows exposes `run_cancellable_with_observer`, which takes a
+    // `CancellationToken` **and** an observer — so a cancellable run keeps the
+    // per-node progress trail (#371/#382) instead of trading it away, which the
+    // old host-side "drop the future" race had to. The engine checks the token
+    // before each node, so cancelling stops the run at the next **node boundary**
+    // rather than mid-await: a node already executing runs to completion, its
+    // finish is journaled, and the run winds down carrying a real (partial)
+    // `RunOutcome` with `cancelled` set. That is the clean path.
+    //
+    // # Why the fallback survives (decision locked)
+    //
+    // A node wedged mid-await on a stalled external call never reaches the next
+    // boundary, so the token alone could hang the stop forever (the
+    // `StallingProvider` test is exactly this). So the stop path flips the token,
+    // gives the run a bounded `CANCEL_HARD_ABORT_GRACE` to wind down cleanly, and
+    // ONLY if it does not settle in that window drops the engine future — the
+    // pre-#398 hard abort. Dropping stops the run mid-await: a node part way
+    // through an external side effect stays part way through it, the same class
+    // of outcome as the host being killed, which the boot sweep already settles.
+    // Keeping this fallback is what guarantees a wedged run stays killable.
+    //
+    // `Box::pin` because the losing branch must be droppable, which a
+    // `tokio::pin!`ed local is not.
+    let token = tinyflows::engine::CancellationToken::new();
+    let mut engine = Box::pin(tinyflows::engine::run_cancellable_with_observer(
+        &compiled,
+        input,
+        &capabilities,
+        token.clone(),
+        &observer,
+    ));
+    let outcome_opt = tokio::select! {
+        biased;
+        () = ctx.cancel.cancelled() => {
+            // Node-boundary stop: flip the engine's token so it winds down
+            // cleanly, then bound the wait. A run that crosses a boundary within
+            // the grace returns its real `cancelled` outcome; a wedged one times
+            // out — the `Err` becomes `None`, falling through to the hard abort
+            // below.
+            token.cancel();
+            tokio::time::timeout(CANCEL_HARD_ABORT_GRACE, &mut engine)
+                .await
+                .ok()
+        }
+        outcome = &mut engine => Some(outcome),
+    };
+    // **Drop the engine future before the observer.** It only matters on the
+    // hard-abort arm (`None`): there the future still owns the observer `Arc`
+    // clones its per-node handlers hold, so dropping `observer` alone would NOT
+    // close the channel — the collector below would then block until the drain
+    // timeout on every wedged stop, and the timeout would hide it. On the clean
+    // arms (completion or a wound-down cancel) the graph already died inside the
+    // call and those clones are gone, so this drop is a no-op.
+    //
+    // Today the **borrow checker enforces this ordering**: the engine future
+    // borrows `observer`, so removing this line does not compile. That is a
+    // happy accident of the current signature taking `&Arc`, not a guarantee —
+    // an engine that took the `Arc` by value would close the compile-time hole
+    // and re-open the runtime one, silently.
+    // `a_cancelled_run_settles_fast_keeping_only_its_completed_nodes` asserts a
+    // cancel-latency bound for exactly that case; it was verified to fail (at
+    // 10.004s, the full drain timeout) against a deliberately leaked observer
+    // clone.
+    drop(engine);
 
-            // Drop the last sender, then join — in that order, and before
-            // anything else. The drop closes the channel so the collector's
-            // `recv()` returns `None` and its loop ends; the join then waits for
-            // every already-sent frame to reach the journal. This is what makes
-            // the ordering guarantee true: every `WorkflowNodeFinished` is
-            // durably appended before the caller's `WorkflowRunFinished`, so a
-            // reader folding the journal never sees a run settle before its
-            // nodes land. Without the join the two would race and a fold could
-            // attach a node to the run *after* it had been rendered as finished.
-            //
-            // The drop closes the channel only if ours is the **last** `Arc` —
-            // true today, because the engine's per-node handler clones die with
-            // the graph inside `run_with_observer`. The bounded wait is there so
-            // that stays a *performance* assumption rather than a liveness one:
-            // if a future engine ever parked a clone somewhere longer-lived,
-            // this would log and move on instead of wedging the run (and the
-            // whole host process behind it) forever on a join that never
-            // returns. Frames already sent still reach the journal either way —
-            // they would just land after the finished event.
-            drop(observer);
-            match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => tracing::warn!(
+    // Drop the last sender, then join — in that order, and before anything else.
+    // The drop closes the channel so the collector's `recv()` returns `None` and
+    // its loop ends; the join then waits for every already-sent frame to reach
+    // the journal (when journaling) and returns the collected rows either way.
+    // This is what makes the ordering guarantee true: every
+    // `WorkflowNodeFinished` is durably appended before the caller's
+    // `WorkflowRunFinished`, so a reader folding the journal never sees a run
+    // settle before its nodes land.
+    //
+    // The drop closes the channel only if ours is the **last** `Arc` — true
+    // today, because the engine's per-node handler clones die with the graph
+    // inside `run_with_observer`. The bounded wait keeps that a *performance*
+    // assumption rather than a liveness one: if a future engine ever parked a
+    // clone somewhere longer-lived, this would log and move on with an empty
+    // trail instead of wedging the run (and the host behind it) forever.
+    drop(observer);
+    let nodes: Vec<crate::ports::WorkflowRunNodeRow> =
+        match tokio::time::timeout(PROGRESS_DRAIN_TIMEOUT, collector).await {
+            Ok(Ok(rows)) => rows,
+            Ok(Err(err)) => {
+                tracing::warn!(
                     company = %record.id,
                     workflow = %workflow.id,
                     %run_id,
                     %err,
                     "workflow: the node-progress collector did not shut down cleanly"
-                ),
-                Err(_) => tracing::warn!(
+                );
+                Vec::new()
+            }
+            Err(_) => {
+                tracing::warn!(
                     company = %record.id,
                     workflow = %workflow.id,
                     %run_id,
                     "workflow: node progress events did not drain in time; the run's finished \
                      record may be journaled ahead of them"
-                ),
+                );
+                Vec::new()
             }
+        };
 
-            // Returned only AFTER the drain above, so a cancelled run's
-            // completed nodes are journaled exactly like a completed run's —
-            // the trail is the whole answer to "how far did it get before I
-            // stopped it?", and it must be durable before the caller writes the
-            // finish.
-            match outcome {
-                Some(outcome) => outcome.map_err(map_engine_error)?,
-                None => return Ok(cancelled_run()),
-            }
-        }
+    // Resolved only AFTER the drain above, so a cancelled run's completed nodes
+    // are journaled exactly like a completed run's before the caller writes the
+    // finish.
+    //
+    // `None` is the **hard-abort** arm (issue #398): the run was wedged past the
+    // grace window and its future was dropped, so there is no outcome to read —
+    // `cancelled_run()` reports the stop with an empty body, and the trail is the
+    // journal, not this return.
+    let outcome = match outcome_opt {
+        Some(outcome) => outcome.map_err(map_engine_error)?,
+        None => return Ok(cancelled_run()),
     };
+
+    // Issue #398: the **clean** node-boundary cancel. The engine observed the
+    // flipped token and wound down at a boundary, so unlike the hard-abort arm
+    // above there IS a real (partial) outcome and the collected node rows are
+    // meaningful — carry them. A stop still routes nothing and parks no gate: an
+    // operator who stopped a run is asking neither to deliver its half-finished
+    // reports nor to be asked about gates it never reached. `pending_approvals`
+    // is emptied for the same reason `cancelled_run()` empties it — listing gates
+    // this run will not continue would imply it is still waiting on them.
+    if outcome.cancelled {
+        return Ok(WorkflowRun {
+            output: outcome.output,
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: true,
+            nodes,
+        });
+    }
+
+    // Issue #542: a dry run STOPS here on the effect side. Route the reached
+    // `output` nodes so the operator sees WHERE each report would have gone —
+    // that routing is exactly what a test run is meant to prove — but dispatch
+    // nothing, journal nothing, and park no gate. The per-node timeline in
+    // `nodes` and this settled body are the whole record.
+    if dry_run {
+        let deliveries = super::delivery::deliver_outputs_dry(record, workflow, &outcome.output);
+        return Ok(WorkflowRun {
+            output: outcome.output,
+            pending_approvals: outcome.pending_approvals,
+            deliveries,
+            cancelled: false,
+            nodes,
+        });
+    }
 
     // Route every reached `output` node's report to its configured destination.
     // Deliberately here rather than in the HTTP handler: the orchestrator's
@@ -428,15 +593,19 @@ async fn run_workflow_inner(
     // no delivery could ever depend on a gate having been parked first.
     //
     // Skipped for a cancelled run, which returns above: an operator who stopped
-    // a run is not asking to be asked about the gates it never reached.
+    // a run is not asking to be asked about the gates it never reached. (A dry
+    // run also never reaches here — it returned above, having parked nothing.)
     park_pending_gates(
         delivery.as_ref(),
         record,
         &workflow.id,
         &run_id,
-        &trigger_input,
-        &outcome.pending_approvals,
-        &deliveries,
+        PausedGates {
+            trigger_input: &trigger_input,
+            pending: &outcome.pending_approvals,
+            deliveries: &deliveries,
+            gated: &gated,
+        },
     )
     .await;
 
@@ -445,7 +614,27 @@ async fn run_workflow_inner(
         pending_approvals: outcome.pending_approvals,
         deliveries,
         cancelled: false,
+        nodes,
     })
+}
+
+/// What a settled run left for the operator to decide.
+///
+/// Grouped rather than passed as four more parameters because they only make
+/// sense together: the gates the engine paused on, the input a continuation has
+/// to be started with, what this run already delivered (so approving does not
+/// re-send it), and which of those gates the company's policy raised rather
+/// than an author (issue #460), so the card can name the call.
+struct PausedGates<'a> {
+    /// The trigger payload the paused run was started with.
+    trigger_input: &'a Value,
+    /// The node ids the engine reported on `pending_approvals`.
+    pending: &'a [String],
+    /// What this run actually routed (issue #438).
+    deliveries: &'a [crate::ports::DeliveryReport],
+    /// The policy-raised gates, so a card can say which tool and why. An
+    /// authored gate has no entry here and its card stays as #395 shipped it.
+    gated: &'a [super::gate::GatedToolCall],
 }
 
 /// Parks one approval card per gate the run paused on (issue #395).
@@ -488,10 +677,14 @@ async fn park_pending_gates(
     record: &CompanyRecord,
     workflow_id: &str,
     run_id: &str,
-    trigger_input: &Value,
-    pending: &[String],
-    deliveries: &[crate::ports::DeliveryReport],
+    paused: PausedGates<'_>,
 ) {
+    let PausedGates {
+        trigger_input,
+        pending,
+        deliveries,
+        gated,
+    } = paused;
     if pending.is_empty() {
         return;
     }
@@ -511,12 +704,20 @@ async fn park_pending_gates(
     };
 
     for node_id in pending {
+        // Issue #460: when the policy is what stopped this node, the card says
+        // which tool and why. An authored gate carries neither — nobody asked a
+        // question on its behalf — so it stays exactly as #395 shipped it.
+        let tool = gated
+            .iter()
+            .find(|gate| gate.node_id == *node_id)
+            .map(|gate| (gate.slug.as_str(), gate.reason.as_str()));
         let effect = crate::runtime::workflow_resume::gate_effect(
             workflow_id,
             node_id,
             trigger_input,
             run_id,
             deliveries,
+            tool,
         );
         if crate::runtime::workflow_resume::already_parked(&parking.journal, &effect) {
             tracing::debug!(
@@ -561,7 +762,13 @@ async fn park_pending_gates(
     }
 }
 
-/// What a run stopped by an operator settles with (issue #383).
+/// What a run stopped by an operator settles with on the **hard-abort** arm
+/// (issue #383/#398) — the wedged-node path, where the engine future was dropped
+/// because the run did not wind down within `CANCEL_HARD_ABORT_GRACE`.
+///
+/// (A run that stopped **cleanly** at a node boundary does not come here: it has
+/// a real partial outcome and is settled inline in `run_workflow_inner`, carrying
+/// its collected node rows. This is only the dropped-future case.)
 ///
 /// Empty on every field but the flag, and each emptiness is a claim rather than
 /// a shrug:
@@ -581,6 +788,11 @@ fn cancelled_run() -> WorkflowRun {
         pending_approvals: Vec::new(),
         deliveries: Vec::new(),
         cancelled: true,
+        // Empty for the same reason as the fields above: a stopped run reports
+        // no result. Its completed nodes were still journaled as they finished
+        // (the drain runs before this returns), so "how far did it get?" is
+        // answered by the history, not by this settled body.
+        nodes: Vec::new(),
     }
 }
 
@@ -703,6 +915,7 @@ description = "Runs Acme."
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2553,14 +2766,19 @@ to = "gate"
     }
 
     /// The ordering guarantee the whole read side rests on: a run journals its
-    /// start, then one event per non-trigger node **in finish order**, and all
-    /// of them are durable before `run_workflow` returns — so the caller's
-    /// `WorkflowRunFinished` can only ever land after them.
+    /// start, then — for each non-trigger node, in execution order — a
+    /// `WorkflowNodeStarted` immediately followed by its `WorkflowNodeFinished`
+    /// (issue #382), and all of them are durable before `run_workflow` returns —
+    /// so the caller's `WorkflowRunFinished` can only ever land after them.
     ///
     /// `GREET` is `start → ceo → done`; `start` is the trigger and the engine
-    /// reports no step for it, so exactly two node events are owed.
+    /// reports no step for it, so exactly two nodes are owed, each with its own
+    /// started/finished pair. The **started-before-finished** ordering is the
+    /// #382 invariant: both frames ride one unbounded channel and the collector
+    /// drains it in order, so a node cannot settle on the journal before it
+    /// opens.
     #[tokio::test]
-    async fn a_run_journals_a_start_then_one_event_per_non_trigger_node() {
+    async fn a_run_journals_a_start_then_a_started_finished_pair_per_non_trigger_node() {
         let dir = tempfile::tempdir().unwrap();
         let pool = Arc::new(HarnessPool::new());
         let rec = record();
@@ -2578,14 +2796,21 @@ to = "gate"
             .iter()
             .map(|e| match e {
                 CompanyEvent::WorkflowRunStarted { .. } => "started".to_string(),
+                CompanyEvent::WorkflowNodeStarted { node_id, .. } => format!("nodestart:{node_id}"),
                 CompanyEvent::WorkflowNodeFinished { node_id, .. } => format!("node:{node_id}"),
                 other => format!("{other:?}"),
             })
             .collect();
         assert_eq!(
             trail,
-            vec!["started", "node:ceo", "node:done"],
-            "expected start then one event per non-trigger node, in graph order"
+            vec![
+                "started",
+                "nodestart:ceo",
+                "node:ceo",
+                "nodestart:done",
+                "node:done"
+            ],
+            "expected the run start, then a started→finished pair per non-trigger node in order"
         );
 
         // One run id across the whole trail — the correlation the fold groups on.
@@ -2599,6 +2824,14 @@ to = "gate"
                     assert_eq!(run_id, &ctx.run_id);
                     assert_eq!(workflow_id, "greet");
                     assert!(!scheduled, "a manual run is not flagged scheduled");
+                }
+                CompanyEvent::WorkflowNodeStarted {
+                    run_id,
+                    workflow_id,
+                    ..
+                } => {
+                    assert_eq!(run_id, &ctx.run_id);
+                    assert_eq!(workflow_id, "greet");
                 }
                 CompanyEvent::WorkflowNodeFinished {
                     run_id,
@@ -2745,6 +2978,7 @@ to = "done"
         for event in &journal {
             let run_id = match event {
                 CompanyEvent::WorkflowRunStarted { run_id, .. } => run_id,
+                CompanyEvent::WorkflowNodeStarted { run_id, .. } => run_id,
                 CompanyEvent::WorkflowNodeFinished { run_id, .. } => run_id,
                 other => panic!("unexpected event: {other:?}"),
             };
@@ -2852,8 +3086,10 @@ from = "ceo"
 to = "done"
 "#;
 
-    /// **The keystone cancel test.** An operator stops a run wedged on an agent
-    /// node, and three things have to be true at once:
+    /// **The keystone cancel test — the HARD-ABORT arm (issue #383/#398).** An
+    /// operator stops a run wedged on an agent node that never returns, so it can
+    /// never reach a node boundary and the clean token path (below) cannot settle
+    /// it. Four things have to be true at once:
     ///
     /// 1. the run settles as `cancelled`, not as an error — a deliberate stop is
     ///    not a failure and must never land in the failure count;
@@ -2861,16 +3097,16 @@ to = "done"
     ///    for the one that was still executing — "how far did it get before I
     ///    stopped it" is the question the trail exists to answer, and inventing
     ///    a row for the wedged node would answer it wrongly;
-    /// 3. **it comes back fast.**
-    ///
-    /// The third is the one worth the stopwatch. If the engine future were not
-    /// dropped before the observer, its per-node handlers would still hold
-    /// observer `Arc` clones, the progress channel would stay open, and the
-    /// collector join would block for the full `PROGRESS_DRAIN_TIMEOUT` — ten
-    /// seconds, on every single cancel. And it would still *pass* the first two
-    /// assertions, because the timeout swallows it and the run settles
-    /// correctly in the end. Only the clock catches that bug, which is why this
-    /// asserts a bound rather than just an outcome.
+    /// 3. **the grace window is actually spent** — a wedged node cannot be
+    ///    hard-aborted before `CANCEL_HARD_ABORT_GRACE`, because the runner first
+    ///    flips the engine token and waits that long for a clean wind-down;
+    /// 4. **once the grace is up, it comes back fast** — the hard abort must drop
+    ///    the engine future *before* the observer, or the per-node handlers keep
+    ///    their observer `Arc` clones, the progress channel stays open, and the
+    ///    collector join blocks for the full `PROGRESS_DRAIN_TIMEOUT` on TOP of
+    ///    the grace. That bug still passes 1–2 (the timeout swallows it and the
+    ///    run settles correctly in the end); only the clock catches it, which is
+    ///    why this asserts a bound rather than just an outcome.
     #[tokio::test]
     async fn a_cancelled_run_settles_fast_keeping_only_its_completed_nodes() {
         let dir = tempfile::tempdir().unwrap();
@@ -2913,20 +3149,31 @@ to = "done"
             "a cancelled run must not route reports for work it did not finish"
         );
 
-        // **The drain-timeout guard.** `PROGRESS_DRAIN_TIMEOUT` is 10s; a
-        // correctly-dropped engine future settles in milliseconds. Two seconds
-        // is far below the timeout and far above a healthy cancel, so this
-        // fails loudly on a missing `drop(engine)` without being flaky on a
-        // loaded CI box.
+        // **The grace was actually spent.** A wedged node cannot reach a boundary,
+        // so the runner flips the token and waits the full `CANCEL_HARD_ABORT_GRACE`
+        // before dropping the future. Landing below that would mean the token path
+        // was skipped — a wedged run must never hard-abort early.
         assert!(
-            elapsed < std::time::Duration::from_secs(2),
-            "cancelling took {elapsed:?} — the progress channel did not close, so the collector \
-             join stalled until the drain timeout. Check that the engine future is dropped BEFORE \
-             the observer in `run_workflow_inner`."
+            elapsed >= CANCEL_HARD_ABORT_GRACE,
+            "cancelling took {elapsed:?} — shorter than the grace window, so the clean node-boundary \
+             wind-down was not attempted before the hard abort"
+        );
+        // **The drain-timeout guard.** Once the grace is up, the hard abort drops
+        // the engine future, which must close the progress channel so the
+        // collector join returns in milliseconds. If `drop(engine)` were missing
+        // the join would stall for the full `PROGRESS_DRAIN_TIMEOUT` (10s) ON TOP
+        // of the grace. This bounds the total at grace + a healthy drain, far
+        // below grace + the drain timeout, so it fails loudly on that bug without
+        // being flaky on a loaded CI box.
+        assert!(
+            elapsed < CANCEL_HARD_ABORT_GRACE + std::time::Duration::from_secs(2),
+            "cancelling took {elapsed:?} — past the grace the progress channel did not close, so \
+             the collector join stalled until the drain timeout. Check that the engine future is \
+             dropped BEFORE the observer in `run_workflow_inner`."
         );
         assert!(
-            elapsed < PROGRESS_DRAIN_TIMEOUT,
-            "cancel latency reached the drain timeout itself"
+            elapsed < CANCEL_HARD_ABORT_GRACE + PROGRESS_DRAIN_TIMEOUT,
+            "cancel latency reached the grace plus the full drain timeout"
         );
 
         // The trail: `shape` completed, `ceo` was still executing. Neither the
@@ -3022,6 +3269,597 @@ to = "done"
                 .iter()
                 .any(|e| matches!(e, CompanyEvent::WorkflowNodeFinished { .. })),
             "a run cancelled before it began must not report any node as finished"
+        );
+    }
+
+    /// A model that blocks its first call until the test releases it, after
+    /// announcing that it got there — but then, unlike [`StallingProvider`],
+    /// **returns normally**. That is what makes a *clean* cancel possible: the
+    /// agent node completes, the engine hits the next boundary, sees the flipped
+    /// token, and winds the run down rather than being dropped mid-await.
+    struct GatedProvider {
+        inner: MockProvider,
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for GatedProvider {
+        async fn invoke(
+            &self,
+            state: &(),
+            request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.entered.notify_waiters();
+            // `notify_one` carries a permit, so a release that lands before this
+            // registers is not lost — no ordering race with the test.
+            self.release.notified().await;
+            tinyagents::harness::model::ChatModel::invoke(&self.inner, state, request).await
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for GatedProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "gated".to_string()
+        }
+    }
+
+    /// **The clean-cancel arm (issue #398).** The counterpart to the hard-abort
+    /// keystone: here the wedged node is *released* right after the stop, so the
+    /// agent node finishes, the engine reaches the next boundary, observes the
+    /// flipped token, and winds the run down cleanly — returning a real
+    /// `RunOutcome` with `cancelled` set instead of having its future dropped.
+    ///
+    /// Three things distinguish this from the hard abort:
+    ///
+    /// 1. the run still settles `cancelled` and still routes nothing;
+    /// 2. **the completed nodes ride the run response** — `run.nodes` carries the
+    ///    trail, because a clean wind-down keeps the collected rows the dropped
+    ///    future had to throw away; and
+    /// 3. the node past the stop point (`done`) never runs — the token halts the
+    ///    graph at the boundary, so it is neither started nor finished.
+    #[tokio::test]
+    async fn a_cleanly_cancelled_run_winds_down_at_the_boundary_keeping_its_nodes() {
+        let dir = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let (mut deps, events) = deps_with_events(dir.path());
+        deps.provider = Arc::new(GatedProvider {
+            inner: MockProvider::new("mock: "),
+            entered: entered.clone(),
+            release: release.clone(),
+        });
+        deps.provider_slug = "gated".to_string();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(STALLS).expect("workflow parses");
+        let ctx = WorkflowRunContext::new(false);
+        let cancel = ctx.cancel.clone();
+        let reached_the_agent = entered.notified();
+
+        let mut run = Box::pin(run_workflow(pool, deps, &rec, &file, Value::Null, &ctx));
+        tokio::select! {
+            _ = &mut run => panic!("the run finished, so the agent node did not stall"),
+            () = reached_the_agent => {}
+        }
+
+        // Stop the run, THEN let the wedged node complete. The token is already
+        // flipped by the time the agent finishes, so the engine winds down at the
+        // boundary before `done` — well within the grace, so no hard abort.
+        let pressed = std::time::Instant::now();
+        cancel.cancel();
+        release.notify_one();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cleanly cancelled run never returned")
+            .expect("a cancelled run is Ok, not Err");
+        let elapsed = pressed.elapsed();
+
+        assert!(
+            run.cancelled,
+            "a clean node-boundary stop still reports cancelled"
+        );
+        assert!(
+            run.deliveries.is_empty(),
+            "a stopped run routes nothing, clean or not"
+        );
+        // Settled by winding down, NOT by the hard-abort fallback: it must come
+        // back well inside the grace window.
+        assert!(
+            elapsed < CANCEL_HARD_ABORT_GRACE,
+            "a clean wind-down took {elapsed:?} — it should settle before the grace, not fall back \
+             to the hard abort"
+        );
+
+        // The clean arm carries the trail on the RESPONSE (the hard-abort arm
+        // returns an empty one). `shape` and `ceo` finished; `done` is past the
+        // stop boundary and never ran.
+        let ran: Vec<&str> = run.nodes.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(ran.contains(&"shape"), "the transform completed: {ran:?}");
+        assert!(
+            ran.contains(&"ceo"),
+            "the agent node finished before the wind-down: {ran:?}"
+        );
+        assert!(
+            !ran.contains(&"done"),
+            "the node past the stop boundary must never run: {ran:?}"
+        );
+
+        // The journal agrees, and every node that finished shows both brackets.
+        let journal = journaled(&events, &rec.id).await;
+        let finished: Vec<String> = journal
+            .iter()
+            .filter_map(|e| match e {
+                CompanyEvent::WorkflowNodeFinished { node_id, .. } => Some(node_id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(finished, vec!["shape".to_string(), "ceo".to_string()]);
+        assert!(
+            !journal
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WorkflowNodeStarted { node_id, .. } if node_id == "done")),
+            "the halted node must not even open a started bracket"
+        );
+    }
+
+    // ── Issue #542: dry run / test mode ─────────────────────────────────────
+
+    /// A run context flagged dry, built off the unregistered constructor.
+    fn dry_ctx() -> WorkflowRunContext {
+        let mut ctx = WorkflowRunContext::new(false);
+        ctx.dry_run = true;
+        ctx
+    }
+
+    /// A [`MockProvider`] wrapper that counts every inference `invoke`, so a
+    /// test can prove a dry agent node makes **zero** of them (T2).
+    #[derive(Clone)]
+    struct CountingProvider {
+        inner: MockProvider,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for CountingProvider {
+        async fn invoke(
+            &self,
+            state: &(),
+            request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            tinyagents::harness::model::ChatModel::invoke(&self.inner, state, request).await
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for CountingProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "counting-mock".to_string()
+        }
+    }
+
+    /// A two-way branching graph: a `switch` on `kind` routes to one of two
+    /// output arms. Only the matched arm's node finishes.
+    const BRANCH: &str = r#"
+id = "branch"
+name = "Branch"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "route"
+kind = "switch"
+name = "Route"
+[node.config]
+field = "kind"
+[[node]]
+id = "paid_out"
+kind = "output"
+name = "Paid"
+[[node]]
+id = "free_out"
+kind = "output"
+name = "Free"
+[[edge]]
+from = "start"
+to = "route"
+[[edge]]
+from = "route"
+to = "paid_out"
+label = "paid"
+[[edge]]
+from = "route"
+to = "free_out"
+label = "free"
+"#;
+
+    /// T1 — a dry run walks the REAL graph with real branch selection: the taken
+    /// arm's node appears in the per-node trail, the untaken one never does.
+    #[tokio::test]
+    async fn t1_dry_run_reports_only_the_taken_branch_in_its_node_trail() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(BRANCH).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "kind": "paid" }),
+            &dry_ctx(),
+        )
+        .await
+        .expect("dry run completes");
+
+        let ran: Vec<&str> = run.nodes.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(
+            ran.contains(&"paid_out"),
+            "the taken branch should be in the trail: {ran:?}"
+        );
+        assert!(
+            !ran.contains(&"free_out"),
+            "the untaken branch must never appear: {ran:?}"
+        );
+    }
+
+    /// T2 — a dry agent node makes ZERO inference calls; the live control makes
+    /// at least one. The flag alone separates the two.
+    #[tokio::test]
+    async fn t2_dry_agent_node_makes_no_inference_calls() {
+        let dir = tempfile::tempdir().unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut deps = deps(dir.path());
+        deps.provider = Arc::new(CountingProvider {
+            inner: MockProvider::new("mock: "),
+            calls: calls.clone(),
+        });
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+        let file = parse_workflow(GREET).expect("parses");
+
+        // Live control: the agent node runs a real turn, so the counter moves.
+        run_workflow(
+            pool.clone(),
+            deps.clone(),
+            &rec,
+            &file,
+            serde_json::json!({}),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("live run completes");
+        let after_live = calls.load(std::sync::atomic::Ordering::SeqCst);
+        assert!(after_live > 0, "the live control must invoke inference");
+
+        // Dry run: the stub agent echoes, so the counter does NOT move.
+        let dry = run_workflow(pool, deps, &rec, &file, serde_json::json!({}), &dry_ctx())
+            .await
+            .expect("dry run completes");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            after_live,
+            "a dry agent node must make no inference calls"
+        );
+        // …and its output carries the dry marker rather than a real reply.
+        assert!(
+            dry.output.to_string().contains("[dry run]"),
+            "dry output should echo the stub fixture: {}",
+            dry.output
+        );
+    }
+
+    /// T3 — a dry `tool_call` executes NOTHING: the CSV the live tool would write
+    /// never appears, and no per-run workspace is even created.
+    #[tokio::test]
+    async fn t3_dry_tool_call_writes_nothing_to_disk() {
+        let src = r#"
+id = "csv"
+name = "CSV"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "export"
+kind = "tool_call"
+name = "Export"
+[node.config]
+slug = "csv_export"
+[node.config.args]
+filename = "wf-out.csv"
+data = "[{\"name\":\"Ada\"}]"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "export"
+[[edge]]
+from = "export"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(src).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_ctx(),
+        )
+        .await
+        .expect("dry run completes");
+        assert!(run.pending_approvals.is_empty());
+        // A dry run creates no workspace at all — so the tool could not have run.
+        assert!(
+            !dir.path().join("acme").join("_workflow").exists(),
+            "a dry run must not create a per-run workspace"
+        );
+    }
+
+    /// T4 — a dry run delivers NOTHING and journals NOTHING: the recording
+    /// channel gets zero dispatches, the delivery row is `Skipped`/`DryRun`, and
+    /// the journal holds no Started / NodeFinished / Finished / ReportDelivered
+    /// for the run.
+    #[tokio::test]
+    async fn t4_dry_run_delivers_nothing_and_journals_nothing() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let channel = OperatorChannel::new();
+        let events: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path()));
+        let mut deps = deps(dir.path());
+        deps.events = Some(events.clone());
+        deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
+            users: Arc::new(FsOps::new(dir.path())),
+            channels: vec![Arc::new(channel.clone())],
+            parking: None,
+            events: events.clone(),
+        });
+
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record(),
+            &file,
+            serde_json::json!({ "brief": "numbers" }),
+            &dry_ctx(),
+        )
+        .await
+        .expect("dry run completes");
+
+        assert_eq!(channel.sent().len(), 0, "a dry run must post nothing");
+        assert_eq!(run.deliveries.len(), 1, "{:?}", run.deliveries);
+        assert_eq!(
+            run.deliveries[0].status,
+            crate::ports::DeliveryStatus::Skipped
+        );
+        assert_eq!(
+            run.deliveries[0].reason,
+            crate::ports::DeliveryReason::DryRun
+        );
+
+        let journal = journaled(&events, &record().id).await;
+        assert!(
+            !journal.iter().any(|e| matches!(
+                e,
+                CompanyEvent::WorkflowRunStarted { .. }
+                    | CompanyEvent::WorkflowNodeStarted { .. }
+                    | CompanyEvent::WorkflowNodeFinished { .. }
+                    | CompanyEvent::WorkflowRunFinished { .. }
+                    | CompanyEvent::WorkflowReportDelivered { .. }
+            )),
+            "a dry run must journal nothing: {journal:?}"
+        );
+    }
+
+    /// T5 — the REQUIRED negative control: the SAME graph run with `dry_run =
+    /// false` DOES dispatch and DOES journal. The flag alone separates the two
+    /// behaviours.
+    #[tokio::test]
+    async fn t5_the_same_graph_run_for_real_dispatches_and_journals() {
+        use crate::runtime::channel::OperatorChannel;
+
+        let dir = tempfile::tempdir().unwrap();
+        let channel = OperatorChannel::new();
+        let events: Arc<dyn crate::ports::EventLog> =
+            Arc::new(crate::store::FsEventLog::new(dir.path()));
+        let mut deps = deps(dir.path());
+        deps.events = Some(events.clone());
+        deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
+            mail: None,
+            inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
+            users: Arc::new(FsOps::new(dir.path())),
+            channels: vec![Arc::new(channel.clone())],
+            parking: None,
+            events: events.clone(),
+        });
+
+        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record(),
+            &file,
+            serde_json::json!({ "brief": "numbers" }),
+            &WorkflowRunContext::new(false),
+        )
+        .await
+        .expect("real run completes");
+
+        assert_eq!(channel.sent().len(), 1, "a real run posts the report");
+        assert_eq!(run.deliveries[0].status, crate::ports::DeliveryStatus::Sent);
+
+        let journal = journaled(&events, &record().id).await;
+        assert!(
+            journal
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WorkflowRunStarted { .. })),
+            "a real run journals its start: {journal:?}"
+        );
+        assert!(
+            journal
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WorkflowReportDelivered { .. })),
+            "a real run journals its delivery: {journal:?}"
+        );
+    }
+
+    /// T6 — an ungranted `tool_call` refuses in a dry run EXACTLY as it does live
+    /// (the grant gate is pure and kept). `record()` grants no tools, so the
+    /// `code`-namespace `csv_export` is denied and, with `on_error` defaulting to
+    /// stop, the run fails with the same "not granted" error.
+    #[tokio::test]
+    async fn t6_ungranted_tool_refuses_identically_in_dry_mode() {
+        let src = r#"
+id = "t6"
+name = "T6"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "call"
+kind = "tool_call"
+name = "Call"
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "call"
+[[edge]]
+from = "call"
+to = "done"
+"#;
+        // A company that grants `web` but NOT `code`, so the `code`-namespace
+        // `csv_export` is refused — the same gate the live invoker applies.
+        let web_only: CompanyRecord = {
+            let mut rec = tools_record();
+            rec.manifest.tools.allow = vec!["web.*".to_string()];
+            rec
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let file = parse_workflow(src).expect("parses");
+        let err = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps(dir.path()),
+            &web_only, // grants web, not code
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_ctx(),
+        )
+        .await
+        .expect_err("an ungranted tool must fail the dry run too");
+        assert!(
+            err.to_string().contains("not granted"),
+            "the dry grant gate must refuse identically: {err}"
+        );
+    }
+
+    /// T7 — a dry run reports the gate on `pending_approvals` but parks NOTHING
+    /// durable: the journal stays empty (park_pending_gates is skipped).
+    #[tokio::test]
+    async fn t7_dry_gate_reports_pending_but_parks_nothing() {
+        let src = r#"
+id = "t7"
+name = "T7"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "gate"
+kind = "tool_call"
+name = "Gate"
+requires_approval = true
+[node.config]
+slug = "csv_export"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "gate"
+[[edge]]
+from = "gate"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let (deps, events) = deps_with_events(dir.path());
+        let file = parse_workflow(src).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &tools_record(),
+            &file,
+            serde_json::json!({ "seed": 1 }),
+            &dry_ctx(),
+        )
+        .await
+        .expect("dry run pauses cleanly");
+        assert!(
+            run.pending_approvals.iter().any(|id| id == "gate"),
+            "the gate should be reported pending: {:?}",
+            run.pending_approvals
+        );
+        let journal = journaled(&events, &tools_record().id).await;
+        assert!(
+            journal.is_empty(),
+            "a dry run parks nothing and journals nothing: {journal:?}"
+        );
+    }
+
+    /// T8 (issue #382) — a dry run emits **no `WorkflowNodeStarted`** either, for
+    /// the same reason it emits no finish: the started event is journaling-gated
+    /// (`events` wired AND not dry), not observer-gated. The observer still fires
+    /// — the per-node trail on the RESPONSE proves the nodes ran — but nothing
+    /// durable is written. The negative control that a real run of the same graph
+    /// DOES journal starts is `a_run_journals_a_start_then_a_started_finished_pair…`.
+    #[tokio::test]
+    async fn t8_dry_run_collects_the_node_trail_but_journals_no_node_started() {
+        let dir = tempfile::tempdir().unwrap();
+        let (deps, events) = deps_with_events(dir.path());
+        let file = parse_workflow(GREET).expect("parses");
+        let run = run_workflow(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record(),
+            &file,
+            serde_json::json!({}),
+            &dry_ctx(),
+        )
+        .await
+        .expect("dry run completes");
+
+        // The observer ran — the response carries the trail even for a dry run.
+        let ran: Vec<&str> = run.nodes.iter().map(|n| n.node_id.as_str()).collect();
+        assert!(ran.contains(&"ceo") && ran.contains(&"done"), "{ran:?}");
+
+        // …but nothing durable, node-started included.
+        let journal = journaled(&events, &record().id).await;
+        assert!(
+            !journal
+                .iter()
+                .any(|e| matches!(e, CompanyEvent::WorkflowNodeStarted { .. })),
+            "a dry run must journal no node-started event: {journal:?}"
+        );
+        assert!(
+            journal.is_empty(),
+            "a dry run journals nothing at all: {journal:?}"
         );
     }
 }

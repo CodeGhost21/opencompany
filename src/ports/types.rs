@@ -711,6 +711,42 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         column: Option<String>,
     },
+    /// A workspace node was written (issue #327) — created, changed, or
+    /// removed.
+    ///
+    /// [`TaskCardChanged`](Self::TaskCardChanged)'s counterpart for the note
+    /// tree, and missing for exactly the same reason: nothing on the feed said
+    /// the workspace had moved, so a console with the Workspace tab open saw an
+    /// agent's write only on a manual refresh or a window refocus. Now that
+    /// agents create notes (#551) and published deliverables land in the tree
+    /// (#552), that stale window is where most of the tree's activity happens.
+    ///
+    /// **Emitted from the store, not from the callers.** Appended by the
+    /// [`WorkspaceAnnouncer`](crate::runtime::WorkspaceAnnouncer) decorator
+    /// wrapping the company's
+    /// [`WorkspaceStore`](crate::ports::workspace::WorkspaceStore) — the one
+    /// place the seeder, the console routes, the agent tools and the publish
+    /// drain all pass through. An emit per call site is the shape of the bug:
+    /// correct only for the paths somebody remembered.
+    ///
+    /// **A record, never a stimulus.** Appended after the write it describes and
+    /// never fed into a cycle. A note that started work by existing would
+    /// re-enter this store and announce again.
+    ///
+    /// Additive: old logs never carry it, and its presence doesn't change how
+    /// any existing variant serializes.
+    WorkspaceChanged {
+        /// The written node's id.
+        node_id: String,
+        /// What happened to it, as a stable wire word: `opened` (the write
+        /// brought the node into existence), `updated` (its body or its place
+        /// in the tree changed), or `removed` (it was deleted).
+        ///
+        /// The same three words [`TaskCardChanged`](Self::TaskCardChanged)
+        /// uses, deliberately — a console that already knows how to read one
+        /// change vocabulary should not have to learn a second.
+        change: String,
+    },
     /// A dispatched board task finished its run (issue #185) — the terminal
     /// anchor a per-task timeline ends on and a lineage rollup counts.
     ///
@@ -894,10 +930,12 @@ pub enum CompanyEvent {
         /// The distinction is the point: a scheduled run is the
         /// nobody-was-watching case this event exists for.
         scheduled: bool,
-        /// A correlation id for the run, when the entry point minted one.
-        /// `None` today from both entry points — neither has a run id to give —
-        /// and kept `Option` so #242's first-class run, or any future
-        /// correlated entry point, needs no migration.
+        /// A correlation id for the run — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) and per-node events
+        /// carry. Every current entry point mints one and populates it here;
+        /// kept `Option` so a legacy record written before entry points minted
+        /// one, and any future entry point with no id to give, need no
+        /// migration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
         /// One row per attempt to route a reached `output` node's report to its
@@ -967,6 +1005,37 @@ pub enum CompanyEvent {
         /// Whether a cron schedule started this run rather than an operator.
         scheduled: bool,
     },
+    /// One non-trigger node of a workflow run began executing (issue #382),
+    /// reported by the engine's `RunObserver` immediately before the node's
+    /// first attempt.
+    ///
+    /// The opening bracket of a node the way
+    /// [`WorkflowNodeStarted`](Self::WorkflowNodeStarted)'s run-level sibling
+    /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) is the bracket of a run:
+    /// it turns "which node is executing right now" from a client-side guess
+    /// (derived from graph topology) into a fact the engine reports. It is
+    /// emitted on the **same** unbounded channel as this node's
+    /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) and always ahead of
+    /// it, so a reader folding the journal sees a node light up before it settles.
+    ///
+    /// **Structural ids only.** Unlike `WorkflowNodeFinished`, this carries no
+    /// status and no duration — the node has not run yet — and, like every event
+    /// on the progress trail, no node input. There is nothing here to scrub: a
+    /// node id is the whole payload, so the same operator-SSE / inference-sidecar
+    /// readers see only "node X of run R started".
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowNodeStarted {
+        /// The workflow graph that is running.
+        workflow_id: String,
+        /// The run this node belongs to — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) and
+        /// [`WorkflowNodeFinished`](Self::WorkflowNodeFinished) carry.
+        run_id: String,
+        /// The graph node that just started executing.
+        node_id: String,
+    },
     /// One non-trigger node of a workflow run finished (issue #371), reported by
     /// the engine's `RunObserver` as the graph is walked.
     ///
@@ -982,10 +1051,12 @@ pub enum CompanyEvent {
     /// [`WorkflowRunFinished::error`](Self::WorkflowRunFinished) — a tenant-scoped
     /// surface — so nothing is lost by keeping this one structural.
     ///
-    /// There is no matching *started* event, and that is an engine constraint
-    /// rather than a choice: tinyflows' `RunObserver` has `on_step_finish` but
-    /// no `on_step_start`, so "currently executing" is derived client-side from
-    /// the graph topology the console already holds.
+    /// Each node's matching *started* bracket is
+    /// [`WorkflowNodeStarted`](Self::WorkflowNodeStarted) (issue #382), emitted
+    /// on the same channel just before the node's first attempt. Before #382 the
+    /// engine's `RunObserver` had only `on_step_finish`, so "currently executing"
+    /// had to be derived client-side from the graph topology the console holds;
+    /// the engine now reports the start directly, so that derivation is gone.
     WorkflowNodeFinished {
         /// The workflow graph that is running.
         workflow_id: String,
@@ -1094,6 +1165,7 @@ impl CompanyEvent {
             Self::WorkflowDeleted { .. } => "WorkflowDeleted",
             Self::TaskSteered { .. } => "TaskSteered",
             Self::TaskCardChanged { .. } => "TaskCardChanged",
+            Self::WorkspaceChanged { .. } => "WorkspaceChanged",
             Self::DeskTaskCompleted { .. } => "DeskTaskCompleted",
             Self::EmergencyPauseChanged { .. } => "EmergencyPauseChanged",
             Self::TaskDiscussionPosted { .. } => "TaskDiscussionPosted",
@@ -1102,6 +1174,7 @@ impl CompanyEvent {
             Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
+            Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
             Self::WorkflowNodeFinished { .. } => "WorkflowNodeFinished",
         }
     }
@@ -1113,11 +1186,13 @@ impl CompanyEvent {
     /// for an unclassified entry is to keep it forever, and a wildcard would
     /// silently pick the other one.
     ///
-    /// Only four kinds are prunable, and each is high-volume machine exhaust
-    /// that no other entry addresses:
+    /// Only a handful of kinds are prunable, and each is high-volume machine
+    /// exhaust that no other entry addresses:
     ///
-    /// - the three workflow-run kinds — the growth the issue was filed for,
-    ///   left behind when #259 deletes a workflow, and
+    /// - the four workflow-run progress kinds — `WorkflowRunStarted`,
+    ///   `WorkflowNodeStarted` (issue #382), `WorkflowNodeFinished` and
+    ///   `WorkflowRunFinished` — the growth the issue was filed for, left behind
+    ///   when #259 deletes a workflow, and
     /// - `McpCallFailed`, a per-attempt tool failure whose durable meaning is
     ///   already carried by the run outcome it belongs to.
     ///
@@ -1141,8 +1216,32 @@ impl CompanyEvent {
         match self {
             Self::WorkflowRunStarted { .. }
             | Self::WorkflowRunFinished { .. }
+            | Self::WorkflowNodeStarted { .. }
             | Self::WorkflowNodeFinished { .. }
-            | Self::McpCallFailed { .. } => Prunable,
+            | Self::McpCallFailed { .. }
+            // Issue #327, and the one place this diverges from its sibling
+            // `TaskCardChanged` — which is Permanent — so the reasoning is
+            // spelled out rather than assumed.
+            //
+            // It passes all three of the tests the doc comment above sets. It
+            // is not evidence: the tree IS the record of what the workspace
+            // holds, and this frame carries no body, only "something moved".
+            // Nothing points at it: no entry is addressed by its sequence, the
+            // way a reaction or a redaction tombstone addresses a chat message.
+            // And nothing reads it back: no boot-time fold consults it, unlike
+            // `WorkflowReportDelivered`.
+            //
+            // What it is instead is high-volume machine exhaust — one frame per
+            // keystroke-debounced console save, per agent write, per seeded
+            // node at first boot — whose entire meaning is "re-read the tree",
+            // and which is worthless the moment the console has done so.
+            //
+            // `TaskCardChanged` stays Permanent because a board card's
+            // lifecycle is the company's work history. A note's revision
+            // history is not kept here at all: for a published deliverable it
+            // lives on the artifact chain (#552), and for an ordinary note it
+            // is not kept anywhere, which pruning this does not change.
+            | Self::WorkspaceChanged { .. } => Prunable,
 
             Self::OperatorMessage { .. }
             | Self::WebhookReceived { .. }
@@ -4314,6 +4413,51 @@ mod test {
                 error: None,
                 cancelled: false,
             }
+        );
+    }
+
+    /// Issue #327: the workspace announcement survives the JSONL round trip the
+    /// journal puts every event through, and carries its discriminant.
+    #[test]
+    fn workspace_changed_round_trips() {
+        let event = CompanyEvent::WorkspaceChanged {
+            node_id: "n-1".to_string(),
+            change: "updated".to_string(),
+        };
+        assert_eq!(round_trip(&event), event);
+        assert_eq!(event.kind(), "WorkspaceChanged");
+        let json = serde_json::to_string(&event).expect("serialize");
+        assert!(json.contains(r#""kind":"WorkspaceChanged""#), "{json}");
+        assert!(json.contains(r#""node_id":"n-1""#), "{json}");
+    }
+
+    /// The one variant whose retention class diverges from its sibling's, so
+    /// the choice is pinned rather than left to the next reader's memory.
+    ///
+    /// `WorkspaceChanged` is Prunable: it is high-volume machine exhaust whose
+    /// whole meaning is "re-read the tree", nothing addresses it by sequence,
+    /// and nothing folds it at boot. `TaskCardChanged` stays Permanent because
+    /// a board card's lifecycle is the company's work history.
+    #[test]
+    fn a_workspace_announcement_is_prunable_though_its_board_sibling_is_not() {
+        use crate::ports::events::RetentionClass;
+
+        assert_eq!(
+            CompanyEvent::WorkspaceChanged {
+                node_id: "n-1".to_string(),
+                change: "updated".to_string(),
+            }
+            .retention_class(),
+            RetentionClass::Prunable
+        );
+        assert_eq!(
+            CompanyEvent::TaskCardChanged {
+                task_id: "t-1".to_string(),
+                change: "opened".to_string(),
+                column: Some("todo".to_string()),
+            }
+            .retention_class(),
+            RetentionClass::Permanent
         );
     }
 

@@ -159,6 +159,16 @@ CREATE TABLE IF NOT EXISTS run_steps (
     step_json  TEXT NOT NULL,
     PRIMARY KEY (company_id, run_id, step_seq)
 );
+CREATE TABLE IF NOT EXISTS workflow_revisions (
+    company_id    TEXT NOT NULL,
+    id            TEXT NOT NULL,
+    workflow_id   TEXT NOT NULL,
+    revision_json TEXT NOT NULL,
+    created_ms    INTEGER NOT NULL,
+    PRIMARY KEY (company_id, id)
+);
+CREATE INDEX IF NOT EXISTS workflow_revisions_by_workflow
+    ON workflow_revisions (company_id, workflow_id, created_ms);
 CREATE TABLE IF NOT EXISTS usage_samples (
     company_id TEXT NOT NULL,
     seq        INTEGER NOT NULL,
@@ -227,6 +237,15 @@ CREATE UNIQUE INDEX IF NOT EXISTS login_codes_hash
     ON login_codes (company_id, code_hash);
 CREATE INDEX IF NOT EXISTS login_codes_email
     ON login_codes (company_id, email);
+CREATE TABLE IF NOT EXISTS schedule_fires (
+    company_id    TEXT NOT NULL,
+    schedule_id   TEXT NOT NULL,
+    scheduled_for INTEGER NOT NULL,
+    claimed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (company_id, schedule_id, scheduled_for)
+);
+CREATE INDEX IF NOT EXISTS schedule_fires_by_schedule
+    ON schedule_fires (company_id, schedule_id, scheduled_for);
 "#;
 
 /// Maps a `rusqlite` failure onto the crate error type without a bare `?` on
@@ -1628,6 +1647,116 @@ impl crate::ports::artifacts::ArtifactStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// WorkflowRevisionStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::workflow_revisions::WorkflowRevisionStore for SqliteStore {
+    async fn push_revision(
+        &self,
+        company: &CompanyId,
+        revision: &crate::ports::workflow_revisions::WorkflowRevisionRecord,
+    ) -> Result<()> {
+        use crate::ports::workflow_revisions::MAX_WORKFLOW_REVISIONS;
+        let json = serde_json::to_string(revision)?;
+        let mut guard = self.conn();
+        // Insert + prune in ONE transaction, so a reader never observes a
+        // 21-deep ring. The prune keeps the newest `MAX` rows for THIS workflow
+        // (by `created_ms DESC, id DESC`, matching `sort_newest_first`) and
+        // deletes the rest — the same shape OpenHuman's `flow_revisions` prune
+        // uses.
+        let tx = guard.transaction().map_err(sql_err)?;
+        tx.execute(
+            "INSERT INTO workflow_revisions (company_id, id, workflow_id, revision_json, created_ms) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                company.as_ref(),
+                revision.id,
+                revision.workflow_id,
+                json,
+                revision.created_at_millis as i64,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.execute(
+            "DELETE FROM workflow_revisions \
+             WHERE company_id = ?1 AND workflow_id = ?2 AND id NOT IN (\
+                 SELECT id FROM workflow_revisions \
+                 WHERE company_id = ?1 AND workflow_id = ?2 \
+                 ORDER BY created_ms DESC, id DESC LIMIT ?3)",
+            params![
+                company.as_ref(),
+                revision.workflow_id,
+                MAX_WORKFLOW_REVISIONS as i64,
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(())
+    }
+
+    async fn list_revisions(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+    ) -> Result<Vec<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_json FROM workflow_revisions \
+                 WHERE company_id = ?1 AND workflow_id = ?2 \
+                 ORDER BY created_ms DESC, id DESC",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), workflow_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(serde_json::from_str(&row.map_err(sql_err)?)?);
+        }
+        Ok(out)
+    }
+
+    async fn get_revision(
+        &self,
+        company: &CompanyId,
+        workflow_id: &str,
+        revision_id: &str,
+    ) -> Result<Option<crate::ports::workflow_revisions::WorkflowRevisionRecord>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT revision_json FROM workflow_revisions \
+                 WHERE company_id = ?1 AND workflow_id = ?2 AND id = ?3",
+            )
+            .map_err(sql_err)?;
+        let mut rows = stmt
+            .query_map(params![company.as_ref(), workflow_id, revision_id], |r| {
+                r.get::<_, String>(0)
+            })
+            .map_err(sql_err)?;
+        match rows.next() {
+            Some(row) => Ok(Some(serde_json::from_str(&row.map_err(sql_err)?)?)),
+            None => Ok(None),
+        }
+    }
+
+    async fn delete_revisions(&self, company: &CompanyId, workflow_id: &str) -> Result<u64> {
+        let conn = self.conn();
+        let n = conn
+            .execute(
+                "DELETE FROM workflow_revisions WHERE company_id = ?1 AND workflow_id = ?2",
+                params![company.as_ref(), workflow_id],
+            )
+            .map_err(sql_err)?;
+        Ok(n as u64)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RunStore
 // ---------------------------------------------------------------------------
 
@@ -1842,6 +1971,69 @@ impl crate::ports::runs::RunStore for SqliteStore {
             out.push(serde_json::from_str(&row.map_err(sql_err)?)?);
         }
         Ok(out)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::schedule_fires::ScheduleFireStore for SqliteStore {
+    async fn claim_fire(
+        &self,
+        company: &CompanyId,
+        schedule_id: &str,
+        minute: u64,
+    ) -> Result<bool> {
+        let conn = self.conn();
+        // `INSERT OR IGNORE` against the `(company_id, schedule_id,
+        // scheduled_for)` primary key: the row lands for the first caller and is
+        // silently skipped for every later one. `changes()` (rows-affected) is
+        // therefore exactly "did I win the claim" — 1 = won, 0 = a peer already
+        // held it.
+        let changed = conn
+            .execute(
+                "INSERT OR IGNORE INTO schedule_fires \
+                 (company_id, schedule_id, scheduled_for, claimed_at_ms) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    company.as_ref(),
+                    schedule_id,
+                    minute as i64,
+                    now_millis() as i64,
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(changed == 1)
+    }
+
+    async fn latest_fire(&self, company: &CompanyId, schedule_id: &str) -> Result<Option<u64>> {
+        let conn = self.conn();
+        // `MAX(scheduled_for)` over one schedule; a company that never fired it
+        // returns SQL `NULL`, mapped to `None` — the no-anchor / fresh-install
+        // case the schedulers read as "no catch-up".
+        let max: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(scheduled_for) FROM schedule_fires \
+                 WHERE company_id = ?1 AND schedule_id = ?2",
+                params![company.as_ref(), schedule_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(max.map(|m| m as u64))
+    }
+
+    async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize> {
+        let conn = self.conn();
+        let removed = conn
+            .execute(
+                "DELETE FROM schedule_fires \
+                 WHERE company_id = ?1 AND scheduled_for < ?2",
+                params![company.as_ref(), cutoff_minute as i64],
+            )
+            .map_err(sql_err)?;
+        Ok(removed)
     }
 }
 
@@ -2314,6 +2506,11 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workflow_revision_store() {
+        conformance::assert_workflow_revision_store(store()).await;
+    }
+
+    #[tokio::test]
     async fn conformance_context_chunk_stamps() {
         conformance::assert_context_chunk_stamps(store()).await;
     }
@@ -2407,6 +2604,36 @@ mod test {
     #[tokio::test]
     async fn conformance_run_reaper() {
         conformance::assert_run_reaper(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_schedule_fire_store() {
+        conformance::assert_schedule_fire_store(store()).await;
+    }
+
+    /// A fire claim written to a file-backed database survives a reopen (issue
+    /// #241) — the restart durability the whole port exists for.
+    #[tokio::test]
+    async fn schedule_fire_claim_survives_reopen() {
+        use crate::ports::schedule_fires::ScheduleFireStore;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("company.db");
+        let id = CompanyId::new("acme");
+        {
+            let s = SqliteStore::open(&path).unwrap();
+            assert!(s.claim_fire(&id, "workflow-x", 42).await.unwrap());
+        }
+        // A fresh handle over the same file loses the repeat and reads the anchor.
+        let s = SqliteStore::open(&path).unwrap();
+        assert!(
+            !s.claim_fire(&id, "workflow-x", 42).await.unwrap(),
+            "a reopened database must see the earlier claim and lose the repeat"
+        );
+        assert_eq!(
+            s.latest_fire(&id, "workflow-x").await.unwrap(),
+            Some(42),
+            "the anchor is durable across a reopen"
+        );
     }
 
     #[tokio::test]

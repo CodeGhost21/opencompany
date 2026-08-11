@@ -85,8 +85,12 @@ use crate::company::{WorkflowFile, list_workflows_union};
 use crate::ports::types::CompanyId;
 use crate::ports::{DeliveryReport, DeliveryStatus};
 use crate::runtime::CompanyRegistry;
+use crate::runtime::WorkflowSpawn;
 use crate::runtime::cron::{CivilTime, CronExpr};
-use crate::runtime::scheduler::{Clock, MINUTE_MS, millis_to_next_minute};
+use crate::runtime::scheduler::{
+    CATCHUP_WINDOW_MINUTES, Clock, MINUTE_MS, PRUNE_CUTOFF_MINUTES, millis_to_next_minute,
+    missed_instant,
+};
 
 /// Identifies one schedulable workflow: which company, which graph.
 type WorkflowKey = (CompanyId, String);
@@ -154,6 +158,13 @@ pub struct WorkflowScheduler {
     /// is once a minute forever, so the warning is latched here and re-armed
     /// only when the situation changes — see [`note_unwired`](Self::note_unwired).
     warned_unwired: HashSet<CompanyId>,
+    /// Workflows this scheduler has already run its one restart catch-up check
+    /// for (issue #241). Keyed per `(company, workflow)` and checked the FIRST
+    /// time each is seen — not once globally — so a tenant provisioned after boot
+    /// and a workflow created at runtime each get their catch-up when they first
+    /// appear, rather than being missed by a boot-only pass. Swept when a company
+    /// leaves the registry, like [`warned_unwired`](Self::warned_unwired).
+    caught_up: HashSet<WorkflowKey>,
     /// How many unwired-company warnings have been emitted, so a test can assert
     /// the latch actually suppresses the repeat.
     #[cfg(test)]
@@ -169,6 +180,7 @@ impl WorkflowScheduler {
             last_fired: HashMap::new(),
             in_flight: Arc::new(Mutex::new(HashSet::new())),
             warned_unwired: HashSet::new(),
+            caught_up: HashSet::new(),
             #[cfg(test)]
             unwired_warnings: 0,
         }
@@ -232,6 +244,11 @@ impl WorkflowScheduler {
         let now = self.clock.now_millis();
         let minute = now / MINUTE_MS;
         let civil = CivilTime::from_unix_millis(now);
+        // Issue #241: prune stale fire claims once a day, on the 00:00 UTC tick,
+        // per visited company. Once daily rather than every tick keeps a
+        // `* * * * *` schedule's 1440-rows-a-day log bounded without a delete on
+        // every minute.
+        let prune_due = civil.hour == 0 && civil.minute == 0;
 
         let mut fired = 0;
         for company in self.registry.list() {
@@ -241,6 +258,20 @@ impl WorkflowScheduler {
             // Not accepting work: paused or archived.
             if runtime.ensure_running().await.is_err() {
                 continue;
+            }
+            // The cutoff sits a full week past the catch-up window
+            // (PRUNE_CUTOFF_MINUTES > CATCHUP_WINDOW_MINUTES), so an anchor a
+            // booting replica still needs is never eligible. Best-effort — a
+            // prune failure must not stop this company's schedules from firing.
+            if prune_due {
+                let cutoff = minute.saturating_sub(PRUNE_CUTOFF_MINUTES);
+                if let Err(err) = runtime
+                    .schedule_fires()
+                    .prune_fires_before(&company, cutoff)
+                    .await
+                {
+                    tracing::warn!(%company, %err, "workflow scheduler: pruning old fire claims failed");
+                }
             }
             // The record's runtime-authored graph bodies, and the ids the
             // operator has switched off (issue #276) — both off the SAME load, so
@@ -326,20 +357,92 @@ impl WorkflowScheduler {
             // have failed to say so.
             let spawn = crate::runtime::WorkflowSpawn::new(&runtime, runner);
 
+            // The durable fire-claim store for this company (issue #241),
+            // reached through the runtime resolved this tick.
+            let store = runtime.schedule_fires().clone();
+
             for (file, cron, expr) in scheduled {
+                let key = (company.clone(), file.id.clone());
+                // The restart-stable durable identity for this workflow's cron.
+                let schedule_id = workflow_schedule_id(&file.id);
+
+                // First-sight restart catch-up (issue #241). The FIRST time this
+                // scheduler sees a (company, workflow), make up at most one fire
+                // that fell during downtime — covering a tenant provisioned after
+                // boot and a workflow created at runtime, neither of which a
+                // boot-only pass would reach. A disabled workflow never gets here
+                // (filtered above), so a paused schedule is never caught up.
+                if self.caught_up.insert(key.clone()) {
+                    match store.latest_fire(&company, &schedule_id).await {
+                        Ok(anchor) => {
+                            if let Some(missed) =
+                                missed_instant(&expr, anchor, minute, CATCHUP_WINDOW_MINUTES)
+                            {
+                                // Hold the overlap slot across the catch-up run so
+                                // a same-minute steady-state fire below suppresses
+                                // WITHOUT claiming (the minute is suppressed, not
+                                // burned) rather than running a second copy.
+                                if let Some(claim) = self.claim(&key) {
+                                    match store.claim_fire(&company, &schedule_id, missed).await {
+                                        Ok(true) => {
+                                            let input = json!({
+                                                "request": format!("Scheduled run (cron `{cron}`)"),
+                                                "scheduled": true,
+                                                "cron": cron.clone(),
+                                                // The ORIGINAL missed minute, not
+                                                // now — the run is a make-up of it.
+                                                "firedAtMs": missed * MINUTE_MS,
+                                                "catchUp": true,
+                                            });
+                                            tracing::info!(
+                                                %company,
+                                                workflow = %file.id,
+                                                schedule = %cron,
+                                                missed_minute = missed,
+                                                "workflow scheduler: firing one catch-up for a schedule missed during downtime"
+                                            );
+                                            spawn_scheduled_run(
+                                                &spawn,
+                                                claim,
+                                                company.clone(),
+                                                file.clone(),
+                                                input,
+                                            );
+                                            fired += 1;
+                                        }
+                                        // A simultaneously-booting replica claimed
+                                        // the catch-up first: release the slot.
+                                        Ok(false) => drop(claim),
+                                        Err(err) => {
+                                            drop(claim);
+                                            tracing::warn!(%company, workflow = %file.id, %err, "workflow scheduler: could not claim catch-up fire; skipping (fail closed)");
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Fail closed: without a trustworthy anchor we cannot tell
+                        // a missed fire from an already-made one.
+                        Err(err) => {
+                            tracing::warn!(%company, workflow = %file.id, %err, "workflow scheduler: could not read catch-up anchor; skipping catch-up (fail closed)");
+                        }
+                    }
+                }
+
                 if !expr.matches(&civil) {
                     continue;
                 }
 
-                let key = (company.clone(), file.id.clone());
                 if self.last_fired.get(&key) == Some(&minute) {
-                    continue; // already fired this minute
+                    continue; // already fired this minute (in-process first pass)
                 }
                 self.last_fired.insert(key.clone(), minute);
 
-                // Overlap guard: a previous scheduled run still executing keeps
-                // this fire from stacking a second copy on top of it. Manual
-                // runs go through the run route and are unaffected.
+                // Overlap guard, checked BEFORE the durable claim: a previous
+                // scheduled run still executing suppresses this fire WITHOUT
+                // claiming the minute, so a slow run's own next tick is suppressed
+                // rather than burned. Manual runs go through the run route and are
+                // unaffected.
                 let Some(claim) = self.claim(&key) else {
                     tracing::info!(
                         %company,
@@ -350,178 +453,37 @@ impl WorkflowScheduler {
                     continue;
                 };
 
+                // Durable cross-replica claim (issue #241): the authority the
+                // in-process `last_fired` map only approximates. Awaited before
+                // the run spawns, so a loser produces zero side effects.
+                match store.claim_fire(&company, &schedule_id, minute).await {
+                    // Won: this replica fires.
+                    Ok(true) => {}
+                    // A peer already fired this minute: release the overlap slot
+                    // and skip with zero side effects.
+                    Ok(false) => {
+                        drop(claim);
+                        continue;
+                    }
+                    // Fail closed: never fire unclaimed, or the cross-replica
+                    // double-fire this claim exists to prevent comes back.
+                    Err(err) => {
+                        drop(claim);
+                        tracing::warn!(%company, workflow = %file.id, %err, "workflow scheduler: could not claim a fire; skipping this minute (fail closed)");
+                        continue;
+                    }
+                }
+
                 let input = json!({
                     // `request` is what `run_request_text` reads, so every agent
                     // turn in the run knows it was started by a schedule rather
                     // than by an operator typing a topic.
                     "request": format!("Scheduled run (cron `{cron}`)"),
                     "scheduled": true,
-                    "cron": cron,
+                    "cron": cron.clone(),
                     "firedAtMs": now,
                 });
-
-                let workflow = file;
-                // Cloned BEFORE the spawn: the task outlives this loop
-                // iteration (and this borrow of `runtime`), so everything it
-                // needs has to be moved in rather than reached for from inside.
-                // The clone carries the company id, the event log (issue #228 —
-                // what turns a scheduled run's outcome from a host-stdout line
-                // into something the tenant's own console reads back), the run
-                // supervisor (issue #383 — what puts a Cancel button on a cron
-                // fire nobody chose the timing of) and the runner.
-                let spawn = spawn.clone();
-                // A FRESH TASK PER FIRE IS CORRECT HERE, and is not a hole in
-                // the `WORKFLOW_DEPTH` re-entry guard
-                // (`crate::workflows::runner`). That guard is a task-local
-                // counting one *causal chain*: a run, the agent turns inside
-                // it, and the tools those turns call all stay on one task, so a
-                // workflow that reaches back into itself is bounded. A
-                // scheduled fire starts no such chain — it is a new root, at
-                // depth 0, exactly like an operator clicking Run — so spawning
-                // it here is the same as any other entry point. What would
-                // break the guard is spawning *inside* an existing run's chain,
-                // which would reset the depth mid-chain; this scheduler never
-                // runs inside a run. Spawning also keeps one slow agent run
-                // from starving every other company's schedule on the tick
-                // loop.
-                tokio::spawn(async move {
-                    // Held for the whole run so the slot is released on EVERY
-                    // exit path, including an unwind. Releasing after the
-                    // `await` instead would leak the claim when the runner
-                    // panics — and a leaked claim is permanent, because nothing
-                    // else ever removes it, so one panic would retire that
-                    // schedule for the life of the process with no log line.
-                    let _claim = claim;
-                    let (company, workflow_id) = key;
-                    // Issue #440: through the shared primitive, which owns both
-                    // halves this used to copy — the supervisor-minted run id
-                    // (issue #383: it is the address the console's Cancel button
-                    // sends to, and #371: the id the run's progress events and
-                    // its outcome share, including on the error arm where the
-                    // runner hands back nothing that could carry one) and the
-                    // `record_run_finished` on BOTH arms (issue #228), with the
-                    // run guard held across the journal write.
-                    //
-                    // The handle is **awaited**, not dropped. The claim above is
-                    // this scheduler's own overlap guard and has to outlive the
-                    // run, and the delivery-log sweep below needs the outcome.
-                    // Both remain the scheduler's job; what is shared is only
-                    // how a run is started and recorded.
-                    let (_run_id, handle) = spawn.spawn(workflow, input, true);
-                    match handle.await {
-                        Ok(Ok(run)) => {
-                            // A manual run hands `deliveries` back in the HTTP
-                            // response and the console renders it. A scheduled
-                            // run has no response and nobody watching, so
-                            // without this the exact case the operator most
-                            // needs to know about — the owner summary that did
-                            // NOT go out — would be the quietest thing the
-                            // system does.
-                            let counts = DeliveryCounts::of(&run.deliveries);
-                            // One line per undelivered report: a count alone
-                            // says something is wrong without saying what to
-                            // fix, and `reason` is the part that names the
-                            // failure class.
-                            for report in &run.deliveries {
-                                if report.status == DeliveryStatus::Sent {
-                                    continue;
-                                }
-                                // A parked report is not a failure and must not
-                                // be logged as one — it is a card waiting in
-                                // the approvals queue. Say where to go, at
-                                // info, and move on.
-                                if report.status == DeliveryStatus::Pending {
-                                    tracing::info!(
-                                        %company,
-                                        workflow = %workflow_id,
-                                        node = %report.node,
-                                        kind = %report.kind,
-                                        // Same reason as the warn below: never
-                                        // the recipient's address in a host log.
-                                        target_configured = report.target.is_some(),
-                                        "workflow scheduler: a scheduled run's report is parked for operator approval — see the Approvals view"
-                                    );
-                                    continue;
-                                }
-                                tracing::warn!(
-                                    %company,
-                                    workflow = %workflow_id,
-                                    node = %report.node,
-                                    kind = %report.kind,
-                                    // NOT the target itself: for an `email`
-                                    // destination that is the recipient's
-                                    // address, and this line goes to host
-                                    // stdout — which on a hosted tenant is us,
-                                    // not the operator. Whether one resolved is
-                                    // the part with diagnostic value anyway.
-                                    target_configured = report.target.is_some(),
-                                    status = ?report.status,
-                                    // The classification, NOT `report.detail`.
-                                    // `detail` interpolates the transport's own
-                                    // words on the failure arms, and a mail
-                                    // transport quotes the mailbox it refused —
-                                    // so logging it walks the recipient address
-                                    // onto host stdout through the back door
-                                    // that scrubbing `target` left open (issue
-                                    // #248). `reason` says the same thing about
-                                    // what failed, out of a closed set that
-                                    // cannot carry transport text; the operator
-                                    // still gets the full `detail` on the run
-                                    // response and in the run history their own
-                                    // console reads back.
-                                    reason = %report.reason,
-                                    "workflow scheduler: a scheduled run's report was NOT delivered"
-                                );
-                            }
-                            tracing::info!(
-                                %company,
-                                workflow = %workflow_id,
-                                pending_approvals = run.pending_approvals.len(),
-                                sent = counts.sent,
-                                // Awaiting a human, not a fix — counted apart
-                                // from `undelivered` for exactly that reason.
-                                pending_approval = counts.pending,
-                                skipped = counts.skipped,
-                                denied = counts.denied,
-                                failed = counts.failed,
-                                // The one number worth alerting on, so a log
-                                // query need not sum the three refusal kinds.
-                                undelivered = counts.undelivered(),
-                                "workflow scheduler: scheduled run finished"
-                            );
-                            // The operator-facing half — the journaled
-                            // `WorkflowRunFinished` the tenant's own console
-                            // reads back — was written by `spawn` before this
-                            // handle resolved (issue #228). The log lines above
-                            // stay exactly as they are: they are the platform
-                            // team's diagnostic on host stdout, which on a
-                            // hosted tenant is emphatically not the operator.
-                        }
-                        Ok(Err(err)) => {
-                            tracing::warn!(
-                                %company,
-                                workflow = %workflow_id,
-                                %err,
-                                "workflow scheduler: scheduled run failed"
-                            );
-                        }
-                        // The run task itself came apart — a panic inside the
-                        // runner, which unwinds in the spawned task rather than
-                        // here. Nothing was journaled for it (the outcome write
-                        // lives in that task), so this line is the only trace
-                        // there is, and it must not be silent. The claim still
-                        // releases: it is held by this task's guard.
-                        Err(err) => {
-                            tracing::error!(
-                                %company,
-                                workflow = %workflow_id,
-                                %err,
-                                "workflow scheduler: a scheduled run's task did not complete; its \
-                                 outcome was never recorded"
-                            );
-                        }
-                    }
-                });
+                spawn_scheduled_run(&spawn, claim, company.clone(), file, input);
                 fired += 1;
             }
         }
@@ -543,6 +505,15 @@ impl WorkflowScheduler {
         let registry = &self.registry;
         self.warned_unwired
             .retain(|company| registry.get(company).is_some());
+        // The catch-up latch is keyed per (company, workflow); a company archived
+        // out of the registry is never visited again, so its entries would be
+        // orphaned forever. Swept here beside the others. (A deleted-but-company-
+        // still-present workflow leaves one stale entry, harmless: it is only a
+        // "have I run catch-up for this" bit and a re-created workflow of the same
+        // id is a first sight again only after this sweep — acceptable, since a
+        // re-created workflow's anchor is whatever it last durably fired.)
+        self.caught_up
+            .retain(|(company, _)| registry.get(company).is_some());
 
         fired
     }
@@ -665,6 +636,165 @@ fn lock_in_flight(
     in_flight
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// The durable [`ScheduleFireStore`](crate::ports::ScheduleFireStore) identity
+/// for a saved workflow's cron trigger: `"workflow-<workflow_id>"` (issue #241).
+///
+/// The natural `(company, workflow)` identity, so it survives a restart and does
+/// not depend on any positional index. The `workflow-` prefix (a hyphen, never a
+/// colon) keeps it readable in a log line; the fs backend hashes it before it
+/// can address the filesystem, so a console-chosen `<workflow_id>` is safe.
+fn workflow_schedule_id(workflow_id: &str) -> String {
+    format!("workflow-{workflow_id}")
+}
+
+/// Spawns one scheduled run on its own task, holding `claim` for the run's whole
+/// lifetime and logging its delivery outcome.
+///
+/// Shared by the steady-state fire path and the restart catch-up (issue #241),
+/// so both start a run and record it the one way [`WorkflowSpawn`] owns (issues
+/// #228 / #383 / #440); the callers differ only in the `firedAtMs` / `catchUp`
+/// they stamp into `input`.
+///
+/// A FRESH TASK PER FIRE IS CORRECT HERE, and is not a hole in the
+/// `WORKFLOW_DEPTH` re-entry guard (`crate::workflows::runner`). That guard is a
+/// task-local counting one *causal chain*: a run, its agent turns, and the tools
+/// those turns call all stay on one task, so a workflow that reaches back into
+/// itself is bounded. A scheduled fire starts no such chain — it is a new root,
+/// at depth 0, exactly like an operator clicking Run. Spawning also keeps one
+/// slow agent run from starving every other company's schedule on the tick loop.
+fn spawn_scheduled_run(
+    spawn: &WorkflowSpawn,
+    claim: Claim,
+    company: CompanyId,
+    workflow: WorkflowFile,
+    input: serde_json::Value,
+) {
+    // Cloned before the spawn: the task outlives the tick's borrow of `runtime`,
+    // so everything it needs is moved in. The clone carries the company id, the
+    // event log (issue #228 — what turns a scheduled run's outcome from a
+    // host-stdout line into something the tenant's own console reads back), the
+    // run supervisor (issue #383 — the Cancel button on a cron fire nobody chose
+    // the timing of) and the runner.
+    let spawn = spawn.clone();
+    tokio::spawn(async move {
+        // Held for the whole run so the slot is released on EVERY exit path,
+        // including an unwind. Releasing after the `await` instead would leak the
+        // claim when the runner panics — and a leaked claim is permanent, because
+        // nothing else ever removes it, so one panic would retire that schedule
+        // for the life of the process with no log line.
+        let _claim = claim;
+        let workflow_id = workflow.id.clone();
+        // Issue #440: through the shared primitive, which owns the
+        // supervisor-minted run id (#383/#371) and the `record_run_finished` on
+        // BOTH arms (#228), with the run guard held across the journal write. The
+        // handle is **awaited**, not dropped: the claim is this scheduler's own
+        // overlap guard and has to outlive the run, and the delivery-log sweep
+        // below needs the outcome.
+        // Issue #542: a scheduled run is always for real — `false`.
+        let (_run_id, handle) = spawn.spawn(workflow, input, true, false);
+        match handle.await {
+            Ok(Ok(run)) => {
+                // A manual run hands `deliveries` back in the HTTP response and
+                // the console renders it. A scheduled run has no response and
+                // nobody watching, so without this the exact case the operator
+                // most needs to know about — the owner summary that did NOT go
+                // out — would be the quietest thing the system does.
+                let counts = DeliveryCounts::of(&run.deliveries);
+                for report in &run.deliveries {
+                    if report.status == DeliveryStatus::Sent {
+                        continue;
+                    }
+                    // A parked report is not a failure and must not be logged as
+                    // one — it is a card waiting in the approvals queue. Say where
+                    // to go, at info, and move on.
+                    if report.status == DeliveryStatus::Pending {
+                        tracing::info!(
+                            %company,
+                            workflow = %workflow_id,
+                            node = %report.node,
+                            kind = %report.kind,
+                            // Same reason as the warn below: never the recipient's
+                            // address in a host log.
+                            target_configured = report.target.is_some(),
+                            "workflow scheduler: a scheduled run's report is parked for operator approval — see the Approvals view"
+                        );
+                        continue;
+                    }
+                    tracing::warn!(
+                        %company,
+                        workflow = %workflow_id,
+                        node = %report.node,
+                        kind = %report.kind,
+                        // NOT the target itself: for an `email` destination that
+                        // is the recipient's address, and this line goes to host
+                        // stdout — which on a hosted tenant is us, not the
+                        // operator. Whether one resolved is the part with
+                        // diagnostic value anyway.
+                        target_configured = report.target.is_some(),
+                        status = ?report.status,
+                        // The classification, NOT `report.detail`. `detail`
+                        // interpolates the transport's own words on the failure
+                        // arms, and a mail transport quotes the mailbox it refused
+                        // — so logging it walks the recipient address onto host
+                        // stdout through the back door that scrubbing `target`
+                        // left open (issue #248). `reason` says the same thing
+                        // about what failed, out of a closed set that cannot carry
+                        // transport text; the operator still gets the full
+                        // `detail` on the run response and in the run history
+                        // their own console reads back.
+                        reason = %report.reason,
+                        "workflow scheduler: a scheduled run's report was NOT delivered"
+                    );
+                }
+                tracing::info!(
+                    %company,
+                    workflow = %workflow_id,
+                    pending_approvals = run.pending_approvals.len(),
+                    sent = counts.sent,
+                    // Awaiting a human, not a fix — counted apart from
+                    // `undelivered` for exactly that reason.
+                    pending_approval = counts.pending,
+                    skipped = counts.skipped,
+                    denied = counts.denied,
+                    failed = counts.failed,
+                    // The one number worth alerting on, so a log query need not
+                    // sum the three refusal kinds.
+                    undelivered = counts.undelivered(),
+                    "workflow scheduler: scheduled run finished"
+                );
+                // The operator-facing half — the journaled `WorkflowRunFinished`
+                // the tenant's own console reads back — was written by `spawn`
+                // before this handle resolved (issue #228). The log lines above
+                // stay exactly as they are: they are the platform team's
+                // diagnostic on host stdout, which on a hosted tenant is
+                // emphatically not the operator.
+            }
+            Ok(Err(err)) => {
+                tracing::warn!(
+                    %company,
+                    workflow = %workflow_id,
+                    %err,
+                    "workflow scheduler: scheduled run failed"
+                );
+            }
+            // The run task itself came apart — a panic inside the runner, which
+            // unwinds in the spawned task rather than here. Nothing was journaled
+            // for it (the outcome write lives in that task), so this line is the
+            // only trace there is, and it must not be silent. The claim still
+            // releases: it is held by this task's guard.
+            Err(err) => {
+                tracing::error!(
+                    %company,
+                    workflow = %workflow_id,
+                    %err,
+                    "workflow scheduler: a scheduled run's task did not complete; its outcome was \
+                     never recorded"
+                );
+            }
+        }
+    });
 }
 
 /// The cron a graph's trigger schedules itself on, if any.
@@ -899,6 +1029,7 @@ mod test {
                             pending_approvals: Vec::new(),
                             deliveries: Vec::new(),
                             cancelled: true,
+                            nodes: Vec::new(),
                         });
                     }
                 }
@@ -909,6 +1040,7 @@ mod test {
                 pending_approvals: Vec::new(),
                 deliveries: self.deliveries.clone(),
                 cancelled: false,
+                nodes: Vec::new(),
             })
         }
     }
@@ -1706,8 +1838,12 @@ to = "done"
             .cloned()
             .expect("the same runner the scheduler used");
         let workflow = parse_workflow(&body("digest", Some("* * * * *"))).expect("parses");
-        let (_run_id, handle) =
-            crate::runtime::WorkflowSpawn::new(&runtime, runner).spawn(workflow, json!({}), false);
+        let (_run_id, handle) = crate::runtime::WorkflowSpawn::new(&runtime, runner).spawn(
+            workflow,
+            json!({}),
+            false,
+            false,
+        );
         handle.await.expect("the run task completes").expect("runs");
         let outcomes = wait_for_outcomes(&registry, company, 2).await;
 
@@ -2565,5 +2701,235 @@ to = "done"
             "the paused workflow must be the one that did not run"
         );
         drain(&scheduler).await;
+    }
+
+    // --- issue #241: durable claims + restart catch-up ---------------------
+
+    /// The anchor minute of a UTC civil minute, the unit the claim store speaks.
+    fn minute_at(year: i64, month: u32, day: u32, hour: u32, minute: u32) -> u64 {
+        millis_at(year, month, day, hour, minute) / MINUTE_MS
+    }
+
+    /// Two independent schedulers over one durable store — a second replica —
+    /// fire a matching minute exactly once between them.
+    #[tokio::test]
+    async fn two_schedulers_over_one_store_fire_once() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        // Monday 2026-07-13 09:00 — the schedule matches.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut a = WorkflowScheduler::new(registry.clone(), clock.clone());
+        let mut b = WorkflowScheduler::new(registry, clock);
+
+        assert_eq!(a.tick().await, 1, "the first replica wins the claim");
+        assert_eq!(
+            b.tick().await,
+            0,
+            "the second replica loses and fires nothing"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        assert_eq!(started.lock().unwrap().len(), 1, "one run in total");
+    }
+
+    /// The FIRST time a scheduler sees a scheduled workflow, it makes up one fire
+    /// missed during downtime — at the original missed minute, marked `catchUp`.
+    #[tokio::test]
+    async fn first_sight_catch_up_fires_one_missed_run() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        // Anchor two Mondays back; the most recent missed Monday is 2026-07-13.
+        let anchor = minute_at(2026, 7, 6, 9, 0);
+        runtime
+            .schedule_fires()
+            .claim_fire(&company, "workflow-digest", anchor)
+            .await
+            .unwrap();
+
+        // "Now" is a Tuesday, so the CURRENT minute never matches — isolating the
+        // catch-up as the only possible fire.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+        assert_eq!(scheduler.tick().await, 1, "one catch-up fires");
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+
+        let run = started.lock().unwrap()[0].clone();
+        assert_eq!(run.workflow, "digest");
+        assert_eq!(run.input["catchUp"], true);
+        assert_eq!(
+            run.input["firedAtMs"],
+            minute_at(2026, 7, 13, 9, 0) * MINUTE_MS,
+            "the make-up run carries the ORIGINAL missed minute, not now"
+        );
+        // The catch-up claimed that minute, so the anchor advanced to it.
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(minute_at(2026, 7, 13, 9, 0))
+        );
+    }
+
+    /// A switched-off workflow (#276) gets NO catch-up: it is filtered before the
+    /// catch-up check, so its anchor is never touched.
+    #[tokio::test]
+    async fn a_disabled_workflow_gets_no_catch_up() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        set_enabled(&registry, "acme", "digest", false).await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        let anchor = minute_at(2026, 7, 6, 9, 0);
+        runtime
+            .schedule_fires()
+            .claim_fire(&company, "workflow-digest", anchor)
+            .await
+            .unwrap();
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock);
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "a paused schedule makes up nothing"
+        );
+        // The anchor is untouched: no catch-up claim was written.
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(anchor)
+        );
+        assert!(started.lock().unwrap().is_empty());
+    }
+
+    /// A previous scheduled run still in flight suppresses the next minute's fire
+    /// WITHOUT claiming it — the minute is suppressed (a slow run's own next
+    /// tick), not burned, so a peer could still fire it.
+    #[tokio::test]
+    async fn an_in_flight_run_suppresses_the_next_minute_without_claiming_it() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let gate = Arc::new(Semaphore::new(0));
+        let (runner, started, _completed) = RecordingRunner::gated(gate.clone());
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 13, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry, clock.clone());
+
+        // Minute M fires and the run parks (gated), holding the in-flight slot.
+        assert_eq!(scheduler.tick().await, 1);
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        let m = minute_at(2026, 7, 13, 9, 0);
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(m)
+        );
+
+        // Minute M+1: the still-in-flight run suppresses this fire. Crucially the
+        // durable claim is NOT taken, so the anchor stays at M — the minute is
+        // suppressed, not burned.
+        clock.set(millis_at(2026, 7, 13, 9, 1));
+        assert_eq!(scheduler.tick().await, 0);
+        assert_eq!(
+            runtime
+                .schedule_fires()
+                .latest_fire(&company, "workflow-digest")
+                .await
+                .unwrap(),
+            Some(m),
+            "a suppressed minute must NOT be claimed"
+        );
+
+        // Let the parked run finish so the test tears down cleanly.
+        gate.add_permits(1);
+        drain(&scheduler).await;
+    }
+
+    /// A company provisioned AFTER boot still gets its catch-up: the check is
+    /// per-(company, workflow) first-sight, not a one-shot boot pass.
+    #[tokio::test]
+    async fn a_late_provisioned_company_gets_its_catch_up_on_first_sight() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+
+        // The scheduler starts over an EMPTY registry — nothing to do yet.
+        let registry = CompanyRegistry::new();
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+        assert_eq!(scheduler.tick().await, 0, "empty registry fires nothing");
+
+        // Provision a company with a missed schedule, after boot.
+        let late = company_with_overlays(
+            &home,
+            "late",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let company = CompanyId::new("late");
+        let runtime = late.get(&company).unwrap();
+        runtime
+            .schedule_fires()
+            .claim_fire(&company, "workflow-digest", minute_at(2026, 7, 6, 9, 0))
+            .await
+            .unwrap();
+        registry.insert(company, runtime);
+
+        // Next tick sees the company for the first time and makes up its fire.
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "the late company gets its catch-up"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        assert_eq!(started.lock().unwrap()[0].input["catchUp"], true);
     }
 }

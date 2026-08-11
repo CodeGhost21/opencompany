@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use crate::Result;
 use crate::company::WorkflowFile;
-use crate::ports::types::CompanyId;
+use crate::ports::types::{CompanyId, WorkflowNodeStatus};
 
 /// The outcome of running one workflow to completion.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +56,39 @@ pub struct WorkflowRun {
     /// payload still loads, as `false`.
     #[serde(default)]
     pub cancelled: bool,
+    /// Per-node progress for this run, in the order the nodes finished (issue
+    /// #542 — the same three scalars a `WorkflowNodeFinished` journal row
+    /// carries, and no more: a node's own output and error text are
+    /// deliberately absent, so they cannot ride this into the run response).
+    ///
+    /// Collected for **every** run, not only a dry one — the runner's progress
+    /// observer feeds it on all paths, so an ordinary synchronous run's
+    /// response can carry the same per-node timeline the history panel already
+    /// shows. It is the *whole* durable record of a dry run, which journals
+    /// nothing: the settled response body is all a test run leaves behind.
+    ///
+    /// `#[serde(default)]` so a `WorkflowRun` deserialized from a payload
+    /// written before this field existed still loads, as an empty list.
+    #[serde(default)]
+    pub nodes: Vec<WorkflowRunNodeRow>,
+}
+
+/// One node's structural outcome inside a run (issue #542).
+///
+/// The port-side twin of the HTTP layer's `WorkflowRunNode` and of a
+/// `WorkflowNodeFinished` journal row: id, status, elapsed millis, and nothing
+/// that could leak a node's payload. It rides [`WorkflowRun::nodes`] out of the
+/// runner so the run response can report a per-node timeline without a second
+/// read of the journal — which matters most for a dry run, whose timeline is
+/// journaled nowhere.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowRunNodeRow {
+    /// The node that finished.
+    pub node_id: String,
+    /// Whether it succeeded or errored.
+    pub status: WorkflowNodeStatus,
+    /// Wall-clock duration of the node's execution, in milliseconds.
+    pub elapsed_ms: u64,
 }
 
 /// What became of one attempt to deliver an `output` node's report.
@@ -174,6 +207,12 @@ pub enum DeliveryReason {
     /// The destination kind is not one this runtime knows how to deliver to
     /// (unreachable through `parse_workflow`, which rejects unknown kinds).
     UnknownDestinationKind,
+    /// This was a **dry run** (issue #542): the report was routed as far as its
+    /// destination but deliberately not dispatched, so an operator can see
+    /// *where* a report would have gone without anything actually leaving the
+    /// process. Carries no transport text — nothing was attempted — so it is
+    /// safe to log.
+    DryRun,
     /// No reason was recorded. Only reachable by deserializing a
     /// `WorkflowRunFinished` event written before this field existed.
     #[default]
@@ -223,6 +262,10 @@ impl std::fmt::Display for DeliveryReason {
             Self::ChannelRefused => "the channel refused the message",
             Self::UnknownDestinationKind => {
                 "the destination kind is not one this runtime can deliver to"
+            }
+            Self::DryRun => {
+                "this was a test run, so the report was not sent — its destination is shown so you \
+                 can see where it would have gone"
             }
             Self::Unspecified => "no reason was recorded for this delivery",
         })
@@ -318,32 +361,52 @@ pub struct WorkflowRunContext {
     /// nobody else holds — nothing can ever fire it, which is exactly right for
     /// a test or an entry point that opted out of registration.
     pub cancel: RunCancel,
+    /// Whether this run is a **dry run** (issue #542): walk the real graph with
+    /// real branch selection, but over stubbed effectful capabilities so no
+    /// agent inference, no tool/http execution, and no delivery, journaling or
+    /// gate-parking actually happen.
+    ///
+    /// It rides the context rather than being a `run` argument for the same
+    /// reason `scheduled` does: the host-side layers that skip effects around
+    /// the engine (`WorkflowSpawn` skips `record_run_finished`; the runner skips
+    /// the started/finished journal writes) read it here, not from a separate
+    /// parameter that would have to be threaded through both the runner and the
+    /// spawn task in lockstep.
+    ///
+    /// [`new`](Self::new) and
+    /// [`RunSupervisor::begin`](crate::runtime::RunSupervisor::begin) both
+    /// default it `false`; only the run route sets it, and every other entry
+    /// point (cron, resume) leaves it off — a scheduled or resumed run is always
+    /// for real.
+    pub dry_run: bool,
 }
 
 /// A one-way stop signal for one workflow run (issue #383).
 ///
-/// # Why this is not the engine's `CancellationToken`
+/// # Why this is not itself the engine's `CancellationToken`
 ///
-/// tinyflows *has* a `CancellationToken`, but no public entry point accepts one
-/// **together with** a `RunObserver`: `run_cancellable` hardcodes a
-/// `NoopObserver`, `run_with_observer` hardcodes a fresh token, and
-/// `build_and_run` — which takes both — is private. Reaching for the engine's
-/// token would therefore cost every cancellable run its per-node progress
-/// events (issue #371), which is a strictly worse trade than stopping the run
-/// host-side. So the runner selects on this signal instead and drops the engine
-/// future when it fires.
-///
-/// It also could not live here even if the engine's would do: this type is on
-/// the port, and the port compiles in the **default build**, which links no
-/// `tinyflows` at all.
+/// This type is on the **port**, and the port compiles in the default build,
+/// which links no `tinyflows` at all — so it cannot *be* the engine's token.
+/// Instead the engine-backed runner **bridges** it: when this signal fires, the
+/// runner flips a `tinyflows::engine::CancellationToken` it handed to
+/// `run_cancellable_with_observer` (issue #398). That entry point takes a token
+/// **and** an observer, so a cancellable run keeps its per-node progress trail
+/// (issue #371/#382) rather than trading it away.
 ///
 /// # Semantics
 ///
-/// Firing this stops the run **mid-await**, it does not let the current node
-/// finish. A node that was half way through an external side effect stays half
-/// way through it — the same class of outcome as the host being killed, which
-/// the boot sweep already handles, only operator-initiated and therefore more
-/// frequent. "Stopped", not "finished".
+/// Firing this stops the run at the next **node boundary**: the engine checks
+/// the token before each node, so a node already executing runs to completion
+/// and is journaled, then the run winds down carrying a real (partial) outcome
+/// with `cancelled` set. "Stopped", not "finished" — but stopped cleanly, not
+/// mid-await.
+///
+/// The one exception is a node **wedged** mid-await on a stalled external call:
+/// it never reaches the next boundary, so the runner bounds the wait
+/// (`CANCEL_HARD_ABORT_GRACE`) and, past it, falls back to dropping the engine
+/// future — the hard abort. That case *does* stop mid-await, the same class of
+/// outcome as the host being killed, which the boot sweep already handles. A
+/// wedged run therefore stays killable even though the clean path cannot reach it.
 ///
 /// Cheap to [`Clone`] (a shared handle); firing is idempotent and safe from any
 /// thread.
@@ -445,6 +508,10 @@ impl WorkflowRunContext {
             run_id: crate::ports::ids::generate_id(),
             scheduled,
             cancel: RunCancel::new(),
+            // A run built through this constructor is for real unless the caller
+            // flips it after the fact — which is exactly what `WorkflowSpawn`
+            // does with the dry flag the run route hands it (issue #542).
+            dry_run: false,
         }
     }
 }

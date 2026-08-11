@@ -5,6 +5,10 @@
 //! report its effective configuration. The cognition kernel (Brain, cycle
 //! loop, stores) lands in later phases; see `docs/spec/roadmap.md`.
 
+/// Issue #552: the seam between a task artifact and the shared workspace tree.
+/// Always compiled — the console's workspace and artifact routes reach it in
+/// every build, and only the publish drain's half is behind `openhuman`.
+pub mod artifact_mirror;
 pub mod composio;
 #[cfg(test)]
 mod content_test;
@@ -42,11 +46,12 @@ mod workflow_file;
 // `GET …/workspace/file/{id}` route the console calls. Always compiled: the
 // REST route is in the default build, and one shared scan is what keeps the two
 // read surfaces from drifting.
-// `Agents/<agent-id>/` provisioning (issue #551). Always compiled and
-// openhuman-free: it is called from the runtime builder at boot, which is in
-// the default build, and it touches nothing but the `WorkspaceStore` port.
-pub mod workspace_agents;
 pub(crate) mod workspace_links;
+// The workspace's `Agents/` + `Desks/` system roots, and the folders minted
+// beneath them on first use (issue #551). Always compiled and openhuman-free:
+// the scaffold is called from the runtime builder at boot, which is in the
+// default build, and it touches nothing but the `WorkspaceStore` port.
+pub mod workspace_scaffold;
 pub mod workspace_seed;
 
 use std::path::Path;
@@ -70,15 +75,22 @@ pub use workflow_file::{
 // Crate-internal only: the workflow creator (issue #69) builds a `RawWorkflow`
 // from its request body, renders it to TOML, and re-parses it through
 // `parse_workflow` above for validation before writing to disk.
-pub(crate) use workflow_file::{RawEdge, RawNode, RawWorkflow, render_workflow};
+pub(crate) use workflow_file::{
+    RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
+};
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.
 // Ungated: the REST route is in the default build, so gating this behind
 // `openhuman` is what let the two surfaces drift apart (issue #168).
 pub(crate) use workflow_create::{
-    create_company_workflow, delete_company_workflow, seed_file_exists,
-    set_company_workflow_enabled, update_company_workflow, workflow_version,
+    WorkflowGraphSpec, create_company_workflow, delete_company_workflow, raw_workflow_from_spec,
+    rollback_company_workflow, seed_file_exists, set_company_workflow_enabled,
+    update_company_workflow, workflow_version,
 };
+// Issue #580: the builder pass's courtesy validation, gated with the harness
+// builder that is its only caller.
+#[cfg(feature = "openhuman")]
+pub(crate) use workflow_create::courtesy_validate_draft;
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
 use crate::{Result, VERSION};

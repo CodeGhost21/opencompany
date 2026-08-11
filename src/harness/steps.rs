@@ -487,6 +487,10 @@ const INTRINSIC_TOOLS: &[&str] = &[
     "spawn_task",
     "delegate_to_desk",
     "run_workflow",
+    // #418's `run_workflow` companion — its full-output pages are the same kind
+    // of OC-authored, agent-facing text as the other intrinsics, safe to surface
+    // verbatim rather than collapsed to a class.
+    "read_run_output",
     "create_workflow",
     "add_agent",
     // #186's pair. Missing here until #461 noticed the drift, so an
@@ -850,7 +854,7 @@ mod tests {
     fn intrinsic_tools_covers_every_orchestrator_tool() {
         use crate::harness::orchestrator::{
             ADD_AGENT_TOOL, ASSIGN_TASK_TOOL, CREATE_WORKFLOW_TOOL, QUERY_COMPANY_TOOL,
-            REVIEW_TASK_TOOL, RUN_WORKFLOW_TOOL,
+            READ_RUN_OUTPUT_TOOL, REVIEW_TASK_TOOL, RUN_WORKFLOW_TOOL,
         };
         use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
 
@@ -859,6 +863,7 @@ mod tests {
             SPAWN_TASK_TOOL,
             DELEGATE_TO_DESK_TOOL,
             RUN_WORKFLOW_TOOL,
+            READ_RUN_OUTPUT_TOOL,
             CREATE_WORKFLOW_TOOL,
             ADD_AGENT_TOOL,
             ASSIGN_TASK_TOOL,

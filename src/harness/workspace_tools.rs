@@ -40,6 +40,15 @@
 //! from this surface entirely — the operator has a console to undo them in and
 //! the agent does not.
 //!
+//! That home folder is minted on first use rather than provisioned at boot, so
+//! [`WorkspaceCreateTool`] makes it on demand when the target sits directly
+//! inside it (via
+//! [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)).
+//! It is the only place the tool auto-creates a parent, and it has to be: the
+//! brief points every agent at a folder that, by design, does not exist until
+//! somebody uses it, so refusing the call that would bring it into existence
+//! would make the steering unfollowable.
+//!
 //! # The tenancy boundary
 //!
 //! This is a live read/write surface over shared company data, so the
@@ -151,8 +160,10 @@ use serde_json::{Value, json};
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
-use crate::company::workspace_agents::AGENTS_ROOT;
+use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
+use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
+use crate::ports::artifacts::{ArtifactAuthor, ArtifactStore};
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
@@ -263,6 +274,13 @@ pub struct CompanyWorkspace {
     store: Arc<dyn WorkspaceStore>,
     company: CompanyId,
     agent_id: String,
+    /// The company's artifact store, when one is wired (issue #552).
+    ///
+    /// Held only so [`WorkspaceWriteTool`] can record an agent's overwrite of a
+    /// *published* note onto that deliverable's version chain. `None` — the
+    /// default, and every construction site but the agent builder's — means the
+    /// write tool behaves exactly as it did before #552.
+    artifacts: Option<Arc<dyn ArtifactStore>>,
 }
 
 impl CompanyWorkspace {
@@ -272,7 +290,20 @@ impl CompanyWorkspace {
             store,
             company,
             agent_id,
+            artifacts: None,
         }
+    }
+
+    /// Wire the artifact store, so an overwrite of a published note is recorded
+    /// on its chain (issue #552).
+    ///
+    /// A builder rather than a fourth parameter on [`new`](Self::new): the
+    /// artifact store is irrelevant to the two read tools and to every test
+    /// that exercises path resolution, and widening the constructor would make
+    /// them all pass a `None` that means nothing to them.
+    pub fn with_artifacts(mut self, artifacts: Option<Arc<dyn ArtifactStore>>) -> Self {
+        self.artifacts = artifacts;
+        self
     }
 
     /// This agent's origin, for stamping [`WorkspaceNode::created_by`] /
@@ -289,6 +320,31 @@ impl CompanyWorkspace {
     async fn index(&self) -> crate::Result<PathIndex> {
         let nodes = self.store.tree(&self.company).await?;
         Ok(PathIndex::build(nodes))
+    }
+
+    /// Whether `segments` spell exactly this agent's own home folder,
+    /// `Agents/<this agent's id>`.
+    ///
+    /// Compared segment-wise against the id fixed at agent-build time, so it
+    /// cannot be spoofed from a tool argument and cannot match a *teammate's*
+    /// home — a path one level deeper (`Agents/<self>/drafts`) is not the home
+    /// either, which is what keeps the one-node-per-call rule intact.
+    fn is_own_home(&self, segments: &[&str]) -> bool {
+        matches!(segments, [root, agent] if *root == AGENTS_ROOT && *agent == self.agent_id)
+    }
+
+    /// Adopt-or-create this agent's own `Agents/<id>/` folder, returning its id.
+    ///
+    /// Since issue #551 a member folder is minted on first use rather than
+    /// provisioned for every roster member at boot, so the agent's home may
+    /// legitimately not exist yet the first time it puts something there.
+    async fn ensure_own_home(&self) -> crate::Result<String> {
+        crate::company::workspace_scaffold::ensure_agent_folder(
+            self.store.as_ref(),
+            &self.company,
+            &self.agent_id,
+        )
+        .await
     }
 }
 
@@ -624,7 +680,10 @@ pub fn workspace_brief(can_write: bool) -> String {
         brief.push_str(&format!(
             " `{AGENTS_ROOT}/<your agent id>/` is your own folder and the default home for anything you \
              produce — put a deliverable, a draft or a working note there with \
-             `{WORKSPACE_CREATE_TOOL}` rather than leaving it only in your reply. You may create \
+             `{WORKSPACE_CREATE_TOOL}` rather than leaving it only in your reply. The folder \
+             itself appears the first time you use it, so create the note straight away rather \
+             than the folder first; do not be put off if you do not see it in a listing yet. \
+             You may create \
              or edit notes anywhere in the tree, but shared guidance (`Standards/`, `Playbooks/`) \
              belongs to everyone: edit it only when the task you were given is about it, and \
              otherwise leave it alone. Revising an existing note is `{WORKSPACE_WRITE_TOOL}`, \
@@ -1154,15 +1213,68 @@ impl Tool for WorkspaceWriteTool {
             )
             .await
         {
-            Ok(node) => Ok(ToolResult::success(format!(
-                "Overwrote the workspace note `{path}` (id={id}); it is now {bytes} bytes. Its \
-                 new revision is rev={rev} — pass that as `expected_updated_at` if you edit it \
-                 again this turn.",
-                path = entry.path,
-                id = node.id,
-                bytes = content.len(),
-                rev = node.updated_at_millis,
-            ))),
+            Ok(node) => {
+                // Issue #552: the note this agent just overwrote may be another
+                // agent's *published deliverable*, whose authoritative history
+                // is the artifact chain. An overwrite the chain never saw is
+                // the same silent divergence a console save would cause, one
+                // surface over — and it is the version history, not the tree,
+                // that the Artifacts tab and `human_edit_diff` read.
+                //
+                // Node first here, unlike the console routes, and forced rather
+                // than chosen: the write above carries the `expected_updated_at`
+                // compare-and-swap, so until it returns there is nothing to
+                // record — a version appended before it would claim an edit
+                // that a stale-revision refusal then never made. The window is
+                // one store round trip, and a failure warns rather than
+                // reporting a successful write as failed.
+                //
+                // Ordinary notes are the overwhelming majority and match no
+                // artifact, so this is a no-op for almost every call. It is not
+                // a publish: no queue, no claim, #445 untouched.
+                if let Some(artifacts) = self.workspace.artifacts.as_ref() {
+                    // A refused append and an unreadable store are told apart
+                    // for callers that still have a decision left to make. This
+                    // one does not: the node is already written, so both mean
+                    // the same thing here — the chain is behind and nothing can
+                    // undo it — and both warn rather than fail a write that
+                    // succeeded.
+                    let unrecorded = match mirror_node_edit(
+                        artifacts.as_ref(),
+                        &self.workspace.company,
+                        &node.id,
+                        content,
+                        ArtifactAuthor::Agent,
+                        &self.workspace.agent_id,
+                        None,
+                    )
+                    .await
+                    {
+                        Ok(MirrorOutcome::Recorded(_) | MirrorOutcome::Ordinary) => None,
+                        Ok(MirrorOutcome::Undetermined(err)) | Err(err) => Some(err),
+                    };
+                    if let Some(err) = unrecorded {
+                        tracing::warn!(
+                            company = %self.workspace.company,
+                            agent = %self.workspace.agent_id,
+                            node = %node.id,
+                            error = %err,
+                            "[workspace] overwrote a note whose artifact chain could not be \
+                             updated; if it was a published deliverable the chain is one \
+                             version behind until the next write on either surface"
+                        );
+                    }
+                }
+                Ok(ToolResult::success(format!(
+                    "Overwrote the workspace note `{path}` (id={id}); it is now {bytes} bytes. \
+                     Its new revision is rev={rev} — pass that as `expected_updated_at` if you \
+                     edit it again this turn.",
+                    path = entry.path,
+                    id = node.id,
+                    bytes = content.len(),
+                    rev = node.updated_at_millis,
+                )))
+            }
             Err(e) => Ok(ToolResult::error(format!(
                 "Could not overwrite `{}`: {e}",
                 entry.path
@@ -1196,10 +1308,11 @@ impl Tool for WorkspaceCreateTool {
     fn description(&self) -> &str {
         "Create ONE new folder or note in the company's shared workspace at `path`. USE FOR \
          putting work you have produced somewhere the operator and your teammates can find it — \
-         your own folder `Agents/<your agent id>/` is the default home for it. The parent folder \
-         must already exist (create it first, one level at a time), and the path must be free — \
-         this never overwrites. To change a note that already exists use `workspace_write`. NOT \
-         for your own scratch files (use the `file_*` tools)."
+         your own folder `Agents/<your agent id>/` is the default home for it, and is made for \
+         you the first time you put something directly in it. Everywhere else the parent folder \
+         must already exist (create it first, one level at a time). The path must be free — this \
+         never overwrites. To change a note that already exists use `workspace_write`. NOT for \
+         your own scratch files (use the `file_*` tools)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1208,7 +1321,7 @@ impl Tool for WorkspaceCreateTool {
             "properties": {
                 "path": {
                     "type": "string",
-                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder. Include the file extension on a note."
+                    "description": "Where to create it, e.g. \"Agents/ceo/Q3 launch brief.md\". Every segment but the last must already be an existing folder, except your own `Agents/<your agent id>/`, which is made on demand. Include the file extension on a note."
                 },
                 "kind": {
                     "type": "string",
@@ -1324,6 +1437,16 @@ impl Tool for WorkspaceCreateTool {
         // store's `create` contract is one node with a resolved parent, and
         // silently making the intermediate folders would let a single typo grow
         // a whole phantom subtree nobody asked for.
+        //
+        // The agent's own `Agents/<self>/` home is the one exception, and it is
+        // not a relaxation of that rule: since issue #551 the home is minted on
+        // first use rather than provisioned at boot, so the *only* way an agent
+        // reaches the folder the brief tells it to work in is by putting
+        // something there. Refusing with "create the folder first" would be
+        // refusing an agent access to its own home for the exact call that is
+        // supposed to bring it into existence. It stays one node per call:
+        // nothing else in the tree is auto-made, and a path one level deeper
+        // (`Agents/<self>/drafts/x.md`) still gets the ordinary refusal.
         let parent_id = if parent_segments.is_empty() {
             None
         } else {
@@ -1344,6 +1467,18 @@ impl Tool for WorkspaceCreateTool {
                         parent = echo_path(&parent_path),
                         n = entries.len(),
                     )));
+                }
+                // The agent's own home, not yet minted: make it and carry on.
+                None if self.workspace.is_own_home(parent_segments) => {
+                    match self.workspace.ensure_own_home().await {
+                        Ok(id) => Some(id),
+                        Err(e) => {
+                            return Ok(ToolResult::error(format!(
+                                "Could not create your own workspace folder `{parent}`: {e}",
+                                parent = echo_path(&parent_path),
+                            )));
+                        }
+                    }
                 }
                 None => {
                     return Ok(ToolResult::error(format!(
@@ -1418,11 +1553,12 @@ impl Tool for WorkspaceCreateTool {
 /// second.
 pub fn workspace_tools(
     store: Arc<dyn WorkspaceStore>,
+    artifacts: Option<Arc<dyn ArtifactStore>>,
     company: CompanyId,
     agent_id: String,
     can_write: bool,
 ) -> Vec<Box<dyn Tool>> {
-    let workspace = CompanyWorkspace::new(store, company, agent_id);
+    let workspace = CompanyWorkspace::new(store, company, agent_id).with_artifacts(artifacts);
     let mut tools: Vec<Box<dyn Tool>> = vec![
         Box::new(WorkspaceListTool::new(workspace.clone())),
         Box::new(WorkspaceReadTool::new(workspace.clone())),
@@ -2575,6 +2711,158 @@ mod tests {
         assert_eq!(ceo.kind, NodeKind::Folder);
     }
 
+    /// The steered-for case as the brief actually tells an agent to do it:
+    /// straight to the note, with no folder call first.
+    ///
+    /// Since issue #551 stopped provisioning a folder per roster member, the
+    /// home does not exist until it is used — so this call is the *only* way it
+    /// ever comes into existence, and refusing it would make the brief's
+    /// instruction unfollowable.
+    #[tokio::test]
+    async fn create_in_the_agents_own_home_mints_the_home_folder() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({
+                "path": "Agents/ceo/Launch brief.md",
+                "kind": "file",
+                "content": "# Launch",
+            }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let tree = store.tree(&id).await.unwrap();
+        let root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+            .expect("the scaffolded root");
+        let home = tree
+            .iter()
+            .find(|n| n.name == TEST_AGENT)
+            .expect("the home folder was minted");
+        assert_eq!(home.kind, NodeKind::Folder);
+        assert_eq!(home.parent_id.as_deref(), Some(root.id.as_str()));
+        assert_eq!(
+            home.created_by,
+            agent_origin(),
+            "the folder belongs to the agent that earned it"
+        );
+        let brief = tree.iter().find(|n| n.name == "Launch brief.md").unwrap();
+        assert_eq!(brief.parent_id.as_deref(), Some(home.id.as_str()));
+
+        // A second note goes into the same folder — minting is find-or-create,
+        // not create.
+        let out = tool
+            .execute(json!({ "path": "Agents/ceo/Retro.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+        let tree = store.tree(&id).await.unwrap();
+        assert_eq!(
+            tree.iter().filter(|n| n.name == TEST_AGENT).count(),
+            1,
+            "the second create minted a rival home folder"
+        );
+        assert_eq!(
+            tree.iter()
+                .find(|n| n.name == "Retro.md")
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(home.id.as_str())
+        );
+    }
+
+    /// The mint repairs its own root too: an agent whose company never got the
+    /// boot scaffold (or whose create fail-softed) still lands its work under
+    /// `Agents/`, rather than being stuck behind a folder nobody will make.
+    #[tokio::test]
+    async fn the_home_mint_creates_the_agents_root_when_it_is_missing() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents/ceo/Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(!out.is_error, "{}", text(&out));
+
+        let tree = store.tree(&id).await.unwrap();
+        let root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
+            .expect("the root was minted alongside the home");
+        assert_eq!(root.created_by, WorkspaceOrigin::Seed);
+        assert_eq!(
+            tree.iter()
+                .find(|n| n.name == TEST_AGENT)
+                .unwrap()
+                .parent_id
+                .as_deref(),
+            Some(root.id.as_str())
+        );
+    }
+
+    /// The exception is *this* agent's own home and nothing else. A teammate's
+    /// home is somebody else's folder to earn, so the ordinary missing-parent
+    /// refusal stands — an agent must not be able to conjure a folder that
+    /// then reads as belonging to a teammate who never produced anything.
+    #[tokio::test]
+    async fn create_does_not_mint_another_agents_home() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let before = store.tree(&id).await.unwrap().len();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents/cmo/Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", text(&out));
+        assert!(text(&out).contains("Agents/cmo"), "{}", text(&out));
+        assert_eq!(
+            store.tree(&id).await.unwrap().len(),
+            before,
+            "a refused create must not have made a teammate's folder"
+        );
+    }
+
+    /// One node per call survives the exception: the home is minted only when
+    /// it is the *direct* parent, so a deeper path is still an actionable
+    /// refusal and still creates nothing at all — not even the home.
+    #[tokio::test]
+    async fn create_below_the_home_still_refuses_and_mints_nothing() {
+        let (_dir, store) = seeded("acme").await;
+        let id = CompanyId::new("acme");
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
+            .await
+            .unwrap();
+        let before = store.tree(&id).await.unwrap().len();
+        let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
+
+        let out = tool
+            .execute(json!({ "path": "Agents/ceo/drafts/Brief.md", "kind": "file" }))
+            .await
+            .unwrap();
+        assert!(out.is_error, "{}", text(&out));
+        assert!(text(&out).contains("Agents/ceo/drafts"), "{}", text(&out));
+        assert_eq!(
+            store.tree(&id).await.unwrap().len(),
+            before,
+            "a refused create made intermediate folders"
+        );
+    }
+
     /// Create never overwrites. A path that already resolves is refused with
     /// the note left byte-identical — the failure mode this tool must never
     /// have, since it carries no compare-and-swap token to protect one.
@@ -2612,7 +2900,7 @@ mod tests {
     async fn create_cannot_mint_a_rival_agents_root() {
         let (_dir, store) = seeded("acme").await;
         let id = CompanyId::new("acme");
-        crate::company::workspace_agents::ensure_agent_folders(store.as_ref(), &id, [TEST_AGENT])
+        crate::company::workspace_scaffold::ensure_workspace_scaffold(store.as_ref(), &id)
             .await
             .unwrap();
         let tool = WorkspaceCreateTool::new(ws(store.clone(), id.clone()));
@@ -2817,6 +3105,172 @@ mod tests {
         assert_eq!(after.updated_by, agent_origin());
     }
 
+    // -- issue #552: an overwrite of a published note reaches its chain ------
+
+    /// A note in the shared tree may be another agent's published deliverable,
+    /// whose authoritative history is the artifact chain. An agent overwriting
+    /// one must record the revision there too — otherwise the Artifacts tab and
+    /// `human_edit_diff`, which read the chain and not the tree, would keep
+    /// showing a body that no longer exists.
+    ///
+    /// Recorded as an **agent** version stamped with this agent's id, so an
+    /// overwrite by a teammate never masquerades as the human edit the port
+    /// exists to isolate.
+    #[tokio::test]
+    async fn overwriting_a_published_note_records_the_revision_on_its_artifact() {
+        use crate::ports::artifacts::{ArtifactKind, ArtifactRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(FsOps::new(dir.path()));
+        let store: Arc<dyn WorkspaceStore> = ops.clone();
+        let artifacts: Arc<dyn ArtifactStore> = ops.clone();
+        let id = CompanyId::new("acme");
+
+        let node = WorkspaceNode {
+            id: "n-deliverable".to_string(),
+            name: "launch.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 2_000,
+            created_by: WorkspaceOrigin::Agent {
+                id: "maya".to_string(),
+            },
+            updated_by: WorkspaceOrigin::Agent {
+                id: "maya".to_string(),
+            },
+        };
+        store
+            .create(&id, &node, Some("maya's draft"))
+            .await
+            .unwrap();
+
+        let mut published = ArtifactRecord::new(
+            "art-1",
+            "t-1",
+            "Launch spec",
+            ArtifactKind::Markdown,
+            "maya's draft",
+            "maya",
+            1,
+        );
+        published.stamp_workspace_node("n-deliverable");
+        artifacts.upsert(&id, &published).await.unwrap();
+
+        let tool = WorkspaceWriteTool::new(
+            CompanyWorkspace::new(store.clone(), id.clone(), TEST_AGENT.to_string())
+                .with_artifacts(Some(artifacts.clone())),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "n-deliverable",
+                "content": "the ceo's revision",
+                "expected_updated_at": 2_000,
+            }))
+            .await
+            .unwrap();
+        assert!(!result.is_error, "{}", text(&result));
+
+        let stored = artifacts.get(&id, "art-1").await.unwrap().unwrap();
+        assert_eq!(stored.versions.len(), 2, "the chain must see the overwrite");
+        assert_eq!(stored.latest().unwrap().body, "the ceo's revision");
+        assert_eq!(stored.latest().unwrap().author, ArtifactAuthor::Agent);
+        assert_eq!(
+            stored.latest().unwrap().author_id,
+            TEST_AGENT,
+            "an agent overwrite must not be filed as the operator's human edit"
+        );
+        assert_eq!(
+            stored.workspace_node_id(),
+            Some("n-deliverable"),
+            "the new version keeps the node, or the next overwrite mirrors nothing"
+        );
+        assert!(
+            stored.human_edit_diff().is_none(),
+            "two agent versions are not a human edit"
+        );
+    }
+
+    /// Nearly every note is an ordinary note. Overwriting one records nothing
+    /// on any artifact — and a refused write records nothing either, because
+    /// the mirror runs only after the CAS'd store write actually lands.
+    #[tokio::test]
+    async fn an_ordinary_or_refused_write_records_no_artifact_version() {
+        use crate::ports::artifacts::{ArtifactKind, ArtifactRecord};
+
+        let dir = tempfile::tempdir().unwrap();
+        let ops = Arc::new(FsOps::new(dir.path()));
+        let store: Arc<dyn WorkspaceStore> = ops.clone();
+        let artifacts: Arc<dyn ArtifactStore> = ops.clone();
+        let id = CompanyId::new("acme");
+
+        let node = WorkspaceNode {
+            id: "n-plain".to_string(),
+            name: "notes.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 2_000,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+        };
+        store.create(&id, &node, Some("a note")).await.unwrap();
+
+        // An artifact exists, but points at a different node.
+        let mut published = ArtifactRecord::new(
+            "art-1",
+            "t-1",
+            "Launch spec",
+            ArtifactKind::Markdown,
+            "deliverable",
+            "maya",
+            1,
+        );
+        published.stamp_workspace_node("n-deliverable");
+        artifacts.upsert(&id, &published).await.unwrap();
+
+        let tool = WorkspaceWriteTool::new(
+            CompanyWorkspace::new(store.clone(), id.clone(), TEST_AGENT.to_string())
+                .with_artifacts(Some(artifacts.clone())),
+        );
+
+        // An ordinary note: the write lands, the chain is untouched.
+        assert!(
+            !tool
+                .execute(json!({
+                    "id": "n-plain",
+                    "content": "an edited note",
+                    "expected_updated_at": 2_000,
+                }))
+                .await
+                .unwrap()
+                .is_error
+        );
+
+        // A stale revision: the write is refused, so nothing may be recorded —
+        // a version appended before the CAS would claim an edit never made.
+        assert!(
+            tool.execute(json!({
+                "id": "n-plain",
+                "content": "clobber",
+                "expected_updated_at": 1,
+            }))
+            .await
+            .unwrap()
+            .is_error
+        );
+
+        assert_eq!(
+            artifacts
+                .get(&id, "art-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .versions
+                .len(),
+            1,
+            "neither an unrelated note nor a refused write may touch the chain"
+        );
+    }
+
     // -- wiring -------------------------------------------------------------
 
     #[test]
@@ -2826,6 +3280,7 @@ mod tests {
 
         let read_only = workspace_tools(
             store.clone(),
+            None,
             CompanyId::new("acme"),
             TEST_AGENT.to_string(),
             false,
@@ -2833,7 +3288,13 @@ mod tests {
         let names: Vec<&str> = read_only.iter().map(|t| t.name()).collect();
         assert_eq!(names, vec![WORKSPACE_LIST_TOOL, WORKSPACE_READ_TOOL]);
 
-        let writable = workspace_tools(store, CompanyId::new("acme"), TEST_AGENT.to_string(), true);
+        let writable = workspace_tools(
+            store,
+            None,
+            CompanyId::new("acme"),
+            TEST_AGENT.to_string(),
+            true,
+        );
         let names: Vec<&str> = writable.iter().map(|t| t.name()).collect();
         assert_eq!(
             names,
@@ -2851,7 +3312,13 @@ mod tests {
     fn declared_permission_levels_match_what_each_tool_does() {
         let dir = tempfile::tempdir().unwrap();
         let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
-        let tools = workspace_tools(store, CompanyId::new("acme"), TEST_AGENT.to_string(), true);
+        let tools = workspace_tools(
+            store,
+            None,
+            CompanyId::new("acme"),
+            TEST_AGENT.to_string(),
+            true,
+        );
         assert_eq!(tools[0].permission_level(), PermissionLevel::ReadOnly);
         assert_eq!(tools[1].permission_level(), PermissionLevel::ReadOnly);
         assert_eq!(tools[2].permission_level(), PermissionLevel::Write);
@@ -2886,6 +3353,10 @@ mod tests {
         );
         for phrase in [
             "default home",
+            // The folder is minted on first use, so the brief has to say so —
+            // an agent told to look for a folder that is not there yet would
+            // otherwise reasonably conclude it has none.
+            "appears the first time you use it",
             "anywhere in the tree",
             "Standards/",
             "Renaming and deleting",

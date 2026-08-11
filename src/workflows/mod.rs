@@ -15,6 +15,13 @@
 
 pub mod caps;
 pub mod delivery;
+/// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes
+/// stop for an operator, before the run reaches them.
+pub mod gate;
+/// Issue #460: end-to-end proof that a `tool_call` node the company's policy
+/// stops does not execute, and leaves a decidable card.
+#[cfg(test)]
+mod gated_tool_call_test;
 /// Issue #395: end-to-end proof that a tool call gated inside a workflow agent
 /// node reaches the Approvals page and survives the next chat cycle.
 #[cfg(test)]
@@ -23,7 +30,7 @@ pub mod runner;
 pub mod translate;
 
 pub use caps::{HarnessAgentRunner, build_capabilities};
-pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs};
+pub use delivery::{DeliveryParking, WorkflowDeliveryDeps, deliver_outputs, deliver_outputs_dry};
 pub use runner::{HarnessWorkflowRunner, run_workflow};
 pub use translate::translate;
 

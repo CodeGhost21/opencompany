@@ -34,9 +34,11 @@ fn manifest() -> CompanyManifest {
 
 /// The sorted node names in a workspace tree body.
 ///
-/// A freshly-built company is no longer an empty tree: boot provisions the
-/// reserved `Agents/` root and one folder per manifest agent (issue #551), so
-/// the tests below name what they expect rather than counting to zero.
+/// A freshly-built company is no longer an empty tree: boot scaffolds the
+/// reserved `Agents/` and `Desks/` roots (issue #551), so the tests below name
+/// what they expect rather than counting to zero. Nothing is provisioned
+/// *inside* them — a member folder is minted when that agent or desk first
+/// produces something.
 fn provisioned_names(tree: &serde_json::Value) -> Vec<String> {
     let mut names: Vec<String> = tree
         .as_array()
@@ -695,6 +697,8 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -1223,15 +1227,16 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     let state = state_with_company(&home).await;
 
     // A workspace with nothing seeded into it reads as a real tree, not a 404
-    // and not a fixture. It is not *empty*, though: boot provisions the
-    // reserved `Agents/` root plus one folder per manifest agent (issue #551),
-    // and the manifest here has one agent — so `Agents` and `Agents/ceo`.
+    // and not a fixture. It is not *empty*, though: boot scaffolds the reserved
+    // `Agents/` and `Desks/` roots (issue #551). The manifest here has an agent
+    // and it gets no folder — a member folder is minted on first use, not on
+    // joining the roster.
     let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         provisioned_names(&tree),
-        vec!["Agents", "ceo"],
-        "a fresh company starts with just its agent folders"
+        vec!["Agents", "Desks"],
+        "a fresh company starts with the two system roots and nothing else"
     );
     let provisioned = tree.as_array().unwrap().len();
 
@@ -1296,21 +1301,17 @@ async fn workspace_tree_and_file_reads_reflect_writes() {
     // are the console's, so the console is the operator.
     assert_eq!(listed["createdBy"], json!({"kind": "operator"}));
     assert_eq!(listed["updatedBy"], json!({"kind": "operator"}));
-    // …and the provisioner's own nodes say what they are, so the console can
-    // tell "the runtime laid this down" from "somebody wrote this".
-    let agents_root = tree
-        .iter()
-        .find(|node| node["name"] == json!("Agents"))
-        .expect("the Agents root is in the tree");
-    assert_eq!(agents_root["createdBy"], json!({"kind": "seed"}));
-    let ceo_folder = tree
-        .iter()
-        .find(|node| node["name"] == json!("ceo"))
-        .expect("Agents/ceo is in the tree");
-    assert_eq!(
-        ceo_folder["createdBy"],
-        json!({"kind": "agent", "id": "ceo"})
-    );
+    // …and the scaffold's own nodes say what they are, so the console can tell
+    // "the runtime laid this down" from "somebody wrote this".
+    for root in ["Agents", "Desks"] {
+        let node = tree
+            .iter()
+            .find(|node| node["name"] == json!(root))
+            .unwrap_or_else(|| panic!("the {root} root is in the tree"));
+        assert_eq!(node["createdBy"], json!({"kind": "seed"}));
+        assert_eq!(node["kind"], json!("folder"));
+        assert!(node["parentId"].is_null());
+    }
 
     // The file read carries the body and the inbound backlink, computed server
     // side — the console derives neither.
@@ -1432,8 +1433,8 @@ async fn workspace_reads_are_isolated_between_companies() {
     assert_eq!(status, StatusCode::OK);
     let note_id = note["id"].as_str().unwrap().to_string();
 
-    // B's own workspace holds only its own provisioned agent folders — A's
-    // note is not in it.
+    // B's own workspace holds only its own scaffolded system roots — A's note
+    // is not in it.
     let (status, tree_b) = send_auth(
         &state,
         "GET",
@@ -1443,7 +1444,7 @@ async fn workspace_reads_are_isolated_between_companies() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "ceo"]);
+    assert_eq!(provisioned_names(&tree_b), vec!["Agents", "Desks"]);
 
     // Even naming A's node id explicitly, B's scope does not resolve it.
     let (status, _) = send_auth(
@@ -2400,6 +2401,45 @@ async fn state_with_manifest_and_defaults(
     state
 }
 
+/// Like [`state_with_manifest`], but seeds operator-added overlay teammates too,
+/// so a test can assert MCP reachability over the full runtime roster — manifest
+/// agents plus overlay agents — the way `build_roster` composes it (issue #568).
+async fn state_with_manifest_and_overlays(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    overlay_agents: Vec<crate::ports::types::OverlayAgent>,
+) -> AppState {
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.to_path_buf());
+    let id = CompanyId::new("acme");
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents,
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    state
+}
+
 #[tokio::test]
 async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     let home_dir = home();
@@ -2428,7 +2468,20 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(added["server"]["name"], "notion");
     assert_eq!(added["server"]["source"], "runtime");
     assert_eq!(added["server"]["authConfigured"], true);
-    assert!(added["note"].as_str().unwrap().contains("rebuild"));
+    // Issue #566: a mutating MCP change reaches agents on the company's next turn
+    // (the effective set is re-fingerprinted every `HarnessPool::ensure` cycle), so
+    // the note must state the no-restart contract outright — not merely avoid one
+    // stale phrase. Asserting the positive claim rejects any "restart required"
+    // variant too, which a bare `!contains("restart the company")` would let pass.
+    let note = added["note"].as_str().unwrap();
+    assert!(
+        note.contains("next turn"),
+        "note should promise next-turn pickup: {note}"
+    );
+    assert!(
+        note.contains("no restart needed"),
+        "mutating MCP response must state no restart is needed: {note}"
+    );
 
     // The token must NOT appear anywhere in the add response.
     assert!(
@@ -2515,6 +2568,166 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
+    // The mutating response carries reachability too (issue #568), so the console
+    // reflects who can reach the server right after an edit, not only on reload.
+    assert!(
+        updated["server"]["reachableBy"].is_array(),
+        "a mutating response also carries reachableBy"
+    );
+}
+
+/// Issue #568: each listed server carries the ids of the agents whose *effective*
+/// grants reach it — over the full runtime roster, manifest agents plus overlay
+/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
+/// (and every overlay teammate, which has no tools row) inherits the wildcard and
+/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
+/// that server.
+#[tokio::test]
+async fn mcp_reachability_lists_reaching_agents_including_overlay() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
+         [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
+         [[mcp_server]]\nname = \"linear\"\nendpoint = \"https://linear.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let overlay = crate::ports::types::OverlayAgent {
+        id: "helper".to_string(),
+        name: "Helper".to_string(),
+        role: "Assistant".to_string(),
+        description: None,
+    };
+    let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let reach = |name: &str| -> Vec<String> {
+        let row = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"));
+        let mut ids: Vec<String> = row["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // notion: the narrowed ceo, the wildcard-inheriting eng, and the overlay.
+    assert_eq!(reach("notion"), vec!["ceo", "eng", "helper"]);
+    // linear: only the wildcard holders — ceo scoped itself out of it.
+    assert_eq!(
+        reach("linear"),
+        vec!["eng", "helper"],
+        "ceo narrowed to mcp:notion, so it cannot reach linear"
+    );
+}
+
+/// Issue #568: a server no agent's grants cover comes back with an **empty**
+/// `reachableBy` — the signal the console flags loudly rather than showing a
+/// healthy server that is silently unreachable. Here a narrow company
+/// `allow = ["mcp:docs"]` reaches `docs` but never `notion`.
+#[tokio::test]
+async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"mcp:docs\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = |name: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"))
+            .clone()
+    };
+    assert_eq!(
+        row("docs")["reachableBy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ceo"],
+        "the company allow covers mcp:docs for the one agent"
+    );
+    assert!(
+        row("notion")["reachableBy"].as_array().unwrap().is_empty(),
+        "no agent's grants cover mcp:notion — the flagged zero case"
+    );
+}
+
+/// Issue #568: a **disabled** server reaches nobody, however wide the grants.
+/// `registry_for_agent` filters on `decl.enabled && grants_cover_server(..)`, so
+/// an agent holding `mcp:docs` is handed no such tool while the server is off —
+/// reporting it as reachable would be the console/harness disagreement this
+/// feature exists to remove. Asserted on both readers: the mutating response
+/// that turns the server off, and the later list.
+#[tokio::test]
+async fn mcp_reachability_is_empty_for_a_disabled_server() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let reach = |body: &serde_json::Value| -> Vec<String> {
+        body["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Enabled: the one agent's grant covers it.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reach(&list[0]), vec!["ceo".to_string()]);
+
+    // Disabling it empties reachability in the mutating response itself.
+    let (status, updated) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/mcp/servers/docs",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["server"]["enabled"], false);
+    assert!(
+        reach(&updated["server"]).is_empty(),
+        "a disabled server is handed to no agent, so it is reachable by none"
+    );
+
+    // And the list agrees on the next read — the grant is unchanged, the server is off.
+    let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(list[0]["enabled"], false);
+    assert!(
+        reach(&list[0]).is_empty(),
+        "the list reader applies the same enabled filter as the harness"
+    );
 }
 
 /// An install default is disabled by its *first* runtime override: no prior
@@ -3464,6 +3677,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         parent_task_id: parent.map(str::to_string),
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     };
     for t in [
         card("t-parent", "Parent", None),
@@ -3648,6 +3863,8 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     }
 }
 
@@ -4311,6 +4528,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -4426,6 +4645,8 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -4526,6 +4747,8 @@ async fn dispatched_task(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -4927,12 +5150,15 @@ async fn a_parked_approval_appears_on_its_own_task() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["id"], "appr-mine");
     assert_eq!(approvals[0]["status"], "pending");
-    assert_eq!(approvals[0]["kind"], "filing.submit");
     assert_eq!(approvals[0]["atMillis"].as_u64().unwrap(), parked_at);
-    assert!(
-        approvals[0].get("resolvedAtMillis").is_none(),
-        "a pending approval has not resolved",
-    );
+    // #468 shrank this projection to what the card's one waiting line reads.
+    // `kind`, `resolvedAtMillis` and `waitedMillis` left with the Approvals tab.
+    for gone in ["kind", "resolvedAtMillis", "waitedMillis"] {
+        assert!(
+            approvals[0].get(gone).is_none(),
+            "`{gone}` was dropped with the Approvals tab (#468)",
+        );
+    }
     // The timeline is untouched — a parked approval still has no event.
     assert!(
         body["timeline"]
@@ -4976,6 +5202,8 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 parent_task_id: None,
                 output: None,
                 plan: None,
+                deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                workflow_proposal: None,
             },
         )
         .await
@@ -5106,13 +5334,23 @@ async fn a_resolved_approval_reports_its_verdict_and_wait_on_the_tab() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     let row = &approvals[0];
     assert_eq!(row["status"], "denied");
-    // The row is anchored at the *park*, so the tab reads in the order things
+    // The row is anchored at the *park*, so approvals read in the order things
     // were asked rather than the order they were answered.
     assert_eq!(row["atMillis"].as_u64().unwrap(), parked_at);
-    let resolved_at = row["resolvedAtMillis"].as_u64().unwrap();
+    // The park→resolve span moved off this row with the Approvals tab (#468).
+    // It is unchanged, and still asserted here — on the `approval` timeline
+    // entry, which is where it now lives. Dropping the assertion along with the
+    // field would have quietly retired the arithmetic's only coverage.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
     assert!(resolved_at > parked_at);
     assert_eq!(
-        row["waitedMillis"].as_u64().unwrap(),
+        entry["waitedMillis"].as_u64().unwrap(),
         resolved_at - parked_at,
     );
     // Nothing is parked any more, so the card is not still waiting.
@@ -5366,9 +5604,17 @@ async fn a_pre_333_approval_falls_back_to_the_run_window() {
     assert_eq!(approvals.len(), 1, "{approvals:?}");
     assert_eq!(approvals[0]["id"], "appr-legacy");
     assert_eq!(approvals[0]["status"], "approved");
-    let resolved_at = approvals[0]["resolvedAtMillis"].as_u64().unwrap();
+    // As above (#468): the span lives on the timeline entry now, and the legacy
+    // clamping behaviour is asserted there rather than dropped.
+    let entry = body["timeline"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["kind"] == "approval")
+        .expect("a resolved approval reaches the timeline");
+    let resolved_at = entry["atMillis"].as_u64().unwrap();
     assert_eq!(
-        approvals[0]["waitedMillis"].as_u64().unwrap(),
+        entry["waitedMillis"].as_u64().unwrap(),
         resolved_at.saturating_sub(dispatched_at + 5),
         "the resolved legacy row keeps the original park-to-resolve wait",
     );
@@ -5705,4 +5951,777 @@ async fn an_admin_is_refused_by_none_of_them() {
             "{method} {uri} refused an admin: {response}"
         );
     }
+}
+
+/// Issue #552: a published deliverable lives on two surfaces, and the console's
+/// workspace `PUT` is where an operator edits one. Saving that note must record
+/// an **operator version** on the artifact chain, because that edit is exactly
+/// the datum `human_edit_diff` exists to answer — and overwriting only the node
+/// would leave the history claiming the agent's draft shipped unchanged.
+///
+/// The ordering is asserted too, by refusing the node write: an artifact
+/// stamped with a node id the tree does not have makes the chain append
+/// succeed and the node write fail, and the version must still be there
+/// afterwards. Chain-ahead-of-node is the survivable direction and
+/// node-ahead-of-chain is the silent one, so a failed save must land on the
+/// first.
+#[tokio::test]
+async fn saving_a_published_note_records_the_operators_edit_on_the_artifact() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A note in the tree…
+    let (status, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "the agent's draft"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    // …that is the projection of a published artifact.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(artifact["versions"].as_array().unwrap().len(), 2);
+    assert_eq!(artifact["versions"][1]["body"], "the operator's rewrite");
+    assert_eq!(artifact["versions"][1]["author"], "operator");
+    assert_eq!(
+        artifact["versions"][1]["note"], "operator edit before approval",
+        "the wording the console recognises, shared with the append route"
+    );
+    assert_eq!(
+        artifact["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version must inherit the node, or the NEXT save mirrors nothing"
+    );
+    assert!(
+        artifact["humanEditDiff"].is_object(),
+        "the whole point: a console edit of a deliverable is now diffable"
+    );
+
+    // And the node itself carries the operator's text.
+    let (node, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(body, "the operator's rewrite");
+    assert_eq!(
+        node.updated_by,
+        crate::ports::workspace::WorkspaceOrigin::Operator
+    );
+
+    // -- and now the ordering, with the node write refused ------------------
+    //
+    // A deliverable whose node the operator deleted still carries that node's
+    // id on its latest version, so the reverse lookup matches and the append
+    // runs — then the write fails, because the node is gone. That is the
+    // failure this route's ordering was chosen for, and it is reachable
+    // without a mock: the refusal comes from the real store.
+    let mut orphaned = ArtifactRecord::new(
+        "art-2",
+        "t-1",
+        "Retired spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    )
+    .with_source("retired.md");
+    orphaned.stamp_workspace_node("node-the-operator-deleted");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &orphaned)
+        .await
+        .expect("seed");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-the-operator-deleted",
+        Some(json!({"content": "an edit the tree cannot take"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "the node write must fail — there is no such node"
+    );
+
+    let (status, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-2", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        2,
+        "the version must survive the refused node write: chain-ahead-of-node is \
+         the direction that heals, and this is the ordering that guarantees it"
+    );
+    assert_eq!(
+        artifact["versions"][1]["body"],
+        "an edit the tree cannot take"
+    );
+}
+
+/// Nearly every note in the tree is an ordinary note, not a deliverable.
+/// Saving one must append nothing anywhere — the reverse lookup answering
+/// "no artifact owns this" is the common case, and deliberately silent.
+#[tokio::test]
+async fn saving_an_unpublished_note_appends_no_artifact_version() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    // A published artifact exists, but points at a DIFFERENT node.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "deliverable",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("some-other-node");
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "still just a note"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_, artifact) = send(&state, "GET", "/api/v1/company/artifacts/art-1", None).await;
+    assert_eq!(
+        artifact["versions"].as_array().unwrap().len(),
+        1,
+        "an ordinary note's save must not touch an unrelated artifact"
+    );
+}
+
+/// The other direction of the same invariant: appending a version through the
+/// Artifacts tab must push the new body into the deliverable's workspace note,
+/// or the tree keeps serving a draft the history has superseded.
+#[tokio::test]
+async fn appending_an_artifact_version_updates_its_workspace_note() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord, ArtifactStore};
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "launch.md", "kind": "file", "content": "v1"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().unwrap().to_string();
+
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "v1",
+        "ceo",
+        1,
+    )
+    .with_source("launch.md");
+    published.stamp_workspace_node(&node_id);
+    ArtifactStore::upsert(runtime.artifacts().as_ref(), &company, &published)
+        .await
+        .expect("seed");
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts/art-1/versions",
+        Some(json!({"body": "v2, edited in the Artifacts tab"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        appended["versions"][1]["workspaceNodeId"], node_id,
+        "the appended version keeps naming the node it lives in"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note exists");
+    assert_eq!(
+        body, "v2, edited in the Artifacts tab",
+        "the shared tree must not keep serving a superseded draft"
+    );
+}
+
+/// An artifact with no workspace note — a legacy capture, or one recorded
+/// while no tree was wired — appends exactly as it always did, with no node
+/// write attempted and nothing invented for it.
+#[tokio::test]
+async fn appending_to_an_unmirrored_artifact_touches_no_note() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, created) = send(
+        &state,
+        "POST",
+        "/api/v1/company/artifacts",
+        Some(json!({"taskId": "t-1", "title": "Draft", "body": "v1"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+
+    let (status, appended) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/artifacts/{id}/versions"),
+        Some(json!({"body": "v2"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(appended["versions"].as_array().unwrap().len(), 2);
+    assert!(
+        appended["versions"][1].get("workspaceNodeId").is_none(),
+        "nothing may invent a node for an artifact that has none"
+    );
+}
+
+/// An artifact store with one chosen fault, so a test can ask for exactly the
+/// failure it means: unreadable (`list`) or unwritable (`upsert`).
+struct FaultyArtifacts {
+    listed: Vec<crate::ports::artifacts::ArtifactRecord>,
+    list_fails: bool,
+    upsert_fails: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::ports::artifacts::ArtifactStore for FaultyArtifacts {
+    async fn list(
+        &self,
+        _: &CompanyId,
+        _: Option<&str>,
+    ) -> crate::Result<Vec<crate::ports::artifacts::ArtifactRecord>> {
+        if self.list_fails {
+            return Err(crate::error::OpenCompanyError::Store(
+                "the artifact store is down".into(),
+            ));
+        }
+        Ok(self.listed.clone())
+    }
+    async fn get(
+        &self,
+        _: &CompanyId,
+        _: &str,
+    ) -> crate::Result<Option<crate::ports::artifacts::ArtifactRecord>> {
+        Ok(None)
+    }
+    async fn upsert(
+        &self,
+        _: &CompanyId,
+        _: &crate::ports::artifacts::ArtifactRecord,
+    ) -> crate::Result<()> {
+        if self.upsert_fails {
+            return Err(crate::error::OpenCompanyError::Store(
+                "the disk is full".into(),
+            ));
+        }
+        Ok(())
+    }
+    async fn delete(&self, _: &CompanyId, _: &str) -> crate::Result<bool> {
+        Ok(false)
+    }
+}
+
+/// [`state_with_company`] with the artifact store swapped for a faulty one, so
+/// the workspace `PUT` can be exercised against a store that will not answer.
+async fn state_with_faulty_artifacts(
+    home: &std::path::Path,
+    artifacts: FaultyArtifacts,
+) -> (AppState, CompanyId) {
+    let state = state_with_company(home).await;
+    let company = state.registry().list()[0].clone();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+        .with_id(company.clone())
+        .with_artifacts(std::sync::Arc::new(artifacts))
+        .build()
+        .await
+        .expect("runtime");
+    // `insert` replaces, so the routes now resolve through the faulty store
+    // while the seeded admin on `state` carries over untouched.
+    state
+        .registry()
+        .insert(company.clone(), std::sync::Arc::new(runtime));
+    (state, company)
+}
+
+/// Issue #552 made every note save consult the artifact store, and an ordinary
+/// note must not inherit that store's health.
+///
+/// Nearly the whole tree is ordinary notes. They own no artifact chain, and
+/// their save touches the artifact store for one reason only — to ask whether
+/// they are a deliverable. When that question cannot be answered, refusing the
+/// save would discard an operator's typing to protect a chain the note does not
+/// have.
+#[tokio::test]
+async fn an_ordinary_note_still_saves_when_the_artifact_store_cannot_be_read() {
+    use crate::ports::workspace::WorkspaceStore;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let (state, company) = state_with_faulty_artifacts(
+        &home,
+        FaultyArtifacts {
+            listed: Vec::new(),
+            list_fails: true,
+            upsert_fails: false,
+        },
+    )
+    .await;
+    let runtime = state.registry().get(&company).expect("company");
+
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "notes.md", "kind": "file", "content": "just a note"})),
+    )
+    .await;
+    let node_id = note["id"].as_str().expect("node id").to_string();
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        &format!("/api/v1/company/workspace/file/{node_id}"),
+        Some(json!({"content": "the operator kept typing"})),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "an unreadable artifact store must not reject a plain note's save"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, &node_id)
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(
+        body, "the operator kept typing",
+        "the edit must actually land, not merely report success"
+    );
+}
+
+/// The other direction, and the one the availability fix must not have cost:
+/// once the store *has* answered and named this node a published deliverable,
+/// a version that cannot be recorded still refuses the save.
+///
+/// This is the fail-closed guarantee the module exists for. A node written
+/// behind a version that was never appended is the silent, permanent direction
+/// — `human_edit_diff` would answer for a draft the operator had already
+/// rewritten.
+#[tokio::test]
+async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded() {
+    use crate::ports::artifacts::{ArtifactKind, ArtifactRecord};
+    use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+
+    // The store answers the lookup — this node IS a deliverable — but refuses
+    // the append.
+    let mut published = ArtifactRecord::new(
+        "art-1",
+        "t-1",
+        "Launch spec",
+        ArtifactKind::Markdown,
+        "the agent's draft",
+        "ceo",
+        1,
+    );
+    published.stamp_workspace_node("node-published");
+    let (state, company) = state_with_faulty_artifacts(
+        &home,
+        FaultyArtifacts {
+            listed: vec![published],
+            list_fails: false,
+            upsert_fails: true,
+        },
+    )
+    .await;
+    let runtime = state.registry().get(&company).expect("company");
+
+    // The node the artifact points at, created directly so its id is the one
+    // the record was stamped with.
+    WorkspaceStore::create(
+        runtime.workspace().as_ref(),
+        &company,
+        &WorkspaceNode {
+            id: "node-published".to_string(),
+            name: "launch.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+        },
+        Some("the agent's draft"),
+    )
+    .await
+    .expect("seed the node");
+
+    let (status, _) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/workspace/file/node-published",
+        Some(json!({"content": "the operator's rewrite"})),
+    )
+    .await;
+    assert_ne!(
+        status,
+        StatusCode::OK,
+        "a deliverable whose version cannot be recorded must not have its node written"
+    );
+
+    let (_, body) = WorkspaceStore::read(runtime.workspace().as_ref(), &company, "node-published")
+        .await
+        .unwrap()
+        .expect("the note still exists");
+    assert_eq!(
+        body, "the agent's draft",
+        "the node must be untouched — writing it would strand the chain behind it"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The plan → workflow bridge: apply / reject a proposal (issue #580)
+// ---------------------------------------------------------------------------
+
+/// Seeds a card sitting In Review with a `workflow` deliverable and the given
+/// proposal graph, straight through the task store (the builder pass that would
+/// normally mint it is behind the `openhuman` feature). Returns the card id.
+async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
+    let runtime = state
+        .registry()
+        .get(&CompanyId::new("acme"))
+        .expect("company");
+    let id = crate::ports::generate_id();
+    let record = TaskRecord {
+        id: id.clone(),
+        title: "Automate the weekly digest".to_string(),
+        note: None,
+        column: "in_review".to_string(),
+        priority: "medium".to_string(),
+        assignee: "ceo".to_string(),
+        updated_at_millis: 1,
+        origin_chat_id: None,
+        parent_task_id: None,
+        output: None,
+        plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Workflow,
+        workflow_proposal: Some(crate::ports::tasks::TaskWorkflowProposal {
+            summary: "Email the digest".to_string(),
+            ops,
+            generated_at_millis: 1,
+            run_id: "run-build-1".to_string(),
+        }),
+    };
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &record)
+        .await
+        .expect("seed the proposal card");
+    id
+}
+
+/// A valid two-node graph (trigger → agent) whose agent names a real roster
+/// teammate. `schedule` arms the trigger when `Some`.
+fn digest_ops(schedule: Option<&str>) -> Value {
+    let mut trigger = json!({ "id": "start", "kind": "trigger", "name": "Start" });
+    if let Some(cron) = schedule {
+        trigger["schedule"] = json!(cron);
+    }
+    json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "description": "Email the weekly digest",
+        "nodes": [
+            trigger,
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ceo" }
+        ],
+        "edges": [{ "from": "start", "to": "write" }]
+    })
+}
+
+/// Applying a manual-trigger proposal creates the workflow, stamps the card's
+/// output link to the build attempt, finishes the card in Done, and clears the
+/// proposal — the whole happy path in one assertion set.
+#[tokio::test]
+async fn applying_a_proposal_creates_the_workflow_and_finishes_the_card() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    // Done is reached — the create path is the human approval the epic requires.
+    assert_eq!(card["column"], "done");
+    // The proposal is consumed, and the card links to the workflow it created and
+    // to the attempt that built it (issue #339).
+    assert!(card.get("workflowProposal").is_none(), "{card}");
+    assert_eq!(card["output"]["runId"], "run-build-1");
+    assert_eq!(
+        card["output"]["workflows"][0]["workflowId"],
+        "weekly-digest"
+    );
+    assert_eq!(card["output"]["workflows"][0]["action"], "created");
+
+    // The workflow now exists in the company's list — and, with no schedule, it
+    // is armed (nothing to disarm).
+    let (status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let created = workflows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "weekly-digest")
+        .expect("the created workflow is listed");
+    assert_eq!(created["enabled"], true, "a manual trigger is not disarmed");
+}
+
+/// #276: applying a proposal whose trigger carries a schedule creates the
+/// workflow **switched off** — armed only by a person, never by approving the
+/// proposal.
+#[tokio::test]
+async fn applying_a_scheduled_proposal_lands_it_disarmed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(Some("0 9 * * 1"))).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "done");
+
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    let created = workflows
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|w| w["id"] == "weekly-digest")
+        .expect("the created workflow is listed");
+    assert_eq!(
+        created["enabled"], false,
+        "a scheduled graph lands disarmed until a person arms it (#276)"
+    );
+}
+
+/// Roster drift (the proposal names a teammate no longer on the roster) is
+/// refused by the create's roster check: the card **stays In Review** with its
+/// proposal intact, and the refusal is a 400 the operator sees.
+#[tokio::test]
+async fn a_proposal_that_fails_validation_keeps_the_card_in_review() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let ops = json!({
+        "id": "weekly-digest",
+        "name": "Weekly digest",
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Start" },
+            { "id": "write", "kind": "agent", "name": "Draft it", "agent": "ghost" }
+        ],
+        "edges": [{ "from": "start", "to": "write" }]
+    });
+    let id = seed_proposal_card(&state, ops).await;
+
+    let (status, _body) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/apply"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    // The card is untouched save for the reason on its note: still In Review,
+    // still carrying the proposal to retry once the roster is fixed.
+    let (_status, card) = send(&state, "GET", &format!("/api/v1/company/tasks/{id}"), None).await;
+    assert_eq!(card["task"]["column"], "in_review");
+    assert!(card["task"].get("workflowProposal").is_some(), "{card}");
+
+    // …and no workflow was created.
+    let (_status, workflows) = send(&state, "GET", "/api/v1/company/workflows", None).await;
+    assert!(
+        workflows
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|w| w["id"] != "weekly-digest"),
+        "a refused proposal must not leave a workflow behind"
+    );
+}
+
+/// Rejecting a proposal returns the card to To-do and clears the proposal
+/// (decision D2c). The card keeps its `workflow` deliverable, so it can be built
+/// again.
+#[tokio::test]
+async fn rejecting_a_proposal_returns_the_card_to_todo() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = seed_proposal_card(&state, digest_ops(None)).await;
+
+    let (status, card) = send(
+        &state,
+        "POST",
+        &format!("/api/v1/company/tasks/{id}/workflow-proposal/reject"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{card}");
+    assert_eq!(card["column"], "todo");
+    assert!(card.get("workflowProposal").is_none(), "{card}");
+    assert_eq!(
+        card["deliverable"], "workflow",
+        "reject keeps the deliverable"
+    );
+}
+
+/// Applying or rejecting a card that has no proposal is a 400, not a silent
+/// no-op — the operator asked for an action on something that is not there.
+#[tokio::test]
+async fn applying_with_no_proposal_is_a_bad_request() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let (_status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "Plain card" })),
+    )
+    .await;
+    let id = task["id"].as_str().unwrap().to_string();
+
+    for verb in ["apply", "reject"] {
+        let (status, _body) = send(
+            &state,
+            "POST",
+            &format!("/api/v1/company/tasks/{id}/workflow-proposal/{verb}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{verb} with no proposal");
+    }
+}
+
+/// The create route accepts an explicit `deliverable`, and it round-trips on the
+/// board read — the operator's once-vs-workflow choice (D2a), with `once` staying
+/// off the wire so a plain card is byte-identical to a pre-#580 one.
+#[tokio::test]
+async fn a_card_can_be_created_as_a_workflow_deliverable() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, workflow_card) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "Automate onboarding", "deliverable": "workflow" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(workflow_card["deliverable"], "workflow");
+
+    let (_status, once_card) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({ "title": "One-off note" })),
+    )
+    .await;
+    assert!(
+        once_card.get("deliverable").is_none(),
+        "a once card stays off the wire: {once_card}"
+    );
+
+    // A patch can flip a once card to workflow before it is dragged into In
+    // Progress.
+    let id = once_card["id"].as_str().unwrap();
+    let (status, flipped) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/tasks/{id}"),
+        Some(json!({ "deliverable": "workflow" })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(flipped["deliverable"], "workflow");
 }

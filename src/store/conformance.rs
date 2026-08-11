@@ -34,6 +34,9 @@ use crate::ports::types::{
 };
 use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
 use crate::ports::users::{InviteRecord, UserRecord, UserRole, UserStatus, UserStore};
+use crate::ports::workflow_revisions::{
+    MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
+};
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
 /// A minimal valid manifest used to seed [`CompanyRecord`]s in the suite.
@@ -866,6 +869,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -1573,6 +1578,198 @@ pub async fn assert_artifact_store(artifacts: Arc<dyn ArtifactStore>) {
     assert!(!artifacts.delete(&alpha, "a1").await.unwrap());
     assert_eq!(artifacts.list(&alpha, None).await.unwrap().len(), 3);
     assert_eq!(artifacts.list(&beta, None).await.unwrap().len(), 1);
+}
+
+/// Asserts the [`WorkflowRevisionStore`] contract (issue #274): per-company and
+/// per-workflow isolation, newest-first order, prune-to-cap inside the push, a
+/// verbatim body round-trip, and the delete cascade.
+///
+/// The prune assertion is the load-bearing one: a backend that grew the ring
+/// unbounded, or that pruned the *newest* rows instead of the oldest, would
+/// still pass a naive "push then read back" check while defeating the whole
+/// point of a bounded history.
+pub async fn assert_workflow_revision_store(revisions: Arc<dyn WorkflowRevisionStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // A helper that pins the capture time, so ordering is asserted against a
+    // known sequence rather than the wall clock.
+    let rev = |workflow_id: &str, name: &str, toml: &str, at: u64| {
+        let mut r = WorkflowRevisionRecord::new(workflow_id, name, toml, at);
+        // Force a distinct, ordered id so the tie-break is deterministic even
+        // when two share a millisecond.
+        r.id = format!("{workflow_id}-{at:04}");
+        r
+    };
+
+    // Two revisions of `greeter`, plus one of a sibling workflow, plus one under
+    // company beta that must never leak into alpha.
+    let first = rev(
+        "greeter",
+        "Greeter v1",
+        "id = \"greeter\"\nname = \"Greeter v1\"",
+        10,
+    );
+    let second = rev(
+        "greeter",
+        "Greeter v2",
+        "id = \"greeter\"\nname = \"Greeter v2\"",
+        20,
+    );
+    revisions.push_revision(&alpha, &first).await.unwrap();
+    revisions.push_revision(&alpha, &second).await.unwrap();
+    revisions
+        .push_revision(&alpha, &rev("digest", "Digest", "id = \"digest\"", 15))
+        .await
+        .unwrap();
+    revisions
+        .push_revision(&beta, &rev("greeter", "Other", "id = \"greeter\"", 99))
+        .await
+        .unwrap();
+
+    // Isolation by company AND by workflow.
+    let alpha_greeter = revisions.list_revisions(&alpha, "greeter").await.unwrap();
+    assert_eq!(alpha_greeter.len(), 2, "only greeter's two snapshots");
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "digest")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Newest first, and the body round-trips verbatim.
+    assert_eq!(alpha_greeter[0].id, second.id, "newest snapshot leads");
+    assert_eq!(alpha_greeter[1].id, first.id);
+    assert_eq!(
+        alpha_greeter[0].toml, second.toml,
+        "the captured TOML must survive byte-for-byte"
+    );
+
+    // get_revision is workflow-scoped: greeter's id is invisible under digest.
+    assert!(
+        revisions
+            .get_revision(&alpha, "greeter", &first.id)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        revisions
+            .get_revision(&alpha, "digest", &first.id)
+            .await
+            .unwrap()
+            .is_none(),
+        "a revision id must not resolve under the wrong workflow"
+    );
+    assert!(
+        revisions
+            .get_revision(&alpha, "greeter", "nope")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // Prune-to-cap: push MAX+5 distinct snapshots of a fresh workflow and prove
+    // the ring holds exactly MAX, keeping the newest and dropping the oldest.
+    for i in 0..(MAX_WORKFLOW_REVISIONS as u64 + 5) {
+        revisions
+            .push_revision(
+                &alpha,
+                &rev(
+                    "ring",
+                    &format!("v{i}"),
+                    &format!("id = \"ring\" # {i}"),
+                    1000 + i,
+                ),
+            )
+            .await
+            .unwrap();
+    }
+    let ring = revisions.list_revisions(&alpha, "ring").await.unwrap();
+    assert_eq!(
+        ring.len(),
+        MAX_WORKFLOW_REVISIONS,
+        "the ring must be capped at MAX_WORKFLOW_REVISIONS"
+    );
+    assert_eq!(
+        ring[0].created_at_millis,
+        1000 + MAX_WORKFLOW_REVISIONS as u64 + 4,
+        "the newest snapshot survives the prune"
+    );
+    assert_eq!(
+        ring[ring.len() - 1].created_at_millis,
+        1000 + 5,
+        "the oldest kept is exactly MAX back from the newest — older ones pruned"
+    );
+
+    // The prune must not have touched the sibling workflows or company beta.
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+
+    // Delete cascade: drops exactly one workflow's history, reports the count,
+    // and is a no-op the second time.
+    let removed = revisions.delete_revisions(&alpha, "greeter").await.unwrap();
+    assert_eq!(removed, 2, "both greeter snapshots removed");
+    assert!(
+        revisions
+            .list_revisions(&alpha, "greeter")
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        revisions.delete_revisions(&alpha, "greeter").await.unwrap(),
+        0
+    );
+    // Siblings and beta untouched by the cascade.
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "digest")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&alpha, "ring")
+            .await
+            .unwrap()
+            .len(),
+        MAX_WORKFLOW_REVISIONS
+    );
+    assert_eq!(
+        revisions
+            .list_revisions(&beta, "greeter")
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
 }
 
 /// Asserts the [`FactStore`] contract: isolation, query/kind filtering, upsert,
@@ -2511,5 +2708,147 @@ pub async fn assert_run_reaper(runs: Arc<dyn crate::ports::runs::RunStore>) {
             .await
             .unwrap()
             .is_empty()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// ScheduleFireStore (issue #241)
+// ---------------------------------------------------------------------------
+//
+// Imports for this suite are function-local rather than added to the module
+// header, keeping it a pure append to a file edited concurrently on other
+// branches.
+
+/// Asserts the
+/// [`ScheduleFireStore`](crate::ports::schedule_fires::ScheduleFireStore)
+/// contract: a claim is won exactly once; keys are isolated per minute, per
+/// schedule and per company; `latest_fire` is the max claimed minute (never the
+/// last written); pruning removes only rows strictly below the cutoff and never
+/// the anchor; and N concurrent claimers of one key produce exactly one winner —
+/// the cross-replica race the whole port exists to arbitrate.
+pub async fn assert_schedule_fire_store(
+    fires: Arc<dyn crate::ports::schedule_fires::ScheduleFireStore>,
+) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // -- first claim wins, a repeat loses -----------------------------------
+
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "the first claim on a key wins"
+    );
+    assert!(
+        !fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "a second claim on the same key loses"
+    );
+
+    // -- keys are distinct per minute, per schedule, per company ------------
+
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 101).await.unwrap(),
+        "a different minute is a different claim"
+    );
+    assert!(
+        fires.claim_fire(&alpha, "workflow-b", 100).await.unwrap(),
+        "a different schedule at the same minute is a different claim"
+    );
+    assert!(
+        fires.claim_fire(&beta, "workflow-a", 100).await.unwrap(),
+        "another company claiming the same key does not collide"
+    );
+
+    // -- latest_fire is the max claimed minute, or None ---------------------
+
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101),
+        "the anchor is the highest claimed minute"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-b").await.unwrap(),
+        Some(100)
+    );
+    assert_eq!(
+        fires.latest_fire(&beta, "workflow-a").await.unwrap(),
+        Some(100),
+        "company A's rows are invisible to company B's anchor"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "never").await.unwrap(),
+        None,
+        "a schedule that never fired has no anchor"
+    );
+
+    // Claiming an OLDER minute after a newer one does not move the anchor down:
+    // it is a max, not a last-write.
+    assert!(fires.claim_fire(&alpha, "workflow-a", 50).await.unwrap());
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101)
+    );
+
+    // -- prune removes only rows strictly below the cutoff, never the anchor -
+    //
+    // Prune is COMPANY-wide across every schedule, not per schedule. alpha holds
+    // workflow-a {50, 100, 101} and workflow-b {100}. Pruning below 101 drops
+    // workflow-a's 50 and 100 and workflow-b's 100 — three rows — and keeps
+    // workflow-a's 101, exactly the anchor-preservation invariant the 14-day
+    // cutoff / 7-day window gap guarantees in production.
+    let removed = fires.prune_fires_before(&alpha, 101).await.unwrap();
+    assert_eq!(
+        removed, 3,
+        "prune removes every row below the cutoff, across all schedules"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-a").await.unwrap(),
+        Some(101),
+        "the newest row survives a prune whose cutoff equals it"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "workflow-b").await.unwrap(),
+        None,
+        "a schedule whose only row fell below the cutoff has no anchor left"
+    );
+    // A pruned minute no longer exists, so it can be claimed again.
+    assert!(
+        fires.claim_fire(&alpha, "workflow-a", 100).await.unwrap(),
+        "a pruned minute can be re-claimed"
+    );
+    // Prune is per-company: beta's row is untouched.
+    assert_eq!(
+        fires.latest_fire(&beta, "workflow-a").await.unwrap(),
+        Some(100)
+    );
+    // A cutoff below everything removes nothing.
+    assert_eq!(fires.prune_fires_before(&alpha, 0).await.unwrap(), 0);
+
+    // -- N concurrent claimers of one key: exactly one winner ---------------
+    //
+    // Spawned tasks, so the claims genuinely contend rather than serialising on
+    // one await. This is the property hosted replicas depend on: two processes
+    // ticking the same minute must not both fire.
+    const N: usize = 16;
+    let key_minute = 777_u64;
+    let mut set = tokio::task::JoinSet::new();
+    for _ in 0..N {
+        let fires = fires.clone();
+        let company = alpha.clone();
+        set.spawn(async move {
+            fires
+                .claim_fire(&company, "race", key_minute)
+                .await
+                .unwrap()
+        });
+    }
+    let mut winners = 0;
+    while let Some(res) = set.join_next().await {
+        if res.unwrap() {
+            winners += 1;
+        }
+    }
+    assert_eq!(
+        winners, 1,
+        "exactly one of {N} concurrent claimers may win the key"
     );
 }

@@ -158,14 +158,27 @@ Backends persist the node as opaque JSON and both fields are
 round-trip, the write stamp, and the rename non-stamp across all three
 backends.
 
-**`Agents/<agent-id>/` (#551).** `company::workspace_agents::ensure_agent_folders`
-adopt-or-creates a reserved `Agents` root plus one folder per roster agent, from
-two seams: `RuntimeBuilder::build` (boot) and `HarnessPool::ensure` (every
-roster rebuild, so console `add_member` and orchestrator `add_agent` are
-covered). It is idempotent and fail-closed — any name collision warns and skips
-rather than creating a duplicate that would make the path ambiguous. The folder
-is an organizational and attribution unit only; agents may create and write
-**anywhere** in their company's tree.
+**`Agents/` and `Desks/` (#551).** `company::workspace_scaffold` owns the
+workspace's two reserved system roots and the folders beneath them, on two
+different schedules:
+
+* `ensure_workspace_scaffold` adopt-or-creates the `Agents` and `Desks` roots,
+  **empty**, from one seam: `RuntimeBuilder::build` (boot). It takes no roster
+  — a company with no agents gets both — so an existing company picks them up
+  on its next boot. Idempotent; one tree read.
+* `ensure_agent_folder` / `ensure_desk_folder` adopt-or-create
+  `Agents/<agent-id>/` and `Desks/<desk-id>/` **on demand**, returning the node
+  id, called when that agent or desk first produces something. A folder means
+  "this member produced something"; an eager folder per roster member would be
+  a claim the tree cannot back. `workspace_create` calls the agent minter when
+  an agent writes into its own home; #552's publish path is the next caller.
+
+Both are fail-closed: a name collision (a *file* of that name, or several nodes
+sharing it) is never resolved by creating a duplicate that would make the path
+permanently ambiguous. The scaffold warns and skips, since nothing waits on its
+result; a minter returns the collision as an error, since its caller needs the
+id. The folder is an organizational and attribution unit only; agents may
+create and write **anywhere** in their company's tree.
 
 ### FactStore
 

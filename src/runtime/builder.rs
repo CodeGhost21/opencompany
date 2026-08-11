@@ -42,13 +42,18 @@ use crate::ports::types::{
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
     FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore, SessionStore,
-    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
+    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
+    WorkspaceStore,
 };
+// Separate line (#241) so this addition is a pure append, not a reflow of the
+// grouped import that sibling store-seam branches (#274, #596) also edit.
+use crate::ports::ScheduleFireStore;
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
 use crate::runtime::handover::RuntimeHandover;
 use crate::runtime::journal::RuntimeJournal;
 use crate::runtime::tools::{StubToolProvider, grant_matches};
+use crate::runtime::workspace_events::WorkspaceAnnouncer;
 use crate::store::paths::Bundle;
 use crate::store::{
     FsCompanyStore, FsContextStore, FsEventLog, FsInboxStore, FsMemoryStore, FsOps, FsSecretStore,
@@ -224,6 +229,8 @@ pub struct RuntimeBuilder {
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
+    workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
+    schedule_fires: Option<Arc<dyn ScheduleFireStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -315,6 +322,8 @@ impl RuntimeBuilder {
             facts: None,
             artifacts: None,
             runs: None,
+            workflow_revisions: None,
+            schedule_fires: None,
             usage: None,
             skills: None,
             users: None,
@@ -431,6 +440,8 @@ impl RuntimeBuilder {
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
         self.runs = Some(handles.runs.clone());
+        self.workflow_revisions = Some(handles.workflow_revisions.clone());
+        self.schedule_fires = Some(handles.schedule_fires.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -500,6 +511,21 @@ impl RuntimeBuilder {
     /// Swaps the task-run store (default: fs-backed).
     pub fn with_runs(mut self, runs: Arc<dyn RunStore>) -> Self {
         self.runs = Some(runs);
+        self
+    }
+
+    /// Swaps the workflow-revision store (default: fs-backed).
+    pub fn with_workflow_revisions(
+        mut self,
+        workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    ) -> Self {
+        self.workflow_revisions = Some(workflow_revisions);
+        self
+    }
+
+    /// Swaps the scheduler fire-claim store (default: fs-backed).
+    pub fn with_schedule_fires(mut self, schedule_fires: Arc<dyn ScheduleFireStore>) -> Self {
+        self.schedule_fires = Some(schedule_fires);
         self
     }
 
@@ -816,10 +842,20 @@ impl RuntimeBuilder {
                     self.tasks.unwrap_or_else(|| fs_ops.clone()),
                     events.clone(),
                 )),
-                workspace: self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                // Issue #327: and the tree announces its own writes, for the
+                // same reason and in the same place. Every writer — the
+                // console routes, the agent tools, the publish drain, the
+                // seeder below — passes through this port, so none of them has
+                // to remember to emit. See [`WorkspaceAnnouncer`].
+                workspace: Arc::new(WorkspaceAnnouncer::new(
+                    self.workspace.unwrap_or_else(|| fs_ops.clone()),
+                    events.clone(),
+                )),
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
+                schedule_fires: self.schedule_fires.unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
@@ -843,26 +879,33 @@ impl RuntimeBuilder {
             seed_workspace(ops.workspace.as_ref(), &id, seed_dir).await?;
         }
 
-        // Issue #551: give every manifest agent its `Agents/<id>/` folder in the
-        // shared tree, so anything it produces has a named home both the
-        // operator and the other agents can navigate to.
+        // Issue #551: lay down the workspace's system roots — `Agents/` and
+        // `Desks/` — beside the template-seeded top-level folders, so anything
+        // an agent or a desk produces has a named home both the operator and
+        // the other agents can navigate to. The roots only; the folder for a
+        // given agent or desk is minted the first time that agent or desk
+        // actually produces something (see
+        // [`company::workspace_scaffold`](crate::company::workspace_scaffold)).
         //
         // Gated on `handover.is_none()` and nothing else, deliberately:
         //
         //  * NOT on `seed_dir` — a provisioned tenant and the desktop build have
-        //    no company bundle to seed from, and their agents need folders just
-        //    as much.
+        //    no company bundle to seed from, and their workspace needs the same
+        //    shape.
         //  * NOT on `is_empty` — that gate exists so an operator's deletions
-        //    stick against re-seeding, which is a different question. A roster
-        //    grows between boots, and a workspace that already has notes in it
-        //    still needs a folder for the teammate added last week.
+        //    stick against re-seeding, which is a different question. An
+        //    existing company with notes already in it picks the roots up on
+        //    its next boot, which is the only way it ever gets them.
+        //  * NOT on the roster — the roots are part of what a workspace *is*,
+        //    so a company with no agents at all still gets both.
         //
         // It is idempotent, so running it on every boot costs one tree read.
+        // This is the feature's only eager seam: everything that used to be
+        // re-provisioned on a roster change is now minted on demand instead.
         if handover.is_none() {
-            crate::company::workspace_agents::ensure_agent_folders(
+            crate::company::workspace_scaffold::ensure_workspace_scaffold(
                 ops.workspace.as_ref(),
                 &id,
-                self.manifest.agents.iter().map(|agent| agent.id.as_str()),
             )
             .await?;
         }
@@ -1162,6 +1205,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #390, the cycle-level equivalent, resting on the same three
+            // invariants: a cycle journals a start before it takes the serial
+            // lock, every cycle is driven in this process, and one process owns
+            // this journal. So a start with no finish at boot is a cycle that
+            // died with the last host.
+            //
+            // Gated on the handover for exactly the same reason as the sweep
+            // above: a cycle survives a live runtime swap, and sweeping mid-life
+            // would stamp "interrupted by a host restart" on one still running,
+            // whose real finish would then land after the synthetic one.
+            //
+            // Placed after `journal.load()`, whose replay is what populates the
+            // open set, and best-effort inside for the same reason.
+            let settled = journal.sweep_interrupted_cycles().await;
+            if settled > 0 {
+                tracing::info!(
+                    company = %id,
+                    settled,
+                    "settled cycles left open by a previous host process"
+                );
+            }
         }
 
         // The policy gate, rehydrated from the journal replay above so approvals
@@ -1262,6 +1327,11 @@ impl RuntimeBuilder {
         // above already use.
         #[cfg(feature = "openhuman")]
         let mut planner: Option<Arc<crate::harness::planning::TaskPlanner>> = None;
+        // Issue #580: the company's workflow builder, built from the SAME deps as
+        // the planner (shared provider + model override) and installed the same
+        // way via `CompanyRuntime::set_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1528,6 +1598,8 @@ impl RuntimeBuilder {
                                 // dispatch settle that drains the publishes.
                                 workflow_refs:
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                                run_outputs: crate::harness::orchestrator::RunOutputCache::default(
+                                ),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.
@@ -1673,6 +1745,13 @@ impl RuntimeBuilder {
                             // that could drift from the roster's.
                             planner = Some(Arc::new(
                                 crate::harness::planning::TaskPlanner::from_deps(&deps),
+                            ));
+                            // Issue #580: built from the same deps, so it shares
+                            // the tenant provider and model override with the
+                            // roster and the planner rather than resolving a
+                            // second credential path.
+                            builder = Some(Arc::new(
+                                crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
                             ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
@@ -1915,6 +1994,14 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(planner) = planner {
             runtime.set_planner(planner);
+        }
+        // Issue #580: same rebuild treatment as the planner — rebuilt from the
+        // successor's deps (so a BYOK switch reaches building), with an empty
+        // in-flight set that matters to nothing (a pass interrupted by a rebuild
+        // has no settle to reach the board; the boot reaper settles its run).
+        #[cfg(feature = "openhuman")]
+        if let Some(builder) = builder {
+            runtime.set_builder(builder);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —
@@ -2663,6 +2750,8 @@ mod test {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())
@@ -2796,10 +2885,22 @@ mod test {
             .build()
             .await
             .unwrap();
-        // Seeded: README.md, Brand/, Brand/voice.md.
+        // Seeded: README.md, Brand/, Brand/voice.md — plus the two system roots
+        // boot always scaffolds beside them (issue #551), which are not seeded
+        // content and so are not what the re-seed gate is about.
+        let seeded = |tree: &[crate::ports::WorkspaceNode]| {
+            let mut names: Vec<String> = tree
+                .iter()
+                .map(|n| n.name.clone())
+                .filter(|name| {
+                    !crate::company::workspace_scaffold::SYSTEM_ROOTS.contains(&name.as_str())
+                })
+                .collect();
+            names.sort();
+            names
+        };
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert_eq!(tree.len(), 3);
-        assert!(tree.iter().any(|n| n.name == "voice.md"));
+        assert_eq!(seeded(&tree), vec!["Brand", "README.md", "voice.md"]);
 
         // Operator deletes a node.
         let voice = tree.iter().find(|n| n.name == "voice.md").unwrap();
@@ -2815,24 +2916,28 @@ mod test {
             .unwrap();
         let tree = runtime.workspace().tree(&id).await.unwrap();
         assert_eq!(
-            tree.len(),
-            2,
+            seeded(&tree),
+            vec!["Brand", "README.md"],
             "workspace re-seeded despite operator deletion"
         );
-        assert!(!tree.iter().any(|n| n.name == "voice.md"));
         // Sanity: the record store still loads.
         assert!(runtime.store().load(&id).await.unwrap().is_some());
     }
 
-    /// Issue #551: boot gives every manifest agent a home in the shared tree.
+    /// Issue #551: boot lays down the workspace's system roots — and nothing
+    /// inside them.
+    ///
+    /// The per-agent folder is deliberately absent: it is minted the first time
+    /// that agent produces something, so a roster of teammates who have done
+    /// nothing yet leaves no trace in the tree.
     ///
     /// Also pins the two gates the seeding block above does NOT share: this
     /// runs with **no** `seed_dir` (the provisioned-tenant and desktop shape),
-    /// and it runs again on a workspace that is no longer empty, picking up the
-    /// teammate the manifest gained in between.
+    /// and it runs again on a workspace that is no longer empty — which is how
+    /// an existing company picks the roots up.
     #[tokio::test]
-    async fn boot_provisions_an_agents_folder_per_manifest_agent() {
-        use crate::company::workspace_agents::AGENTS_ROOT;
+    async fn boot_provisions_the_system_roots_and_nothing_inside_them() {
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, DESKS_ROOT};
         use crate::ports::workspace::{NodeKind, WorkspaceOrigin};
 
         let home_dir = tmp_home("oc-agents-");
@@ -2853,23 +2958,30 @@ mod test {
         .await
         .unwrap();
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        let root = tree
-            .iter()
-            .find(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
-            .expect("the Agents root is provisioned with no seed dir");
-        assert_eq!(root.kind, NodeKind::Folder);
-        assert_eq!(root.created_by, WorkspaceOrigin::Seed);
-        let ceo = tree.iter().find(|n| n.name == "ceo").expect("Agents/ceo");
-        assert_eq!(ceo.parent_id.as_deref(), Some(root.id.as_str()));
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
         assert_eq!(
-            ceo.created_by,
-            WorkspaceOrigin::Agent {
-                id: "ceo".to_string()
-            }
+            names,
+            vec![AGENTS_ROOT, DESKS_ROOT],
+            "boot provisions the two roots with no seed dir, and no folder for a \
+             teammate that has produced nothing"
         );
+        for node in &tree {
+            assert!(node.parent_id.is_none());
+            assert_eq!(node.kind, NodeKind::Folder);
+            assert_eq!(node.created_by, WorkspaceOrigin::Seed);
+        }
 
-        // A manifest that gains a teammate: the workspace is no longer empty,
-        // so an `is_empty` gate would have skipped this rebuild entirely.
+        // An existing, non-empty workspace: an `is_empty` gate would have
+        // skipped this boot entirely, and a company that predates the feature
+        // would never get its roots.
+        let agents_root = tree
+            .iter()
+            .find(|n| n.name == AGENTS_ROOT)
+            .unwrap()
+            .id
+            .clone();
+        runtime.workspace().delete(&id, &agents_root).await.unwrap();
         drop(runtime);
         let runtime = RuntimeBuilder::new(
             home,
@@ -2883,17 +2995,36 @@ mod test {
         .await
         .unwrap();
         let tree = runtime.workspace().tree(&id).await.unwrap();
-        assert!(
-            tree.iter().any(|n| n.name == "cmo"),
-            "a teammate added between boots got no folder"
-        );
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
         assert_eq!(
-            tree.iter()
-                .filter(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
-                .count(),
-            1,
-            "the second boot minted a rival Agents root"
+            names,
+            vec![AGENTS_ROOT, DESKS_ROOT],
+            "the deleted root was re-provisioned and the surviving one not duplicated"
         );
+    }
+
+    /// The roots are part of what a workspace *is*, not a projection of the
+    /// roster: a company with no agents at all still gets both.
+    #[tokio::test]
+    async fn boot_provisions_the_roots_for_a_company_with_no_agents() {
+        use crate::company::workspace_scaffold::{AGENTS_ROOT, DESKS_ROOT};
+
+        let home_dir = tmp_home("oc-noagents-");
+        let id = CompanyId::new("acme");
+        let runtime = RuntimeBuilder::new(
+            home_dir.path().to_path_buf(),
+            parse("[company]\nname=\"Acme\"\n[policy]\nmode=\"full\"\n"),
+        )
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+
+        let tree = runtime.workspace().tree(&id).await.unwrap();
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec![AGENTS_ROOT, DESKS_ROOT]);
     }
 
     /// Issue #85: the launch path's template provenance is stamped onto the

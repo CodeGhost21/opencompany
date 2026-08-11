@@ -101,18 +101,32 @@ impl WorkflowSpawn {
     /// task holds its own guard, journals its own outcome, and deregisters
     /// itself on every exit path including an unwind. Awaiting it therefore
     /// resolves only once the outcome is already durable.
+    ///
+    /// `dry_run` (issue #542) makes this a **test run**: the flag is stamped
+    /// onto the run's [`WorkflowRunContext`] (the supervisor still registers it,
+    /// so a dry run stays cancellable and free), and the outcome journal write
+    /// below is skipped on **both** arms — a test run leaves nothing durable, so
+    /// [`record_run_finished`] must not write a `WorkflowRunFinished` for it any
+    /// more than the runner writes a `WorkflowRunStarted`. Every entry point but
+    /// the run route passes `false`; a scheduled or resumed run is always real.
     pub fn spawn(
         self,
         workflow: WorkflowFile,
         input: Value,
         scheduled: bool,
+        dry_run: bool,
     ) -> (String, JoinHandle<Result<WorkflowRun>>) {
         // Issue #371 mints the id above the runner so the error arm can still
         // correlate; issue #383 mints it HERE, through the supervisor, so the
         // same id is also an address an operator can send "stop" to.
         // Deliberately not a second identifier — the run id the console already
         // correlates SSE frames on IS the cancellation handle.
-        let (ctx, guard) = self.supervisor.begin(&workflow.id, scheduled);
+        //
+        // Issue #542: the dry flag is stamped on the freshly-minted context
+        // AFTER `begin`, so the supervisor is untouched — a dry run registers
+        // and cancels exactly like a real one.
+        let (mut ctx, guard) = self.supervisor.begin(&workflow.id, scheduled);
+        ctx.dry_run = dry_run;
         let run_id = ctx.run_id.clone();
         let handle = tokio::spawn(async move {
             // Held for the whole run INCLUDING the journal write below, so the
@@ -121,34 +135,41 @@ impl WorkflowSpawn {
             // included, is why this is a guard rather than a call at the end.
             let _guard = guard;
             let result = self.runner.run(&self.company, &workflow, input, &ctx).await;
-            // Issue #228: journaled on BOTH arms. The caller may well have
-            // closed the tab; the record is what is still there tomorrow.
-            let outcome = match result.as_ref() {
-                Ok(run) => Ok(run),
-                Err(err) => Err(err.to_string()),
-            };
-            match outcome {
-                Ok(run) => {
-                    record_run_finished(
-                        &self.events,
-                        &self.company,
-                        &workflow.id,
-                        scheduled,
-                        &ctx.run_id,
-                        Ok(run),
-                    )
-                    .await;
-                }
-                Err(err) => {
-                    record_run_finished(
-                        &self.events,
-                        &self.company,
-                        &workflow.id,
-                        scheduled,
-                        &ctx.run_id,
-                        Err(err.as_str()),
-                    )
-                    .await;
+            // Issue #542: a dry run journals NOTHING. The runner already skipped
+            // the started + per-node rows; skipping the finish here keeps the
+            // pair honest, so a test run leaves no `WorkflowRunFinished` for the
+            // history to fold and no boot sweep to adopt. The settled result is
+            // the whole record, and it still flows back to the awaiting caller.
+            if !dry_run {
+                // Issue #228: journaled on BOTH arms. The caller may well have
+                // closed the tab; the record is what is still there tomorrow.
+                let outcome = match result.as_ref() {
+                    Ok(run) => Ok(run),
+                    Err(err) => Err(err.to_string()),
+                };
+                match outcome {
+                    Ok(run) => {
+                        record_run_finished(
+                            &self.events,
+                            &self.company,
+                            &workflow.id,
+                            scheduled,
+                            &ctx.run_id,
+                            Ok(run),
+                        )
+                        .await;
+                    }
+                    Err(err) => {
+                        record_run_finished(
+                            &self.events,
+                            &self.company,
+                            &workflow.id,
+                            scheduled,
+                            &ctx.run_id,
+                            Err(err.as_str()),
+                        )
+                        .await;
+                    }
                 }
             }
             result

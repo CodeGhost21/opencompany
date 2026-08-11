@@ -200,6 +200,28 @@ export interface WorkflowRunResult {
    * awaited, and its frames would repaint the canvas.
    */
   runId?: string;
+  /**
+   * Per-node progress for this run, in the order the nodes finished (issue
+   * #542) — the same structural rows {@link WorkflowRunOutcome.nodes} carries.
+   * Present on every synchronous run from a host that supports it; for a dry
+   * run it is the ONLY record of what ran, since a test run journals nothing.
+   * Optional on the type (not the wire) so a response from an older host still
+   * parses.
+   */
+  nodes?: WorkflowRunNode[];
+  /**
+   * `true` when the host ran this as a **dry run / test run** (issue #542): the
+   * real graph walked over stubbed effects, so nothing was sent, no tokens were
+   * spent, and nothing was journaled or parked.
+   *
+   * **The presence discriminator, and always `true` when set.** An older host
+   * ignores the `dryRun` request flag and runs FOR REAL, answering with a body
+   * that has no `dryRun` key — so a console that asked for a test run must read
+   * this back (see {@link isDryRun}) rather than trust what it asked for, and
+   * warn loudly when it is absent. Optional/absent must read as "was NOT a dry
+   * run", i.e. the run was real.
+   */
+  dryRun?: boolean;
 }
 
 /**
@@ -237,6 +259,24 @@ export type WorkflowRunResponse = WorkflowRunResult | WorkflowRunAccepted;
  */
 export function isDetached(response: WorkflowRunResponse): response is WorkflowRunAccepted {
   return (response as WorkflowRunAccepted).detached === true;
+}
+
+/**
+ * Whether the host actually ran this as a **dry run** (issue #542).
+ *
+ * **Discriminates on the response, never on what we asked for** — the same
+ * compatibility story as {@link isDetached}. A host predating test mode ignores
+ * the `dryRun` request flag and runs FOR REAL, and its settled body carries no
+ * `dryRun` key. So a console that asked for a test run and reasoned "I asked to
+ * dry-run, therefore nothing happened" would be wrong on exactly the hosts where
+ * a real run just fired every effect. Read `dryRun` back instead, and when it is
+ * absent from a run you asked to be dry, warn loudly: the run was real.
+ *
+ * Only meaningful on a settled result (a detached response carries no output and
+ * no `dryRun`); guarded so it is safe to call on either shape.
+ */
+export function isDryRun(response: WorkflowRunResponse): boolean {
+  return (response as WorkflowRunResult).dryRun === true;
 }
 
 /** One node's outcome inside a run (issue #371). */
@@ -342,17 +382,29 @@ export function getWorkflow(
  * **Always check {@link isDetached} on the result**, whatever you asked for: a
  * host predating #383 ignores the flag and answers with the settled run, and
  * that answer is fine to use.
+ *
+ * **`dryRun` (issue #542)** asks the host to run a **test run**: the real graph
+ * over stubbed effects, so nothing is sent and no tokens are spent. It is
+ * synchronous by nature — the whole point is to read the settled `output` and
+ * per-node `nodes` back — so it composes with the default (no `detach`). Just
+ * like `detach`, an older host ignores the flag and runs FOR REAL, so the caller
+ * MUST confirm with {@link isDryRun} rather than assume, and warn when a run it
+ * asked to be dry comes back without the marker.
  */
 export function runWorkflow(
   client: OpenCompanyClient,
   company: string | null,
   wid: string,
   input?: unknown,
-  options?: { detach?: boolean },
+  options?: { detach?: boolean; dryRun?: boolean },
 ): Promise<WorkflowRunResponse> {
   return client.post<WorkflowRunResponse>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/run`,
-    { input: input ?? {}, ...(options?.detach ? { detach: true } : {}) },
+    {
+      input: input ?? {},
+      ...(options?.detach ? { detach: true } : {}),
+      ...(options?.dryRun ? { dry_run: true } : {}),
+    },
   );
 }
 
@@ -514,6 +566,87 @@ export function setWorkflowEnabled(
   return client.put<WorkflowGraph>(
     `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/enabled`,
     { enabled },
+  );
+}
+
+/**
+ * One entry in a workflow's edit history (issue #274) — **metadata only**.
+ *
+ * The graph body is deliberately absent: the history list is a chooser, and the
+ * body arrives (and is applied to the canvas) only when
+ * {@link restoreWorkflowRevision} actually restores one. `version` is the same
+ * opaque token {@link getWorkflow} hands out, so the console can tell which
+ * snapshot matches the graph it currently holds.
+ */
+export interface WorkflowRevision {
+  /** Stable id of the snapshot, used to address it for a restore. */
+  id: string;
+  /** The workflow's display name at the moment the snapshot was captured. */
+  name: string;
+  /** The opaque version token of the snapshotted body. Never parse it. */
+  version: string;
+  /** Epoch-millis the snapshot was captured. */
+  createdAtMillis: number;
+}
+
+/** The `GET …/workflows/{wid}/revisions` response. */
+interface WorkflowRevisionsResponse {
+  revisions: WorkflowRevision[];
+}
+
+/**
+ * Lists one workflow's edit history (issue #274), **newest first**.
+ *
+ * Each `PUT` that actually changed the graph left the prior body here, bounded
+ * to the most recent 20. A workflow that was never edited — or a seed-defined
+ * one that cannot be edited from the console — resolves to an empty list rather
+ * than an error: "no history" is a normal state the History panel renders as
+ * empty, not a failure.
+ *
+ * Returns metadata only (see {@link WorkflowRevision}); the graph body is
+ * fetched by {@link restoreWorkflowRevision} when an operator picks one.
+ */
+export async function listWorkflowRevisions(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+): Promise<WorkflowRevision[]> {
+  const res = await client.get<WorkflowRevisionsResponse>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/revisions`,
+  );
+  return res.revisions;
+}
+
+/**
+ * Restores a workflow to one of its captured revisions (issue #274), returning
+ * the restored graph with a **fresh** `version`.
+ *
+ * A restore is an ordinary edit whose new body is an old one, so it inherits
+ * everything {@link updateWorkflow} guarantees: the revision is re-validated
+ * against the *current* company (a snapshot naming a since-removed teammate is a
+ * `400`, not a broken restore), the body it replaces is itself snapshotted (so a
+ * restore is undoable), and a restored schedule lands **switched off** pending
+ * review (issue #276) — read `enabled` on the result to reflect that.
+ *
+ * Pass `expectedVersion` — the `version` of the graph the operator was looking
+ * at — to make the restore conditional. On a `409` the graph moved underneath
+ * them: **reload and let them re-choose, do not retry** without the token, which
+ * is the silent-overwrite the guard exists to prevent. Other rejections carry
+ * the host's prosumer-language message: `404` for an unknown workflow or
+ * revision, `409` for a source-defined / body-less workflow or a name collision.
+ */
+export function restoreWorkflowRevision(
+  client: OpenCompanyClient,
+  company: string | null,
+  wid: string,
+  revisionId: string,
+  expectedVersion?: string,
+): Promise<WorkflowGraph> {
+  return client.post<WorkflowGraph>(
+    `${client.scopeFor(company)}/workflows/${encodeURIComponent(wid)}/revisions/${encodeURIComponent(
+      revisionId,
+    )}/restore`,
+    expectedVersion ? { expectedVersion } : {},
   );
 }
 

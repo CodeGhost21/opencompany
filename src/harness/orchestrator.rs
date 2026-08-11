@@ -28,6 +28,13 @@
 //!   task waiting on a workflow can actually be run to completion. Unlike the
 //!   delegation tools it runs the graph inline and returns a concise summary of
 //!   the run rather than enqueuing deferred work.
+//! * [`ReadRunOutputTool`] (issue #418) — the `run_workflow` companion. The run
+//!   summary only previews each node's *last* item, clipped — so
+//!   `read_run_output` pages a named node's full, unclipped output out of a
+//!   bounded in-process [`RunOutputCache`] the run tool populates. No journal or
+//!   workspace write is involved: the durable human record already exists in the
+//!   console run drawer; this exists only so the same-process orchestrator agent
+//!   can read what its own summary clipped.
 //! * [`CreateWorkflowTool`] (issue #112) — authors and saves a brand-new
 //!   workflow graph through the same validated-persist core the console
 //!   `POST .../workflows` route runs, so the orchestrator can capture a
@@ -45,6 +52,7 @@
 //!
 //! Compiled only under `feature = "openhuman"` (the whole `harness` module is).
 
+use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -102,6 +110,9 @@ use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
 /// The `run_workflow` tool name (issue #67).
 pub const RUN_WORKFLOW_TOOL: &str = "run_workflow";
+/// The `read_run_output` tool name (issue #418 — the `run_workflow` companion
+/// that reads a run node's full, unclipped output out of the in-process cache).
+pub const READ_RUN_OUTPUT_TOOL: &str = "read_run_output";
 /// The `add_agent` tool name (issue #71 — Active Runtime Teammates).
 pub const ADD_AGENT_TOOL: &str = "add_agent";
 /// The `create_workflow` tool name (issue #112 — author a saved workflow graph).
@@ -781,6 +792,14 @@ fn summarize_event(event: &CompanyEvent) -> String {
             Some(column) => format!("card {change}: {task_id} → {column}"),
             None => format!("card {change}: {task_id}"),
         },
+        // Issue #327. Structural only, like the board arm above: the id and the
+        // change word, from a fixed vocabulary. The node's NAME is deliberately
+        // absent — it is operator-authored free text, and this string is a
+        // non-sensitive one-liner for the insight surface, which is exactly
+        // where free text does not belong.
+        CompanyEvent::WorkspaceChanged { node_id, change } => {
+            format!("workspace {change}: {node_id}")
+        }
         CompanyEvent::ScheduleFired { cron, .. } => format!("schedule fired: {cron}"),
         CompanyEvent::WebhookReceived { channel, .. } => format!("webhook on {channel}"),
         CompanyEvent::A2aTaskReceived { from, .. } => format!("A2A task from {from}"),
@@ -946,6 +965,13 @@ fn summarize_event(event: &CompanyEvent) -> String {
         CompanyEvent::WorkflowRunStarted { workflow_id, .. } => {
             format!("workflow run started: {workflow_id}")
         }
+        // Issue #382: the per-node start bracket. Same summarized, no-payload
+        // rule as its sibling arms — a node id only, never any input.
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id,
+            node_id,
+            ..
+        } => format!("workflow {workflow_id} started node {node_id}"),
         CompanyEvent::WorkflowNodeFinished {
             workflow_id,
             node_id,
@@ -1558,8 +1584,8 @@ impl Tool for AddAgentTool {
 /// The complete tool set wired onto the company's orchestrator agent (issues
 /// #53, #67, #71, and #112), in order: the `query_company` read surface, the
 /// `spawn_task` and `delegate_to_desk` delegation tools, the `run_workflow`
-/// execution tool, the `create_workflow` authoring tool, and the `add_agent`
-/// roster-write tool.
+/// execution tool, the `read_run_output` companion (issue #418), the
+/// `create_workflow` authoring tool, and the `add_agent` roster-write tool.
 ///
 /// [`build_agent`](crate::harness::build::build_agent) extends the orchestrator
 /// agent's tools with exactly this vector, so a test over this function is the
@@ -1583,6 +1609,7 @@ pub fn orchestrator_tools(
     run_supervisor: crate::runtime::RunSupervisor,
     store: Arc<dyn CompanyStore>,
     workflow_refs: WorkflowRefQueue,
+    run_outputs: RunOutputCache,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
@@ -1600,6 +1627,14 @@ pub fn orchestrator_tools(
         run_supervisor,
         events.clone(),
         workflow_refs.clone(),
+        run_outputs.clone(),
+    )));
+    // `read_run_output` (issue #418) is the run tool's companion: it reads full
+    // node output out of the same bounded cache the run tool populates, so a
+    // preview the summary clipped is reachable. Pushed right after the run tool.
+    tools.push(Box::new(ReadRunOutputTool::new(
+        company.clone(),
+        run_outputs,
     )));
     // `create_workflow` (issue #112) shares the same source dir the run tool
     // reads graphs from, plus the store it enables the new id on and the event
@@ -1657,6 +1692,156 @@ impl WorkflowRunnerHandle {
 /// How many characters of a node item preview the run summary keeps.
 const ITEM_PREVIEW_CHARS: usize = 120;
 
+/// How many recent runs the in-process [`RunOutputCache`] keeps before evicting
+/// the oldest.
+const RUN_OUTPUT_CACHE_RUNS: usize = 8;
+
+/// Total serialized-bytes ceiling across every cached run's node map (~4 MiB).
+/// Reached before [`RUN_OUTPUT_CACHE_RUNS`] only by unusually large runs; the
+/// oldest entries are evicted until the cache is back under it.
+const RUN_OUTPUT_CACHE_MAX_BYTES: usize = 4 * 1024 * 1024;
+
+/// A single run whose node map serializes past this hard ceiling (16 MiB) is
+/// **refused** rather than cached — caching it would blow the whole budget on
+/// one run. The refusal is announced in the run summary footer (pointing at the
+/// console run drawer), never silently dropped.
+const RUN_OUTPUT_ENTRY_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+/// One cached run's node output: the run id it is keyed on, the workflow that
+/// produced it, and the engine's `run.output["nodes"]` map (`{ "<node id>": {
+/// "items": [ … ] } }`). `bytes` is the map's serialized size, held so the
+/// byte-ceiling eviction does not re-serialize on every insert.
+#[derive(Clone)]
+struct CachedRunOutput {
+    run_id: String,
+    workflow_id: String,
+    nodes: Value,
+    bytes: usize,
+    /// Display-name → node-id pairs from the workflow file, captured at store
+    /// time so `read_run_output` can resolve a `node` argument that is the
+    /// display name the run summary prints. The engine's `nodes` map is keyed by
+    /// id (a slug); the summary shows the name (prose) — in real graphs the two
+    /// differ, so a name-only lookup would miss. Resolved case-insensitively at
+    /// read time, so keys are kept as authored.
+    name_to_id: Vec<(String, String)>,
+}
+
+/// What [`RunOutputCache::store`] did with a run's node map — the run summary
+/// footer is worded from this so a refused (oversized) run points the agent at
+/// the console instead of at a `read_run_output` call that would 404.
+#[derive(Clone, Copy)]
+enum RunOutputStored {
+    /// Cached and reachable via `read_run_output`.
+    Stored,
+    /// Over the hard per-run ceiling, so not cached. `bytes` is the size that
+    /// tripped it, named in the footer.
+    Oversized { bytes: usize },
+}
+
+/// A bounded, in-process cache of recent workflow-run node output, so the
+/// `read_run_output` tool can hand back the items the run summary clipped.
+///
+/// # Why a bounded cache and not the journal
+///
+/// The run summary is the sole surface the orchestrator agent sees, and it only
+/// previews each node's *last* item, clipped — items `1..n-1` and everything
+/// past [`ITEM_PREVIEW_CHARS`] are unreachable from the turn. The obvious
+/// "persist the output" answer is wrong here: the journal deliberately scrubs
+/// node output (it feeds the SSE stream and the inference sidecar — issue's
+/// tested no-output invariant), and the tenant workspace is for files on disk,
+/// not a run's in-memory items. Durability is not the requirement either — the
+/// consumer is the *same process* that produced the run, and the durable human
+/// record already exists (the console run drawer renders the full output from
+/// the POST run route, and run history covers the rest). So this is a plain
+/// in-memory cache, bounded two ways ([`RUN_OUTPUT_CACHE_RUNS`] runs and
+/// [`RUN_OUTPUT_CACHE_MAX_BYTES`] total), evicting oldest-first.
+///
+/// Cheap to [`Clone`] (a shared handle) exactly like [`WorkflowRefQueue`]: the
+/// run tool that fills it and the read tool that drains it are both built in one
+/// `build_agent` pass off the same [`HarnessDeps`] clone, so they see one cache.
+#[derive(Clone, Default)]
+pub struct RunOutputCache {
+    inner: Arc<Mutex<VecDeque<CachedRunOutput>>>,
+}
+
+impl RunOutputCache {
+    /// Caches a run's node map under its run id, enforcing both bounds and
+    /// evicting oldest-first. A map that serializes past
+    /// [`RUN_OUTPUT_ENTRY_MAX_BYTES`] is refused (returned as
+    /// [`RunOutputStored::Oversized`]) rather than cached.
+    fn store(
+        &self,
+        run_id: &str,
+        workflow_id: &str,
+        nodes: Value,
+        name_to_id: Vec<(String, String)>,
+    ) -> RunOutputStored {
+        // An unserializable map can't be sized, so treat it as over the hard
+        // ceiling: refuse it rather than cache it at a false zero that never
+        // counts toward the byte ceiling and so never gets evicted.
+        let bytes = serde_json::to_string(&nodes)
+            .map(|s| s.len())
+            .unwrap_or(usize::MAX);
+        if bytes > RUN_OUTPUT_ENTRY_MAX_BYTES {
+            tracing::debug!(
+                run_id = %run_id,
+                workflow = %workflow_id,
+                bytes,
+                "read_run_output: run output over the hard ceiling, refusing to cache"
+            );
+            return RunOutputStored::Oversized { bytes };
+        }
+        let entry = CachedRunOutput {
+            run_id: run_id.to_string(),
+            workflow_id: workflow_id.to_string(),
+            nodes,
+            bytes,
+            name_to_id,
+        };
+        let mut q = self.inner.lock().expect("run output cache");
+        q.push_back(entry);
+        // Run-count bound first.
+        while q.len() > RUN_OUTPUT_CACHE_RUNS {
+            q.pop_front();
+        }
+        // Then the byte ceiling — but never evict the run just stored, even when
+        // it alone is over the ceiling (it is still under the hard per-run cap,
+        // and refusing to keep the one thing a follow-up would read is worse
+        // than briefly overshooting the total).
+        let mut total: usize = q.iter().map(|e| e.bytes).sum();
+        while total > RUN_OUTPUT_CACHE_MAX_BYTES && q.len() > 1 {
+            if let Some(evicted) = q.pop_front() {
+                total -= evicted.bytes;
+            }
+        }
+        tracing::debug!(
+            run_id = %run_id,
+            workflow = %workflow_id,
+            bytes,
+            runs = q.len(),
+            "read_run_output: cached run output"
+        );
+        RunOutputStored::Stored
+    }
+
+    /// The cached entry for `run_id`, if it is still held (recent and
+    /// un-evicted). Cloned out so the lock is not held across rendering.
+    fn get(&self, run_id: &str) -> Option<CachedRunOutput> {
+        self.inner
+            .lock()
+            .expect("run output cache")
+            .iter()
+            .find(|e| e.run_id == run_id)
+            .cloned()
+    }
+
+    /// How many runs are cached. Test/introspection helper.
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.inner.lock().expect("run output cache").len()
+    }
+}
+
 /// A tool that runs one of the company's saved workflows by id.
 ///
 /// It mirrors the REST run route (`POST /workflows/{wid}/run`): load the graph
@@ -1704,14 +1889,25 @@ pub struct RunWorkflowTool {
     /// only after the runner actually returned a run: a refused, unknown or
     /// failed invocation produced nothing to point at.
     workflow_refs: WorkflowRefQueue,
+    /// Issue #418: the bounded cache a successful run's node output is stored
+    /// into, so the `read_run_output` companion can hand back the items this
+    /// tool's summary previewed only the last of (and clipped). Shared handle,
+    /// so the read tool built in the same `build_agent` pass sees what this one
+    /// stores. A cancelled or failed run stores nothing.
+    run_outputs: RunOutputCache,
 }
 
 impl RunWorkflowTool {
     /// Builds the tool over the company id, its on-disk source directory
     /// (`companies/<name>`, whose `workflows/` subtree holds the seed graphs),
     /// the company store (holding the runtime-authored graph bodies), the
-    /// shared runner handle, the company's journal, and the shared queue a
-    /// dispatched card's output link is staged on (issue #339).
+    /// shared runner handle, the company's journal, the shared queue a
+    /// dispatched card's output link is staged on (issue #339), and the run
+    /// output cache the `read_run_output` companion reads back (issue #418).
+    // Each argument is a distinct wired dependency; the tool is built from
+    // exactly one place (`orchestrator_tools`), so there is nothing a parameter
+    // struct would deduplicate — same rationale as `orchestrator_tools` above.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         company: CompanyId,
         source_dir: Option<PathBuf>,
@@ -1720,6 +1916,7 @@ impl RunWorkflowTool {
         run_supervisor: crate::runtime::RunSupervisor,
         events: Option<Arc<dyn EventLog>>,
         workflow_refs: WorkflowRefQueue,
+        run_outputs: RunOutputCache,
     ) -> Self {
         Self {
             company,
@@ -1729,6 +1926,7 @@ impl RunWorkflowTool {
             run_supervisor,
             events,
             workflow_refs,
+            run_outputs,
         }
     }
 }
@@ -1740,7 +1938,7 @@ impl Tool for RunWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Run one of the company's saved workflows by id to completion — use this to advance or finish work that is waiting on a workflow run. Provide the workflow `id` and an optional `input` trigger payload. Returns a summary of each node's outcome and any steps left pending approval."
+        "Run one of the company's saved workflows by id to completion — use this to advance or finish work that is waiting on a workflow run. Provide the workflow `id` and an optional `input` trigger payload. Returns a summary of each node's outcome and any steps left pending approval; the summary previews only each node's last item, clipped, so call `read_run_output` with the returned `run_id` and a node name to read any node's full output."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1899,10 +2097,28 @@ impl Tool for RunWorkflowTool {
                     run_id: Some(ctx.run_id.clone()),
                     action: TaskOutputAction::Ran,
                 });
-                let md = summarize_run(&file, &run);
+                // Issue #418: stash the run's node output so `read_run_output`
+                // can hand back the items this summary only previews the last
+                // of. Cloned (not moved out of `run`) because the summary below
+                // still reads `run.output`. The outcome shapes the footer — a
+                // refused oversized run points at the console, not at a
+                // `read_run_output` call that would find nothing.
+                let nodes_map = run.output.get("nodes").cloned().unwrap_or(Value::Null);
+                // Capture display-name → id so `read_run_output` resolves the
+                // name the summary prints back to the id the cache is keyed on.
+                let name_to_id: Vec<(String, String)> = file
+                    .nodes
+                    .iter()
+                    .map(|n| (n.name.trim().to_string(), n.id.clone()))
+                    .collect();
+                let cache_outcome =
+                    self.run_outputs
+                        .store(&ctx.run_id, &file.id, nodes_map, name_to_id);
+                let md = summarize_run(&file, &run, &ctx.run_id, cache_outcome);
                 Ok(ToolResult::success_with_markdown(
                     json!({
                         "workflow": file.id,
+                        "run_id": ctx.run_id,
                         "pending_approvals": run.pending_approvals.len(),
                     }),
                     md,
@@ -1941,14 +2157,33 @@ fn is_safe_workflow_id(wid: &str) -> bool {
 /// outcome line (in graph order) plus any nodes left pending approval. This is
 /// what the tool hands back to the turn — never the engine's raw
 /// `{ run, nodes }` JSON dumped verbatim.
-fn summarize_run(file: &WorkflowFile, run: &WorkflowRun) -> String {
+/// `run_id` is the run's correlation id, so the footer can name the exact
+/// `read_run_output` call that reads a node's full output; `cache` is what the
+/// output cache did with this run's node map, so the footer points at the right
+/// follow-up (a `read_run_output` call, or the console when the run was too
+/// large to cache).
+fn summarize_run(
+    file: &WorkflowFile,
+    run: &WorkflowRun,
+    run_id: &str,
+    cache: RunOutputStored,
+) -> String {
     let mut md = format!("Ran workflow **{}** (`{}`).\n\n", file.name.trim(), file.id);
     md.push_str("## Per-node outcome\n");
     let nodes = run.output.get("nodes").and_then(Value::as_object);
+    // Whether any per-node line carried output — drives the footer, which only
+    // makes sense when there is something to read the full of.
+    let mut rendered_output = false;
     match nodes {
         Some(nodes) if !file.nodes.is_empty() => {
             for node in &file.nodes {
                 let name = node.name.trim();
+                // Surface the node id alongside the display name: `read_run_output`
+                // keys the cache by id, but the summary is the only place the agent
+                // sees a node, and in real graphs ids are slugs while names are
+                // prose. Printing `(`id`, kind)` makes the footer's `node: <id>`
+                // instruction true without a wasted round trip.
+                let id = node.id.as_str();
                 let kind = node.kind.as_str();
                 match nodes.get(&node.id) {
                     Some(state) => {
@@ -1959,15 +2194,27 @@ fn summarize_run(file: &WorkflowFile, run: &WorkflowRun) -> String {
                             .map(preview_item)
                             .filter(|p| !p.is_empty());
                         match preview {
-                            Some(preview) => md.push_str(&format!(
-                                "- **{name}** ({kind}): {count} item(s) — {preview}\n"
-                            )),
-                            None => {
-                                md.push_str(&format!("- **{name}** ({kind}): {count} item(s)\n"))
+                            // With >1 item the preview is the *last* of them, so
+                            // say so — the earlier items are not shown here and
+                            // reachable only through `read_run_output`.
+                            Some(preview) if count > 1 => {
+                                rendered_output = true;
+                                md.push_str(&format!(
+                                    "- **{name}** (`{id}`, {kind}): last of {count} items — {preview}\n"
+                                ))
                             }
+                            Some(preview) => {
+                                rendered_output = true;
+                                md.push_str(&format!(
+                                    "- **{name}** (`{id}`, {kind}): {count} item(s) — {preview}\n"
+                                ))
+                            }
+                            None => md.push_str(&format!(
+                                "- **{name}** (`{id}`, {kind}): {count} item(s)\n"
+                            )),
                         }
                     }
-                    None => md.push_str(&format!("- **{name}** ({kind}): not reached\n")),
+                    None => md.push_str(&format!("- **{name}** (`{id}`, {kind}): not reached\n")),
                 }
             }
         }
@@ -1982,23 +2229,313 @@ fn summarize_run(file: &WorkflowFile, run: &WorkflowRun) -> String {
             run.pending_approvals.join(", ")
         ));
     }
+
+    // Footer: the previews above are the *last* item of each node, clipped, so
+    // name the follow-up that reads the rest. Only when there was node output to
+    // read, and worded off the tool-name const so it can never drift from the
+    // registered tool. An oversized (refused) run cannot be read this way, so it
+    // is sent to the console run drawer instead of to a dead `read_run_output`.
+    if rendered_output {
+        match cache {
+            RunOutputStored::Stored => md.push_str(&format!(
+                "\n_Previews are clipped. Read any node's full output with `{READ_RUN_OUTPUT_TOOL}` (run_id: `{run_id}`, node: <id>) — the `id` in each line above._\n"
+            )),
+            RunOutputStored::Oversized { bytes } => md.push_str(&format!(
+                "\n_This run's output ({bytes} bytes) was too large to keep in memory, so `{READ_RUN_OUTPUT_TOOL}` can't reach it — open run `{run_id}` in the console's run drawer to read it in full._\n"
+            )),
+        }
+    }
     md
 }
 
 /// A short, single-line preview of one node output item: the raw string when the
 /// item is a string, else its compact JSON — truncated on a char boundary to
-/// [`ITEM_PREVIEW_CHARS`] so a large item can't blow up the summary.
+/// [`ITEM_PREVIEW_CHARS`]. A clipped preview ends `… (+N chars)` naming exactly
+/// how many characters were dropped, so the omission is stated rather than left
+/// to a bare `…`. Codepoint-safe (`chars()`-iterated, never byte-indexed).
 fn preview_item(item: &Value) -> String {
     let raw = match item {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     };
     let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
-    if one_line.chars().count() <= ITEM_PREVIEW_CHARS {
+    let total = one_line.chars().count();
+    if total <= ITEM_PREVIEW_CHARS {
         one_line
     } else {
         let cut: String = one_line.chars().take(ITEM_PREVIEW_CHARS).collect();
-        format!("{cut}…")
+        let dropped = total - ITEM_PREVIEW_CHARS;
+        format!("{cut}… (+{dropped} chars)")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// read_run_output (issue #418) — the run_workflow companion
+// ---------------------------------------------------------------------------
+
+/// Bytes reserved out of [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES) for a `read_run_output`
+/// page's own framing — the header line and the trailing "Showing chars …
+/// Continue with offset=…" notice — so the whole rendered result stays under the
+/// harness's tool-result budget and is never silently re-clipped downstream.
+const READ_PAGE_HEADROOM_BYTES: usize = 1024;
+
+/// Renders every item of a node's output into one string, each under an `Item i
+/// of n:` header — strings verbatim, any other JSON value pretty-printed.
+/// Returns the joined text and the item count.
+fn render_run_items(items: &[Value]) -> (String, usize) {
+    let n = items.len();
+    let mut full = String::new();
+    for (i, item) in items.iter().enumerate() {
+        if i > 0 {
+            full.push_str("\n\n");
+        }
+        full.push_str(&format!("Item {} of {n}:\n", i + 1));
+        match item {
+            Value::String(s) => full.push_str(s),
+            other => full.push_str(
+                &serde_json::to_string_pretty(other).unwrap_or_else(|_| other.to_string()),
+            ),
+        }
+    }
+    (full, n)
+}
+
+/// Pages `full` starting at char `offset`, accumulating **whole** chars until the
+/// next one would push the page past `budget` bytes. Returns the page text and,
+/// when output remains, the char offset to resume from (`None` at the end).
+///
+/// Never splits a codepoint — chars are pushed whole, so a page boundary that
+/// lands mid-multibyte-character keeps that character with the next page. An
+/// empty page always takes at least one char, so a caller looping on the
+/// returned offset always makes forward progress even against a pathological
+/// budget.
+fn page_run_output(full: &str, offset: usize, budget: usize) -> (String, Option<usize>) {
+    // Resolve the char `offset` to a byte index once, then walk from there — so
+    // reading a long output to its end is linear in the output, not quadratic in
+    // the page count (each call would otherwise rescan from index 0, and the
+    // caller re-renders the whole joined string per page).
+    let start_byte = full
+        .char_indices()
+        .nth(offset)
+        .map(|(b, _)| b)
+        .unwrap_or(full.len());
+    let mut page = String::new();
+    for c in full[start_byte..].chars() {
+        if !page.is_empty() && page.len() + c.len_utf8() > budget {
+            // `page` holds exactly the chars taken since `offset`, so the resume
+            // point is `offset` plus that count — and `c` starts the next page.
+            // Count before the move into the returned tuple.
+            let next = offset + page.chars().count();
+            return (page, Some(next));
+        }
+        page.push(c);
+    }
+    (page, None)
+}
+
+/// The `read_run_output` tool (issue #418): reads a workflow run node's full,
+/// unclipped output out of the bounded [`RunOutputCache`] the `run_workflow`
+/// tool fills.
+///
+/// The run summary previews only each node's *last* item, clipped to
+/// [`ITEM_PREVIEW_CHARS`] — so items `1..n-1`, and everything a preview dropped,
+/// are otherwise unreachable from the turn. This tool renders **every** item and
+/// pages the result under [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES) so nothing is silently
+/// re-clipped. Every failure — an unknown run id (evicted or from before a
+/// restart), an unknown node, an empty node — is an agent-actionable
+/// [`ToolResult`] naming the console fallback or the valid node ids, never a
+/// panic or a bare empty result.
+pub struct ReadRunOutputTool {
+    /// The owning company — used only for `tracing` context, never in the
+    /// lookup (which is by `run_id` alone). That is safe **because the cache is
+    /// per-company by construction**: `HarnessDeps` (and the `RunOutputCache`
+    /// handle it carries) is built once per tenant in `build_agent`
+    /// (`src/runtime/builder.rs`), so a run id from another company can never be
+    /// in this cache to collide with. Kept as a field so this invariant is
+    /// explicit — a later refactor toward a shared cache must re-derive scoping
+    /// from the id rather than assume this one is already isolated.
+    company: CompanyId,
+    run_outputs: RunOutputCache,
+}
+
+impl ReadRunOutputTool {
+    /// Builds the tool over the company id and the shared run-output cache the
+    /// `run_workflow` tool fills.
+    pub fn new(company: CompanyId, run_outputs: RunOutputCache) -> Self {
+        Self {
+            company,
+            run_outputs,
+        }
+    }
+}
+
+#[async_trait]
+impl Tool for ReadRunOutputTool {
+    fn name(&self) -> &str {
+        READ_RUN_OUTPUT_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Read the full, unclipped output of one node from a recent workflow run — use this when a `run_workflow` summary previewed only a node's last item (clipped). Provide the `run_id` from that summary and the node's id (the `id` shown in each summary line; the node's display name also resolves); pass `offset` to continue reading a long output where a previous page stopped. Only recent runs of this running company are cached; older runs are in the console's run drawer."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "run_id": {
+                    "type": "string",
+                    "description": "The run id from the `run_workflow` summary footer (its `run_id`)."
+                },
+                "node": {
+                    "type": "string",
+                    "description": "The node whose full output to read — its `id` from the run summary line (the node's display name also resolves)."
+                },
+                "offset": {
+                    "type": "integer",
+                    "minimum": 0,
+                    "description": "Character offset to resume from; omit to start at the beginning. Use the `offset=` value a previous page ended with to read the next page."
+                }
+            },
+            "required": ["run_id", "node"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        PermissionLevel::ReadOnly
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let run_id = args
+            .get("run_id")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(run_id) = run_id else {
+            return Ok(ToolResult::error(
+                "`run_id` is required: pass the `run_id` from the `run_workflow` summary.",
+            ));
+        };
+        let node = args
+            .get("node")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let Some(node) = node else {
+            return Ok(ToolResult::error(
+                "`node` is required: pass the name of the node whose output to read (see the run summary).",
+            ));
+        };
+        let offset = args.get("offset").and_then(Value::as_u64).unwrap_or(0) as usize;
+
+        let Some(entry) = self.run_outputs.get(run_id) else {
+            tracing::debug!(company = %self.company, run_id = %run_id, "read_run_output: run not cached");
+            return Ok(ToolResult::error(format!(
+                "No cached output for run `{run_id}`. The run-output cache holds only the most \
+                 recent workflow runs of this running company, so a run from before the last \
+                 restart — or one pushed out by newer runs — isn't here. Open the run in the \
+                 console's run drawer to read its full output."
+            )));
+        };
+
+        let Some(nodes) = entry.nodes.as_object() else {
+            tracing::debug!(company = %self.company, run_id = %run_id, "read_run_output: run recorded no node map");
+            return Ok(ToolResult::error(format!(
+                "Run `{run_id}` (workflow `{}`) recorded no per-node output to read.",
+                entry.workflow_id
+            )));
+        };
+
+        // Resolve the `node` argument three ways, so passing either the id or the
+        // display name the run summary prints both land: an exact id match, a
+        // case-insensitive id match, then — since ids are slugs but the summary
+        // shows prose names — the display name resolved to its id through the
+        // name→id map captured at store time.
+        let state = nodes
+            .get(node)
+            .or_else(|| {
+                nodes
+                    .iter()
+                    .find(|(id, _)| id.eq_ignore_ascii_case(node))
+                    .map(|(_, st)| st)
+            })
+            .or_else(|| {
+                entry
+                    .name_to_id
+                    .iter()
+                    .find(|(name, _)| name.eq_ignore_ascii_case(node))
+                    .and_then(|(_, id)| nodes.get(id))
+            });
+        let Some(state) = state else {
+            // Name the valid ids + their item counts, so the agent can retry
+            // with a real node rather than guess.
+            let mut valid: Vec<String> = nodes
+                .iter()
+                .map(|(id, st)| {
+                    let count = st
+                        .get("items")
+                        .and_then(Value::as_array)
+                        .map(Vec::len)
+                        .unwrap_or(0);
+                    format!("`{id}` ({count} item(s))")
+                })
+                .collect();
+            valid.sort();
+            let list = if valid.is_empty() {
+                "(this run reached no nodes)".to_string()
+            } else {
+                valid.join(", ")
+            };
+            tracing::debug!(company = %self.company, run_id = %run_id, node = %node, "read_run_output: unknown node");
+            return Ok(ToolResult::error(format!(
+                "Run `{run_id}` has no node named `{node}`. Nodes in this run: {list}."
+            )));
+        };
+
+        let items = state
+            .get("items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if items.is_empty() {
+            return Ok(ToolResult::success(format!(
+                "Node `{node}` of run `{run_id}` produced no items."
+            )));
+        }
+
+        let (full, n) = render_run_items(&items);
+        let total = full.chars().count();
+        let start = offset.min(total);
+        let budget = crate::harness::build::TOOL_RESULT_BUDGET_BYTES
+            .saturating_sub(READ_PAGE_HEADROOM_BYTES);
+        let (page, next) = page_run_output(&full, start, budget);
+        let end = next.unwrap_or(total);
+
+        let mut out = format!(
+            "Full output of node `{node}` from run `{run_id}` (workflow `{}`) — {n} item(s), \
+             {total} chars total.\n\n{page}",
+            entry.workflow_id
+        );
+        if let Some(next_off) = next {
+            out.push_str(&format!(
+                "\n\nShowing chars {start}–{end} of {total}. Continue with offset={next_off}."
+            ));
+        } else if start > 0 {
+            out.push_str(&format!(
+                "\n\nShowing chars {start}–{end} of {total} (end)."
+            ));
+        }
+        tracing::debug!(
+            company = %self.company,
+            run_id = %run_id,
+            node = %node,
+            start,
+            end,
+            total,
+            "read_run_output: served a page"
+        );
+        Ok(ToolResult::success(out))
     }
 }
 
@@ -2413,6 +2950,28 @@ mod tests {
             !summary.contains("finished"),
             "a stopped run must not read as a finished one: {summary}"
         );
+    }
+
+    /// **Issue #327.** A workspace write summarizes structurally — the change
+    /// word and the node id, nothing else.
+    ///
+    /// The node's *name* is the exclusion with teeth. It is operator-authored
+    /// free text that routinely carries the substance of the note ("Q3 layoffs
+    /// shortlist"), and this string is a non-sensitive one-liner for the
+    /// insight surface, which is precisely where free text does not belong.
+    /// Same reasoning as the recipient exclusion two tests up; the arm was
+    /// written this way, and this is what pins it.
+    #[test]
+    fn a_workspace_write_summarizes_to_the_change_and_node_without_the_notes_name() {
+        let summary = summarize_event(&CompanyEvent::WorkspaceChanged {
+            node_id: "n-42".to_string(),
+            change: "updated".to_string(),
+        });
+
+        // Exact, not `contains`: the whole claim is that nothing *else* is in
+        // here. A future arm that looked the node up to add its name would keep
+        // passing every `contains` assertion and fail this one.
+        assert_eq!(summary, "workspace updated: n-42");
     }
 
     #[test]
@@ -3472,6 +4031,7 @@ name = "Morning"
                 pending_approvals: Vec::new(),
                 deliveries: Vec::new(),
                 cancelled: false,
+                nodes: Vec::new(),
             })
         }
     }
@@ -3523,7 +4083,7 @@ name = "Morning"
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_eight() {
+    fn orchestrator_tools_includes_all_nine() {
         let queue = DelegationQueue::default();
         let tools = orchestrator_tools(
             CompanyId::new("acme"),
@@ -3535,11 +4095,14 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             Arc::new(MemStore::default()),
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
-        // Six before #186; `assign_task` + `review_task` make eight.
-        assert_eq!(names.len(), 8, "got {names:?}");
+        // Six before #186; `assign_task` + `review_task` made eight; #418's
+        // `read_run_output` makes nine.
+        assert_eq!(names.len(), 9, "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_RUN_OUTPUT_TOOL), "got {names:?}");
         assert!(names.contains(&CREATE_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&ADD_AGENT_TOOL), "got {names:?}");
         assert!(names.contains(&QUERY_COMPANY_TOOL), "got {names:?}");
@@ -3547,6 +4110,9 @@ name = "Morning"
         assert!(names.contains(&DELEGATE_TO_DESK_TOOL), "got {names:?}");
         assert!(names.contains(&ASSIGN_TASK_TOOL), "got {names:?}");
         assert!(names.contains(&REVIEW_TASK_TOOL), "got {names:?}");
+        // `read_run_output` sits immediately after `run_workflow`.
+        let run_at = names.iter().position(|n| *n == RUN_WORKFLOW_TOOL).unwrap();
+        assert_eq!(names[run_at + 1], READ_RUN_OUTPUT_TOOL, "got {names:?}");
     }
 
     #[tokio::test]
@@ -3562,6 +4128,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         });
         let calls = runner_impl.calls.clone();
         let runner: Arc<dyn WorkflowRunner> = Arc::new(runner_impl);
@@ -3576,6 +4143,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "demo", "input": { "seed": 1 } }))
@@ -3603,6 +4171,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3616,6 +4185,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             refs.clone(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -3651,6 +4221,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             refs.clone(),
+            RunOutputCache::default(),
         );
         assert!(
             unwired
@@ -3672,6 +4243,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             refs.clone(),
+            RunOutputCache::default(),
         );
         assert!(
             unknown
@@ -3697,6 +4269,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: true,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3710,6 +4283,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             refs.clone(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -3729,6 +4303,7 @@ name = "Morning"
             pending_approvals: vec!["worker".to_string()],
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3741,6 +4316,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -3765,6 +4341,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "demo" }))
@@ -3790,6 +4367,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "nope" }))
@@ -3812,6 +4390,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = tool.execute(json!({})).await.expect("execute");
         assert!(result.is_error);
@@ -3834,6 +4413,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = tool
             .execute(json!({ "id": "../secrets" }))
@@ -3923,6 +4503,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -3934,6 +4515,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = run
             .execute(json!({ "id": "greeter" }))
@@ -3989,6 +4571,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -4000,6 +4583,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             refs.clone(),
+            RunOutputCache::default(),
         );
         assert!(
             !run.execute(json!({ "id": "greeter" }))
@@ -4085,6 +4669,7 @@ name = "Morning"
             pending_approvals: Vec::new(),
             deliveries: Vec::new(),
             cancelled: false,
+            nodes: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -4096,6 +4681,7 @@ name = "Morning"
             crate::runtime::RunSupervisor::default(),
             None,
             WorkflowRefQueue::default(),
+            RunOutputCache::default(),
         );
         let result = run
             .execute(json!({ "id": "hosted" }))
@@ -4123,5 +4709,455 @@ name = "Morning"
             result.output_for_llm(false).contains("Couldn't read"),
             "{result:?}"
         );
+    }
+
+    // ---- read_run_output (issue #418) ----
+
+    /// Builds a `RunWorkflowTool` over the demo graph in `dir`, a stub runner
+    /// returning `run`, and the given caches — the shared setup the round-trip
+    /// tests need.
+    /// Returns the tool **and** the runner `Arc` — the handle keeps only a weak
+    /// reference, so the caller must hold the returned runner alive for the
+    /// duration of the test or the run tool reports "no runner wired".
+    fn run_tool_over(
+        dir: &std::path::Path,
+        run: WorkflowRun,
+        refs: WorkflowRefQueue,
+        cache: RunOutputCache,
+    ) -> (RunWorkflowTool, Arc<dyn WorkflowRunner>) {
+        let runner: Arc<dyn WorkflowRunner> = Arc::new(StubRunner::new(run));
+        let handle = WorkflowRunnerHandle::default();
+        handle.set(&runner);
+        let tool = RunWorkflowTool::new(
+            CompanyId::new("acme"),
+            Some(dir.to_path_buf()),
+            Arc::new(MemStore::default()),
+            handle,
+            crate::runtime::RunSupervisor::default(),
+            None,
+            refs,
+            cache,
+        );
+        (tool, runner)
+    }
+
+    /// T1: a clipped preview names exactly how many characters it dropped, and
+    /// counts them in `chars()` — so a multibyte string past the boundary
+    /// reports codepoints dropped, never bytes, and never panics on a byte
+    /// index that lands mid-character.
+    #[test]
+    fn preview_marks_the_exact_dropped_char_count_including_multibyte() {
+        // 130 ASCII chars → 120 kept, 10 dropped.
+        let ascii = "a".repeat(130);
+        let preview = preview_item(&json!(ascii));
+        assert!(preview.ends_with("… (+10 chars)"), "{preview}");
+        assert!(preview.starts_with(&"a".repeat(120)), "{preview}");
+        // 120 kept chars, then the '…' and the marker — the kept body is exactly
+        // the cap, not one over.
+        assert_eq!(preview.chars().take_while(|c| *c == 'a').count(), 120);
+
+        // A multibyte fill: 130 'é' (2 bytes each). The marker must count the 10
+        // dropped *characters*, not their 20 bytes, and the boundary must not
+        // split a codepoint.
+        let multibyte = "é".repeat(130);
+        let preview = preview_item(&json!(multibyte));
+        assert!(preview.ends_with("… (+10 chars)"), "{preview}");
+        assert_eq!(preview.chars().take_while(|c| *c == 'é').count(), 120);
+
+        // At or below the cap there is no marker at all.
+        let short = "x".repeat(ITEM_PREVIEW_CHARS);
+        assert_eq!(preview_item(&json!(short)), short);
+    }
+
+    /// T2: a node with more than one item is labelled `last of N items`, and the
+    /// summary footer names the companion tool via the `READ_RUN_OUTPUT_TOOL`
+    /// const (so wording can't drift) and embeds the run id.
+    #[test]
+    fn summary_labels_multi_item_nodes_and_footers_the_companion() {
+        let file = crate::company::parse_workflow(DEMO_WF).unwrap();
+        let run = WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["first", "second", "third"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+        };
+        let md = summarize_run(&file, &run, "run-xyz", RunOutputStored::Stored);
+        assert!(md.contains("last of 3 items — third"), "{md}");
+        assert!(md.contains(READ_RUN_OUTPUT_TOOL), "{md}");
+        assert!(md.contains("run-xyz"), "{md}");
+
+        // A single-item node keeps the plain "1 item(s)" phrasing.
+        let run_one = WorkflowRun {
+            output: json!({ "nodes": { "worker": { "items": ["only"] } } }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            cancelled: false,
+            nodes: Vec::new(),
+        };
+        let md = summarize_run(&file, &run_one, "run-1", RunOutputStored::Stored);
+        assert!(md.contains("1 item(s) — only"), "{md}");
+        assert!(!md.contains("last of"), "{md}");
+
+        // The oversized footer sends the agent to the console run drawer instead
+        // of to a `read_run_output` call that would find nothing cached.
+        let md = summarize_run(
+            &file,
+            &run,
+            "run-big",
+            RunOutputStored::Oversized { bytes: 999 },
+        );
+        assert!(md.contains("console"), "{md}");
+        assert!(md.contains("run drawer"), "{md}");
+        assert!(md.contains("999 bytes"), "{md}");
+        assert!(!md.contains("Read any node's full output"), "{md}");
+    }
+
+    /// T3: a successful run populates the cache and the tool's JSON payload
+    /// carries the run id; a cancelled or failed run stores nothing.
+    #[tokio::test]
+    async fn success_populates_cache_and_payload_carries_run_id() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let cache = RunOutputCache::default();
+        let (ok, _runner) = run_tool_over(
+            dir.path(),
+            WorkflowRun {
+                output: json!({ "nodes": { "worker": { "items": ["did the thing"] } } }),
+                pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+            },
+            WorkflowRefQueue::default(),
+            cache.clone(),
+        );
+        let result = ok.execute(json!({ "id": "demo" })).await.expect("execute");
+        assert!(!result.is_error, "{result:?}");
+        assert_eq!(cache.len(), 1, "a successful run must be cached");
+        // The payload the brain sees carries a run id string.
+        let payload = match &result.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("expected JSON payload, got {other:?}"),
+        };
+        assert!(
+            payload.get("run_id").and_then(Value::as_str).is_some(),
+            "{payload}"
+        );
+
+        // A cancelled run caches nothing.
+        let cancel_cache = RunOutputCache::default();
+        let (cancelled, _cancel_runner) = run_tool_over(
+            dir.path(),
+            WorkflowRun {
+                output: json!({ "nodes": {} }),
+                pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
+                cancelled: true,
+                nodes: Vec::new(),
+            },
+            WorkflowRefQueue::default(),
+            cancel_cache.clone(),
+        );
+        assert!(
+            cancelled
+                .execute(json!({ "id": "demo" }))
+                .await
+                .expect("execute")
+                .is_error
+        );
+        assert_eq!(cancel_cache.len(), 0, "a cancelled run stores nothing");
+    }
+
+    /// T4: the full agent round-trip. A run whose node holds multiple >120-char
+    /// items is summarised (clipping the preview), then `read_run_output` over
+    /// the shared cache returns every item — including every character the
+    /// preview dropped — verbatim.
+    #[tokio::test]
+    async fn read_run_output_returns_every_dropped_char_after_a_run() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let long_a = "A".repeat(400);
+        let long_b = format!("B{}", "b".repeat(500));
+        let cache = RunOutputCache::default();
+        let (run, _runner) = run_tool_over(
+            dir.path(),
+            WorkflowRun {
+                output: json!({ "nodes": { "worker": { "items": [long_a, long_b] } } }),
+                pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+            },
+            WorkflowRefQueue::default(),
+            cache.clone(),
+        );
+        let summary = run.execute(json!({ "id": "demo" })).await.expect("execute");
+        // The summary only previews the last item, clipped.
+        assert!(
+            summary.output_for_llm(true).contains("last of 2 items"),
+            "{summary:?}"
+        );
+
+        let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
+        // Pass the display name "Worker" — the case-insensitive fallback resolves
+        // it to id `worker`.
+        let read = reader
+            .execute(json!({ "run_id": "", "node": "Worker" }))
+            .await
+            .expect("execute");
+        // Empty run_id is rejected before lookup.
+        assert!(read.is_error, "empty run_id must be rejected");
+
+        // Read with the real run id (recover it from the payload).
+        let payload = match &summary.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data.clone(),
+            other => panic!("{other:?}"),
+        };
+        let run_id = payload.get("run_id").and_then(Value::as_str).unwrap();
+        let read = reader
+            .execute(json!({ "run_id": run_id, "node": "Worker" }))
+            .await
+            .expect("execute");
+        assert!(!read.is_error, "{read:?}");
+        let text = read.output_for_llm(false);
+        assert!(text.contains("Item 1 of 2:"), "{text}");
+        assert!(text.contains("Item 2 of 2:"), "{text}");
+        assert!(text.contains(&"A".repeat(400)), "item 1 must be verbatim");
+        assert!(text.contains(&"b".repeat(500)), "item 2 must be verbatim");
+    }
+
+    /// T4b: the run summary lists a node by its display name but the cache is
+    /// keyed by id, and in `DEMO_WF` the two genuinely differ — `id = "done"`,
+    /// `name = "Report"`. Both the display name the summary prints ("Report")
+    /// and the raw id ("done") must resolve through `read_run_output`. This is
+    /// the non-degenerate name/id pair the case-only fallback never covered.
+    #[tokio::test]
+    async fn read_run_output_resolves_display_name_and_id() {
+        let dir = tempfile::tempdir().unwrap();
+        seed_demo_workflow(dir.path());
+
+        let cache = RunOutputCache::default();
+        let (run, _runner) = run_tool_over(
+            dir.path(),
+            WorkflowRun {
+                // The terminal node's id is `done`; the summary shows its name,
+                // "Report".
+                output: json!({ "nodes": { "done": { "items": ["the report body"] } } }),
+                pending_approvals: Vec::new(),
+                deliveries: Vec::new(),
+                cancelled: false,
+                nodes: Vec::new(),
+            },
+            WorkflowRefQueue::default(),
+            cache.clone(),
+        );
+        let summary = run.execute(json!({ "id": "demo" })).await.expect("execute");
+        // The summary prints the display name and now the id alongside it.
+        let md = summary.output_for_llm(true);
+        assert!(md.contains("**Report**"), "{md}");
+        assert!(md.contains("`done`"), "{md}");
+        let run_id = match &summary.content[0] {
+            openhuman_core::openhuman::skills::types::ToolContent::Json { data } => data
+                .get("run_id")
+                .and_then(Value::as_str)
+                .unwrap()
+                .to_string(),
+            other => panic!("{other:?}"),
+        };
+        let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
+
+        // The display name from the summary resolves to id `done`.
+        let by_name = reader
+            .execute(json!({ "run_id": run_id, "node": "Report" }))
+            .await
+            .expect("execute");
+        assert!(!by_name.is_error, "display name must resolve: {by_name:?}");
+        assert!(
+            by_name.output_for_llm(false).contains("the report body"),
+            "{by_name:?}"
+        );
+
+        // The raw id resolves too, so both paths are live.
+        let by_id = reader
+            .execute(json!({ "run_id": run_id, "node": "done" }))
+            .await
+            .expect("execute");
+        assert!(!by_id.is_error, "id must resolve: {by_id:?}");
+        assert!(
+            by_id.output_for_llm(false).contains("the report body"),
+            "{by_id:?}"
+        );
+    }
+
+    /// T5: paging. Two windows concatenate to the original, each page stays
+    /// within budget, and a boundary that lands on a multibyte char never
+    /// splits a codepoint.
+    #[test]
+    fn paging_reassembles_and_never_splits_a_codepoint() {
+        // 300 'é' (2 bytes each) = 600 bytes. A 401-byte budget forces a break
+        // right where the next 'é' would cross it — proving whole-char taking.
+        let full: String = "é".repeat(300);
+        let budget = 401;
+        let (p1, next) = page_run_output(&full, 0, budget);
+        let n1 = next.expect("more remains");
+        assert!(p1.len() <= budget, "page 1 is {} bytes", p1.len());
+        // A page of whole 'é' has even byte length — never an odd split.
+        assert_eq!(p1.len() % 2, 0, "a split codepoint would make this odd");
+        let (p2, next2) = page_run_output(&full, n1, budget);
+        assert!(p2.len() <= budget, "page 2 is {} bytes", p2.len());
+        // Continue to the end and prove the concatenation reconstructs the whole.
+        let mut assembled = p1.clone();
+        assembled.push_str(&p2);
+        let mut off = next2;
+        while let Some(o) = off {
+            let (p, nxt) = page_run_output(&full, o, budget);
+            assert!(p.len() <= budget);
+            assembled.push_str(&p);
+            off = nxt;
+        }
+        assert_eq!(assembled, full, "the pages must reassemble the original");
+
+        // Every char is valid UTF-8 by construction (String), so decoding the
+        // reassembly back is lossless.
+        assert_eq!(assembled.chars().count(), 300);
+    }
+
+    /// T5b: the tool's own paging clips a huge single item under the budget and
+    /// hands back an offset that reads the remainder.
+    #[tokio::test]
+    async fn read_run_output_pages_a_huge_item_under_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        // One item far larger than the 16 KiB tool-result budget.
+        let huge = "z".repeat(40_000);
+        let cache = RunOutputCache::default();
+        cache.store(
+            "run-huge",
+            "demo",
+            json!({ "worker": { "items": [huge] } }),
+            Vec::new(),
+        );
+        let _ = dir;
+        let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
+
+        let first = reader
+            .execute(json!({ "run_id": "run-huge", "node": "worker" }))
+            .await
+            .expect("execute");
+        assert!(!first.is_error, "{first:?}");
+        let text = first.output_for_llm(false);
+        assert!(
+            text.len() <= crate::harness::build::TOOL_RESULT_BUDGET_BYTES,
+            "page too big"
+        );
+        assert!(text.contains("Continue with offset="), "{text}");
+        // Pull the offset out and read the next page.
+        let off: usize = text
+            .rsplit("offset=")
+            .next()
+            .and_then(|t| t.trim_end_matches('.').parse().ok())
+            .expect("an offset to continue from");
+        let second = reader
+            .execute(json!({ "run_id": "run-huge", "node": "worker", "offset": off }))
+            .await
+            .expect("execute");
+        assert!(!second.is_error, "{second:?}");
+        assert!(
+            off > 0 && off < 40_100,
+            "offset {off} advances into the item"
+        );
+    }
+
+    /// T6: the error arms are actionable — unknown run names the console
+    /// fallback, unknown node lists the valid ids with item counts, and an empty
+    /// node says so rather than returning nothing.
+    #[tokio::test]
+    async fn read_run_output_error_arms_are_actionable() {
+        let cache = RunOutputCache::default();
+        cache.store(
+            "run-1",
+            "demo",
+            json!({
+                "worker": { "items": ["one", "two"] },
+                "done": { "items": [] }
+            }),
+            Vec::new(),
+        );
+        let reader = ReadRunOutputTool::new(CompanyId::new("acme"), cache);
+
+        // Unknown run → names the cache scope + the console fallback.
+        let unknown_run = reader
+            .execute(json!({ "run_id": "ghost", "node": "worker" }))
+            .await
+            .expect("execute");
+        assert!(unknown_run.is_error);
+        let t = unknown_run.output_for_llm(false);
+        assert!(t.contains("console"), "{t}");
+
+        // Unknown node → lists valid ids + counts.
+        let unknown_node = reader
+            .execute(json!({ "run_id": "run-1", "node": "nope" }))
+            .await
+            .expect("execute");
+        assert!(unknown_node.is_error);
+        let t = unknown_node.output_for_llm(false);
+        assert!(t.contains("`worker` (2 item(s))"), "{t}");
+        assert!(t.contains("`done` (0 item(s))"), "{t}");
+
+        // Empty node → a success that says it is empty, not an error, not silence.
+        let empty = reader
+            .execute(json!({ "run_id": "run-1", "node": "done" }))
+            .await
+            .expect("execute");
+        assert!(!empty.is_error, "{empty:?}");
+        assert!(
+            empty.output_for_llm(false).contains("no items"),
+            "{empty:?}"
+        );
+    }
+
+    /// T7: eviction (oldest run drops past the run-count bound) and the
+    /// oversized-run announce (a run over the hard per-run ceiling is refused,
+    /// reported as `Oversized`, and never cached).
+    #[test]
+    fn cache_evicts_oldest_and_refuses_an_oversized_run() {
+        let cache = RunOutputCache::default();
+        for i in 0..(RUN_OUTPUT_CACHE_RUNS + 3) {
+            let outcome = cache.store(
+                &format!("run-{i}"),
+                "demo",
+                json!({ "worker": { "items": [format!("item-{i}")] } }),
+                Vec::new(),
+            );
+            assert!(matches!(outcome, RunOutputStored::Stored));
+        }
+        assert_eq!(cache.len(), RUN_OUTPUT_CACHE_RUNS, "bounded to the run cap");
+        // The three oldest runs were evicted; the newest survive.
+        assert!(cache.get("run-0").is_none(), "oldest must be evicted");
+        assert!(
+            cache
+                .get(&format!("run-{}", RUN_OUTPUT_CACHE_RUNS + 2))
+                .is_some(),
+            "newest must survive"
+        );
+
+        // A run whose node map serializes past the hard per-run ceiling is
+        // refused, announced (not silently dropped), and never cached.
+        let fresh = RunOutputCache::default();
+        let giant = "g".repeat(RUN_OUTPUT_ENTRY_MAX_BYTES + 1);
+        let outcome = fresh.store(
+            "run-giant",
+            "demo",
+            json!({ "worker": { "items": [giant] } }),
+            Vec::new(),
+        );
+        assert!(
+            matches!(outcome, RunOutputStored::Oversized { .. }),
+            "must refuse"
+        );
+        assert_eq!(fresh.len(), 0, "an oversized run must not be cached");
+        assert!(fresh.get("run-giant").is_none());
     }
 }

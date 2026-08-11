@@ -35,6 +35,13 @@
 //! offline [`MockProvider`](provider::MockProvider) does not, so test turns stay
 //! inert.
 
+/// A `RunTurn` over an ACP agent (the `acp` feature).
+///
+/// Gated because nothing in a default build can reach it: the endpoint that
+/// would drive it lives behind the same feature, and `/acp` is a reserved
+/// prefix that 404s without it. Compiling it unconditionally meant a surface
+/// that no lane ran and no route served — see issue #475.
+#[cfg(feature = "acp")]
 pub mod acp_run_turn;
 pub mod brain;
 pub mod build;
@@ -101,6 +108,12 @@ pub mod toolbelt;
 /// Issue #339: the staging queue the orchestrator's `run_workflow` /
 /// `create_workflow` tools push a workflow reference onto and the
 /// [`HarnessBrain`] drains at the end of a dispatch, so a card that built or
+/// Issue #580: the workflow builder pass — turns a `workflow`-deliverable card's
+/// plan into a proposed graph that lands In Review for approval. Modeled on the
+/// planning station (one card, one tool-less model call, one settled outcome),
+/// but it mints an attempt row because building the workflow is the card's work.
+/// See [`workflow_build`].
+pub mod workflow_build;
 /// ran a workflow can link to it. See [`workflow_refs`].
 pub mod workflow_refs;
 /// End-to-end proof that an agent granted `files` and **not** `shell` can write
@@ -271,6 +284,17 @@ pub struct HarnessDeps {
     /// workflow — the stamp falls back to the attempt's trace, which is a
     /// complete answer rather than a missing one.
     pub workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue,
+    /// The bounded, in-process cache the orchestrator's `run_workflow` tool fills
+    /// with each successful run's node output and the `read_run_output` companion
+    /// reads back (issue #418) — so a preview the run summary clipped is
+    /// reachable within the same turn.
+    ///
+    /// Same cheap-shared-handle pattern as [`Self::workflow_refs`]: the run tool
+    /// that stores and the read tool that serves are built in one `build_agent`
+    /// pass off the same deps clone, so they share one cache. Default is an empty
+    /// cache; nothing durable rides on it (the console run drawer is the durable
+    /// record), so a fresh process simply starts with nothing to read back.
+    pub run_outputs: crate::harness::orchestrator::RunOutputCache,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -988,39 +1012,21 @@ impl HarnessPool {
         // into the roster the very next turn runs on.
         fresh_company.overlay_budgets = overlay_budgets;
 
-        // Issue #551: provision `Agents/<id>/` for the roster this rebuild is
-        // about to build, manifest teammates and overlay teammates alike.
+        // Issue #551 note — this rebuild deliberately touches no workspace.
         //
-        // This is the second of the feature's two seams. The first
-        // ([`RuntimeBuilder::build`]) covers boot; this one covers everything
-        // that changes the roster afterwards — a manifest edit, the console's
-        // `add_member`, the orchestrator's `add_agent` — because all three land
-        // here as a moved overlay fingerprint, on the slow path, just before
-        // the roster is rebuilt. Putting it here rather than in each of those
-        // writers is what keeps them from having to know the workspace exists.
-        //
-        // Only when a workspace store is actually wired: with none, no agent
-        // has workspace tools either, so there is nothing for a folder to be
-        // the home of.
-        if let Some(workspace) = &fresh_deps.workspace {
-            crate::company::workspace_agents::ensure_agent_folders(
-                workspace.as_ref(),
-                &company.id,
-                fresh_company
-                    .manifest
-                    .agents
-                    .iter()
-                    .map(|agent| agent.id.as_str())
-                    .chain(
-                        fresh_company
-                            .overlay_agents
-                            .iter()
-                            .map(|agent| agent.id.as_str()),
-                    ),
-            )
-            .await?;
-        }
-
+        // It used to provision `Agents/<id>/` for the roster it was about to
+        // build, because a teammate added at runtime (a manifest edit, the
+        // console's `add_member`, the orchestrator's `add_agent`) all land here
+        // as a moved overlay fingerprint and boot could not have known about
+        // them. That justification is gone: a member folder is no longer a
+        // function of the roster. `Agents/` and `Desks/` are laid down once at
+        // boot ([`RuntimeBuilder::build`]) and depend on nothing a rebuild can
+        // change, and `Agents/<id>/` is minted by
+        // [`ensure_agent_folder`](crate::company::workspace_scaffold::ensure_agent_folder)
+        // at the moment that agent first produces something — which is also the
+        // repair path if boot's create ever fail-softed, since the minter
+        // creates the root it needs. A rebuild-time call would now be a tree
+        // read that can only ever find its work already done.
         let roster = build_roster(&fresh_company, &fresh_deps, &skill_deltas)?;
 
         let mut agents = self.agents.write().await;
@@ -2259,6 +2265,7 @@ description = "Builds the product."
                 mcp_failures: McpFailureQueue::default(),
                 pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -2326,6 +2333,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2406,17 +2414,21 @@ description = "Builds the product."
         );
     }
 
-    /// Issue #551, the second provisioning seam.
+    /// Issue #551: a roster rebuild writes nothing to the workspace.
     ///
-    /// Everything that changes a roster after boot — a manifest edit, the
-    /// console's `add_member`, the orchestrator's `add_agent` — reaches the
-    /// harness the same way: a moved overlay fingerprint, then a roster
-    /// rebuild. Hanging provisioning off that rebuild is what covers all three
-    /// without any of those writers learning that a workspace exists.
+    /// This used to be the feature's second provisioning seam — a teammate
+    /// added at runtime (a manifest edit, the console's `add_member`, the
+    /// orchestrator's `add_agent`) reaches the harness as a moved overlay
+    /// fingerprint, and the folder was minted here. A member folder is no
+    /// longer a function of the roster, so joining one is no longer an event
+    /// the tree records: the folder appears when the teammate first produces
+    /// something, and the two system roots come from boot.
+    ///
+    /// Pinned as a test because a rebuild that quietly resumed writing would
+    /// re-fill the tree with empty folders for teammates who have done nothing
+    /// — exactly the noise this change removed.
     #[tokio::test]
-    async fn ensure_provisions_an_agents_folder_for_a_teammate_added_at_runtime() {
-        use crate::company::workspace_agents::AGENTS_ROOT;
-
+    async fn a_roster_rebuild_writes_nothing_to_the_workspace() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ws: Arc<dyn crate::ports::WorkspaceStore> =
             Arc::new(crate::store::FsOps::new(dir.path()));
@@ -2426,21 +2438,9 @@ description = "Builds the product."
         let mut rec = record();
         let pool = HarnessPool::new();
         pool.ensure(&rec, &fx.deps).await.expect("first ensure");
-
-        let names = |nodes: &[crate::ports::WorkspaceNode]| {
-            let mut out: Vec<String> = nodes.iter().map(|n| n.name.clone()).collect();
-            out.sort();
-            out
-        };
-        let tree = ws.tree(&rec.id).await.expect("tree");
-        assert_eq!(
-            names(&tree),
-            vec![
-                AGENTS_ROOT.to_string(),
-                "ceo".to_string(),
-                "engineer".to_string()
-            ],
-            "both manifest teammates get a folder"
+        assert!(
+            ws.is_empty(&rec.id).await.expect("is_empty"),
+            "the roster build touched the workspace"
         );
 
         // The runtime-added teammate. The overlay fingerprint moves, so this
@@ -2453,24 +2453,26 @@ description = "Builds the product."
         });
         pool.ensure(&rec, &fx.deps).await.expect("second ensure");
 
-        let tree = ws.tree(&rec.id).await.expect("tree");
         assert!(
-            tree.iter().any(|n| n.name == "designer"),
-            "the overlay teammate got no folder: {:?}",
-            names(&tree)
+            ws.is_empty(&rec.id).await.expect("is_empty"),
+            "the rebuild minted a folder for a teammate that has produced nothing"
         );
+
+        // …and the folder the teammate *does* get is the one it earns by
+        // producing something, minted through the lazy seam instead.
+        let minted = crate::company::workspace_scaffold::ensure_agent_folder(
+            ws.as_ref(),
+            &rec.id,
+            "designer",
+        )
+        .await
+        .expect("mint");
+        let tree = ws.tree(&rec.id).await.expect("tree");
+        let mut names: Vec<&str> = tree.iter().map(|n| n.name.as_str()).collect();
+        names.sort_unstable();
+        assert_eq!(names, vec!["Agents", "designer"]);
         assert_eq!(
-            tree.iter()
-                .filter(|n| n.name == AGENTS_ROOT && n.parent_id.is_none())
-                .count(),
-            1,
-            "the rebuild minted a rival Agents root"
-        );
-        assert_eq!(
-            tree.iter()
-                .find(|n| n.name == "designer")
-                .unwrap()
-                .created_by,
+            tree.iter().find(|n| n.id == minted).unwrap().created_by,
             crate::ports::WorkspaceOrigin::Agent {
                 id: "designer".to_string()
             },
@@ -2936,6 +2938,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3070,10 +3073,17 @@ description = "Builds the product."
         }
     }
 
-    /// A console-added MCP server reaches the agent on the NEXT `ensure` — the
-    /// roster is rebuilt because the effective set re-resolved from the LIVE
-    /// secret store (not the boot snapshot) changed its fingerprint. This is the
-    /// Parallel-Search / BrowserBase freshness bug, proven end-to-end.
+    /// A console-added MCP server reaches the agent on the NEXT `ensure`, with no
+    /// restart — the roster rebuilds because the effective set, re-resolved from
+    /// the LIVE secret store (not the boot snapshot), changed its fingerprint.
+    /// This is the Parallel-Search / BrowserBase freshness bug proven end-to-end,
+    /// and the CI guard for issue #566: the effective-MCP fingerprint is a *term*
+    /// of [`HarnessPool::ensure`]'s staleness check. Both directions are pinned —
+    /// an unchanged set holds the fingerprint (no needless rebuild), an MCP-only
+    /// change moves it (rebuilt in place, without a restart). A refactor that
+    /// drops the term makes the post-change `ensure` early-return without storing
+    /// the new fingerprint: the value stops moving across the mutation and the
+    /// `assert_ne!` fails, rather than the restart requirement quietly returning.
     #[tokio::test]
     async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
@@ -3100,6 +3110,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -3123,6 +3134,16 @@ description = "Builds the product."
             .await
             .expect("fingerprinted");
 
+        // Stability direction: with no axis changed, a redundant `ensure` is a
+        // no-op — the gate reuses the cached roster and the fingerprint holds, so
+        // the change-direction assertion below can't pass by coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.mcp_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an unchanged MCP set must not move the fingerprint"
+        );
+
         // Console-add a runtime MCP server directly into the live secret store.
         crate::company::mcp::save_runtime_index(
             &rec.id,
@@ -3142,22 +3163,27 @@ description = "Builds the product."
         .await
         .unwrap();
 
-        // Next ensure re-resolves from the live store → fingerprint changes →
-        // roster rebuilt, so the new server reaches the agent without a restart.
-        pool.ensure(&rec, &deps).await.expect("second ensure");
+        // Change direction: the next ensure re-resolves from the live store →
+        // fingerprint changes → roster rebuilt, so the new server reaches the
+        // agent without a restart.
+        pool.ensure(&rec, &deps).await.expect("post-add ensure");
         let after = pool
             .mcp_fingerprint_of(&rec.id)
             .await
             .expect("fingerprinted");
-        assert_ne!(before, after, "adding a server must change the fingerprint");
+        assert_ne!(
+            before, after,
+            "an MCP-only change must move the staleness fingerprint (issue #566)"
+        );
         assert_eq!(
             pool.resident_companies().await,
             1,
-            "same company, rebuilt in place"
+            "same company, rebuilt in place — not a new residency"
         );
 
-        // A third ensure with no change is a no-op (fingerprint stable).
-        pool.ensure(&rec, &deps).await.expect("third ensure");
+        // Stability after the change too: a further ensure with no new change is
+        // a no-op and the fingerprint holds at its post-change value.
+        pool.ensure(&rec, &deps).await.expect("final no-op ensure");
         assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
     }
 
@@ -3416,6 +3442,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3578,6 +3605,7 @@ description = "Sets direction."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3723,6 +3751,7 @@ description = "Sets direction."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

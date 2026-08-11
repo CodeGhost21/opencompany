@@ -101,7 +101,7 @@ operator-initiated. Nodes that already completed keep their journal rows, and
 approvals earlier nodes parked stay valid in the queue: they are journal-backed
 and independent of the run, so they can still be approved or denied afterwards.
 No minted grant is revoked. See
-[events.md](events.md#stopping-a-run-issue-383).
+[workflow-events.md](workflow-events.md#stopping-a-run-issue-383).
 
 ## Console write plane (`src/server/ops/`)
 
@@ -180,7 +180,10 @@ which is fixed at agent-build time and never taken from tool arguments. Agents
 reach the same tree through `workspace_list` / `workspace_read` /
 `workspace_create` / `workspace_write`, and a created note has its default home
 in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
-brief steers toward, not a boundary the routes enforce.
+brief steers toward, not a boundary the routes enforce. Boot scaffolds the
+`Agents/` and `Desks/` roots empty; an individual `Agents/<agent-id>/` is minted
+the first time that agent writes into it, so a tree read on a fresh company
+shows the two roots and no member folders.
 
 Team writes are an **operator overlay** persisted through the store, merged
 into the manifest roster at read time — the version-controlled `company.toml`

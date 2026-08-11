@@ -299,6 +299,16 @@ impl Bundle {
         self.dir.join("artifacts.jsonl")
     }
 
+    /// Path to the per-workflow revision ring (`workflow-revisions.jsonl`, one
+    /// [`WorkflowRevisionRecord`] per line, append-then-prune to the cap; issue
+    /// #274). Not last-write-wins: every distinct snapshot is its own immutable
+    /// line, keyed by its minted `id`.
+    ///
+    /// [`WorkflowRevisionRecord`]: crate::ports::workflow_revisions::WorkflowRevisionRecord
+    pub fn workflow_revisions_jsonl(&self) -> PathBuf {
+        self.dir.join("workflow-revisions.jsonl")
+    }
+
     /// Path to the task-run log (`runs.jsonl`, one [`RunRecord`] per line;
     /// last-write-wins per id).
     ///
@@ -322,6 +332,19 @@ impl Bundle {
     /// [`RunStepRecord`]: crate::ports::runs::RunStepRecord
     pub fn run_steps_jsonl(&self) -> PathBuf {
         self.dir.join("run-steps.jsonl")
+    }
+
+    /// The per-company schedule-fire claim subdirectory
+    /// (`schedule_fires/<hashed-schedule-id>/<minute>`, one empty-ish marker
+    /// file per claimed instant; #241).
+    ///
+    /// A directory of `O_EXCL` marker files rather than a JSONL log: the claim's
+    /// whole value is that `create_new` is atomic, so the *existence* of the
+    /// file is the claim. The schedule-id component is hashed before it becomes a
+    /// path so an id the store did not mint can never address the filesystem —
+    /// the same rule [`runs_jsonl`](Self::runs_jsonl) states for run ids.
+    pub fn schedule_fires_dir(&self) -> PathBuf {
+        self.dir.join("schedule_fires")
     }
 
     /// Path to the human user directory (`users.json`, the full set as a JSON

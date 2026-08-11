@@ -6,7 +6,9 @@
 //!   does not apply and the credential never enters the webview.
 //! - **[`embedded`]** — the host running in this process, for someone with no
 //!   server to point at.
-//! - **[`commands`]** — the thin Tauri surface over both.
+//! - **[`keychain`]** — where a paired device's token lives, so the webview
+//!   holds a handle and never the secret.
+//! - **[`commands`]** — the thin Tauri surface over all three.
 //!
 //! The console itself is unchanged: it is the same `frontend/` bundle the web
 //! deployment serves, and it reaches all of the above through the `Transport`
@@ -15,6 +17,7 @@
 pub mod acp;
 pub mod commands;
 pub mod embedded;
+pub mod keychain;
 pub mod proxy;
 
 use std::path::PathBuf;
@@ -105,6 +108,8 @@ pub fn run() {
         .manage(AppHandleState { data_dir, embedded })
         .invoke_handler(tauri::generate_handler![
             commands::oc_connect,
+            commands::oc_pair_device,
+            commands::oc_forget_device,
             commands::oc_disconnect,
             commands::oc_connections,
             commands::oc_request,

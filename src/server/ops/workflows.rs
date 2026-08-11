@@ -85,8 +85,8 @@ use crate::AppState;
 use crate::company::{
     RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowEdgeDef, WorkflowFile,
     WorkflowNodeDef, WorkflowRetryDef, create_company_workflow, delete_company_workflow,
-    list_workflows_union, load_workflow_union, seed_file_exists, set_company_workflow_enabled,
-    update_company_workflow, workflow_version,
+    list_workflows_union, load_workflow_union, rollback_company_workflow, seed_file_exists,
+    set_company_workflow_enabled, update_company_workflow, workflow_version,
 };
 use crate::error::OpenCompanyError;
 use crate::ports::types::{
@@ -150,6 +150,19 @@ pub fn router() -> Router<AppState> {
         .merge(scoped(
             "/workflows/{wid}/enabled",
             put(set_workflow_enabled),
+        ))
+        // Issue #274: the edit history of one workflow, and the restore of one of
+        // its snapshots. Both hang off `{wid}` after a further static segment
+        // (`revisions`), so they cannot collide with the dynamic `{wid}` reads
+        // above — they are strictly more specific — and they carry zero overlap
+        // with the `…/runs*` family, which lives on a different static prefix.
+        .merge(scoped(
+            "/workflows/{wid}/revisions",
+            get(list_workflow_revisions),
+        ))
+        .merge(scoped(
+            "/workflows/{wid}/revisions/{rev}/restore",
+            post(restore_workflow_revision),
         ))
 }
 
@@ -724,6 +737,7 @@ async fn update_workflow(
         company.id(),
         company.runtime.source_dir(),
         company.runtime.store(),
+        company.runtime.workflow_revisions(),
         Some(company.runtime.events()),
         draft,
         expected.as_deref(),
@@ -773,6 +787,7 @@ async fn delete_workflow(
         company.id(),
         company.runtime.source_dir(),
         company.runtime.store(),
+        company.runtime.workflow_revisions(),
         Some(company.runtime.events()),
         &wid,
         query.expected_version.as_deref(),
@@ -848,6 +863,135 @@ async fn set_workflow_enabled(
     Ok(Json(WorkflowGraph::new(file, editable, version, enabled)))
 }
 
+// ---------------------------------------------------------------------------
+// Revision history + rollback (issue #274)
+// ---------------------------------------------------------------------------
+
+/// One revision as the console's history panel renders it — **metadata only**.
+///
+/// The graph body is deliberately absent: the list is a chooser, and shipping a
+/// full graph per row would make the history read as heavy as N graph reads for
+/// no benefit. The restore route fetches (and returns) the body when an operator
+/// actually picks one. `version` is the same opaque token
+/// `GET …/workflows/{wid}` hands out for the current body, so a console can tell
+/// which revision matches what it is looking at.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RevisionSummary {
+    id: String,
+    name: String,
+    version: String,
+    created_at_millis: u64,
+}
+
+/// The `GET …/workflows/{wid}/revisions` response: the snapshots, newest first.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowRevisionsResponse {
+    revisions: Vec<RevisionSummary>,
+}
+
+/// `GET …/workflows/{wid}/revisions` — one workflow's edit history (issue #274),
+/// newest first, **metadata only** (no graph bodies — see [`RevisionSummary`]).
+///
+/// A workflow with no history (never edited, or seed-backed) answers `200` with
+/// an empty list rather than a `404`: "no revisions" is a normal state the
+/// console renders as an empty panel, not an error. A malformed `wid` is a `404`
+/// like every other read here.
+async fn list_workflow_revisions(
+    company: ScopedCompany,
+    Path(WorkflowPath { wid }): Path<WorkflowPath>,
+) -> Result<Json<WorkflowRevisionsResponse>, ApiError> {
+    if !safe_wid(&wid) {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "workflow {wid}"
+        ))));
+    }
+    let rows = company
+        .runtime
+        .workflow_revisions()
+        .list_revisions(company.id(), &wid)
+        .await
+        .map_err(ApiError)?;
+    let revisions = rows
+        .into_iter()
+        .map(|r| RevisionSummary {
+            id: r.id,
+            name: r.name,
+            // The token the current-graph read would hand out for this body, so
+            // the console can correlate a row with what it currently holds.
+            version: workflow_version(&r.toml),
+            created_at_millis: r.created_at_millis,
+        })
+        .collect();
+    Ok(Json(WorkflowRevisionsResponse { revisions }))
+}
+
+/// The sub-resource path on the restore route: the workflow id and the revision
+/// id. The scope `id` is consumed by the extractor.
+#[derive(Debug, Deserialize)]
+struct RevisionPath {
+    wid: String,
+    rev: String,
+}
+
+/// The `POST …/workflows/{wid}/revisions/{rev}/restore` body: the optional
+/// concurrency token of the graph being replaced.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RestoreRevisionBody {
+    /// The token from the `GET`/`PUT` the operator was looking at when they hit
+    /// Restore. Omit for an unconditional restore; the console always sends it,
+    /// and on a `409` should reload rather than retry — the graph moved under it.
+    #[serde(default)]
+    expected_version: Option<String>,
+}
+
+/// `POST …/workflows/{wid}/revisions/{rev}/restore` — roll a workflow back to a
+/// captured revision (issue #274), returning the restored [`WorkflowGraph`] with
+/// a fresh version token.
+///
+/// This is an ordinary edit whose new body is an old one, so it routes through
+/// the same [`rollback_company_workflow`] → [`update_company_workflow`] path a
+/// `PUT` does and inherits every one of its guarantees: re-validation against
+/// the *current* record, a snapshot of the body it replaces (so the restore is
+/// itself undoable), the optimistic-concurrency token, and the #276 disarm of a
+/// restored schedule.
+///
+/// Statuses: `200` (restored), `400` (the revision is invalid against the
+/// current record — e.g. it names a since-removed teammate), `404` (unknown
+/// `wid` or unknown `rev`), `409` (seed-backed / body-less `wid`, a stale
+/// `expectedVersion`, or a name collision).
+async fn restore_workflow_revision(
+    company: ScopedCompany,
+    Path(RevisionPath { wid, rev }): Path<RevisionPath>,
+    body: Option<Json<RestoreRevisionBody>>,
+) -> Result<Json<WorkflowGraph>, ApiError> {
+    if !safe_wid(&wid) {
+        return Err(ApiError(OpenCompanyError::CompanyNotFound(format!(
+            "workflow {wid}"
+        ))));
+    }
+    let expected = body.and_then(|Json(b)| b.expected_version);
+    let file = rollback_company_workflow(
+        company.id(),
+        company.runtime.source_dir(),
+        company.runtime.store(),
+        company.runtime.workflow_revisions(),
+        Some(company.runtime.events()),
+        &wid,
+        &rev,
+        expected.as_deref(),
+    )
+    .await
+    .map_err(ApiError)?;
+    // The response carries the restored graph plus its NEW token — a restore is a
+    // write, so the console holds a valid token for the next edit without a
+    // follow-up read (and can see the #276 disarm on `enabled` if the restored
+    // graph re-introduced a schedule).
+    Ok(Json(graph_with_version(&company, file).await?))
+}
+
 /// Whether `wid` is a single safe on-disk filename stem — no path separators,
 /// no `..`, not empty — so it can't escape the `workflows/` directory.
 fn safe_wid(wid: &str) -> bool {
@@ -879,6 +1023,20 @@ struct RunWorkflowBody {
     /// happened from the response's **shape**, not from what it asked for.
     #[serde(default)]
     detach: bool,
+    /// Run as a **dry run / test run** (issue #542): walk the real graph with
+    /// real branch selection over stubbed effectful capabilities, so the run
+    /// proves routing and output shape without any real effect — no agent
+    /// inference, no tool/http execution, no delivery, no journaling, no gate
+    /// parked in Approvals.
+    ///
+    /// **Opt-in and compatible in both directions, exactly like `detach`.** A
+    /// caller that omits it gets today's behaviour byte-for-byte. A newer
+    /// console asking an *older* host for a dry run sends it and the old host
+    /// ignores the unknown field (no `deny_unknown_fields`) and runs it **FOR
+    /// REAL** — which is why the response carries a `dryRun` presence
+    /// discriminator the console must read, never trusting what it asked for.
+    #[serde(default)]
+    dry_run: bool,
 }
 
 /// The run response: the engine's final state plus any nodes left pending
@@ -918,6 +1076,27 @@ struct RunWorkflowResponse {
     /// caller's body is byte-unchanged.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    /// Per-node progress for this run, in the order the nodes finished (issue
+    /// #542). Carried for **every** synchronous run, not only a dry one — it is
+    /// the same structural per-node timeline `GET …/workflows/runs` returns, so
+    /// the run-result panel can render it without a second read. For a dry run
+    /// it is the *only* record of what ran, since a test run journals nothing.
+    ///
+    /// Empty for a run whose nodes all failed to report (or a build with no
+    /// progress observer), so an empty list means "no per-node trail", never
+    /// "the run did nothing".
+    nodes: Vec<WorkflowRunNode>,
+    /// Whether this was a **dry run** (issue #542) — the presence discriminator.
+    ///
+    /// **A constant `true` when set, and absent otherwise, on purpose** — the
+    /// exact shape `detached` takes for #383. A newer console asking an older
+    /// host for a dry run gets a *real* run back (the old host ignored the
+    /// unknown request field), and the body then carries no `dryRun` key. So the
+    /// console cannot tell a dry run from a real one by what it asked for — only
+    /// by what came back. A field that is only ever `true` makes that a presence
+    /// check, and its absence a loud signal that the run was REAL.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    dry_run: bool,
 }
 
 /// The `detach: true` response (issue #383): the run's id, handed back before
@@ -986,6 +1165,7 @@ fn spawn_workflow_run(
     runner: std::sync::Arc<dyn crate::ports::WorkflowRunner>,
     workflow: WorkflowFile,
     input: Value,
+    dry_run: bool,
 ) -> (
     String,
     tokio::task::JoinHandle<crate::Result<crate::ports::WorkflowRun>>,
@@ -994,7 +1174,10 @@ fn spawn_workflow_run(
     // journalling that used to live here now live in `WorkflowSpawn`, because
     // approving a paused workflow gate starts a run too and owes exactly the
     // same two things. One copy of the discipline, two entry points.
-    crate::runtime::WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false)
+    //
+    // Issue #542: `dry_run` rides through to the spawn task, which stamps it on
+    // the run context and skips the outcome journal write when set.
+    crate::runtime::WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, dry_run)
 }
 
 /// `POST …/workflows/{wid}/run` (both scope forms).
@@ -1048,12 +1231,22 @@ async fn run_workflow(
 
     let body = body.map(|Json(b)| b).unwrap_or_default();
     let detach = body.detach;
+    // Issue #542: captured before `body.input` moves, and threaded into both the
+    // spawn (so the run runs dry) and the settled response's discriminator (so
+    // the console can confirm the host honoured the request rather than running
+    // for real).
+    let dry_run = body.dry_run;
 
     // Issue #383: registered and spawned before either mode branches, so the two
     // modes cannot drift in what they start. Issue #228's journalling now lives
     // inside the task rather than around this await.
-    let (run_id, handle) =
-        spawn_workflow_run(company.runtime.as_ref(), runner.clone(), file, body.input);
+    let (run_id, handle) = spawn_workflow_run(
+        company.runtime.as_ref(),
+        runner.clone(),
+        file,
+        body.input,
+        dry_run,
+    );
 
     if detach {
         // Returned before the engine has walked a node. From here the client
@@ -1081,6 +1274,12 @@ async fn run_workflow(
             deliveries: run.deliveries,
             run_id,
             cancelled: run.cancelled,
+            // Issue #542: the runner collects this per-node trail on every run;
+            // map the port rows onto the wire shape the history route already
+            // uses. `dry_run` is the request's, echoed back as the presence
+            // discriminator a console pointed at an old host would never see.
+            nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
+            dry_run,
         })),
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
@@ -1340,6 +1539,21 @@ struct WorkflowRunNode {
     node_id: String,
     status: WorkflowNodeStatus,
     elapsed_ms: u64,
+}
+
+impl From<crate::ports::WorkflowRunNodeRow> for WorkflowRunNode {
+    /// The run-response path (issue #542): the runner hands its per-node trail
+    /// back on [`WorkflowRun::nodes`](crate::ports::WorkflowRun) as
+    /// [`WorkflowRunNodeRow`](crate::ports::WorkflowRunNodeRow)s, which carry the
+    /// same three structural scalars this wire shape does — so the run response
+    /// reuses the identical camelCase rows the history route already serves.
+    fn from(row: crate::ports::WorkflowRunNodeRow) -> Self {
+        Self {
+            node_id: row.node_id,
+            status: row.status,
+            elapsed_ms: row.elapsed_ms,
+        }
+    }
 }
 
 /// `GET …/workflows/runs?workflow=&limit=` — the company's finished workflow
@@ -2044,6 +2258,8 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -2074,6 +2290,8 @@ mod tests {
             }],
             run_id: "run-1".into(),
             cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -2089,6 +2307,8 @@ mod tests {
             deliveries: Vec::new(),
             run_id: "run-1".into(),
             cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
@@ -3283,6 +3503,181 @@ mod tests {
             assert_eq!(items.as_array().unwrap().len(), 1, "{items}");
         }
 
+        // ── Issue #274: revision history + rollback at the HTTP boundary ────
+
+        /// Edits `greeter` once (adding a schedule) so exactly one revision — the
+        /// original, schedule-less body — is captured, and returns the token of
+        /// the now-current (scheduled) graph.
+        async fn create_then_edit_greeter(state: &AppState) -> String {
+            let version = create_greeter(state).await;
+            let response = router(state.clone())
+                .oneshot(request(
+                    "PUT",
+                    "/api/v1/company/workflows/greeter",
+                    Some(edited_body(Some(&version))),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            json_body(response).await["version"]
+                .as_str()
+                .expect("new token")
+                .to_string()
+        }
+
+        /// `GET …/revisions` returns metadata only — id, name, version,
+        /// createdAtMillis — and never a graph body. Leaking the TOML/nodes here
+        /// would make the list as heavy as N graph reads and expose the raw
+        /// stored body the console never asked for.
+        #[tokio::test]
+        async fn revisions_list_is_metadata_only_and_newest_first() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_then_edit_greeter(&state).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/greeter/revisions",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            let revs = body["revisions"].as_array().expect("revisions array");
+            assert_eq!(revs.len(), 1, "one edit captured one revision: {body}");
+            let row = &revs[0];
+            assert!(row["id"].is_string());
+            assert_eq!(row["name"], "Greeter");
+            assert!(row["version"].is_string());
+            assert!(row["createdAtMillis"].is_number());
+            // No graph body leaks into the list.
+            assert!(row.get("nodes").is_none(), "metadata only: {row}");
+            assert!(row.get("edges").is_none(), "metadata only: {row}");
+            assert!(
+                row.get("toml").is_none(),
+                "the raw body must never leak: {row}"
+            );
+        }
+
+        /// `POST …/revisions/{rev}/restore` reverts the live graph to the
+        /// snapshot and answers with the restored body + a fresh token. The
+        /// captured revision was the schedule-less original, so the restore
+        /// removes the schedule the edit added.
+        #[tokio::test]
+        async fn restore_reverts_the_live_graph() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_then_edit_greeter(&state).await;
+
+            // Discover the revision id from the list.
+            let list = json_body(
+                router(state.clone())
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let rev_id = list["revisions"][0]["id"].as_str().unwrap().to_string();
+
+            // Restore it (unconditionally — no expectedVersion).
+            let response = router(state.clone())
+                .oneshot(request(
+                    "POST",
+                    &format!("/api/v1/company/workflows/greeter/revisions/{rev_id}/restore"),
+                    Some(serde_json::json!({})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let restored = json_body(response).await;
+            // The schedule the edit introduced is gone — the original is back.
+            assert!(
+                restored["nodes"][0].get("schedule").is_none(),
+                "restore should drop the edit's schedule: {restored}"
+            );
+            assert!(
+                restored["version"].is_string(),
+                "restore returns a fresh token"
+            );
+
+            // A fresh read agrees, and the restore itself was captured, so the
+            // history now holds two snapshots (the original + the scheduled body
+            // the restore replaced).
+            let graph = json_body(
+                router(state.clone())
+                    .oneshot(request("GET", "/api/v1/company/workflows/greeter", None))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert!(graph["nodes"][0].get("schedule").is_none(), "{graph}");
+            let list = json_body(
+                router(state)
+                    .oneshot(request(
+                        "GET",
+                        "/api/v1/company/workflows/greeter/revisions",
+                        None,
+                    ))
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(
+                list["revisions"].as_array().unwrap().len(),
+                2,
+                "the restore captured the body it replaced: {list}"
+            );
+        }
+
+        /// Restoring a revision id that does not exist is a clean `404`.
+        #[tokio::test]
+        async fn restore_unknown_revision_is_not_found() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_then_edit_greeter(&state).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/greeter/revisions/no-such-rev/restore",
+                    Some(serde_json::json!({})),
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        /// A workflow that was never edited has an empty history — `200 []`, not
+        /// a `404`.
+        #[tokio::test]
+        async fn revisions_of_an_unedited_workflow_are_empty() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+            create_greeter(&state).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "GET",
+                    "/api/v1/company/workflows/greeter/revisions",
+                    None,
+                ))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = json_body(response).await;
+            assert_eq!(body["revisions"].as_array().unwrap().len(), 0, "{body}");
+        }
+
         /// **The silent-overwrite guard.** Two consoles hold the same graph; one
         /// saves, then the other saves its stale copy. The second must be
         /// refused, not silently win.
@@ -3719,6 +4114,7 @@ mod tests {
                             pending_approvals: Vec::new(),
                             deliveries: Vec::new(),
                             cancelled: true,
+                            nodes: Vec::new(),
                         });
                     }
                 }
@@ -3728,6 +4124,7 @@ mod tests {
                     pending_approvals: Vec::new(),
                     deliveries: Vec::new(),
                     cancelled: false,
+                    nodes: Vec::new(),
                 })
             }
         }
@@ -4326,6 +4723,107 @@ label = "ok"
                 body.to_string().contains("workflow run"),
                 "the 404 should come from the cancel handler: {body}"
             );
+        }
+
+        // ── Issue #542: dry run through the real route ──────────────────────
+
+        /// A runner that completes immediately, returning one node row — enough
+        /// to prove the route maps `WorkflowRun.nodes` onto the response and
+        /// echoes the request's `dry_run` as the discriminator.
+        struct EchoRunner;
+
+        #[async_trait::async_trait]
+        impl WorkflowRunner for EchoRunner {
+            async fn run(
+                &self,
+                _company: &CompanyId,
+                _workflow: &crate::company::WorkflowFile,
+                _input: serde_json::Value,
+                _ctx: &WorkflowRunContext,
+            ) -> crate::Result<WorkflowRun> {
+                Ok(WorkflowRun {
+                    output: serde_json::json!({ "run": {}, "nodes": {} }),
+                    pending_approvals: Vec::new(),
+                    deliveries: Vec::new(),
+                    cancelled: false,
+                    nodes: vec![crate::ports::WorkflowRunNodeRow {
+                        node_id: "done".to_string(),
+                        status: crate::ports::types::WorkflowNodeStatus::Ok,
+                        elapsed_ms: 3,
+                    }],
+                })
+            }
+        }
+
+        /// A hosted company whose runner echoes immediately.
+        async fn echo_company(home: &std::path::Path) -> axum::Router {
+            let manifest: CompanyManifest =
+                toml::from_str("[company]\nname = \"Acme\"\n[policy]\nmode = \"full\"\n").unwrap();
+            let id = CompanyId::new("acme");
+            FsCompanyStore::new(home.to_path_buf())
+                .save(&CompanyRecord {
+                    id: id.clone(),
+                    manifest: manifest.clone(),
+                    ledger: Vec::new(),
+                    overlay_agents: Vec::new(),
+                    overlay_desk_members: Vec::new(),
+                    overlay_desk_order: Vec::new(),
+                    overlay_desks: Vec::new(),
+                    overlay_workflows: vec![crate::ports::types::OverlayWorkflow {
+                        id: "demo".to_string(),
+                        toml: GRAPH.to_string(),
+                    }],
+                    overlay_budgets: Vec::new(),
+                    disabled_workflows: Vec::new(),
+                    lifecycle: "running".to_string(),
+                    template_provenance: None,
+                })
+                .await
+                .unwrap();
+            let mut runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+                .with_id(id.clone())
+                .build()
+                .await
+                .unwrap();
+            runtime.set_workflow_runner(Arc::new(EchoRunner));
+            let state = AppState::new(AppConfig::default());
+            state.registry().insert(id.clone(), Arc::new(runtime));
+            crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+            router(state)
+        }
+
+        /// T8 — `{"dry_run":true}` answers 200 carrying `dryRun:true` and the
+        /// per-node `nodes`; a plain body carries neither `dryRun` (a real run's
+        /// shape an old host would produce) — the presence discriminator the
+        /// console reads instead of trusting what it asked for.
+        #[tokio::test]
+        async fn dry_run_request_echoes_the_marker_and_nodes_a_plain_body_omits_it() {
+            let home_dir = home();
+            let app = echo_company(home_dir.path()).await;
+
+            let dry = app
+                .clone()
+                .oneshot(run_request(serde_json::json!({ "dry_run": true })))
+                .await
+                .unwrap();
+            assert_eq!(dry.status(), StatusCode::OK);
+            let body = json_body(dry).await;
+            assert_eq!(body["dryRun"], serde_json::json!(true), "{body}");
+            assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
+            assert_eq!(body["nodes"][0]["status"], "ok", "{body}");
+
+            let plain = app
+                .oneshot(run_request(serde_json::json!({})))
+                .await
+                .unwrap();
+            assert_eq!(plain.status(), StatusCode::OK);
+            let body = json_body(plain).await;
+            assert!(
+                body.get("dryRun").is_none(),
+                "a real run must carry no dryRun key: {body}"
+            );
+            // The node trail rides every settled run, dry or not.
+            assert_eq!(body["nodes"][0]["nodeId"], "done", "{body}");
         }
     }
 }

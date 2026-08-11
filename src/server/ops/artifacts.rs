@@ -28,13 +28,19 @@ use crate::error::OpenCompanyError;
 use crate::ports::artifacts::{
     ArtifactAuthor, ArtifactDiff, ArtifactKind, ArtifactRecord, ArtifactVersion,
 };
+use crate::ports::workspace::WorkspaceOrigin;
 use crate::ports::{generate_id, now_millis};
 use crate::server::error::ApiError;
 use crate::server::ops::{ScopedCompany, scoped};
 
 /// The note stamped on a version created through the append route when the
 /// caller supplies none. Kept as a constant so the console can recognise it.
-const OPERATOR_EDIT_NOTE: &str = "operator edit before approval";
+///
+/// `pub(crate)` since issue #552: the workspace `PUT` route now records an
+/// operator's edit of a *published* note as a version too, and it has to say
+/// the same thing this route does — the console recognises the wording, and two
+/// spellings of one event would show up as two different kinds of edit.
+pub(crate) const OPERATOR_EDIT_NOTE: &str = "operator edit before approval";
 
 /// Builds the artifact route fragment.
 pub fn router() -> Router<AppState> {
@@ -188,6 +194,20 @@ async fn create_artifact(
 /// This is how a human edit is captured. The prior version is left untouched,
 /// so the diff between them stays computable forever; there is deliberately no
 /// route that rewrites a stored version.
+///
+/// # The node follows the chain (issue #552)
+///
+/// When the artifact is a *published* deliverable it also lives as a node in
+/// the shared workspace tree, and that node holds the current body. Appending
+/// here without updating it would leave the operator and every agent reading a
+/// draft the version history has already superseded — the same divergence from
+/// the other direction, and just as invisible.
+///
+/// Chain first, node second, matching the workspace `PUT`: the chain is
+/// authoritative, so a node that could not be updated is a stale projection
+/// that heals on the next write, and it must never fail the request that
+/// already recorded the version. A mirror failure therefore warns and returns
+/// the appended version.
 async fn append_version(
     company: ScopedCompany,
     Path(ArtifactPath { artifact_id }): Path<ArtifactPath>,
@@ -203,12 +223,43 @@ async fn append_version(
         ArtifactAuthor::Operator => Some(OPERATOR_EDIT_NOTE.to_string()),
         ArtifactAuthor::Agent => None,
     });
+    // Read from the version this one supersedes, before the push: the appended
+    // version has no node of its own until it inherits this one.
+    let mirror_target = record.workspace_node_id().map(str::to_string);
+    let origin = match author {
+        ArtifactAuthor::Operator => WorkspaceOrigin::Operator,
+        ArtifactAuthor::Agent => WorkspaceOrigin::Agent {
+            id: author_id.clone(),
+        },
+    };
+    let mirrored_body = body.body.clone();
     record.push_version(body.body, author, author_id, now_millis(), note);
+    if let Some(node_id) = &mirror_target {
+        // Carried onto the new version, or the *next* append's lookup finds no
+        // node and mirroring silently stops after one hop.
+        record.stamp_workspace_node(node_id);
+    }
     company
         .runtime
         .artifacts()
         .upsert(company.id(), &record)
         .await?;
+
+    if let Some(node_id) = mirror_target
+        && let Err(err) = company
+            .runtime
+            .workspace()
+            .write(company.id(), &node_id, &mirrored_body, origin)
+            .await
+    {
+        tracing::warn!(
+            artifact = %artifact_id,
+            node = %node_id,
+            error = %err,
+            "[artifacts] appended a version but could not update its workspace note; the note is \
+             stale until the next write on either surface"
+        );
+    }
     Ok(Json(record.into()))
 }
 

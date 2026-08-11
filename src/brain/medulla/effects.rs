@@ -186,6 +186,18 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
         // same reason they stay off the operator SSE projection: this body is
         // sent to the inference sidecar, and a board write is not a place to
         // hand it operator-authored text nobody asked to send.
+        // Issue #327: the tree's counterpart to the board announcement below,
+        // and on exactly its terms — written for completeness, not for a live
+        // path, since a workspace write starts no cycle and a brain therefore
+        // never sees one here. Structural only: the node's NAME is deliberately
+        // absent, because it is operator-authored free text and this body goes
+        // to the inference sidecar.
+        CompanyEvent::WorkspaceChanged { node_id, change } => (
+            Role::System,
+            "workspace".to_string(),
+            format!("Workspace node {node_id} {change}"),
+            "workspace.changed",
+        ),
         CompanyEvent::TaskCardChanged {
             task_id,
             change,
@@ -363,6 +375,19 @@ pub(crate) fn wire_event(seq: u64, event: &CompanyEvent) -> WireEvent {
             "workflow".to_string(),
             format!("Run of workflow {workflow_id} started"),
             "workflow.run.started",
+        ),
+        // Issue #382: the per-node start bracket. Structural, like the finish
+        // arm below — a node id and nothing else, so the sidecar reads "a node
+        // began" without any of the node's own payload.
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id,
+            node_id,
+            ..
+        } => (
+            Role::System,
+            "workflow".to_string(),
+            format!("Workflow {workflow_id} started node {node_id}"),
+            "workflow.node",
         ),
         CompanyEvent::WorkflowNodeFinished {
             workflow_id,
@@ -669,5 +694,31 @@ mod test {
         // Still says what happened: a human posted, and on which card.
         assert!(wired.body.contains("t-42"), "{}", wired.body);
         assert_eq!(wired.kind, "task.discussion_posted");
+    }
+
+    /// **Issue #382: the per-node start bracket wires out structurally.** The
+    /// node has not run, so the event carries ids alone — no status, no
+    /// duration, never any input. This pins that the sidecar reads "a node
+    /// began" as a system record on the `workflow` sender under the
+    /// `workflow.node` kind, carrying the structural ids and nothing of the
+    /// node's own payload (there is none to leak). Mirrors the finish arm one
+    /// variant over.
+    #[test]
+    fn a_started_node_wires_out_structurally_on_the_workflow_sender() {
+        let event = CompanyEvent::WorkflowNodeStarted {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node_id: "owner_summary".to_string(),
+        };
+
+        let wired = wire_event(3, &event);
+
+        assert_eq!(wired.role, Role::System);
+        assert_eq!(wired.sender, "workflow");
+        assert_eq!(wired.kind, "workflow.node");
+        // Says what happened, in ids: which graph, which node, that it started.
+        assert!(wired.body.contains("digest"), "{}", wired.body);
+        assert!(wired.body.contains("owner_summary"), "{}", wired.body);
+        assert!(wired.body.contains("started"), "{}", wired.body);
     }
 }

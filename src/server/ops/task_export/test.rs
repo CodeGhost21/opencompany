@@ -46,6 +46,8 @@ fn card(title: &str) -> TaskCard {
         // the export would have to carry, and that is a different change.
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     }
 }
 

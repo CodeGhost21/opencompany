@@ -472,6 +472,11 @@ pub fn build_agent(
         Some(store) if grants_cover(grants, "workspace") => {
             Some(crate::harness::workspace_tools::workspace_tools(
                 store.clone(),
+                // Issue #552: so an overwrite of a *published* note is recorded
+                // on that deliverable's artifact chain rather than diverging
+                // from it. Read-only for the write tool's mirroring — no tool
+                // here opens or deletes an artifact.
+                deps.artifacts.clone(),
                 company.clone(),
                 manifest_agent.id.clone(),
                 workspace_writes,
@@ -587,6 +592,10 @@ pub fn build_agent(
             // stage onto, so a dispatched card can link to the workflow its
             // attempt built or ran. Orchestrator-only, like the tools.
             deps.workflow_refs.clone(),
+            // Issue #418: the shared run-output cache `run_workflow` fills and
+            // the `read_run_output` companion reads back, so a clipped preview
+            // is reachable within the turn. Orchestrator-only, like the tools.
+            deps.run_outputs.clone(),
         ));
     }
 
@@ -1175,6 +1184,7 @@ mod tests {
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

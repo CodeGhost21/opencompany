@@ -69,6 +69,10 @@ test("running a workflow shows its per-node output in the result drawer", async 
 
   // And it renders the run's per-node result, not just a heading — the node card
   // for the agent step carries its graph name, which only the parsed
-  // (non-fallback) render path produces.
-  await expect(drawer.getByText("Draft the note")).toBeVisible();
+  // (non-fallback) render path produces. Scope to the output-cards region
+  // (issue #542 added a "Steps" timeline that also names each node, so a
+  // drawer-wide match is ambiguous); this still proves the per-node OUTPUT card
+  // mounted, which is the point of the spec.
+  const nodeResults = drawer.getByTestId("workflow-run-node-results");
+  await expect(nodeResults.getByText("Draft the note")).toBeVisible();
 });

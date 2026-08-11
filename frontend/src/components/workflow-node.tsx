@@ -54,11 +54,11 @@ export function WorkflowNode({ data, selected }: NodeProps) {
               "shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium uppercase tracking-wide",
               RUN_STATE_BADGE[runState],
             )}
-            // "running" is a derived frontier, not something the engine reports.
-            // Saying so on hover is cheaper than being subtly wrong in silence.
+            // "running" is now reported by the engine (issue #382), not a
+            // derived frontier — the node really is executing when this shows.
             title={
               runState === "running"
-                ? "Reached this node — the engine reports nodes only as they finish, so this is where the run should be now."
+                ? "This node is executing now."
                 : runState === "error"
                   ? "This node failed."
                   : "This node finished."

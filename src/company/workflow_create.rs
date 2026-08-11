@@ -84,10 +84,16 @@
 //!
 //! ## What is deliberately not here
 //!
-//! * **No revision history.** OpenHuman keeps a bounded snapshot ring in a
-//!   dedicated `flow_revisions` table; our overlay bodies live inside
-//!   `CompanyRecord`, which is loaded and saved *whole* on every write, so a ring
-//!   per workflow would bloat that hot path. It needs its own store surface.
+//! * **Revision history lives in its own store (issue #274).** OpenHuman keeps a
+//!   bounded snapshot ring in a dedicated `flow_revisions` table; our overlay
+//!   bodies live inside `CompanyRecord`, which is loaded and saved *whole* on
+//!   every write, so a ring per workflow would bloat that hot path. It therefore
+//!   got its own [`WorkflowRevisionStore`](crate::ports::WorkflowRevisionStore)
+//!   port plus three backends rather than a field on the record.
+//!   [`update_company_workflow`] captures the prior body into it under the write
+//!   lock, and [`rollback_company_workflow`] restores one *through this same
+//!   update path* — so a rollback re-validates against the current record and is
+//!   itself undoable. Diffing/merging revisions stays out of scope.
 //! * **No run-history reaping.** Past runs are
 //!   [`WorkflowRunFinished`](CompanyEvent::WorkflowRunFinished) entries on the
 //!   company's single append-only journal, interleaved with chat and audit. What
@@ -143,18 +149,22 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::company::{
-    RawWorkflow, WorkflowFile, list_workflows_union, parse_workflow, render_workflow,
+    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, list_workflows_union,
+    parse_workflow, raw_workflow_from_toml, render_workflow,
 };
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
 use crate::ports::events::EventLog;
+use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
 use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, OverlayWorkflow, WorkflowEnabledReason,
 };
+use crate::ports::workflow_revisions::{WorkflowRevisionRecord, WorkflowRevisionStore};
 use crate::server::ops::language;
 
 /// Max nodes a freshly authored graph may declare. A larger graph is refused
@@ -208,36 +218,11 @@ pub(crate) async fn create_company_workflow(
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.to_string()))?;
 
-    // Cross-check every `agent` node against the company's effective roster
-    // (manifest agents ∪ operator overlay teammates). `parse_workflow` checks
-    // the graph's own shape but has no roster to validate names against.
-    let roster: HashSet<&str> = record
-        .manifest
-        .agents
-        .iter()
-        .map(|a| a.id.as_str())
-        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
-        .collect();
-    for node in &draft.nodes {
-        if node.kind != "agent" {
-            continue;
-        }
-        match node.agent.as_deref() {
-            Some(agent_id) if roster.contains(agent_id) => {}
-            Some(agent_id) => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
-                    node.id
-                )));
-            }
-            None => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` is an agent node but names no teammate.",
-                    node.id
-                )));
-            }
-        }
-    }
+    // Cross-check every `agent` node against the company's effective roster and
+    // every `tool_call` node against the company's wired+granted tools.
+    // `parse_workflow` checks the graph's own shape but has no record to validate
+    // names against — the same helper gates create and update identically.
+    validate_draft_against_record(&draft, &record)?;
 
     // Id uniqueness against every id this company already answers for: the seed
     // files, the record's overlay bodies, and the manifest-enabled ids. The
@@ -377,6 +362,167 @@ pub(crate) async fn create_company_workflow(
     Ok(file)
 }
 
+// ---------------------------------------------------------------------------
+// The workflow proposal's authoring payload (issue #580)
+// ---------------------------------------------------------------------------
+
+/// The `{id, name, description, nodes, edges}` graph a
+/// [`TaskWorkflowProposal`](crate::ports::tasks::TaskWorkflowProposal) stores as
+/// its `ops` — the same shape `POST …/workflows` accepts, but owned by the
+/// company layer so the harness builder (which *produces* a proposal) and the
+/// apply route (which *persists* it) rebuild a [`RawWorkflow`] from it the SAME
+/// way.
+///
+/// **The host is the authority.** A proposal never stores a rendered graph; it
+/// stores this payload, and apply re-derives and re-validates a `RawWorkflow`
+/// from it through [`create_company_workflow`]. So a stored proposal is *input*
+/// to the create checks, never a substitute for them — a graph cannot reach the
+/// workflow list without passing exactly the validation a hand-authored one does.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowGraphSpec {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) description: Option<String>,
+    #[serde(default)]
+    pub(crate) nodes: Vec<WorkflowNodeSpec>,
+    #[serde(default)]
+    pub(crate) edges: Vec<WorkflowEdgeSpec>,
+}
+
+/// One node of a [`WorkflowGraphSpec`]. Mirrors the create route's node body —
+/// the subset a builder pass produces (`trigger`, `agent`, `tool_call`,
+/// `condition`, `output`). `on_error`/`retry` are omitted because the builder
+/// does not author them; they convert to `None` on a [`RawNode`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowNodeSpec {
+    #[serde(default)]
+    pub(crate) id: String,
+    #[serde(default)]
+    pub(crate) kind: String,
+    #[serde(default)]
+    pub(crate) name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) summary: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) schedule: Option<String>,
+    /// Free-form engine config as JSON (a `tool_call`'s `slug`, a condition's
+    /// expression). Converted to a TOML value on the way into [`RawNode`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) config: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) requires_approval: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) destination: Option<WorkflowDestinationDef>,
+}
+
+/// One edge of a [`WorkflowGraphSpec`].
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorkflowEdgeSpec {
+    #[serde(default)]
+    pub(crate) from: String,
+    #[serde(default)]
+    pub(crate) to: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) label: Option<String>,
+}
+
+/// Rebuilds a [`RawWorkflow`] from a stored proposal graph — the one conversion
+/// both the builder pass and the apply route use, so what the builder validated
+/// and what apply persists are the same graph.
+///
+/// The only fallible step is `config`: TOML (the node config's storage form) has
+/// no `null`, so a JSON config carrying one is refused here with an actionable
+/// message rather than silently dropped — the same rule the create route's own
+/// body conversion applies.
+pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWorkflow> {
+    let mut nodes = Vec::with_capacity(spec.nodes.len());
+    for n in &spec.nodes {
+        let config = match &n.config {
+            Some(json) => Some(toml::Value::try_from(json).map_err(|err| {
+                OpenCompanyError::InvalidRequest(format!(
+                    "node `{}` has config that can't be stored ({err}) — TOML has no null; drop \
+                     null-valued keys.",
+                    n.id
+                ))
+            })?),
+            None => None,
+        };
+        nodes.push(RawNode {
+            id: n.id.clone(),
+            kind: n.kind.clone(),
+            name: n.name.clone(),
+            summary: n.summary.clone(),
+            agent: n.agent.clone(),
+            schedule: n.schedule.clone(),
+            config,
+            on_error: None,
+            retry: None,
+            requires_approval: n.requires_approval,
+            destination: n.destination.clone(),
+        });
+    }
+    Ok(RawWorkflow {
+        id: spec.id.clone(),
+        name: spec.name.clone(),
+        description: spec.description.clone(),
+        nodes,
+        edges: spec
+            .edges
+            .iter()
+            .map(|e| RawEdge {
+                from: e.from.clone(),
+                to: e.to.clone(),
+                label: e.label.clone(),
+            })
+            .collect(),
+    })
+}
+
+/// Runs the full author-time validation on a candidate graph **without
+/// persisting it** — the builder pass's courtesy check (issue #580), so a
+/// proposal that could never be created never reaches In Review.
+///
+/// It runs exactly the checks [`create_company_workflow`] runs before its save —
+/// shape (id/name/size/one-trigger), the render → byte-cap → `parse_workflow`
+/// round trip, and the roster/tool cross-check against the loaded `record` — and
+/// then throws the result away. The one thing it deliberately does **not** check
+/// is id/name uniqueness, because that is a function of the live record at
+/// *apply* time, not build time: a name free when the proposal was built can be
+/// taken by the time it is approved, and that is the roster-drift case apply
+/// surfaces by keeping the card In Review.
+///
+/// Gated with the builder it serves: the only caller is
+/// `crate::harness::workflow_build`, so in the default build (no harness) this
+/// would be dead code.
+#[cfg(feature = "openhuman")]
+pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
+    validate_draft_shape(draft)?;
+    let toml_src = render_workflow(draft)?;
+    if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "the proposed workflow is {} bytes, over the {MAX_WORKFLOW_TOML_BYTES}-byte limit.",
+            toml_src.len()
+        )));
+    }
+    parse_workflow(&toml_src).map_err(|err| match err {
+        OpenCompanyError::DataInvalid { problems, .. } => {
+            OpenCompanyError::InvalidRequest(problems.join(" "))
+        }
+        OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
+        other => other,
+    })?;
+    validate_draft_against_record(draft, record)?;
+    Ok(())
+}
+
 /// Journals a best-effort [`WorkflowEnabledChanged`](CompanyEvent::WorkflowEnabledChanged).
 ///
 /// Best-effort in the same sense as every other write-path audit event here: the
@@ -456,6 +602,153 @@ fn validate_draft_shape(draft: &RawWorkflow) -> Result<()> {
         return Err(OpenCompanyError::InvalidRequest(format!(
             "a workflow needs exactly one `trigger` node to say what starts it (found {trigger_count})."
         )));
+    }
+
+    Ok(())
+}
+
+/// Cross-checks a draft graph against the company `record`: every `agent` node
+/// names a real roster teammate (manifest agents ∪ operator overlay teammates),
+/// and every `tool_call` node names a wired, granted tool. Shared verbatim by
+/// [`create_company_workflow`] and [`update_company_workflow`] so a bad draft is
+/// refused on exactly the same terms whichever surface authored it, and runs
+/// **inside the write lock** because the roster and grants both come from the
+/// loaded record.
+///
+/// This is an author-time convenience, not the enforcement point. The run-time
+/// gate in [`WorkflowToolInvoker::invoke`](crate::workflows::caps) stays the
+/// backstop: `[tools].allow` grants can be revoked after a graph is saved, and
+/// seed / legacy graphs never pass through this create path at all — so passing
+/// here means the draft was coherent when written, not that a run is forever
+/// permitted.
+fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
+    let roster: HashSet<&str> = record
+        .manifest
+        .agents
+        .iter()
+        .map(|a| a.id.as_str())
+        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
+        .collect();
+
+    for node in &draft.nodes {
+        match node.kind.as_str() {
+            "agent" => match node.agent.as_deref() {
+                Some(agent_id) if roster.contains(agent_id) => {}
+                Some(agent_id) => {
+                    return Err(OpenCompanyError::InvalidRequest(format!(
+                        "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
+                        node.id
+                    )));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(format!(
+                        "node `{}` is an agent node but names no teammate.",
+                        node.id
+                    )));
+                }
+            },
+            "tool_call" => validate_tool_call_node(node, record)?,
+            _ => {}
+        }
+    }
+
+    Ok(())
+}
+
+/// Author-time `tool_call` check: the slug must be a non-empty `config.slug`
+/// string, and — under the `openhuman` feature — it must name a wired toolbelt
+/// namespace the company's `[tools].allow` actually grants. These are the same
+/// two gates [`WorkflowToolInvoker::invoke`](crate::workflows::caps) applies at
+/// run time (`namespace_of` for "is it a wired tool", then the grant-glob rule
+/// with the priced `search` family requiring an explicit grant), surfaced at
+/// save so an author hears about an unwired or ungranted slug now instead of at
+/// first run.
+///
+/// The namespace/grant half is `cfg(feature = "openhuman")` because
+/// `namespace_of` / `grants_cover` live behind that feature; the slug-presence
+/// half is unconditional. Under the default build only the presence check runs
+/// and the run-time gate remains the backstop — `record` is still consumed
+/// (the roster check in the caller always reads it), so the helper compiles
+/// warning-free with and without the feature.
+fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()> {
+    // (a) UNGATED — a tool_call must name a non-empty `slug` string in `config`.
+    let raw_slug = node
+        .config
+        .as_ref()
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("slug"))
+        .and_then(toml::Value::as_str);
+    // Absent, or empty / whitespace-only, names no tool at all.
+    let Some(slug) = raw_slug.filter(|slug| !slug.trim().is_empty()) else {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "node `{}` is a tool_call but names no `slug` — set `config.slug` to the tool to run.",
+            node.id
+        )));
+    };
+    // The slug is stored and looked up at run time EXACTLY as written —
+    // `render_workflow` persists the raw config, and `WorkflowToolInvoker` indexes
+    // tools by literal `name()`. So a padded slug like `" csv_export "` would sail
+    // through a trim-normalized check here yet be persisted (and looked up) padded,
+    // halting the run on the very lookup this save-time gate promised to prevent.
+    // Reject the padding rather than silently trimming, so the validated string
+    // and the persisted/runtime string are the same literal.
+    if slug != slug.trim() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "node `{}` has a tool_call `slug` with leading or trailing whitespace (`{slug}`) — \
+             set `config.slug` to the exact tool name.",
+            node.id
+        )));
+    }
+
+    #[cfg(feature = "openhuman")]
+    {
+        // (b) The slug must map to a wired toolbelt namespace — mirroring the
+        // run-time gate's "not a wired workflow tool".
+        let Some(namespace) = crate::harness::toolbelt::namespace_of(slug) else {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}`, which is not a wired workflow tool.",
+                node.id
+            )));
+        };
+        // (b.1) The slug's namespace must be one the workflow `tool_call` invoker
+        // actually wires (`WORKFLOW_TOOL_NAMESPACES` == shell/code/web/search).
+        // `media` and `composio` map to a namespace but are agent-turn families the
+        // invoker never builds, so a run passes the grant gate and then ALWAYS
+        // misses the tool lookup ("not available in company workflows"). Reject them
+        // here so this gate mirrors the run-time outcome instead of green-lighting a
+        // slug that can never execute.
+        if !crate::workflows::caps::WORKFLOW_TOOL_NAMESPACES.contains(&namespace) {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}` (namespace `{namespace}`), which workflow \
+                 `tool_call` nodes cannot run — `{namespace}` is an agent-turn tool family, not a \
+                 workflow tool.",
+                node.id
+            )));
+        }
+        // (c) The company's `[tools].allow` must grant that namespace. The priced
+        // `search` family needs an EXPLICIT `search` grant — a `*` wildcard never
+        // confers it — while every other namespace uses the ordinary grant-glob
+        // intersection, exactly the split `WorkflowToolInvoker::invoke` enforces.
+        let grants = &record.manifest.tools.allow;
+        let granted = if namespace == "search" {
+            crate::company::grants_search_explicit(grants)
+        } else {
+            crate::harness::build::grants_cover(grants, namespace)
+        };
+        if !granted {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "node `{}` calls tool `{slug}` (namespace `{namespace}`), which this company's \
+                 `[tools].allow` does not grant — grant it in `[tools].allow`.",
+                node.id
+            )));
+        }
+    }
+    #[cfg(not(feature = "openhuman"))]
+    {
+        // Under the default build the namespace/grant resolution is not compiled
+        // in; the slug-presence check above still runs and the run-time gate
+        // stays the backstop. Consume both bindings so neither warns.
+        let _ = (slug, record);
     }
 
     Ok(())
@@ -585,6 +878,7 @@ pub(crate) async fn update_company_workflow(
     company: &CompanyId,
     source_dir: Option<&Path>,
     store: &Arc<dyn CompanyStore>,
+    revisions: &Arc<dyn WorkflowRevisionStore>,
     events: Option<&Arc<dyn EventLog>>,
     draft: RawWorkflow,
     expected_version: Option<&str>,
@@ -607,35 +901,10 @@ pub(crate) async fn update_company_workflow(
     // Optimistic concurrency, inside the lock and before any mutation.
     check_expected_version(expected_version, &record.overlay_workflows[index].toml)?;
 
-    // Same roster cross-check as create: `parse_workflow` validates the graph's
-    // own shape but has no roster to check `agent` node names against.
-    let roster: HashSet<&str> = record
-        .manifest
-        .agents
-        .iter()
-        .map(|a| a.id.as_str())
-        .chain(record.overlay_agents.iter().map(|a| a.id.as_str()))
-        .collect();
-    for node in &draft.nodes {
-        if node.kind != "agent" {
-            continue;
-        }
-        match node.agent.as_deref() {
-            Some(agent_id) if roster.contains(agent_id) => {}
-            Some(agent_id) => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` names teammate `{agent_id}`, which is not on this company's roster.",
-                    node.id
-                )));
-            }
-            None => {
-                return Err(OpenCompanyError::InvalidRequest(format!(
-                    "node `{}` is an agent node but names no teammate.",
-                    node.id
-                )));
-            }
-        }
-    }
+    // Same record cross-check as create (roster + tool_call grants):
+    // `parse_workflow` validates the graph's own shape but has no record to check
+    // `agent`/`tool_call` node names against.
+    validate_draft_against_record(&draft, &record)?;
 
     // Display-name uniqueness, MINUS this workflow's own current name — a
     // re-save that doesn't rename must not collide with itself. Every other
@@ -689,6 +958,31 @@ pub(crate) async fn update_company_workflow(
         .and_then(|previous| previous.trigger_schedule().map(str::to_string))
         .is_some();
     let disarmed = file.trigger_schedule().is_some() && !armed_before;
+
+    // Issue #274: snapshot the body we are about to overwrite, so the edit is
+    // undoable. Captured HERE — inside the write lock, holding the prior TOML —
+    // because this is the only instant a snapshot is race-free (the same reason
+    // OpenHuman's `flow_revisions` insert rides inside the guarded UPDATE).
+    //
+    // Ordering is load-bearing: push the revision BEFORE `store.save`. A failed
+    // push aborts the edit and the prior body is still the live one, so nothing
+    // is lost — which is the exact failure this feature exists to prevent.
+    // Save-first would risk overwriting the body and then losing its only copy.
+    //
+    // Deduped against a no-op save: when the new TOML is byte-identical to the
+    // prior, there is nothing to lose — the version token already defines those
+    // two as the same graph — so no snapshot is taken.
+    let prior_toml = record.overlay_workflows[index].toml.clone();
+    if prior_toml != toml_src {
+        // Name from the prior parsed body; fall back to the id when it no longer
+        // parses (a corrupt body still deserves a recoverable snapshot).
+        let prior_name = parse_workflow(&prior_toml)
+            .map(|f| f.name)
+            .unwrap_or_else(|_| file.id.clone());
+        let revision =
+            WorkflowRevisionRecord::new(file.id.clone(), prior_name, prior_toml, now_millis());
+        revisions.push_revision(company, &revision).await?;
+    }
 
     // Replace in place: same slot, same order, so the picker doesn't reshuffle.
     record.overlay_workflows[index] = OverlayWorkflow {
@@ -744,6 +1038,76 @@ pub(crate) async fn update_company_workflow(
     }
 
     Ok(file)
+}
+
+/// Restores a workflow to one of its captured revisions (issue #274), returning
+/// the parsed [`WorkflowFile`] the union read path will now serve.
+///
+/// A rollback is **not** a special write path — it is an ordinary edit whose new
+/// body happens to be an old one. It loads the revision (scoped to `wid`, so one
+/// workflow's snapshot can never be restored onto another), converts its stored
+/// TOML back into a draft, and routes it through
+/// [`update_company_workflow`] unchanged. That reuse is deliberate and buys four
+/// properties for free:
+///
+/// * **Re-validation against the *current* record.** A revision that named a
+///   teammate who has since been removed is a `400`, not a broken restore — the
+///   same roster/tool check every edit passes.
+/// * **The rollback is itself undoable.** `update_company_workflow` snapshots the
+///   *current* body before overwriting it, so restoring A over B captures B — a
+///   rollback can be rolled back.
+/// * **Optimistic concurrency.** `expected_version`, when supplied, is the token
+///   of the body being replaced; a stale one is a `409`, so a rollback cannot
+///   silently clobber a concurrent edit.
+/// * **The #276 disarm.** If the restored graph carries a schedule the live one
+///   lacked, it lands switched **off** — a restored cron cannot fire before
+///   anyone has reviewed it.
+///
+/// Statuses: `400` (the revision is invalid against the current record), `404`
+/// (unknown `wid` or unknown `rev_id`), `409` (seed-backed / body-less `wid`, a
+/// stale token, or a name collision).
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn rollback_company_workflow(
+    company: &CompanyId,
+    source_dir: Option<&Path>,
+    store: &Arc<dyn CompanyStore>,
+    revisions: &Arc<dyn WorkflowRevisionStore>,
+    events: Option<&Arc<dyn EventLog>>,
+    wid: &str,
+    rev_id: &str,
+    expected_version: Option<&str>,
+) -> Result<WorkflowFile> {
+    if !is_safe_workflow_id(wid) {
+        return Err(OpenCompanyError::InvalidRequest(
+            language::WORKFLOW_ID_INVALID.to_string(),
+        ));
+    }
+
+    // Load the snapshot, scoped to this workflow. Unknown wid or unknown rev both
+    // read as "nothing to restore" → 404.
+    let revision = revisions
+        .get_revision(company, wid, rev_id)
+        .await?
+        .ok_or_else(|| {
+            OpenCompanyError::CompanyNotFound(format!("workflow {wid} revision {rev_id}"))
+        })?;
+
+    // Convert the captured body back into an editable draft and pin its id to
+    // `wid`: a rollback restores a workflow **in place**, never renames it, and a
+    // hand-mangled revision body must not be able to retarget another workflow.
+    let mut draft = raw_workflow_from_toml(&revision.toml)?;
+    draft.id = wid.to_string();
+
+    update_company_workflow(
+        company,
+        source_dir,
+        store,
+        revisions,
+        events,
+        draft,
+        expected_version,
+    )
+    .await
 }
 
 /// Switches a workflow on or off without touching its graph (issue #276).
@@ -886,6 +1250,7 @@ pub(crate) async fn delete_company_workflow(
     company: &CompanyId,
     source_dir: Option<&Path>,
     store: &Arc<dyn CompanyStore>,
+    revisions: &Arc<dyn WorkflowRevisionStore>,
     events: Option<&Arc<dyn EventLog>>,
     wid: &str,
     expected_version: Option<&str>,
@@ -924,6 +1289,21 @@ pub(crate) async fn delete_company_workflow(
     store.save(&record).await?;
 
     drop(_lock);
+
+    // Issue #274: cascade the workflow's revision history away with it, so a
+    // removed workflow leaves no orphaned snapshots behind. Best-effort in the
+    // same sense as the audit journal below: the workflow is already gone by the
+    // time this runs, so a failure is logged rather than rolling the delete back
+    // (and a leftover ring is harmless — a re-created id starts its own history,
+    // and nothing reads another workflow's rows).
+    if let Err(err) = revisions.delete_revisions(company, wid).await {
+        tracing::warn!(
+            company = %company,
+            workflow = %wid,
+            error = %err,
+            "workflow deleted but its revision history could not be cleared"
+        );
+    }
 
     if let Some(log) = events
         && let Err(err) = log
@@ -1075,6 +1455,86 @@ mod tests {
         fn subscribe(&self, _id: &CompanyId) -> BoxStream<'static, StoredEvent> {
             Box::pin(stream::empty())
         }
+    }
+
+    /// An in-memory [`WorkflowRevisionStore`] so the capture, prune, cascade and
+    /// rollback behaviour can be asserted without a real backend. Pruning to the
+    /// cap is applied on push, mirroring the durable backends.
+    #[derive(Default)]
+    struct MemRevisions {
+        rows: StdMutex<Vec<WorkflowRevisionRecord>>,
+    }
+
+    #[async_trait]
+    impl WorkflowRevisionStore for MemRevisions {
+        async fn push_revision(
+            &self,
+            _company: &CompanyId,
+            revision: &WorkflowRevisionRecord,
+        ) -> Result<()> {
+            use crate::ports::workflow_revisions::{MAX_WORKFLOW_REVISIONS, sort_newest_first};
+            let mut rows = self.rows.lock().unwrap();
+            rows.push(revision.clone());
+            let mut mine: Vec<WorkflowRevisionRecord> = rows
+                .iter()
+                .filter(|r| r.workflow_id == revision.workflow_id)
+                .cloned()
+                .collect();
+            if mine.len() > MAX_WORKFLOW_REVISIONS {
+                sort_newest_first(&mut mine);
+                let keep: std::collections::HashSet<String> = mine
+                    .into_iter()
+                    .take(MAX_WORKFLOW_REVISIONS)
+                    .map(|r| r.id)
+                    .collect();
+                rows.retain(|r| r.workflow_id != revision.workflow_id || keep.contains(&r.id));
+            }
+            Ok(())
+        }
+        async fn list_revisions(
+            &self,
+            _company: &CompanyId,
+            workflow_id: &str,
+        ) -> Result<Vec<WorkflowRevisionRecord>> {
+            use crate::ports::workflow_revisions::sort_newest_first;
+            let mut mine: Vec<WorkflowRevisionRecord> = self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|r| r.workflow_id == workflow_id)
+                .cloned()
+                .collect();
+            sort_newest_first(&mut mine);
+            Ok(mine)
+        }
+        async fn get_revision(
+            &self,
+            _company: &CompanyId,
+            workflow_id: &str,
+            revision_id: &str,
+        ) -> Result<Option<WorkflowRevisionRecord>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|r| r.workflow_id == workflow_id && r.id == revision_id)
+                .cloned())
+        }
+        async fn delete_revisions(&self, _company: &CompanyId, workflow_id: &str) -> Result<u64> {
+            let mut rows = self.rows.lock().unwrap();
+            let before = rows.len();
+            rows.retain(|r| r.workflow_id != workflow_id);
+            Ok((before - rows.len()) as u64)
+        }
+    }
+
+    /// A throwaway revision store for tests that do not assert on revision
+    /// capture — the common case. Tests that DO assert capture/prune/rollback
+    /// hold their own `Arc<MemRevisions>` so they can read it back.
+    fn revs() -> Arc<dyn WorkflowRevisionStore> {
+        Arc::new(MemRevisions::default())
     }
 
     // --- fixtures ------------------------------------------------------------
@@ -1686,6 +2146,7 @@ to = "done"
             &company,
             None,
             &store,
+            &revs(),
             Some(&log_dyn),
             draft,
             Some(&version),
@@ -1753,16 +2214,17 @@ to = "done"
         // Someone else edits first, unconditionally.
         let mut theirs = valid_draft("greeter", "Greeter");
         theirs.description = Some("Theirs landed first.".to_string());
-        update_company_workflow(&company, None, &store, None, theirs, None)
+        update_company_workflow(&company, None, &store, &revs(), None, theirs, None)
             .await
             .expect("first writer wins");
 
         // Our stale token is now wrong.
         let mut ours = valid_draft("greeter", "Greeter");
         ours.description = Some("Ours would clobber.".to_string());
-        let err = update_company_workflow(&company, None, &store, None, ours, Some(&stale))
-            .await
-            .expect_err("stale version must be refused");
+        let err =
+            update_company_workflow(&company, None, &store, &revs(), None, ours, Some(&stale))
+                .await
+                .expect_err("stale version must be refused");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
 
         // And the other writer's edit is intact — the refusal is not partial.
@@ -1782,7 +2244,7 @@ to = "done"
 
         let mut once = valid_draft("greeter", "Greeter");
         once.description = Some("One.".to_string());
-        update_company_workflow(&company, None, &store, None, once, Some(&first))
+        update_company_workflow(&company, None, &store, &revs(), None, once, Some(&first))
             .await
             .expect("first conditional write");
 
@@ -1792,7 +2254,7 @@ to = "done"
 
         let mut twice = valid_draft("greeter", "Greeter");
         twice.description = Some("Two.".to_string());
-        update_company_workflow(&company, None, &store, None, twice, Some(&second))
+        update_company_workflow(&company, None, &store, &revs(), None, twice, Some(&second))
             .await
             .expect("refreshed token is accepted");
     }
@@ -1804,7 +2266,7 @@ to = "done"
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
         let mut draft = valid_draft("greeter", "Greeter");
         draft.description = Some("No token needed.".to_string());
-        update_company_workflow(&company, None, &store, None, draft, None)
+        update_company_workflow(&company, None, &store, &revs(), None, draft, None)
             .await
             .expect("unconditional write");
     }
@@ -1816,7 +2278,7 @@ to = "done"
         let (store, version) = with_one_workflow(&company, "greeter", "Greeter").await;
         let mut draft = valid_draft("greeter", "  greeter  ");
         draft.description = Some("Same name, different case and padding.".to_string());
-        update_company_workflow(&company, None, &store, None, draft, Some(&version))
+        update_company_workflow(&company, None, &store, &revs(), None, draft, Some(&version))
             .await
             .expect("own name must not conflict with itself");
     }
@@ -1834,6 +2296,7 @@ to = "done"
             &company,
             None,
             &store,
+            &revs(),
             None,
             valid_draft("greeter", "OTHER"),
             None,
@@ -1852,7 +2315,7 @@ to = "done"
         // Zero triggers.
         let mut no_trigger = valid_draft("greeter", "Greeter");
         no_trigger.nodes[0].kind = "output".to_string();
-        let err = update_company_workflow(&company, None, &store, None, no_trigger, None)
+        let err = update_company_workflow(&company, None, &store, &revs(), None, no_trigger, None)
             .await
             .expect_err("no trigger");
         assert!(err.to_string().contains("exactly one `trigger`"), "{err}");
@@ -1860,7 +2323,7 @@ to = "done"
         // Off-roster teammate.
         let mut ghost = valid_draft("greeter", "Greeter");
         ghost.nodes[1].agent = Some("ghost".to_string());
-        let err = update_company_workflow(&company, None, &store, None, ghost, None)
+        let err = update_company_workflow(&company, None, &store, &revs(), None, ghost, None)
             .await
             .expect_err("off-roster teammate");
         assert!(
@@ -1897,6 +2360,7 @@ to = "done"
             &company,
             Some(dir.path()),
             &store,
+            &revs(),
             None,
             valid_draft("seeded", "Seeded flow"),
             None,
@@ -1915,6 +2379,7 @@ to = "done"
             &company,
             None,
             &store,
+            &revs(),
             None,
             valid_draft("ghost", "Ghost"),
             None,
@@ -1940,6 +2405,7 @@ to = "done"
             &company,
             None,
             &store,
+            &revs(),
             None,
             valid_draft("legacy", "Legacy"),
             None,
@@ -1965,7 +2431,7 @@ to = "done"
 
         let mut draft = valid_draft("a", "Alpha");
         draft.description = Some("Edited.".to_string());
-        update_company_workflow(&company, None, &store, None, draft, None)
+        update_company_workflow(&company, None, &store, &revs(), None, draft, None)
             .await
             .expect("edit the first");
 
@@ -1991,6 +2457,7 @@ to = "done"
             &company,
             None,
             &store,
+            &revs(),
             Some(&log_dyn),
             "greeter",
             Some(&version),
@@ -2036,7 +2503,7 @@ to = "done"
     async fn a_deleted_workflow_has_nothing_left_for_the_boot_merge_to_re_enable() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        delete_company_workflow(&company, None, &store, None, "greeter", None)
+        delete_company_workflow(&company, None, &store, &revs(), None, "greeter", None)
             .await
             .expect("deletes");
 
@@ -2060,13 +2527,21 @@ to = "done"
 
         let mut theirs = valid_draft("greeter", "Greeter");
         theirs.description = Some("Edited after you loaded it.".to_string());
-        update_company_workflow(&company, None, &store, None, theirs, None)
+        update_company_workflow(&company, None, &store, &revs(), None, theirs, None)
             .await
             .expect("someone edits first");
 
-        let err = delete_company_workflow(&company, None, &store, None, "greeter", Some(&stale))
-            .await
-            .expect_err("stale delete must be refused");
+        let err = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            "greeter",
+            Some(&stale),
+        )
+        .await
+        .expect_err("stale delete must be refused");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
 
         let record = store.load(&company).await.unwrap().unwrap();
@@ -2089,9 +2564,17 @@ to = "done"
             manifest_with_assistant(),
         )));
 
-        let err = delete_company_workflow(&company, Some(dir.path()), &store, None, "seeded", None)
-            .await
-            .expect_err("a source-defined workflow is not deletable");
+        let err = delete_company_workflow(
+            &company,
+            Some(dir.path()),
+            &store,
+            &revs(),
+            None,
+            "seeded",
+            None,
+        )
+        .await
+        .expect_err("a source-defined workflow is not deletable");
         assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
         assert!(err.to_string().contains("source tree"), "{err}");
         // And the seed file is untouched — this path never writes to the tree.
@@ -2102,7 +2585,7 @@ to = "done"
     async fn deleting_an_unknown_workflow_is_not_found() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        let err = delete_company_workflow(&company, None, &store, None, "ghost", None)
+        let err = delete_company_workflow(&company, None, &store, &revs(), None, "ghost", None)
             .await
             .expect_err("unknown id");
         assert!(
@@ -2115,9 +2598,10 @@ to = "done"
     async fn deleting_a_traversal_id_is_invalid() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        let err = delete_company_workflow(&company, None, &store, None, "../secrets", None)
-            .await
-            .expect_err("traversal id");
+        let err =
+            delete_company_workflow(&company, None, &store, &revs(), None, "../secrets", None)
+                .await
+                .expect_err("traversal id");
         assert!(
             matches!(err, OpenCompanyError::InvalidRequest(_)),
             "{err:?}"
@@ -2139,7 +2623,7 @@ to = "done"
                 .expect("seed");
         }
 
-        delete_company_workflow(&company, None, &store, None, "b", None)
+        delete_company_workflow(&company, None, &store, &revs(), None, "b", None)
             .await
             .expect("deletes the middle one");
 
@@ -2166,7 +2650,7 @@ to = "done"
         rec.manifest.workflows.enabled.push("greeter".to_string());
         let store = store_of(MemStore::failing(rec));
 
-        delete_company_workflow(&company, None, &store, None, "greeter", None)
+        delete_company_workflow(&company, None, &store, &revs(), None, "greeter", None)
             .await
             .expect_err("save fails");
 
@@ -2194,6 +2678,310 @@ to = "done"
                 .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()),
             "{a}"
         );
+    }
+
+    // --- #540: author-time tool_call validation ----------------------------
+
+    /// A manifest with the `assistant` roster agent AND an explicit
+    /// `[tools].allow`, so tool_call grant coverage can be exercised precisely.
+    ///
+    /// Only the tool_call grant-coverage tests use this, and every one of them
+    /// is gated on `openhuman` (the tool catalogue lives behind that feature);
+    /// without the gate the helper is dead code at default features and trips
+    /// `-D warnings` in the default `Rust` CI lane.
+    #[cfg(feature = "openhuman")]
+    fn manifest_with_allow(allow: &[&str]) -> CompanyManifest {
+        let list = allow
+            .iter()
+            .map(|grant| format!("\"{grant}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        toml::from_str(&format!(
+            "[company]\nname = \"Acme\"\n[tools]\nallow = [{list}]\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n"
+        ))
+        .expect("valid manifest")
+    }
+
+    /// A `trigger → tool_call` draft. `slug` of `None` omits `config` entirely,
+    /// so the ungated slug-presence check fires.
+    fn tool_call_draft(id: &str, name: &str, slug: Option<&str>) -> RawWorkflow {
+        let config = slug.map(|slug| {
+            let mut table = toml::map::Map::new();
+            table.insert("slug".to_string(), toml::Value::String(slug.to_string()));
+            toml::Value::Table(table)
+        });
+        RawWorkflow {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "call".to_string(),
+                    kind: "tool_call".to_string(),
+                    name: "Call".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "call".to_string(),
+                label: None,
+            }],
+        }
+    }
+
+    /// UNGATED: a tool_call with no `slug` is refused before any feature-specific
+    /// namespace resolution, so it fails the same way in every build.
+    #[tokio::test]
+    async fn tool_call_without_slug_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", None),
+        )
+        .await
+        .expect_err("tool_call with no slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("no `slug`"), "{err}");
+    }
+
+    /// A slug that maps to no toolbelt namespace is unwired — the run would halt
+    /// on it, so the save is refused with the run gate's own wording.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_with_bogus_slug_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("totally_bogus")),
+        )
+        .await
+        .expect_err("unwired slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a wired workflow tool"),
+            "{err}"
+        );
+    }
+
+    /// A wired slug whose namespace the company's `[tools].allow` does not cover
+    /// is refused; granting that namespace lets the same slug through.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_slug_outside_the_granted_namespace_is_invalid() {
+        let company = CompanyId::new("acme");
+        // `web.*` grants `web` but NOT `code`; `csv_export` is a `code` tool.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["web.*"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("csv_export")),
+        )
+        .await
+        .expect_err("code slug not granted");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("does not grant"), "{err}");
+
+        // Positive control: grant `code` and the same slug is accepted.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["code"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf2", "WF2", Some("csv_export")),
+        )
+        .await
+        .expect("code slug is granted");
+    }
+
+    /// Mirrors `caps/tools.rs`'s
+    /// `the_search_namespace_requires_an_explicit_grant_not_a_wildcard`: the
+    /// catch-all `*` never confers the priced `search` family, but an explicit
+    /// `search` grant does.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn the_search_namespace_needs_an_explicit_grant_not_a_wildcard() {
+        let company = CompanyId::new("acme");
+        // `*` covers ordinary namespaces but must NOT buy a managed search call.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["*"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("web_search")),
+        )
+        .await
+        .expect_err("wildcard never confers search");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("does not grant"), "{err}");
+
+        // An explicit `search` grant alongside the belt passes.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["*", "search"]),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf2", "WF2", Some("web_search")),
+        )
+        .await
+        .expect("explicit search grant is honored");
+    }
+
+    /// The shared helper gates BOTH surfaces: an update into a graph with an
+    /// unwired tool_call slug is refused the same way a create is.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn update_gates_tool_calls_through_the_shared_helper() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(&company, None, &store, None, valid_draft("wf", "WF"))
+            .await
+            .expect("seed create");
+
+        let err = update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            None,
+            tool_call_draft("wf", "WF", Some("totally_bogus")),
+            None,
+        )
+        .await
+        .expect_err("update must gate tool_calls too");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(
+            err.to_string().contains("not a wired workflow tool"),
+            "{err}"
+        );
+    }
+
+    /// A slug padded with leading/trailing whitespace is rejected outright rather
+    /// than silently trimmed: the persisted config and the run-time lookup are
+    /// literal, so a padded slug that "passed" a trim-normalized check would halt
+    /// the run on the very lookup this save-time gate promised to catch.
+    /// (Regression, #540.)
+    #[tokio::test]
+    async fn tool_call_with_a_whitespace_padded_slug_is_rejected() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some(" csv_export ")),
+        )
+        .await
+        .expect_err("padded slug");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("whitespace"), "{err}");
+    }
+
+    /// `media` and `composio` are agent-turn tool families the workflow invoker
+    /// never wires (see `WORKFLOW_TOOL_NAMESPACES`), so a `tool_call` naming one
+    /// would clear the run-time grant gate and then ALWAYS miss the lookup.
+    /// Author-time validation rejects it up front even when the namespace is
+    /// explicitly granted, so the save mirrors the run. (Regression, #540.)
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn tool_call_in_an_agent_turn_only_family_is_rejected() {
+        let company = CompanyId::new("acme");
+        // Grant BOTH families explicitly, so the rejection is about the workflow
+        // surface — not a missing grant.
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_allow(&["media", "composio"]),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            tool_call_draft("wf", "WF", Some("media_generate_image")),
+        )
+        .await
+        .expect_err("media is not a workflow tool family");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("cannot run"), "{err}");
     }
 
     // --- issue #276: arming, disarming, and the switch -----------------------
@@ -2370,6 +3158,7 @@ to = "done"
             &company,
             Some(dir.path()),
             &store,
+            &revs(),
             Some(&log_dyn),
             scheduled_draft("greeter", "Greeter", "0 8 * * *"),
             None,
@@ -2426,6 +3215,7 @@ to = "done"
             &company,
             Some(dir.path()),
             &store,
+            &revs(),
             Some(&log_dyn),
             scheduled_draft("digest", "Digest", "0 3 * * *"),
             None,
@@ -2474,6 +3264,7 @@ to = "done"
             &company,
             Some(dir.path()),
             &store,
+            &revs(),
             Some(&log_dyn),
             valid_draft("digest", "Digest"),
             None,
@@ -2687,6 +3478,7 @@ to = "done"
             &company,
             Some(dir.path()),
             &store,
+            &revs(),
             None,
             valid_draft("seeded", "Seeded flow"),
             None,
@@ -2713,6 +3505,348 @@ to = "done"
         assert!(
             saved.overlay_workflows.is_empty(),
             "pausing must not materialize an overlay body for a seed graph"
+        );
+    }
+
+    // --- issue #274: revision capture + rollback -----------------------------
+
+    /// The overlay TOML currently stored for `wid`.
+    async fn current_toml(store: &Arc<dyn CompanyStore>, company: &CompanyId, wid: &str) -> String {
+        store
+            .load(company)
+            .await
+            .unwrap()
+            .unwrap()
+            .overlay_workflows
+            .into_iter()
+            .find(|w| w.id == wid)
+            .expect("overlay body exists")
+            .toml
+    }
+
+    /// Creates `greeter`, then returns `(store, revisions, body_a)` ready to edit.
+    async fn seeded_greeter() -> (Arc<dyn CompanyStore>, Arc<MemRevisions>, String) {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            valid_draft("greeter", "Greeter"),
+        )
+        .await
+        .expect("create");
+        let body_a = current_toml(&store, &company, "greeter").await;
+        (store, Arc::new(MemRevisions::default()), body_a)
+    }
+
+    #[tokio::test]
+    async fn update_snapshots_the_prior_body_exactly_once() {
+        let company = CompanyId::new("acme");
+        let (store, revs, body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        // Edit the description so the rendered body differs from A.
+        let mut edit = valid_draft("greeter", "Greeter");
+        edit.description = Some("edited once".to_string());
+        update_company_workflow(&company, None, &store, &revs_dyn, None, edit, None)
+            .await
+            .expect("update");
+
+        let history = revs.list_revisions(&company, "greeter").await.unwrap();
+        assert_eq!(history.len(), 1, "one edit captures one snapshot");
+        assert_eq!(
+            history[0].toml, body_a,
+            "the snapshot must hold the prior body byte-for-byte"
+        );
+        assert_eq!(history[0].workflow_id, "greeter");
+        assert_eq!(history[0].name, "Greeter");
+    }
+
+    #[tokio::test]
+    async fn a_byte_identical_resave_snapshots_nothing() {
+        let company = CompanyId::new("acme");
+        let (store, revs, _body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        // Re-save the exact same graph: the rendered body is byte-identical, so
+        // there is nothing to lose and no snapshot is taken.
+        update_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs_dyn,
+            None,
+            valid_draft("greeter", "Greeter"),
+            None,
+        )
+        .await
+        .expect("no-op resave");
+        assert!(
+            revs.list_revisions(&company, "greeter")
+                .await
+                .unwrap()
+                .is_empty(),
+            "a byte-identical re-save must not snapshot"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_ring_prunes_the_oldest_past_the_cap() {
+        use crate::ports::workflow_revisions::MAX_WORKFLOW_REVISIONS;
+        let company = CompanyId::new("acme");
+        let (store, revs, _body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        // MAX+1 distinct edits capture MAX+1 prior bodies; the ring keeps MAX.
+        for i in 0..=MAX_WORKFLOW_REVISIONS {
+            let mut edit = valid_draft("greeter", "Greeter");
+            edit.description = Some(format!("edit {i}"));
+            update_company_workflow(&company, None, &store, &revs_dyn, None, edit, None)
+                .await
+                .expect("update");
+        }
+        let history = revs.list_revisions(&company, "greeter").await.unwrap();
+        assert_eq!(
+            history.len(),
+            MAX_WORKFLOW_REVISIONS,
+            "the ring is capped at MAX_WORKFLOW_REVISIONS"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_restores_the_body_and_is_itself_undoable() {
+        let company = CompanyId::new("acme");
+        let (store, revs, body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        // A → edit → B. One revision now holds A.
+        let mut edit_b = valid_draft("greeter", "Greeter");
+        edit_b.description = Some("this is B".to_string());
+        update_company_workflow(&company, None, &store, &revs_dyn, None, edit_b, None)
+            .await
+            .expect("edit to B");
+        let body_b = current_toml(&store, &company, "greeter").await;
+        let rev_a = revs.list_revisions(&company, "greeter").await.unwrap()[0]
+            .id
+            .clone();
+
+        // Restore A: the live body becomes A again, and B is captured as the new
+        // newest revision — so the rollback can itself be rolled back.
+        let restored = rollback_company_workflow(
+            &company, None, &store, &revs_dyn, None, "greeter", &rev_a, None,
+        )
+        .await
+        .expect("rollback to A");
+        assert_eq!(restored.description.as_deref(), Some("A tiny graph."));
+        assert_eq!(current_toml(&store, &company, "greeter").await, body_a);
+
+        let history = revs.list_revisions(&company, "greeter").await.unwrap();
+        assert_eq!(
+            history.len(),
+            2,
+            "the restore captured the body it replaced"
+        );
+        assert_eq!(history[0].toml, body_b, "B is the newest snapshot now");
+
+        // …and restoring that B snapshot puts B back.
+        let rev_b = history[0].id.clone();
+        rollback_company_workflow(
+            &company, None, &store, &revs_dyn, None, "greeter", &rev_b, None,
+        )
+        .await
+        .expect("rollback the rollback");
+        assert_eq!(current_toml(&store, &company, "greeter").await, body_b);
+    }
+
+    #[tokio::test]
+    async fn rollback_of_a_revision_naming_a_removed_teammate_is_400_and_leaves_current() {
+        let company = CompanyId::new("acme");
+        let (store, revs, _body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        // Edit to capture a revision (which still names `assistant`), then set B.
+        let mut edit_b = valid_draft("greeter", "Greeter");
+        edit_b.description = Some("B, assistant still valid here".to_string());
+        update_company_workflow(&company, None, &store, &revs_dyn, None, edit_b, None)
+            .await
+            .expect("edit to B");
+        let body_b = current_toml(&store, &company, "greeter").await;
+        let rev_a = revs.list_revisions(&company, "greeter").await.unwrap()[0]
+            .id
+            .clone();
+
+        // Remove `assistant` from the roster: the captured revision now names a
+        // teammate the current record does not know about.
+        let mut rec = store.load(&company).await.unwrap().unwrap();
+        rec.manifest = toml::from_str("[company]\nname = \"Acme\"\n").unwrap();
+        store.save(&rec).await.unwrap();
+
+        let err = rollback_company_workflow(
+            &company, None, &store, &revs_dyn, None, "greeter", &rev_a, None,
+        )
+        .await
+        .expect_err("a revision naming a removed teammate must not restore");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        // The current body is untouched — a rejected rollback writes nothing.
+        assert_eq!(current_toml(&store, &company, "greeter").await, body_b);
+    }
+
+    #[tokio::test]
+    async fn rollback_with_a_stale_expected_version_is_409_and_writes_nothing() {
+        let company = CompanyId::new("acme");
+        let (store, revs, body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        let mut edit_b = valid_draft("greeter", "Greeter");
+        edit_b.description = Some("B".to_string());
+        update_company_workflow(&company, None, &store, &revs_dyn, None, edit_b, None)
+            .await
+            .expect("edit to B");
+        let body_b = current_toml(&store, &company, "greeter").await;
+        let rev_a = revs.list_revisions(&company, "greeter").await.unwrap()[0]
+            .id
+            .clone();
+
+        let err = rollback_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs_dyn,
+            None,
+            "greeter",
+            &rev_a,
+            Some("deadbeef-not-the-current-token"),
+        )
+        .await
+        .expect_err("a stale token must refuse the restore");
+        assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+        assert_eq!(
+            current_toml(&store, &company, "greeter").await,
+            body_b,
+            "a 409 must leave the live body unchanged"
+        );
+
+        // The response token of a successful restore is the hash of the restored
+        // body — echo the CURRENT token and the restore lands.
+        let current = workflow_version(&body_b);
+        let restored = rollback_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs_dyn,
+            None,
+            "greeter",
+            &rev_a,
+            Some(&current),
+        )
+        .await
+        .expect("the current token lets the restore through");
+        // The restored live body is the captured A body, and the token the write
+        // response carries is that body's hash.
+        let restored_toml = current_toml(&store, &company, "greeter").await;
+        assert_eq!(restored_toml, body_a, "restoring A puts A back verbatim");
+        assert_eq!(restored.id, "greeter");
+        assert_eq!(
+            workflow_version(&restored_toml),
+            workflow_version(&body_a),
+            "the response token is the restored body's hash"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_disarms_a_restored_schedule() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let revs: Arc<MemRevisions> = Arc::new(MemRevisions::default());
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+
+        // A scheduled workflow lands disarmed on create (issue #276); arm it, so
+        // the "restored cron re-arms" hazard is real to test.
+        let mut scheduled = valid_draft("greeter", "Greeter");
+        scheduled.nodes[0].schedule = Some("0 9 * * *".to_string());
+        create_company_workflow(&company, None, &store, None, scheduled)
+            .await
+            .expect("create scheduled");
+        set_company_workflow_enabled(&company, None, &store, None, "greeter", true)
+            .await
+            .expect("arm it");
+
+        // Edit the schedule away — the workflow stays armed (removal never
+        // disarms), and the scheduled body is captured as a revision.
+        let mut unscheduled = valid_draft("greeter", "Greeter");
+        unscheduled.description = Some("no schedule now".to_string());
+        update_company_workflow(&company, None, &store, &revs_dyn, None, unscheduled, None)
+            .await
+            .expect("remove schedule");
+        assert!(
+            store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("greeter"),
+            "removing a schedule must not disarm"
+        );
+        let rev_scheduled = revs.list_revisions(&company, "greeter").await.unwrap()[0]
+            .id
+            .clone();
+
+        // Restoring the scheduled body re-introduces a cron the live graph lacked
+        // → it lands switched off pending review.
+        rollback_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs_dyn,
+            None,
+            "greeter",
+            &rev_scheduled,
+            None,
+        )
+        .await
+        .expect("restore scheduled body");
+        assert!(
+            !store
+                .load(&company)
+                .await
+                .unwrap()
+                .unwrap()
+                .workflow_enabled("greeter"),
+            "a restored schedule must land disarmed (issue #276)"
+        );
+    }
+
+    #[tokio::test]
+    async fn rollback_unknown_revision_is_not_found() {
+        let company = CompanyId::new("acme");
+        let (store, revs, _body_a) = seeded_greeter().await;
+        let revs_dyn: Arc<dyn WorkflowRevisionStore> = revs.clone();
+        let err = rollback_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs_dyn,
+            None,
+            "greeter",
+            "no-such-rev",
+            None,
+        )
+        .await
+        .expect_err("unknown revision");
+        assert!(
+            matches!(err, OpenCompanyError::CompanyNotFound(_)),
+            "{err:?}"
         );
     }
 }

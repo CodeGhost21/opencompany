@@ -13,8 +13,8 @@ a safe default; the defaults produce a working company with only
 
 Parsing lives in `src/company/manifest.rs` (`CompanyManifest::from_path`,
 serde + validation). Validation errors MUST be actionable in prosumer
-language ("`[policy].mode` must be one of readonly, supervised, full — you
-wrote `supervized`"), never serde traces.
+language ("`[policy].mode` must be one of readonly, supervised, auto, full —
+you wrote `supervized`"), never serde traces.
 
 ## Full schema
 
@@ -70,7 +70,7 @@ allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
-mode = "supervised"                # readonly | supervised (default) | full
+mode = "supervised"                # readonly | supervised (default) | auto | full
 always_approve = ["payment.send", "filing.submit", "external.publish"]
 auto_approve_under_usd = 1.0
 
@@ -187,11 +187,14 @@ prompt = "Weekly review and operator digest"
 - **`[channels.*]`** enables `ChannelAdapter`s. Unknown channels are a
   validation error; disabled OpenHuman means non-operator channels degrade
   with a boot warning, never a failure.
-- **`[policy]`** configures the default `ApprovalGate`. `mode` mirrors
-  OpenHuman's security tiers. `always_approve` lists effect kinds that park
-  for approval regardless of amount; `auto_approve_under_usd` lets small
-  spends through. Defaults are conservative: `supervised`, with all
-  money/publish/filing effects gated.
+- **`[policy]`** configures the default `ApprovalGate`. `mode` takes three of
+  its four names from OpenHuman's security tiers; `auto` is opencompany's own
+  and sits between `supervised` and `full` (the agent's sandbox writes and
+  outward reads run unattended, anything that leaves the company or spends on
+  submit still parks). `always_approve` lists effect kinds that park for
+  approval regardless of amount and wins over every tier including `full`;
+  `auto_approve_under_usd` lets small spends through. Defaults are
+  conservative: `supervised`, with all money/publish/filing effects gated.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across
@@ -273,14 +276,21 @@ prompt = "Weekly review and operator digest"
     edited in the console since the agent read it is refused rather than
     clobbered. `workspace_create` adds one folder or note at a path that is
     **free** and whose parent folder already exists — never an overwrite, never
-    a `mkdir -p`. Renaming and deleting stay operator-only.
+    a `mkdir -p`. The single exception is the agent's own
+    `Agents/<agent-id>/`, which is created on demand when the agent writes
+    directly into it, because that folder is minted on first use rather than
+    provisioned at boot. Since issue #552 this call is one of two paths that
+    bring it into existence; publishing a deliverable
+    (`artifact_mirror::materialize`) is the other, and both go through the same
+    `ensure_agent_folder` seam. Renaming and deleting stay operator-only.
 
     Agent writes are **unconfined**: an agent may create or edit anywhere in its
     company's tree. Confining creation while leaving overwrite free would
     protect nothing. What keeps the tree navigable instead is steering plus
     attribution — the persona brief names the agent's own reserved folder
-    `Agents/<agent-id>/` (provisioned per roster agent at boot and on every
-    roster change) as the default home for what it produces and marks shared
+    `Agents/<agent-id>/` (minted the first time that agent puts something in it;
+    boot only scaffolds the empty `Agents/` and `Desks/` roots) as the default
+    home for what it produces and marks shared
     guidance as something to edit only on purpose, and every node records who
     created it and who last wrote it (issue #326), which the console shows. Both
     sides are capped at the agent harness's own per-tool-result byte budget
