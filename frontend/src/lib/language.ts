@@ -153,6 +153,15 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   workspace_write: "Edit a note in its workspace",
   workspace_read: "Read a note in its workspace",
   workspace_list: "List its workspace notes",
+  // Every workspace mutation parks per call, so each of these reaches an
+  // operator on the approval card and again in the Standing permissions list.
+  // `workspace_create` has been missing since issue #551 and was showing as the
+  // generic "Use one of its tools"; the lifecycle pair (#671) would have
+  // arrived with the same gap. "its own folder" is load-bearing on the last
+  // two — the scope is the whole reason an operator can wave them through.
+  workspace_create: "Add a note to its workspace",
+  workspace_rename: "Rename a note in its own folder",
+  workspace_delete: "Delete a note from its own folder",
   memory_store: "Save something to its memory",
   memory_recall: "Look something up in its memory",
   web_fetch: "Fetch a web page",

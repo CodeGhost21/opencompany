@@ -128,7 +128,8 @@ destroying the diff.
 The Obsidian-style note tree (`src/ports/workspace.rs`), seeded from the
 company's `workspace/**` on first use and thereafter written by both the
 operator (console/REST) and the company's agents (`workspace_create` /
-`workspace_write`).
+`workspace_write`, plus `workspace_rename` / `workspace_delete` within
+`Agents/<agent-id>/` since issue #671).
 
 ```rust
 pub trait WorkspaceStore: Send + Sync {

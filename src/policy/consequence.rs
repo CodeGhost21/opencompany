@@ -383,6 +383,24 @@ const DECLARED: &[Declared] = &[
     d("workspace_search", EffectGroup::Other, Reach::Nothing),
     d("workspace_create", EffectGroup::Other, Reach::Consequence),
     d("workspace_write", EffectGroup::Other, Reach::Consequence),
+    // `workspace_delete` and `workspace_rename` (issue #671) take the same
+    // classification, and again by re-deriving it rather than by copying.
+    //
+    // Both are confined to the agent's own `Agents/<self>/` folder, which is
+    // narrower than either tool above — so the temptation is to price them
+    // lower. That would be backwards. Reach here is about what a call costs the
+    // company, and a delete removes a node **and its authorship record** from a
+    // tree the operator and every teammate read; a rename moves what somebody
+    // may have linked to by path. Neither is undone by the agent that did it,
+    // and the operator's undo is a console session, not a retry. `Consequence`
+    // is what "the operator would want to have seen this" means.
+    //
+    // `PerCall` follows for the same reason it does above, with one more: a
+    // standing grant on deletion is precisely the shape that turns one bad turn
+    // into a folder that is quietly empty by the end of it. Per-call parking
+    // makes each removal its own card naming its own path.
+    d("workspace_delete", EffectGroup::Other, Reach::Consequence),
+    d("workspace_rename", EffectGroup::Other, Reach::Consequence),
     // ---- Publishing --------------------------------------------------------
     // Externally visible and not reversible by the company alone.
     d("publish_artifact", EffectGroup::Publish, Reach::Consequence),
@@ -887,6 +905,8 @@ mod tests {
             "http_request",
             "git_operations",
             "workspace_write",
+            "workspace_delete",
+            "workspace_rename",
             "publish_artifact",
             "media_generate_image",
             "media_generate_video",
@@ -961,6 +981,8 @@ mod tests {
             "web_fetch",
             "workspace_create",
             "workspace_write",
+            "workspace_delete",
+            "workspace_rename",
             "git_operations",
             "run_workflow",
             "mcp_call_tool",
@@ -1482,6 +1504,8 @@ mod tests {
             workspace_tools::WORKSPACE_SEARCH_TOOL,
             workspace_tools::WORKSPACE_CREATE_TOOL,
             workspace_tools::WORKSPACE_WRITE_TOOL,
+            workspace_tools::WORKSPACE_RENAME_TOOL,
+            workspace_tools::WORKSPACE_DELETE_TOOL,
             crate::harness::composio_catalog::LIST_TOOLS_TOOL,
             crate::harness::composio_catalog::LIST_TOOLKITS_TOOL,
         ] {

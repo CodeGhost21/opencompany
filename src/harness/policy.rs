@@ -1504,6 +1504,8 @@ mod tests {
             ("git_operations", serde_json::json!({})),
             ("workspace_write", serde_json::json!({})),
             ("workspace_create", serde_json::json!({})),
+            ("workspace_delete", serde_json::json!({})),
+            ("workspace_rename", serde_json::json!({})),
             ("publish_artifact", serde_json::json!({})),
             ("media_generate_image", serde_json::json!({})),
             ("media_generate_video", serde_json::json!({})),
@@ -1856,18 +1858,20 @@ mod tests {
         );
     }
 
-    /// The company workspace (issues #237, #551): the two read tools reach only
-    /// this company's own note tree and must be allowed in every mode, while
-    /// `workspace_write` (overwrites shared guidance) and `workspace_create`
-    /// (adds to the tree everyone reads) must park under supervised / be denied
+    /// The company workspace (issues #237, #551, #671): the two read tools
+    /// reach only this company's own note tree and must be allowed in every
+    /// mode, while the four mutations — `workspace_write` (overwrites shared
+    /// guidance), `workspace_create` (adds to the tree everyone reads),
+    /// `workspace_delete` and `workspace_rename` (remove and move what the
+    /// agent put in its own folder) — must park under supervised / be denied
     /// under readonly.
     ///
     /// This is the ACTUAL gate on a workspace write. Issue #237 proposed that
     /// declaring `PermissionLevel::Write` would keep the `ApprovalPolicy` as
     /// the per-call gate; it would not — openhuman's `ToolPolicy` surface hands
     /// this bridge only the tool name and args, never the tool's permission
-    /// level, so classification is by name alone. Pinning all three names here
-    /// is what stops a later rename (say `get_workspace_note`, which the
+    /// level, so classification is by name alone. Pinning every one of the six
+    /// names here is what stops a later rename (say `get_workspace_note`, which the
     /// read-only prefix list would silently wave through) from moving a tool
     /// across the gate unnoticed.
     #[tokio::test]
@@ -1882,7 +1886,12 @@ mod tests {
                 "{tool} only reads this company's own workspace and must be allowed"
             );
         }
-        for tool in ["workspace_write", "workspace_create"] {
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
             assert!(
                 matches!(
                     supervised
@@ -1902,7 +1911,12 @@ mod tests {
                 "{tool} must stay available to a read-only desk"
             );
         }
-        for tool in ["workspace_write", "workspace_create"] {
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
             assert!(
                 matches!(
                     readonly.check(&request(tool, serde_json::json!({}))).await,
@@ -1913,11 +1927,18 @@ mod tests {
         }
 
         // Under `full` there is no per-call gate at all — which is precisely
-        // why `workspace_write` carries a required `expected_updated_at`
-        // compare-and-swap token of its own, and why `workspace_create` refuses
-        // a path that already resolves rather than overwriting it.
+        // why `workspace_write` and `workspace_delete` each carry a required
+        // `expected_updated_at` compare-and-swap token of their own, why
+        // `workspace_create` refuses a path that already resolves rather than
+        // overwriting it, and why `workspace_delete` refuses a folder that
+        // still holds anything.
         let full = policy("full", &[], None);
-        for tool in ["workspace_write", "workspace_create"] {
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
             assert_eq!(
                 full.check(&request(tool, serde_json::json!({}))).await,
                 ToolPolicyDecision::Allow,
@@ -3584,6 +3605,8 @@ mod tests {
             "web_fetch",
             "workspace_write",
             "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
             // Anything a remote server chooses to advertise.
             "mcp_registry_tool_call",
             "mcp_call_tool",
@@ -4016,14 +4039,20 @@ mod tests {
         assert!(!grantable("deploy_site", &args));
     }
 
-    /// The two workspace mutations keep their `Other` label on the card — there
-    /// is no consequence word to name — while being refused a standing scope.
+    /// The four workspace mutations keep their `Other` label on the card —
+    /// there is no consequence word to name — while being refused a standing
+    /// scope.
     /// That separation is the point of issue #444: the label and the permission
     /// are different questions.
     #[test]
     fn workspace_mutations_are_labelled_other_and_are_still_not_grantable() {
         let args = serde_json::json!({});
-        for tool in ["workspace_write", "workspace_create"] {
+        for tool in [
+            "workspace_write",
+            "workspace_create",
+            "workspace_delete",
+            "workspace_rename",
+        ] {
             assert_eq!(classify_group(tool, &args), EffectGroup::Other, "{tool}");
             assert!(classify_group(tool, &args).is_unclassified(), "{tool}");
             assert!(!grantable(tool, &args), "{tool}");
