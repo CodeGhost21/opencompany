@@ -446,6 +446,7 @@ impl CompanyStore for SqliteStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_policy: overlay.policy,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
