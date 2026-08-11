@@ -222,6 +222,25 @@ impl QuotaEnforcedWorkspace {
             .sum())
     }
 
+    /// The per-file half of the quota, on its own.
+    ///
+    /// Written once and called twice — by [`admit`](Self::admit) and by
+    /// [`admit_upload`](WorkspaceStore::admit_upload) — for the reason
+    /// [`human`] is shared: an operator who hits the same cap through the
+    /// upload route and through a binary write is hitting one limit, and two
+    /// copies of the sentence are two chances for the two paths to start
+    /// describing it differently.
+    fn admit_single(&self, name: &str, len: u64) -> Result<()> {
+        if len > self.quota.max_blob_bytes {
+            return Err(OpenCompanyError::WorkspaceQuota(format!(
+                "`{name}` is {}, over the {} limit for a single file. Nothing was stored.",
+                human(len),
+                human(self.quota.max_blob_bytes),
+            )));
+        }
+        Ok(())
+    }
+
     /// Refuses `len` bytes when either limit would be broken.
     ///
     /// Runs before any call into the inner store, which is what makes a refusal
@@ -233,13 +252,7 @@ impl QuotaEnforcedWorkspace {
         len: u64,
         replacing: Option<&str>,
     ) -> Result<()> {
-        if len > self.quota.max_blob_bytes {
-            return Err(OpenCompanyError::WorkspaceQuota(format!(
-                "`{name}` is {}, over the {} limit for a single file. Nothing was stored.",
-                human(len),
-                human(self.quota.max_blob_bytes),
-            )));
-        }
+        self.admit_single(name, len)?;
         let Some(limit) = self.quota.tree_quota_bytes else {
             return Ok(());
         };
@@ -270,14 +283,7 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
     /// measured against it. That is the documented narrowing above, unchanged —
     /// this bounds a single upload, it does not start counting notes.
     async fn admit_upload(&self, _company: &CompanyId, name: &str, len: u64) -> Result<()> {
-        if len > self.quota.max_blob_bytes {
-            return Err(OpenCompanyError::WorkspaceQuota(format!(
-                "`{name}` is {}, over the {} limit for a single file. Nothing was stored.",
-                human(len),
-                human(self.quota.max_blob_bytes),
-            )));
-        }
-        Ok(())
+        self.admit_single(name, len)
     }
 
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
