@@ -641,10 +641,9 @@ async fn two_concurrent_binds_of_one_repository_leave_exactly_one_intact() {
 
     let winners = [&a, &b].iter().filter(|r| r.is_ok()).count();
     assert_eq!(winners, 1, "exactly one bind may win: a={a:?} b={b:?}");
-    let loser = if a.is_err() {
-        a.unwrap_err()
-    } else {
-        b.unwrap_err()
+    let loser = match (a, b) {
+        (Err(e), Ok(_)) | (Ok(_), Err(e)) => e,
+        (a, b) => panic!("exactly one bind may fail: a={a:?} b={b:?}"),
     };
     assert!(
         matches!(loser, OpenCompanyError::Conflict(_)),

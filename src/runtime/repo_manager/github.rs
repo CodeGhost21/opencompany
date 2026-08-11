@@ -109,13 +109,54 @@ impl HttpRepoHost {
                 "the GitHub API answered {status}"
             )));
         }
-        // Deliberately not `response.text()`: that buffers whatever arrives.
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(|e| OpenCompanyError::Store(format!("reading the GitHub response: {e}")))?;
+        // Read the body in chunks and stop once the cap is exceeded.
+        //
+        // The previous version called `response.bytes()` and applied the cap
+        // afterwards, under a comment claiming that avoided buffering. It did
+        // not: `bytes()` collects the whole response first, exactly as `text()`
+        // would, so a multi-gigabyte diff was fully resident before a single
+        // byte was discarded. The cap bounded what the *caller* saw, not what
+        // the host allocated — which is the opposite of what a cap on a remote
+        // response is for.
+        //
+        // Bounded here by construction: at most `MAX_DIFF_BYTES` plus one
+        // chunk is ever held, whatever the remote sends.
+        let stream = response.bytes_stream();
+        let bytes = read_capped(stream, MAX_DIFF_BYTES).await?;
         Ok(truncate_utf8(&bytes, MAX_DIFF_BYTES))
     }
+}
+
+/// Collects a byte stream until it holds more than `limit`, then stops.
+///
+/// Generic over the stream rather than taking a `reqwest::Response` so the
+/// stopping behaviour is testable without a server: the property that matters
+/// is "it stopped pulling", and a test that only inspects the returned bytes
+/// cannot tell an early stop from a full download that was truncated after the
+/// fact — which is precisely the bug this replaced.
+///
+/// Reads one chunk past the limit on purpose. `truncate_utf8` needs to know
+/// whether the body actually exceeded the cap, and a buffer holding exactly
+/// `limit` bytes is ambiguous between "that is the whole diff" and "there is
+/// more".
+async fn read_capped<S, E>(stream: S, limit: usize) -> Result<Vec<u8>>
+where
+    S: futures::Stream<Item = std::result::Result<bytes::Bytes, E>>,
+    E: std::fmt::Display,
+{
+    use futures::StreamExt;
+
+    let mut stream = std::pin::pin!(stream);
+    let mut buf: Vec<u8> = Vec::new();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk
+            .map_err(|e| OpenCompanyError::Store(format!("reading the GitHub response: {e}")))?;
+        buf.extend_from_slice(&chunk);
+        if buf.len() > limit {
+            break;
+        }
+    }
+    Ok(buf)
 }
 
 /// Decodes at most `limit` bytes, cutting on a character boundary and marking
@@ -214,6 +255,40 @@ mod test {
         assert!(!out.contains('\u{FFFD}'), "cut mid-character: {out}");
         let shown = out.split("\n\n[truncated:").next().unwrap();
         assert_eq!(shown.len() % 3, 0, "cut on a character boundary");
+    }
+
+    /// The cap must stop the read, not tidy up after it.
+    ///
+    /// Asserting only on the returned bytes cannot tell an early stop from a
+    /// full download truncated afterwards — which is exactly what the previous
+    /// implementation did, under a comment claiming otherwise. So this counts
+    /// the chunks the stream was actually asked for.
+    #[tokio::test]
+    async fn the_body_read_stops_once_the_cap_is_passed() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pulled = Arc::new(AtomicUsize::new(0));
+        let counter = pulled.clone();
+        // 100 chunks of 1 KiB against a 4 KiB cap: a full drain would pull all
+        // 100, and the whole 100 KiB would be resident.
+        let stream = futures::stream::iter((0..100).map(move |_| {
+            counter.fetch_add(1, Ordering::Relaxed);
+            Ok::<_, std::io::Error>(bytes::Bytes::from(vec![b'x'; 1024]))
+        }));
+
+        let out = read_capped(stream, 4096).await.unwrap();
+
+        assert!(
+            out.len() <= 4096 + 1024,
+            "at most the cap plus one chunk may be held, got {}",
+            out.len()
+        );
+        let n = pulled.load(Ordering::Relaxed);
+        assert!(
+            n <= 6,
+            "the read kept pulling past the cap: {n} chunks of 100"
+        );
     }
 
     #[test]

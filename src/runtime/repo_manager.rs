@@ -749,7 +749,10 @@ impl RepoManager {
 /// Process-local, which is the whole scope that exists: a tenant is one
 /// container running one process, and `SecretStore` offers no compare-and-swap
 /// to build a cross-process equivalent on.
-static BIND_LOCKS: LazyLock<StdMutex<HashMap<(CompanyId, String), Arc<Mutex<()>>>>> =
+/// One company's repository key, the identity a bind lock is held against.
+type BindLockKey = (CompanyId, String);
+
+static BIND_LOCKS: LazyLock<StdMutex<HashMap<BindLockKey, Arc<Mutex<()>>>>> =
     LazyLock::new(|| StdMutex::new(HashMap::new()));
 
 /// Returns (or creates) the bind mutex for one company's repository key.
