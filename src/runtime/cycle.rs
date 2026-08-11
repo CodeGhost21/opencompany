@@ -123,6 +123,30 @@ impl ResolveReceipt {
 }
 
 /// Drives cycles for one [`CompanyRuntime`].
+/// A short, stable label for what a cycle is running (issue #390).
+///
+/// Read off the driving events rather than passed in, so every entry point gets
+/// one without threading a string through. It exists so an operator looking at
+/// an open bracket can tell a stuck approval continuation — the case #390 is
+/// about — from a stuck chat turn, without joining the bracket to anything.
+///
+/// Deliberately coarse and deliberately not the event's payload: this lands in a
+/// durable record, and a label is not the place for message text or tool
+/// arguments.
+fn cycle_trigger(events: &[CompanyEvent]) -> String {
+    let Some(first) = events.first() else {
+        return "empty".to_string();
+    };
+    match first {
+        CompanyEvent::ApprovalResolved { .. } => "approval-continuation",
+        CompanyEvent::OperatorMessage { .. } => "operator-message",
+        CompanyEvent::TaskDispatched { .. } => "task-dispatch",
+        CompanyEvent::AgentReply { .. } => "agent-reply",
+        _ => "other",
+    }
+    .to_string()
+}
+
 pub struct CycleRunner<'a> {
     rt: &'a CompanyRuntime,
 }
@@ -134,12 +158,78 @@ impl<'a> CycleRunner<'a> {
     }
 
     /// Runs one cycle over `events`, holding the per-company serial lock.
+    ///
+    /// # The bracket opens before the lock (issue #390)
+    ///
+    /// `cycle_id` is minted **here**, not inside [`run_locked`](Self::run_locked)
+    /// where it used to be, and the journal's `started` record is written before
+    /// `serial.lock()` is awaited. The lock is held for a whole cycle, so a
+    /// continuation queued behind a busy company waits on it for an unbounded
+    /// time — and a host that dies in that wait is precisely the "I approved and
+    /// nothing happened" failure this bracket exists to make visible. Opening it
+    /// after the lock would report that case as though the cycle had never been
+    /// asked for.
+    ///
+    /// Moving the mint is safe because nothing between `run_locked`'s first
+    /// statement and the old mint site read it: the input-append loop, the
+    /// `begin_run` call and the history/context/roster loads are all keyed on
+    /// the company and the event, never on the cycle.
+    /// `a_cycles_id_is_minted_before_the_serial_lock` pins the placement, since
+    /// the failure mode here is a correctly-typed id written in the wrong place
+    /// rather than anything the compiler can see.
+    ///
+    /// Paths that owe no cycle open no bracket: `already_resolved_report` and
+    /// `still_waiting_report` return without reaching this function. That is
+    /// deliberate — a banked decision is *correctly* not running, and giving it
+    /// a bracket would leave an open cycle that never closes and never should.
     pub async fn run(&self, events: Vec<CompanyEvent>) -> Result<CycleReport> {
-        let _guard = self.rt.serial.lock().await;
-        self.run_locked(events).await
+        let cycle_id = crate::ports::generate_id();
+        let trigger = cycle_trigger(&events);
+
+        // Best-effort, and it must stay that way: record-keeping does not get to
+        // refuse a cycle. A failed open simply means this cycle is unbracketed,
+        // which is the pre-#390 behaviour rather than a new failure.
+        if let Err(err) = self
+            .rt
+            .journal
+            .record_cycle_started(&cycle_id, &trigger)
+            .await
+        {
+            tracing::warn!(
+                company = %self.rt.id,
+                cycle = %cycle_id,
+                %err,
+                "could not journal a cycle start; this cycle runs unbracketed"
+            );
+        }
+
+        let guard = self.rt.serial.lock().await;
+        let outcome = self.run_locked(events, cycle_id.clone()).await;
+        // Closed while the lock is still held, so the bracket cannot outlive the
+        // critical section it describes.
+        let error = outcome.as_ref().err().map(|err| err.to_string());
+        if let Err(err) = self
+            .rt
+            .journal
+            .record_cycle_finished(&cycle_id, error)
+            .await
+        {
+            tracing::warn!(
+                company = %self.rt.id,
+                cycle = %cycle_id,
+                %err,
+                "could not journal a cycle finish; the boot sweep will settle it"
+            );
+        }
+        drop(guard);
+        outcome
     }
 
-    async fn run_locked(&self, mut events: Vec<CompanyEvent>) -> Result<CycleReport> {
+    async fn run_locked(
+        &self,
+        mut events: Vec<CompanyEvent>,
+        cycle_id: String,
+    ) -> Result<CycleReport> {
         let company = self.rt.id.clone();
 
         // 2. Persist input — durable before any thinking.
@@ -209,7 +299,10 @@ impl<'a> CycleRunner<'a> {
             self.inject_handed_task_awareness(record, &mut events).await;
         }
 
-        let cycle_id = crate::ports::generate_id();
+        // Issue #390: `cycle_id` is now minted by `run` before the serial lock,
+        // so the journal's bracket can cover the wait on that lock. Nothing
+        // above this point ever read it — see the note on `run`.
+        //
         // Issue #364: the report carries the input seqs too, so the chat route
         // can tell the console the durable id of the message it just sent. The
         // brain needs the same list, and it is the append loop above — the one
@@ -3699,6 +3792,94 @@ mod test {
 
         // The serial lock kept the two cycles from overlapping.
         assert_eq!(peak.load(Ordering::SeqCst), 1);
+    }
+
+    // --- The cycle bracket (issue #390) --------------------------------------
+
+    /// **The placement test.** The bracket opens *before* the serial lock, and
+    /// this is the only thing that says so.
+    ///
+    /// Condition of the fix rather than a nice-to-have: `cycle_id` used to be
+    /// minted inside `run_locked`, and moving it is the riskiest part of #390.
+    /// The failure mode is a correctly-typed id written in the wrong place —
+    /// invisible to the compiler and invisible to every other test, because a
+    /// bracket that opens after the lock still opens, still closes, and still
+    /// reads correctly once the cycle is over.
+    ///
+    /// So this holds the lock and asserts the cycle is *already* visible as open
+    /// while it is still queued behind it. Move the mint or the `started` write
+    /// back inside `run_locked` and this fails; nothing else does.
+    #[tokio::test]
+    async fn a_cycles_bracket_opens_before_the_serial_lock() {
+        let home_dir = tmp_home();
+        let rt = Arc::new(
+            RuntimeBuilder::new(home_dir.path().to_path_buf(), manifest("full"))
+                .build()
+                .await
+                .unwrap(),
+        );
+
+        assert!(rt.journal.open_cycles().is_empty(), "nothing has run yet");
+
+        // Hold the lock, so any cycle we start is stuck on the near side of it —
+        // the window a post-lock bracket cannot see.
+        let guard = rt.serial.lock().await;
+
+        let spawned = {
+            let rt = rt.clone();
+            tokio::spawn(async move { rt.run_cycle(Vec::new()).await })
+        };
+
+        // Wait for the bracket, not for the cycle — the cycle cannot proceed.
+        let mut open = Vec::new();
+        for _ in 0..200 {
+            open = rt.journal.open_cycles();
+            if !open.is_empty() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        assert_eq!(
+            open.len(),
+            1,
+            "a cycle blocked on the serial lock must already be bracketed; if this \
+             is empty the `started` write moved back inside the lock and #390's \
+             whole case — a continuation that dies waiting — is invisible again"
+        );
+        assert_eq!(open[0].trigger, "empty", "no events drove this one");
+
+        // …and it closes once the lock is released.
+        drop(guard);
+        spawned.await.unwrap().unwrap();
+        assert!(
+            rt.journal.open_cycles().is_empty(),
+            "the bracket closes when the cycle ends"
+        );
+    }
+
+    /// The trigger label distinguishes the case #390 is about from an ordinary
+    /// chat turn, which is the whole reason an operator can read the surface.
+    #[test]
+    fn the_trigger_label_names_what_drove_the_cycle() {
+        assert_eq!(cycle_trigger(&[]), "empty");
+        assert_eq!(
+            cycle_trigger(&[CompanyEvent::ApprovalResolved {
+                approval_id: ApprovalId::new("appr-1"),
+                verdict: Verdict::Approve,
+                by: operator(),
+            }]),
+            "approval-continuation"
+        );
+        assert_eq!(
+            cycle_trigger(&[CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "hello".into(),
+                by: None,
+                chat: None,
+            }]),
+            "operator-message"
+        );
     }
 
     #[tokio::test]

@@ -1166,6 +1166,28 @@ impl RuntimeBuilder {
         // logged inside the sweep and never stops a company booting.
         if handover.is_none() {
             crate::runtime::sweep_interrupted_runs(&events, &id).await;
+
+            // Issue #390, the cycle-level equivalent, resting on the same three
+            // invariants: a cycle journals a start before it takes the serial
+            // lock, every cycle is driven in this process, and one process owns
+            // this journal. So a start with no finish at boot is a cycle that
+            // died with the last host.
+            //
+            // Gated on the handover for exactly the same reason as the sweep
+            // above: a cycle survives a live runtime swap, and sweeping mid-life
+            // would stamp "interrupted by a host restart" on one still running,
+            // whose real finish would then land after the synthetic one.
+            //
+            // Placed after `journal.load()`, whose replay is what populates the
+            // open set, and best-effort inside for the same reason.
+            let settled = journal.sweep_interrupted_cycles().await;
+            if settled > 0 {
+                tracing::info!(
+                    company = %id,
+                    settled,
+                    "settled cycles left open by a previous host process"
+                );
+            }
         }
 
         // The policy gate, rehydrated from the journal replay above so approvals
