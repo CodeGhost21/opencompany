@@ -51,6 +51,18 @@ fn provisioned_names(tree: &serde_json::Value) -> Vec<String> {
 }
 
 async fn state_with_company(home: &std::path::Path) -> AppState {
+    state_with_quota(home, crate::runtime::WorkspaceQuota::default()).await
+}
+
+/// [`state_with_company`], with the workspace held to `quota`.
+///
+/// Parameterised rather than duplicated so the one test that needs a non-default
+/// `[workspace] max_blob_mb` (issue #647) exercises the same wiring every other
+/// test here does, instead of a second harness that could drift from it.
+async fn state_with_quota(
+    home: &std::path::Path,
+    quota: crate::runtime::WorkspaceQuota,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -73,6 +85,7 @@ async fn state_with_company(home: &std::path::Path) -> AppState {
         .unwrap();
     let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
         .with_id(id.clone())
+        .with_workspace_quota(quota)
         .build()
         .await
         .unwrap();
@@ -7096,4 +7109,299 @@ async fn an_upload_can_target_a_parent_folder() {
     .await;
     assert_eq!(status, StatusCode::OK, "{node}");
     assert_eq!(node["parentId"], folder_id.as_str());
+}
+
+// ---------------------------------------------------------------------------
+// An over-cap upload says "too large", not "malformed" (issue #647)
+// ---------------------------------------------------------------------------
+
+/// The boundary the raw-body helpers below agree on.
+const OVERSIZE_BOUNDARY: &str = "----opencompany647boundary";
+
+/// Posts an already-built body at the upload route.
+///
+/// [`upload_file`] assembles its body into a `Vec`, which is the one thing these
+/// tests cannot do: the smallest of them weighs 65 MiB and two of them have to
+/// out-weigh a 256 MiB limit. Taking a `Body` lets the caller stream one — or
+/// malform one on purpose.
+async fn post_upload(state: &AppState, body: Body) -> (StatusCode, Value) {
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/workspace/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={OVERSIZE_BOUNDARY}"),
+        )
+        .body(body)
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = serde_json::from_slice(&out).unwrap_or(Value::Null);
+    (status, value)
+}
+
+/// A body of `prefix` + `payload` zero bytes + `suffix`, streamed in 1 MiB
+/// frames with a yield before each.
+///
+/// The framing is load-bearing, not tidiness. A contiguous body would make the
+/// *test process* hold the whole payload before the server saw a byte of it,
+/// and the multipart reader drains every frame that is ready in one poll — so
+/// an always-ready stream is buffered whole however finely it was cut up. The
+/// yield keeps the reader one frame ahead of the parser rather than a whole
+/// body ahead, which is what lets a 257 MiB request that the handler *skips*
+/// cost about a megabyte instead of 257 of them.
+fn streamed_multipart(prefix: Vec<u8>, payload: usize, suffix: Vec<u8>) -> Body {
+    const FRAME: usize = 1024 * 1024;
+    let prefix = std::sync::Arc::new(prefix);
+    let suffix = std::sync::Arc::new(suffix);
+    let filler = bytes::Bytes::from(vec![0u8; FRAME]);
+    let frames = payload.div_ceil(FRAME);
+
+    let stream = futures::stream::unfold(0usize, move |step| {
+        let prefix = prefix.clone();
+        let suffix = suffix.clone();
+        let filler = filler.clone();
+        async move {
+            tokio::task::yield_now().await;
+            let frame = if step == 0 {
+                bytes::Bytes::from(prefix.as_ref().clone())
+            } else if step <= frames {
+                filler.slice(..(payload - (step - 1) * FRAME).min(FRAME))
+            } else if step == frames + 1 {
+                bytes::Bytes::from(suffix.as_ref().clone())
+            } else {
+                return None;
+            };
+            Some((Ok::<_, std::io::Error>(frame), step + 1))
+        }
+    });
+    Body::from_stream(stream)
+}
+
+/// The opening of a `file` part, up to (not including) its bytes.
+fn file_part_prefix(filename: &str) -> Vec<u8> {
+    format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"{filename}\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// The node names currently in the workspace tree.
+async fn tree_names(state: &AppState) -> Vec<String> {
+    let (status, tree) = send(state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    provisioned_names(&tree)
+}
+
+/// The headline of #647: a file over the store's per-file cap is refused as
+/// **too large**, with the sentence an operator can act on.
+///
+/// This failed before the fix, and not subtly — the route's `DefaultBodyLimit`
+/// was the same 64 MiB as the cap, so it truncated the body first and the
+/// truncation surfaced as a parse failure: `400 invalid request: unreadable
+/// file part: Error parsing multipart/form-data request`. A correctly-formed
+/// request, described as broken, for a reason the operator could not guess.
+/// The store's refusal below existed the whole time and could never be reached
+/// through this route.
+#[tokio::test]
+async fn a_file_over_the_per_file_cap_is_refused_as_too_large_not_as_malformed() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // One megabyte over the 64 MiB default: enough to break the cap, nowhere
+    // near the 256 MiB the route will now read.
+    let oversize = 65 * 1024 * 1024;
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            file_part_prefix("hero.mov"),
+            oversize,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(message.contains("hero.mov"), "names the file: {message}");
+    assert!(message.contains("65.0 MiB"), "names its size: {message}");
+    assert!(message.contains("64.0 MiB"), "names the limit: {message}");
+    assert!(message.contains("Nothing was stored"), "{message}");
+
+    // The two words the bug used to answer with. Asserting on their absence is
+    // the regression guard: a future change that lets the body limit preempt
+    // the store again would put them straight back.
+    assert!(
+        !message.contains("unreadable file part"),
+        "the request was not unreadable: {message}"
+    );
+    assert!(
+        !message.contains("Error parsing"),
+        "nor was it malformed: {message}"
+    );
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The route's own backstop is classified too, and it fires while *skipping* a
+/// part — the reader can notice the limit anywhere it reads, not only where the
+/// handler wants bytes.
+///
+/// Without this the classifier arm ships untested and a drift in axum's status
+/// mapping would silently regress the answer to the old lying 400.
+#[tokio::test]
+async fn a_body_over_the_route_limit_is_classified_while_a_part_is_skipped() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // A field the handler ignores by name, so it is drained rather than
+    // buffered — and the drain runs past the 256 MiB the route will read.
+    let prefix = format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"ignored\"\r\n\r\n"
+    )
+    .into_bytes();
+    let mut suffix = format!("\r\n--{OVERSIZE_BOUNDARY}\r\n").into_bytes();
+    suffix.extend_from_slice(
+        b"Content-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\nxx\r\n",
+    );
+    suffix.extend_from_slice(format!("--{OVERSIZE_BOUNDARY}--\r\n").as_bytes());
+
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(prefix, 257 * 1024 * 1024, suffix),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("256.0 MiB"),
+        "names the ceiling: {message}"
+    );
+    assert!(message.contains("Nothing was stored"), "{message}");
+    // The size is deliberately absent: the body was cut off, so the true total
+    // is not knowable here and a guess would be worse than silence.
+    assert!(
+        !message.contains("Error parsing"),
+        "still not a parse failure: {message}"
+    );
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The same backstop, noticed at the other read site — while the handler is
+/// pulling the `file` part's bytes rather than skipping past someone else's.
+#[tokio::test]
+async fn a_file_part_over_the_route_limit_is_classified_too() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            file_part_prefix("enormous.bin"),
+            257 * 1024 * 1024,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(
+        message.contains("256.0 MiB"),
+        "names the ceiling: {message}"
+    );
+    assert!(
+        !message.contains("unreadable file part"),
+        "the part was readable, just too long: {message}"
+    );
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The counter-test, and the half of the issue that is easiest to lose: a
+/// genuinely malformed body still answers 400.
+///
+/// Classifying by size must not swallow the case the old message was right
+/// about. These two shapes stay `invalid_request` — and stay distinguishable
+/// from the 413s above, which is the whole point of the change.
+#[tokio::test]
+async fn a_malformed_multipart_body_is_still_a_400() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // The declared boundary never appears.
+    let (status, body) =
+        post_upload(&state, Body::from(b"this is not a multipart body".to_vec())).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("malformed multipart upload")),
+        "{body}"
+    );
+
+    // A part that opens and never closes: headers, some bytes, no terminating
+    // boundary. Truncated — the shape the body limit used to be mistaken for.
+    let mut unterminated = file_part_prefix("half.bin");
+    unterminated.extend_from_slice(b"partial bytes and then nothing");
+    let (status, body) = post_upload(&state, Body::from(unterminated)).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["code"], "invalid_request", "{body}");
+    assert!(
+        body["error"]
+            .as_str()
+            .is_some_and(|m| m.contains("unreadable file part")),
+        "{body}"
+    );
+}
+
+/// `[workspace] max_blob_mb` above the default is a real knob again.
+///
+/// It never was one: the route stopped reading at 64 MiB whatever a company had
+/// configured, so raising the cap bought nothing but a different way to fail.
+/// A company at 128 MiB can now actually store a 65 MiB file.
+#[tokio::test]
+async fn a_company_that_raised_its_blob_cap_can_use_it() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_quota(
+        &home,
+        crate::runtime::WorkspaceQuota {
+            max_blob_bytes: 128 * 1024 * 1024,
+            tree_quota_bytes: None,
+        },
+    )
+    .await;
+
+    let size = 65 * 1024 * 1024;
+    let (status, node) = post_upload(
+        &state,
+        streamed_multipart(
+            file_part_prefix("raised.bin"),
+            size,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["name"], "raised.bin");
+    assert_eq!(node["size"], size as u64);
+    assert!(tree_names(&state).await.contains(&"raised.bin".to_string()));
 }

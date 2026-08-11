@@ -52,6 +52,7 @@
 use std::num::NonZeroUsize;
 
 use axum::body::Body;
+use axum::extract::multipart::MultipartError;
 use axum::extract::{DefaultBodyLimit, Multipart, Path, Query};
 use axum::http::{StatusCode, header};
 use axum::response::Response;
@@ -69,6 +70,8 @@ use crate::error::OpenCompanyError;
 use crate::ports::artifacts::ArtifactAuthor;
 use crate::ports::generate_id;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin};
+use crate::runtime::UPLOAD_BODY_LIMIT_BYTES;
+use crate::runtime::workspace_quota::human;
 use crate::server::error::ApiError;
 use crate::server::ops::artifacts::OPERATOR_EDIT_NOTE;
 use crate::server::ops::{ScopedCompany, scoped};
@@ -93,17 +96,30 @@ pub fn router() -> Router<AppState> {
                 // handler in the process, which is the opposite of what an
                 // upload endpoint should cost its neighbours.
                 //
-                // The number is the *default* per-file cap rather than the
-                // company's configured one: routers are built once, before any
-                // company exists, so a per-company limit cannot be applied
-                // here. A company configured **below** the default is still
-                // enforced exactly, by the store — this only decides how much
-                // is read before that refusal. A company configured **above**
-                // it is capped here at 256 MiB, which is a known limit rather
-                // than a silent one: raising it means raising
-                // [`DEFAULT_MAX_BLOB_BYTES`] too.
+                // Two limits, in this order (issue #647):
+                //
+                // 1. The **store's** per-file cap decides policy. It sees the
+                //    whole payload, so it refuses by name and size —
+                //    "`hero.mov` is 91.4 MiB, over the 64.0 MiB limit for a
+                //    single file" — and it honours the company's configured
+                //    `[workspace] max_blob_mb`, which this layer cannot: routers
+                //    are built once, before any company exists.
+                // 2. This layer is the **backstop**, four times the default cap.
+                //    It exists so an unbounded body cannot be buffered, not to
+                //    express policy, and the headroom is what lets the store
+                //    speak first for every realistic over-cap upload.
+                //
+                // Both answer 413. Setting this *at* the cap — what it used to
+                // be — made (1) unreachable: the body limit fired mid-parse, and
+                // a body that stops mid-part is indistinguishable from a
+                // malformed one, so the honest 413 came out as `400 malformed
+                // multipart`. `upload` below still has to classify, because this
+                // layer's own failure arrives through the same parse error.
+                //
+                // The trade: this is also how much one in-flight upload may hold
+                // in memory, because the write path buffers by design.
                 .layer(DefaultBodyLimit::max(
-                    crate::runtime::DEFAULT_MAX_BLOB_BYTES as usize,
+                    crate::runtime::UPLOAD_BODY_LIMIT_BYTES as usize,
                 )),
         )
         .merge(scoped(
@@ -461,6 +477,43 @@ async fn read_blob(
     })
 }
 
+/// Names a multipart failure for what it actually was (issue #647).
+///
+/// One error type carries two unrelated causes. A body that ran past the
+/// route's `DefaultBodyLimit` stops mid-part, and to the multipart reader that
+/// looks exactly like a body that was malformed to begin with — so reporting
+/// every failure here as `InvalidRequest` told an operator whose only mistake
+/// was picking a large file that their request was broken. It is not: it is
+/// oversized, which is a different sentence and a different fix.
+///
+/// axum keeps the two apart. `MultipartError::status()` answers 413 for the
+/// size-limit variants — multer's own `FieldSizeExceeded` / `StreamSizeExceeded`
+/// and the `StreamReadFailed` whose source is `http_body_util`'s
+/// `LengthLimitError`, which is the `DefaultBodyLimit` case — and 400 for the
+/// genuinely malformed ones. Reading that rather than matching on the message
+/// keeps this from breaking when axum rewords an error.
+///
+/// The 413 is raised as [`OpenCompanyError::WorkspaceQuota`] on purpose: that
+/// is already the store's over-cap refusal, so the two causes share a status
+/// (413) and a stable code (`workspace_quota_exceeded`) rather than inventing a
+/// second vocabulary for "too big". A caller keying on the code cannot tell —
+/// and should not have to — which of the two limits noticed.
+///
+/// Only the limit is named, never a size. The body was cut off, so the true
+/// total is not knowable here; guessing at it would be worse than omitting it.
+fn multipart_error(error: MultipartError, context: &str) -> ApiError {
+    if error.status() == StatusCode::PAYLOAD_TOO_LARGE {
+        return ApiError(OpenCompanyError::WorkspaceQuota(format!(
+            "this upload is larger than the {} this endpoint will read in one request, \
+             so it was cut off before its size could be measured. Nothing was stored.",
+            human(UPLOAD_BODY_LIMIT_BYTES),
+        )));
+    }
+    ApiError(OpenCompanyError::InvalidRequest(format!(
+        "{context}: {error}"
+    )))
+}
+
 /// `POST …/workspace/upload` — multipart upload of a file of any kind.
 ///
 /// The existing create route takes a JSON body, which cannot carry bytes; this
@@ -482,18 +535,21 @@ async fn upload(
     let mut file: Option<(String, Option<String>, Vec<u8>)> = None;
     let mut parent_id: Option<String> = None;
 
-    while let Some(field) = multipart.next_field().await.map_err(|e| {
-        ApiError(OpenCompanyError::InvalidRequest(format!(
-            "malformed multipart upload: {e}"
-        )))
-    })? {
+    // Every one of these three is a place the body limit can be noticed — this
+    // one while draining a part the route ignores, the two below while reading
+    // one it wants — so all three classify rather than the one that happened to
+    // be reported first.
+    while let Some(field) = multipart
+        .next_field()
+        .await
+        .map_err(|e| multipart_error(e, "malformed multipart upload"))?
+    {
         match field.name() {
             Some("parentId") | Some("parent_id") => {
-                let value = field.text().await.map_err(|e| {
-                    ApiError(OpenCompanyError::InvalidRequest(format!(
-                        "unreadable parentId: {e}"
-                    )))
-                })?;
+                let value = field
+                    .text()
+                    .await
+                    .map_err(|e| multipart_error(e, "unreadable parentId"))?;
                 // An empty value is the console saying "the workspace root",
                 // which is what an absent field means too.
                 if !value.trim().is_empty() {
@@ -511,11 +567,10 @@ async fn upload(
                         ))
                     })?;
                 let declared = field.content_type().map(str::to_string);
-                let bytes = field.bytes().await.map_err(|e| {
-                    ApiError(OpenCompanyError::InvalidRequest(format!(
-                        "unreadable file part: {e}"
-                    )))
-                })?;
+                let bytes = field
+                    .bytes()
+                    .await
+                    .map_err(|e| multipart_error(e, "unreadable file part"))?;
                 file = Some((name, declared, bytes.to_vec()));
             }
             // Ignored rather than rejected: a browser's `FormData` may carry

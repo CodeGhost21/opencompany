@@ -301,9 +301,19 @@ GridFS the 16 MB BSON document limit was an accidental brake on how much an
 agent could write; GridFS removes it by chunking, so the cap is what replaces
 it deliberately. It defaults to 64 MiB — an order of magnitude above a
 generated image or document, and above a short generated video, so no
-deliverable this feature exists to make durable is near it. It is also the
-upload route's request body limit, so an over-cap upload is rejected at the
-edge instead of being buffered and then refused.
+deliverable this feature exists to make durable is near it.
+
+The console's upload route holds a **separate** `DefaultBodyLimit` of 256 MiB
+(4× the default cap), and the gap is deliberate (#647). One shared number made
+the store's refusal unreachable there: the body limit fired mid-parse, a body
+that stops mid-part is indistinguishable from a malformed one, so an oversized
+upload answered `400 malformed multipart` — a correct request called broken —
+and `max_blob_mb` above 64 bought only a different way to fail. With headroom
+the store speaks first. The route limit is a backstop against buffering an
+unbounded body; when it does fire the handler classifies axum's parse error via
+`MultipartError::status()` and answers 413 naming the 256 MiB ceiling but never
+a size, since a truncated body has no knowable total. Both share the
+`workspace_quota_exceeded` code, so callers need not know which limit noticed.
 
 One decorator covers every writer: the console's REST surface, the agent
 workspace tools and the publish drain all hold the *same* `ops.workspace`

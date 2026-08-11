@@ -50,11 +50,14 @@ impl ApiError {
             OpenCompanyError::Quiescing(_) => StatusCode::SERVICE_UNAVAILABLE,
             OpenCompanyError::ToolNotGranted(_) => StatusCode::FORBIDDEN,
             OpenCompanyError::BudgetExceeded(_) => StatusCode::PAYMENT_REQUIRED,
-            // 413, matching what axum's `DefaultBodyLimit` returns when the
-            // upload route rejects an over-cap body before a handler runs. The
-            // two limits are the same number, so answering with two different
-            // statuses depending on which one noticed first would make the API
-            // look inconsistent for one cause.
+            // 413 — for both ways an upload can be too big. The store's per-file
+            // cap raises this variant with the file and the limit named; the
+            // upload route's `DefaultBodyLimit` backstop raises it too, after
+            // classifying the parse failure axum reports (issue #647). The two
+            // limits are deliberately *different* numbers, but they are one
+            // cause as far as a caller is concerned, so they share this status
+            // and the `workspace_quota_exceeded` code rather than splitting into
+            // two vocabularies for "too big".
             OpenCompanyError::WorkspaceQuota(_) => StatusCode::PAYLOAD_TOO_LARGE,
             // The company is at its concurrent-run ceiling (issue #401). The run
             // was never started; the operator waits for a slot or raises the cap,
