@@ -108,6 +108,35 @@ valid evidence about embedded mode too.
 data root. The console renders that as a row; the desktop still holds remote
 hosts, which is the point of holding several.
 
+### One row, however many launches
+
+The ephemeral port is not free: it means the embedded host's *address* is
+different on every launch, and `addConnection` recognises a host by address. So
+each launch read as a first meeting — a new connection id, a new row, and the
+previous launch's row left behind pointing at a closed port. They persist, so
+they accumulated, and they all carry the same label; the sidebar filled with
+indistinguishable "This computer" entries, all but one broken (issue #615).
+
+`oc_embedded` therefore also reports `instance_id`, read from the data root
+(see [`instance.rs`](../../../src/app/instance.rs)) rather than derived from the
+address, and the console registers this host through `adoptEmbeddedHost` rather
+than `addConnection`. That function matches on the identity, re-points the
+remembered connection at the new port, and drops anything else claiming to be
+this application's host — enforcing the invariant that at most one embedded
+connection exists at a time.
+
+Reusing the remembered id is what carries the tour state, the last-read channel
+and the mail draft across a relaunch, all of them keyed by connection id. A
+*different* `instance_id` — a second data root — is deliberately not adopted:
+that is a different host, and merging its local state is the failure the
+`(connection, company)` namespace exists to prevent.
+
+Profiles written before the identity was reported carry neither it nor an
+`origin` marker, so `embeddedProfiles` recognises them by the signature the bug
+left: this client's own label for its host, at a loopback address. Narrow on
+purpose — a host an operator added by hand is labelled by authority
+(`127.0.0.1:8080`), never with that string.
+
 ## Authenticating as a person
 
 A desktop cannot hold a session cookie: `SameSite=Lax` means the browser never
