@@ -44,6 +44,7 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { ADD_TASK_COLUMN, PRIORITY_STYLES, TASK_COLUMNS } from "@/lib/tasks-sample";
 import {
   extraOutputCount,
@@ -213,13 +214,18 @@ export function TasksView({
     }
   }, [client, company]);
 
+  // Issue #581: the fallback poll runs only while the tab is being looked at.
+  // Reading the whole board every four seconds is affordable for an operator
+  // watching it and pure waste for a background tab, and the poller's
+  // load-on-visible is what makes pausing safe — a tab coming back re-reads
+  // immediately rather than showing a stale board for up to an interval.
   useEffect(() => {
     mounted.current = true;
     void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
+    const dispose = startVisiblePolling(() => void refresh(), POLL_MS);
     return () => {
       mounted.current = false;
-      clearInterval(timer);
+      dispose();
     };
   }, [refresh]);
 
@@ -239,6 +245,16 @@ export function TasksView({
   const seenTick = useRef(taskEventTick);
   useEffect(() => {
     if (taskEventTick === undefined || taskEventTick === seenTick.current) return;
+    // Issue #581: the push half is gated too, or the poll gate above buys
+    // nothing on a busy company — a hidden tab would still re-read the whole
+    // board on every frame the stream delivers.
+    //
+    // The tick is deliberately NOT consumed on the way out. Marking it seen
+    // here would drop it: this effect does not re-run on a visibility change,
+    // so nothing would ever come back for it. Leaving it unseen means the
+    // board's staleness is settled by the poller's load-on-visible read
+    // instead, and the next frame after that still counts as a change.
+    if (document.visibilityState === "hidden") return;
     seenTick.current = taskEventTick;
     void refresh();
   }, [taskEventTick, refresh]);
