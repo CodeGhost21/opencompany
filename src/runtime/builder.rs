@@ -1528,6 +1528,8 @@ impl RuntimeBuilder {
                                 // dispatch settle that drains the publishes.
                                 workflow_refs:
                                     crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                                run_outputs: crate::harness::orchestrator::RunOutputCache::default(
+                                ),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.

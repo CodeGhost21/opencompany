@@ -325,6 +325,7 @@ fn brain_with(
         mcp_failures: McpFailureQueue::default(),
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
+        run_outputs: Default::default(),
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

@@ -266,6 +266,17 @@ pub struct HarnessDeps {
     /// workflow — the stamp falls back to the attempt's trace, which is a
     /// complete answer rather than a missing one.
     pub workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue,
+    /// The bounded, in-process cache the orchestrator's `run_workflow` tool fills
+    /// with each successful run's node output and the `read_run_output` companion
+    /// reads back (issue #418) — so a preview the run summary clipped is
+    /// reachable within the same turn.
+    ///
+    /// Same cheap-shared-handle pattern as [`Self::workflow_refs`]: the run tool
+    /// that stores and the read tool that serves are built in one `build_agent`
+    /// pass off the same deps clone, so they share one cache. Default is an empty
+    /// cache; nothing durable rides on it (the console run drawer is the durable
+    /// record), so a fresh process simply starts with nothing to read back.
+    pub run_outputs: crate::harness::orchestrator::RunOutputCache,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -2234,6 +2245,7 @@ description = "Builds the product."
                 mcp_failures: McpFailureQueue::default(),
                 pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+                run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -2300,6 +2312,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2903,6 +2916,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3066,6 +3080,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -3381,6 +3396,7 @@ description = "Builds the product."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3542,6 +3558,7 @@ description = "Sets direction."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3686,6 +3703,7 @@ description = "Sets direction."
             mcp_failures: McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
