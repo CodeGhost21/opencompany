@@ -43,6 +43,10 @@ Supporting docs:
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — HTTP routes and auth
 - [config.md](config.md) — configuration and the one-key story
+- [repos.md](repos.md) — bound repositories: the host-side mirror cache, how a
+  credential reaches git without entering argv, the environment or any file, the
+  alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
+  of same-user confinement
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
 
