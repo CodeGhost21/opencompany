@@ -161,6 +161,10 @@ use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 use openhuman_core::openhuman as oh;
 
 use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
+// One rule for what a node's path is and what a caller may pass as one, shared
+// with `workspace_search` so search can never offer a node this module's
+// `PathIndex` would then refuse to resolve.
+use crate::company::workspace_paths::{render_path, split_logical_path};
 use crate::company::workspace_scaffold::AGENTS_ROOT;
 use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactStore};
@@ -250,12 +254,6 @@ const MAX_WRITE_BYTES: usize = MAX_CONTENT_BYTES;
 /// exists to protect back out of reach. Node paths are operator-supplied and no
 /// backend caps a node name, so the read header takes the same bound.
 const MAX_ECHOED_PATH_BYTES: usize = 512;
-
-/// Depth guard when walking a node's ancestor chain to render its path.
-///
-/// The stores reject parent cycles on `rename_move`, but a hand-edited backing
-/// row could still present one; this bounds the walk regardless.
-const MAX_PATH_DEPTH: usize = 64;
 
 // ---------------------------------------------------------------------------
 // The company-scoped handle
@@ -497,86 +495,6 @@ impl ResolveError {
             ),
         }
     }
-}
-
-/// Render a node's logical path by walking its ancestor chain to the root.
-///
-/// Returns `None` — leaving the node addressable by `id` only — when the chain
-/// dangles, exceeds [`MAX_PATH_DEPTH`], or any name on it is not a legal single
-/// path segment.
-fn render_path(node: &WorkspaceNode, by_id: &HashMap<&str, &WorkspaceNode>) -> Option<String> {
-    let mut names = Vec::new();
-    let mut cursor = Some(node);
-    let mut depth = 0;
-    while let Some(current) = cursor {
-        if !is_legal_segment(&current.name) {
-            return None;
-        }
-        names.push(current.name.as_str());
-        depth += 1;
-        if depth > MAX_PATH_DEPTH {
-            return None;
-        }
-        cursor = match &current.parent_id {
-            None => None,
-            // A dangling parent means the chain never reaches the root, so the
-            // node has no well-defined path.
-            Some(parent) => Some(*by_id.get(parent.as_str())?),
-        };
-    }
-    names.reverse();
-    Some(names.join("/"))
-}
-
-/// Whether `name` is a legal single path segment.
-///
-/// Mirrors the `fs` backend's `reject_unsafe_name`, applied here so the sqlite
-/// and mongodb backends — which do not validate names on create — cannot
-/// present a node whose name would make a rendered path ambiguous or
-/// traversal-shaped.
-fn is_legal_segment(name: &str) -> bool {
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\\')
-        && !name.contains('\0')
-}
-
-/// Split an agent-supplied logical path into validated segments.
-///
-/// Takes the component-wise shape of tinycortex's `resolve_within_content_root`:
-/// validate every component *before* it can be used, and reject rather than
-/// normalise anything traversal-shaped. Leading/trailing and repeated `/` are
-/// tolerated (an agent writing `/Standards/` means `Standards`); `.` and `..`
-/// segments are refused outright.
-///
-/// Note this is defence in depth, not the boundary itself: the result is only
-/// ever matched against node names inside a company-scoped index, never joined
-/// onto a host path.
-fn split_logical_path(path: &str) -> Result<Vec<&str>, String> {
-    let trimmed = path.trim();
-    if trimmed.is_empty() {
-        return Err("`path` is empty".to_string());
-    }
-    if trimmed.contains('\\') {
-        return Err(format!(
-            "`{trimmed}` contains a backslash; workspace paths separate segments with `/`"
-        ));
-    }
-    let segments: Vec<&str> = trimmed.split('/').filter(|s| !s.is_empty()).collect();
-    if segments.is_empty() {
-        return Err(format!("`{path}` names no path segments"));
-    }
-    for segment in &segments {
-        if *segment == "." || *segment == ".." {
-            return Err(format!(
-                "`{trimmed}` contains a `{segment}` segment; workspace paths are absolute within \
-                 the company workspace and cannot traverse"
-            ));
-        }
-    }
-    Ok(segments)
 }
 
 // ---------------------------------------------------------------------------
