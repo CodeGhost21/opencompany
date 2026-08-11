@@ -695,4 +695,30 @@ mod test {
         assert!(wired.body.contains("t-42"), "{}", wired.body);
         assert_eq!(wired.kind, "task.discussion_posted");
     }
+
+    /// **Issue #382: the per-node start bracket wires out structurally.** The
+    /// node has not run, so the event carries ids alone — no status, no
+    /// duration, never any input. This pins that the sidecar reads "a node
+    /// began" as a system record on the `workflow` sender under the
+    /// `workflow.node` kind, carrying the structural ids and nothing of the
+    /// node's own payload (there is none to leak). Mirrors the finish arm one
+    /// variant over.
+    #[test]
+    fn a_started_node_wires_out_structurally_on_the_workflow_sender() {
+        let event = CompanyEvent::WorkflowNodeStarted {
+            workflow_id: "digest".to_string(),
+            run_id: "run-1".to_string(),
+            node_id: "owner_summary".to_string(),
+        };
+
+        let wired = wire_event(3, &event);
+
+        assert_eq!(wired.role, Role::System);
+        assert_eq!(wired.sender, "workflow");
+        assert_eq!(wired.kind, "workflow.node");
+        // Says what happened, in ids: which graph, which node, that it started.
+        assert!(wired.body.contains("digest"), "{}", wired.body);
+        assert!(wired.body.contains("owner_summary"), "{}", wired.body);
+        assert!(wired.body.contains("started"), "{}", wired.body);
+    }
 }
