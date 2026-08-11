@@ -1733,11 +1733,14 @@ impl<'a> CycleHostImpl<'a> {
                 &effect,
                 now_millis(),
                 TaskLink::from_task_id(self.task_id.as_deref()),
-                self.thread_id.clone(),
-                // Issue #435: and where inside that channel, so the
+                // Which channel, and — issue #435 — where inside it, so the
                 // continuation can be threaded back under the same root rather
-                // than landing flat in the channel.
-                self.thread_parent,
+                // than landing flat in the channel. Built as one value so the
+                // pair cannot be written down describing two different places.
+                ApprovalConversation {
+                    thread: self.thread_id.clone(),
+                    parent: self.thread_parent,
+                },
                 // Issue #469: which turn is blocked on this. Recorded here
                 // because this is the one write path into the approval queue, so
                 // the count the continuation queue keeps below cannot describe a
@@ -4124,8 +4127,7 @@ mod test {
                 &effect,
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -4199,8 +4201,7 @@ mod test {
                 &effect,
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -4257,8 +4258,7 @@ mod test {
                     &effect,
                     now_millis(),
                     TaskLink::Unlinked,
-                    None,
-                    None,
+                    ApprovalConversation::default(),
                     None,
                 )
                 .await

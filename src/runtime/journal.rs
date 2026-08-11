@@ -1088,22 +1088,27 @@ impl RuntimeJournal {
     /// on the same terms as `thread`: absent means "this host did not record a
     /// turn", which falls back to continuing the approval on its own.
     ///
-    /// `parent` is the thread root within `thread` (issue #435), and is an
-    /// `Option` on the same terms again: absent means the channel is the whole
-    /// answer, which is both "raised outside a thread" and "written before
-    /// #435", and those need not be told apart because they behave identically.
-    /// It is only ever meaningful alongside a `thread` — see
-    /// [`ApprovalOrigin::parent`].
+    /// `conversation` carries the channel **and** the thread root inside it as
+    /// one value (issue #435), rather than as two adjacent parameters. Both of
+    /// its fields are `Option` on the terms above, and its `parent` is only ever
+    /// meaningful alongside its `thread` — see [`ApprovalOrigin::parent`]. They
+    /// travel together for the same reason
+    /// [`approval_conversation`](Self::approval_conversation) returns them
+    /// together: two same-shaped `Option`s side by side in a call are trivially
+    /// transposable by a caller and the compiler would not notice, and a park is
+    /// the one place a wrong pairing would be written down durably. The
+    /// `ApprovalConversation` this hands back on the read side is the same type,
+    /// so a continuation round-trips one value instead of re-assembling two.
     pub async fn record_parked(
         &self,
         id: &ApprovalId,
         effect: &Effect,
         at_millis: u64,
         task: TaskLink,
-        thread: Option<String>,
-        parent: Option<EventSeq>,
+        conversation: ApprovalConversation,
         cycle: Option<String>,
     ) -> Result<()> {
+        let ApprovalConversation { thread, parent } = conversation;
         {
             let mut state = self.state.lock().expect("journal state poisoned");
             state.origins.insert(
@@ -1847,8 +1852,7 @@ mod test {
                 &effect(),
                 1_000,
                 TaskLink::Task { id: "t-1".into() },
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -1912,7 +1916,14 @@ mod test {
         };
 
         journal
-            .record_parked(&id, &parked, 1_000, TaskLink::Unlinked, None, None, None)
+            .record_parked(
+                &id,
+                &parked,
+                1_000,
+                TaskLink::Unlinked,
+                ApprovalConversation::default(),
+                None,
+            )
             .await
             .unwrap();
         journal.record_resolved(&id).await.unwrap();
@@ -1953,8 +1964,7 @@ mod test {
                 },
                 1_000,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -1992,8 +2002,7 @@ mod test {
                 &effect(),
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2037,8 +2046,7 @@ mod test {
                 &effect(),
                 1_000,
                 TaskLink::Task { id: "t-1".into() },
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2049,8 +2057,7 @@ mod test {
                 &effect(),
                 1_100,
                 TaskLink::Task { id: "t-2".into() },
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2062,8 +2069,7 @@ mod test {
                 &effect(),
                 1_200,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2152,8 +2158,7 @@ mod test {
                 &effect(),
                 5_000,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2222,8 +2227,10 @@ mod test {
                 &effect(),
                 5_000,
                 TaskLink::Unlinked,
-                Some("desk-finance".to_string()),
-                None,
+                ApprovalConversation {
+                    thread: Some("desk-finance".to_string()),
+                    parent: None,
+                },
                 None,
             )
             .await
@@ -2311,8 +2318,10 @@ mod test {
                 &effect(),
                 5_000,
                 TaskLink::Unlinked,
-                Some("desk-finance".to_string()),
-                Some(EventSeq::new(7)),
+                ApprovalConversation {
+                    thread: Some("desk-finance".to_string()),
+                    parent: Some(EventSeq::new(7)),
+                },
                 None,
             )
             .await
@@ -2375,8 +2384,7 @@ mod test {
                 &effect(),
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2407,8 +2415,7 @@ mod test {
                 &effect(),
                 now_millis(),
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2456,8 +2463,7 @@ mod test {
                 &effect(),
                 1_000,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2468,8 +2474,7 @@ mod test {
                 &effect(),
                 2_000,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2778,8 +2783,7 @@ mod test {
                 &effect(),
                 500,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
@@ -2816,8 +2820,7 @@ mod test {
                 &effect(),
                 500,
                 TaskLink::Unlinked,
-                None,
-                None,
+                ApprovalConversation::default(),
                 None,
             )
             .await
