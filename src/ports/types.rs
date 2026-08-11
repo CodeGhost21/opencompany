@@ -930,10 +930,12 @@ pub enum CompanyEvent {
         /// The distinction is the point: a scheduled run is the
         /// nobody-was-watching case this event exists for.
         scheduled: bool,
-        /// A correlation id for the run, when the entry point minted one.
-        /// `None` today from both entry points — neither has a run id to give —
-        /// and kept `Option` so #242's first-class run, or any future
-        /// correlated entry point, needs no migration.
+        /// A correlation id for the run — the same id its
+        /// [`WorkflowRunStarted`](Self::WorkflowRunStarted) and per-node events
+        /// carry. Every current entry point mints one and populates it here;
+        /// kept `Option` so a legacy record written before entry points minted
+        /// one, and any future entry point with no id to give, need no
+        /// migration.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
         /// One row per attempt to route a reached `output` node's report to its
