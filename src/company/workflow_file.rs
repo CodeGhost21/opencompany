@@ -378,7 +378,11 @@ pub fn parse_workflow(toml_src: &str) -> Result<WorkflowFile> {
         PathBuf::from(format!("{}.toml", raw.id))
     };
 
-    let problems = validate(&raw);
+    // Lenient (issue #682): the read/load path must not hard-fail a saved graph
+    // on the new #661 author-time rules — those are enforced strictly on the
+    // create/update draft path and the seed corpus test. Every structural check
+    // still runs here; only the two #661 rules are skipped.
+    let problems = validate(&raw, false);
     if !problems.is_empty() {
         return Err(OpenCompanyError::DataInvalid { path, problems });
     }
@@ -580,7 +584,20 @@ pub fn list_workflows_union(
 }
 
 /// Collects every validation problem in prosumer language. Empty means valid.
-fn validate(raw: &RawWorkflow) -> Vec<String> {
+///
+/// `strict` picks the severity surface (issue #682). The two NEW #661 author-time
+/// rules — per-kind required `config` ([`required_config_problems`]) and the
+/// `condition` branch `yes`/`no` label rule — run ONLY when `strict` is true.
+/// The read/load path ([`parse_workflow`]) calls this with `strict = false` so a
+/// graph persisted before #661 (a field-less condition, an off-vocabulary branch
+/// label — shapes the console couldn't even emit until this change) still LOADS
+/// and runs with today's behaviour, instead of hard-failing on every read and
+/// vanishing from the console / silently halting a scheduled run. Author-time
+/// enforcement lives on the create/update draft path
+/// ([`validate_draft_against_record`](crate::company::workflow_create)), which
+/// applies these same rules strictly, plus the seed corpus test which runs this
+/// with `strict = true`. Every OTHER structural check here is unconditional.
+pub(crate) fn validate(raw: &RawWorkflow, strict: bool) -> Vec<String> {
     let mut problems = Vec::new();
 
     if raw.id.trim().is_empty() {
@@ -658,6 +675,18 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
         }
         if kind == Some(WorkflowNodeKind::Condition) && !node.id.trim().is_empty() {
             condition_nodes.insert(node.id.as_str());
+        }
+
+        // Per-kind required config (issue #661): a hand-authored file that omits
+        // a `condition` `field`, an `http_request` `method`/`url`, a `switch`
+        // discriminant, or a `tool_call` `slug` translates into a graph whose
+        // runtime behaviour is silently wrong. Enforced ONLY on the strict
+        // author-time surface (issue #682): the read/load path must not hard-fail
+        // a graph persisted before #661, or it would vanish from the console and
+        // silently stop a scheduled run. The console-draft path applies the same
+        // helper strictly, so the two AUTHOR surfaces reject the same shapes.
+        if strict && let Some(kind) = kind {
+            problems.extend(required_config_problems(kind, &label, node.config.as_ref()));
         }
 
         // `schedule` says *when* the workflow starts, so it is trigger-only —
@@ -904,6 +933,48 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
                 ));
             }
         }
+
+        // A `condition` node's branches steer the run onto the engine's `true`
+        // or `false` port, keyed off the edge label (issue #661). An unlabeled
+        // or oddly-labeled branch would silently funnel through `condition_port`
+        // onto the `true` port — a mislabeled branch that quietly runs the wrong
+        // way — so require every condition branch to read `yes` or `no`. The
+        // sole exception is the `error` recovery edge of a condition that is also
+        // `on_error = "route"`, already validated by the routing-edge rule above.
+        //
+        // Enforced ONLY on the strict author-time surface (issue #682): the
+        // read/load path must accept a graph persisted before #661 (a
+        // console-authored condition could not carry `yes`/`no` labels until this
+        // change), where a field-less/label-less condition routed `true` always —
+        // wrong-but-working beats "gone and never fires". The draft path applies
+        // this same rule strictly.
+        //
+        // Intentional asymmetry (do not "fix" one to match the other): the branch
+        // label is lowercased + trimmed before matching `yes`/`no`, so ` YES `
+        // passes — the label is compared, never persisted as a lookup key. By
+        // contrast `validate_tool_call_node` REJECTS a padded `slug`, because that
+        // string is stored and looked up at run time verbatim, so the validated
+        // string must equal the persisted one.
+        if strict && condition_nodes.contains(edge.from.as_str()) {
+            let is_route_error =
+                edge.label.as_deref() == Some("error") && route_nodes.contains(edge.from.as_str());
+            let is_yes_no = edge
+                .label
+                .as_deref()
+                .map(|l| l.trim().to_ascii_lowercase())
+                .is_some_and(|l| matches!(l.as_str(), "yes" | "no"));
+            if !is_route_error && !is_yes_no {
+                let shown = edge
+                    .label
+                    .as_deref()
+                    .map(|l| format!("`{l}`"))
+                    .unwrap_or_else(|| "no label".to_string());
+                problems.push(format!(
+                    "{label} leaves condition node `{}` with {shown} — a condition's branches must be labeled `yes` or `no`.",
+                    edge.from
+                ));
+            }
+        }
     }
 
     // Every routing node must actually have somewhere to route its error to.
@@ -1077,6 +1148,73 @@ fn validate(raw: &RawWorkflow) -> Vec<String> {
         }
     }
 
+    problems
+}
+
+/// The per-kind required-`config` problems for one node, in prosumer language.
+///
+/// Shared by the on-disk [`validate`] pass and the console/builder draft path
+/// ([`validate_draft_against_record`](crate::company::workflow_create)) so the
+/// same missing config is rejected identically on BOTH author-time surfaces
+/// (issue #661): a `condition` with no `field`, an `http_request` missing
+/// `method`/`url`, a `switch` with no discriminant, or a `tool_call` with no
+/// `slug`. Each of those still *translates* into a runnable graph, but the
+/// node's behaviour is silently wrong — a field-less condition tests the whole
+/// item, a slug-less `tool_call` used to fall back to the node id (masking which
+/// tool would run) — so surfacing it at load/author time is the point.
+pub(crate) fn required_config_problems(
+    kind: WorkflowNodeKind,
+    label: &str,
+    config: Option<&toml::Value>,
+) -> Vec<String> {
+    let table = config.and_then(toml::Value::as_table);
+    // A config key set to a non-empty, non-whitespace string.
+    let non_empty = |key: &str| -> bool {
+        table
+            .and_then(|t| t.get(key))
+            .and_then(toml::Value::as_str)
+            .is_some_and(|value| !value.trim().is_empty())
+    };
+    let mut problems = Vec::new();
+    match kind {
+        WorkflowNodeKind::Condition if !non_empty("field") => {
+            problems.push(format!(
+                "{label} is a condition node but sets no `config.field` — give it the boolean \
+                 expression the branch tests (e.g. `field = \"=item.approved\"`)."
+            ));
+        }
+        WorkflowNodeKind::HttpRequest => {
+            if !non_empty("method") {
+                problems.push(format!(
+                    "{label} is an http_request node but sets no `config.method` — name the HTTP \
+                     method (e.g. `method = \"GET\"`)."
+                ));
+            }
+            if !non_empty("url") {
+                problems.push(format!(
+                    "{label} is an http_request node but sets no `config.url` — give the request \
+                     URL (e.g. `url = \"https://…\"`)."
+                ));
+            }
+        }
+        // `field` OR `expression` both satisfy a switch — the tinyflows engine
+        // reads `config.expression` first and falls back to `config.field`
+        // (`vendor/tinyagents` `switch.rs`), so either is honoured downstream and
+        // requiring only that ONE is present matches the runtime.
+        WorkflowNodeKind::Switch if !non_empty("field") && !non_empty("expression") => {
+            problems.push(format!(
+                "{label} is a switch node but names no discriminant — set `config.field` or \
+                 `config.expression` to the value that selects the branch."
+            ));
+        }
+        WorkflowNodeKind::ToolCall if !non_empty("slug") => {
+            problems.push(format!(
+                "{label} is a tool_call but sets no `config.slug` — set `config.slug` to the \
+                 tool to run."
+            ));
+        }
+        _ => {}
+    }
     problems
 }
 
@@ -1368,6 +1506,8 @@ mod tests {
             name = "Export"
             on_error = "continue"
             requires_approval = true
+            [node.config]
+            slug = "csv_export"
             [node.retry]
             max_attempts = 3
             backoff_ms = 100
@@ -1543,6 +1683,8 @@ mod tests {
             kind = "tool_call"
             name = "Call"
             on_error = "route"
+            [node.config]
+            slug = "csv_export"
             [[node]]
             id = "recover"
             kind = "output"
@@ -1575,6 +1717,8 @@ mod tests {
             id = "sw"
             kind = "switch"
             name = "Switch"
+            [node.config]
+            field = "=item.kind"
             [[node]]
             id = "mg"
             kind = "merge"
@@ -1747,6 +1891,8 @@ mod tests {
             id = "sw"
             kind = "switch"
             name = "Switch"
+            [node.config]
+            field = "=item.kind"
             [[node]]
             id = "err_case"
             kind = "output"
@@ -1771,6 +1917,232 @@ mod tests {
             parse_workflow(src).is_ok(),
             "an error-labeled switch case must be valid without on_error = route"
         );
+    }
+
+    // --- Per-kind required config (issue #661) ------------------------------
+
+    /// A `condition` node with no `config.field` still LOADS on the lenient
+    /// read path (issue #682: pre-#661 saved graphs must keep loading), but the
+    /// STRICT author-time pass reports it — without a field the engine tests the
+    /// whole item and the branch is silently meaningless. This is the regression
+    /// guard: a field-less-condition graph parses via `parse_workflow` yet is
+    /// rejected by `validate(_, true)`.
+    #[test]
+    fn condition_without_field_loads_leniently_but_strict_rejects() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [[node]]
+            id = "yes_out"
+            kind = "output"
+            name = "Yes"
+            [[node]]
+            id = "no_out"
+            kind = "output"
+            name = "No"
+            [[edge]]
+            from = "start"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "yes_out"
+            label = "yes"
+            [[edge]]
+            from = "gate"
+            to = "no_out"
+            label = "no"
+        "#;
+        // Lenient load path accepts it — a graph persisted before #661 still loads.
+        assert!(parse_workflow(src).is_ok());
+        // Strict author-time pass reports the missing field.
+        let raw: RawWorkflow = toml::from_str(src).expect("the fixture is valid TOML");
+        let problems = validate(&raw, true).join("\n");
+        assert!(problems.contains("config.field"), "{problems}");
+    }
+
+    /// A `condition` branch labeled anything but `yes`/`no` loads leniently
+    /// (issue #682) but is rejected by the STRICT author-time pass — an
+    /// off-vocabulary label silently maps onto the `true` port.
+    #[test]
+    fn condition_branch_with_non_yes_no_label_loads_leniently_but_strict_rejects() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [node.config]
+            field = "=item.ok"
+            [[node]]
+            id = "a"
+            kind = "output"
+            name = "A"
+            [[node]]
+            id = "b"
+            kind = "output"
+            name = "B"
+            [[edge]]
+            from = "start"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "a"
+            label = "pass"
+            [[edge]]
+            from = "gate"
+            to = "b"
+            label = "no"
+        "#;
+        // Lenient load path accepts the off-vocabulary label.
+        assert!(parse_workflow(src).is_ok());
+        // Strict author-time pass reports it.
+        let raw: RawWorkflow = toml::from_str(src).expect("the fixture is valid TOML");
+        let problems = validate(&raw, true).join("\n");
+        assert!(problems.contains("labeled `yes` or `no`"), "{problems}");
+    }
+
+    /// A well-formed `condition` — a `field` plus `yes`/`no` branches — parses.
+    #[test]
+    fn condition_with_field_and_yes_no_labels_is_valid() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "gate"
+            kind = "condition"
+            name = "Gate"
+            [node.config]
+            field = "=item.approved"
+            [[node]]
+            id = "a"
+            kind = "output"
+            name = "A"
+            [[node]]
+            id = "b"
+            kind = "output"
+            name = "B"
+            [[edge]]
+            from = "start"
+            to = "gate"
+            [[edge]]
+            from = "gate"
+            to = "a"
+            label = "yes"
+            [[edge]]
+            from = "gate"
+            to = "b"
+            label = "no"
+        "#;
+        assert!(parse_workflow(src).is_ok());
+    }
+
+    /// An `http_request` node missing `config.method` / `config.url` loads
+    /// leniently (issue #682) but the STRICT pass reports BOTH missing keys.
+    #[test]
+    fn http_request_without_method_or_url_loads_leniently_but_strict_rejects() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "fetch"
+            kind = "http_request"
+            name = "Fetch"
+            [[edge]]
+            from = "start"
+            to = "fetch"
+        "#;
+        // Lenient load path accepts it.
+        assert!(parse_workflow(src).is_ok());
+        // Strict author-time pass reports both missing config keys at once.
+        let raw: RawWorkflow = toml::from_str(src).expect("the fixture is valid TOML");
+        let message = validate(&raw, true).join("\n");
+        assert!(message.contains("config.method"), "{message}");
+        assert!(message.contains("config.url"), "{message}");
+    }
+
+    /// A `switch` node with neither `field` nor `expression` loads leniently
+    /// (issue #682) but the STRICT pass reports the missing discriminant.
+    #[test]
+    fn switch_without_discriminant_loads_leniently_but_strict_rejects() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "sw"
+            kind = "switch"
+            name = "Switch"
+            [[node]]
+            id = "case_a"
+            kind = "output"
+            name = "A"
+            [[edge]]
+            from = "start"
+            to = "sw"
+            [[edge]]
+            from = "sw"
+            to = "case_a"
+            label = "a"
+        "#;
+        // Lenient load path accepts it.
+        assert!(parse_workflow(src).is_ok());
+        // Strict author-time pass reports the missing discriminant.
+        let raw: RawWorkflow = toml::from_str(src).expect("the fixture is valid TOML");
+        let problems = validate(&raw, true).join("\n");
+        assert!(problems.contains("discriminant"), "{problems}");
+    }
+
+    /// Strict author-time parity (issue #661/#682): a `tool_call` with no `slug`
+    /// loads leniently now, but the STRICT pass reports it — the same shape the
+    /// console-draft path rejects — so `translate` never has to fall back to the
+    /// node id as a placeholder slug once a graph reaches an author surface.
+    #[test]
+    fn tool_call_without_slug_loads_leniently_but_strict_rejects() {
+        let src = r#"
+            id = "wf"
+            name = "WF"
+            [[node]]
+            id = "start"
+            kind = "trigger"
+            name = "Start"
+            [[node]]
+            id = "call"
+            kind = "tool_call"
+            name = "Call"
+            [[edge]]
+            from = "start"
+            to = "call"
+        "#;
+        // Lenient load path accepts it.
+        assert!(parse_workflow(src).is_ok());
+        // Strict author-time pass reports the missing slug.
+        let raw: RawWorkflow = toml::from_str(src).expect("the fixture is valid TOML");
+        let problems = validate(&raw, true).join("\n");
+        assert!(problems.contains("config.slug"), "{problems}");
     }
 
     // --- G15: inescapable cycles + reachability (issue #540) ----------------
@@ -1816,7 +2188,7 @@ mod tests {
     }
 
     /// A miniature of the shipped `game_build_pipeline` shape: a `condition`
-    /// guards the loop, with a `pass` branch that leaves it and a `fail` branch
+    /// guards the loop, with a `yes` branch that leaves it and a `no` branch
     /// that loops back. That is a legal bounded retry — it must parse clean.
     #[test]
     fn condition_guarded_loop_is_valid() {
@@ -1836,6 +2208,8 @@ mod tests {
             id = "gate"
             kind = "condition"
             name = "Good enough?"
+            [node.config]
+            field = "=item.good_enough"
             [[node]]
             id = "done"
             kind = "output"
@@ -1849,11 +2223,11 @@ mod tests {
             [[edge]]
             from = "gate"
             to = "done"
-            label = "pass"
+            label = "yes"
             [[edge]]
             from = "gate"
             to = "work"
-            label = "fail"
+            label = "no"
         "#;
         assert!(
             parse_workflow(src).is_ok(),
@@ -1863,7 +2237,7 @@ mod tests {
 
     /// The shipped guarded-retry preset itself must stay valid — its loop
     /// (`gameplay → assets → balance → qa → gate → gameplay`) is escapable
-    /// because `gate` is a `condition` whose `pass` branch leaves the loop.
+    /// because `gate` is a `condition` whose `yes` branch leaves the loop.
     #[test]
     fn the_shipped_guarded_loop_preset_is_valid() {
         const GAME: &str = include_str!(concat!(
@@ -2753,7 +3127,9 @@ to = "done"
     #[test]
     fn destination_messages_match_the_console() {
         let raw: RawWorkflow = toml::from_str(BAD_DESTINATIONS).expect("the fixture is valid TOML");
-        let problems = validate(&raw).join("\n");
+        // Destination checks are unconditional, so the load-path (`false`) form
+        // surfaces them exactly as `parse_workflow` does.
+        let problems = validate(&raw, false).join("\n");
 
         for tail in [EMAIL_TARGET_TAIL, CHANNEL_TARGET_TAIL] {
             assert!(

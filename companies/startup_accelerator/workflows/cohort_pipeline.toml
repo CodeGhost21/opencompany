@@ -33,6 +33,8 @@ id = "gate"
 kind = "condition"
 name = "Admit?"
 summary = "Admit to the cohort or pass."
+[node.config]
+field = "=item.admitted"
 
 [[node]]
 id = "mentor"
@@ -97,12 +99,12 @@ to = "gate"
 [[edge]]
 from = "gate"
 to = "mentor"
-label = "admit"
+label = "yes"
 
 [[edge]]
 from = "gate"
 to = "done"
-label = "pass"
+label = "no"
 
 [[edge]]
 from = "mentor"

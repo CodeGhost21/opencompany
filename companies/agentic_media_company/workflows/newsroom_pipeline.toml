@@ -33,6 +33,8 @@ id = "gate"
 kind = "condition"
 name = "Verified?"
 summary = "Run the story or spike it."
+[node.config]
+field = "=item.verified"
 
 [[node]]
 id = "write"
@@ -97,12 +99,12 @@ to = "gate"
 [[edge]]
 from = "gate"
 to = "write"
-label = "verified"
+label = "yes"
 
 [[edge]]
 from = "gate"
 to = "done"
-label = "spiked"
+label = "no"
 
 [[edge]]
 from = "write"

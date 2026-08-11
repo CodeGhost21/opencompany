@@ -153,8 +153,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::company::{
-    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, list_workflows_union,
-    parse_workflow, raw_workflow_from_toml, render_workflow,
+    RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile, WorkflowNodeKind,
+    list_workflows_union, parse_workflow, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 use crate::error::{OpenCompanyError, Result};
 use crate::ports::CompanyStore;
@@ -648,7 +649,76 @@ fn validate_draft_against_record(draft: &RawWorkflow, record: &CompanyRecord) ->
                 }
             },
             "tool_call" => validate_tool_call_node(node, record)?,
+            // Per-kind required config (issue #661): reject a `condition` with no
+            // `field`, an `http_request` missing `method`/`url`, or a `switch`
+            // with no discriminant at author time — the same gate the on-disk
+            // `validate` applies, surfaced here as a 400 so the console/builder
+            // draft path never persists a graph whose runtime behaviour is
+            // silently wrong. `tool_call` keeps its richer `validate_tool_call_node`
+            // (slug + namespace/grant); the structural kinds share the helper.
+            "condition" | "http_request" | "switch" => {
+                let kind = match node.kind.as_str() {
+                    "condition" => WorkflowNodeKind::Condition,
+                    "http_request" => WorkflowNodeKind::HttpRequest,
+                    _ => WorkflowNodeKind::Switch,
+                };
+                // Report EVERY missing-config problem for the node, not just the
+                // first: an `http_request` missing both `method` AND `url` should
+                // name both, since the draft path is where a human/model iterates.
+                let problems = required_config_problems(
+                    kind,
+                    &format!("node `{}`", node.id),
+                    node.config.as_ref(),
+                );
+                if !problems.is_empty() {
+                    return Err(OpenCompanyError::InvalidRequest(problems.join(" ")));
+                }
+            }
             _ => {}
+        }
+    }
+
+    // Condition branch labels must read `yes`/`no` at author time (issue #661).
+    // `parse_workflow` is now LENIENT on this rule (issue #682) so pre-#661 saved
+    // graphs still load, which means ALL author-time strictness for it has to
+    // live here — mirroring the on-disk `validate` strict rule. The sole
+    // exception is the `error` recovery edge of a condition that is also
+    // `on_error = "route"`, whose routing is validated separately. The label is
+    // lowercased + trimmed before matching (it is compared, never persisted as a
+    // lookup key), matching the load rule's asymmetry vs the verbatim `slug`.
+    let condition_ids: HashSet<&str> = draft
+        .nodes
+        .iter()
+        .filter(|node| node.kind == "condition" && !node.id.trim().is_empty())
+        .map(|node| node.id.as_str())
+        .collect();
+    let route_ids: HashSet<&str> = draft
+        .nodes
+        .iter()
+        .filter(|node| node.on_error.as_deref() == Some("route") && !node.id.trim().is_empty())
+        .map(|node| node.id.as_str())
+        .collect();
+    for edge in &draft.edges {
+        if !condition_ids.contains(edge.from.as_str()) {
+            continue;
+        }
+        let is_route_error =
+            edge.label.as_deref() == Some("error") && route_ids.contains(edge.from.as_str());
+        let is_yes_no = edge
+            .label
+            .as_deref()
+            .map(|label| label.trim().to_ascii_lowercase())
+            .is_some_and(|label| matches!(label.as_str(), "yes" | "no"));
+        if !is_route_error && !is_yes_no {
+            let shown = edge
+                .label
+                .as_deref()
+                .map(|label| format!("`{label}`"))
+                .unwrap_or_else(|| "no label".to_string());
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "an edge leaves condition node `{}` with {shown} — a condition's branches must be labeled `yes` or `no`.",
+                edge.from
+            )));
         }
     }
 
@@ -2982,6 +3052,195 @@ to = "done"
             "{err:?}"
         );
         assert!(err.to_string().contains("cannot run"), "{err}");
+    }
+
+    // --- issue #661/#682: required config + condition labels on the draft path
+
+    /// A minimal draft — trigger → condition `gate` → two outputs — with the
+    /// gate's `config.field` and both branch labels parameterised. Since
+    /// `parse_workflow` is now lenient on the #661 rules (issue #682), these are
+    /// the graphs that prove the create/update path still enforces them strictly.
+    fn condition_draft(
+        field: Option<&str>,
+        yes_label: Option<&str>,
+        no_label: Option<&str>,
+    ) -> RawWorkflow {
+        let config = field.map(|field| {
+            let mut table = toml::map::Map::new();
+            table.insert("field".to_string(), toml::Value::String(field.to_string()));
+            toml::Value::Table(table)
+        });
+        let node = |id: &str, kind: &str, config: Option<toml::Value>| RawNode {
+            id: id.to_string(),
+            kind: kind.to_string(),
+            name: id.to_string(),
+            summary: None,
+            agent: None,
+            schedule: None,
+            config,
+            on_error: None,
+            retry: None,
+            requires_approval: None,
+            destination: None,
+        };
+        RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                node("start", "trigger", None),
+                node("gate", "condition", config),
+                node("a", "output", None),
+                node("b", "output", None),
+            ],
+            edges: vec![
+                RawEdge {
+                    from: "start".to_string(),
+                    to: "gate".to_string(),
+                    label: None,
+                },
+                RawEdge {
+                    from: "gate".to_string(),
+                    to: "a".to_string(),
+                    label: yes_label.map(str::to_string),
+                },
+                RawEdge {
+                    from: "gate".to_string(),
+                    to: "b".to_string(),
+                    label: no_label.map(str::to_string),
+                },
+            ],
+        }
+    }
+
+    /// A condition draft with no `config.field` is refused at author time even
+    /// though `parse_workflow` would now let it load.
+    #[tokio::test]
+    async fn draft_condition_without_field_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            condition_draft(None, Some("yes"), Some("no")),
+        )
+        .await
+        .expect_err("condition with no field");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("config.field"), "{err}");
+    }
+
+    /// A condition branch labeled anything but `yes`/`no` is refused at author
+    /// time — the load path is lenient, so this rule now lives entirely here.
+    #[tokio::test]
+    async fn draft_condition_with_non_yes_no_label_is_invalid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let err = create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            condition_draft(Some("=item.ok"), Some("pass"), Some("no")),
+        )
+        .await
+        .expect_err("off-vocabulary condition label");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        assert!(err.to_string().contains("labeled `yes` or `no`"), "{err}");
+    }
+
+    /// The positive control: a condition with a `field` and `yes`/`no` branches
+    /// is accepted by the same author path.
+    #[tokio::test]
+    async fn draft_condition_with_field_and_yes_no_labels_is_valid() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        create_company_workflow(
+            &company,
+            None,
+            &store,
+            None,
+            condition_draft(Some("=item.approved"), Some("yes"), Some("no")),
+        )
+        .await
+        .expect("a well-formed condition draft is accepted");
+    }
+
+    /// An http_request draft missing BOTH `method` and `url` reports both in one
+    /// 400 — the draft path collects every required-config problem for a node,
+    /// not just the first, so a human/model iterating hears the full list.
+    #[tokio::test]
+    async fn draft_http_request_missing_method_and_url_reports_both() {
+        let company = CompanyId::new("acme");
+        let store = store_of(MemStore::seeded(record(
+            &company,
+            manifest_with_assistant(),
+        )));
+        let draft = RawWorkflow {
+            id: "wf".to_string(),
+            name: "WF".to_string(),
+            description: None,
+            nodes: vec![
+                RawNode {
+                    id: "start".to_string(),
+                    kind: "trigger".to_string(),
+                    name: "Start".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+                RawNode {
+                    id: "fetch".to_string(),
+                    kind: "http_request".to_string(),
+                    name: "Fetch".to_string(),
+                    summary: None,
+                    agent: None,
+                    schedule: None,
+                    config: None,
+                    on_error: None,
+                    retry: None,
+                    requires_approval: None,
+                    destination: None,
+                },
+            ],
+            edges: vec![RawEdge {
+                from: "start".to_string(),
+                to: "fetch".to_string(),
+                label: None,
+            }],
+        };
+        let err = create_company_workflow(&company, None, &store, None, draft)
+            .await
+            .expect_err("http_request with no method or url");
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "{err:?}"
+        );
+        let message = err.to_string();
+        assert!(message.contains("config.method"), "{message}");
+        assert!(message.contains("config.url"), "{message}");
     }
 
     // --- issue #276: arming, disarming, and the switch -----------------------

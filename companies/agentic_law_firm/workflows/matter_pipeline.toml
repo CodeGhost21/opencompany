@@ -26,6 +26,8 @@ id = "gate"
 kind = "condition"
 name = "Contract or litigation?"
 summary = "Route by the kind of matter."
+[node.config]
+field = "=item.is_contract"
 
 [[node]]
 id = "draft"
@@ -65,12 +67,12 @@ to = "gate"
 [[edge]]
 from = "gate"
 to = "draft"
-label = "contract"
+label = "yes"
 
 [[edge]]
 from = "gate"
 to = "litigation"
-label = "litigation"
+label = "no"
 
 [[edge]]
 from = "draft"

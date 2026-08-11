@@ -124,9 +124,10 @@ fn tinyflows_kind(kind: WorkflowNodeKind) -> NodeKind {
 ///    defaults (so an author can override the derived `prompt`, add a
 ///    `tool_call` `slug`/`args`, or shape an `http_request` descriptor).
 /// 3. **First-class fields LAST** — `agent_ref` (bound from `agent`, so config
-///    can never rebind the node to another teammate), the `tool_call` id
-///    placeholder `slug` (only when the overlay carries none), and the
-///    engine-read `on_error` / `retry` / `requires_approval` keys.
+///    can never rebind the node to another teammate) and the engine-read
+///    `on_error` / `retry` / `requires_approval` keys. A `tool_call`'s `slug`
+///    rides in the config overlay (layer 2); author-time validation guarantees
+///    it is present, so translation adds no placeholder (issue #661).
 ///
 /// A legacy node (no `config`, no typed fields) yields exactly the pre-P1
 /// config, so translation of an unchanged file is byte-identical.
@@ -152,13 +153,16 @@ fn translate_node(def: &WorkflowNodeDef) -> Node {
                 config.insert("agent_ref".to_string(), json!(agent));
             }
         }
-        // A `tool_call` needs a `slug` or the engine's node errors; when the
-        // config binds none, fall back to the node id as a stable placeholder.
-        WorkflowNodeKind::ToolCall => {
-            config
-                .entry("slug".to_string())
-                .or_insert_with(|| json!(def.id));
-        }
+        // A `tool_call` needs a `slug` (the config overlay above carries it). The
+        // masking node-id default was removed (issue #661): author-time
+        // validation now rejects a slug-less `tool_call` on BOTH the on-disk seed
+        // path (`workflow_file::validate`) and the console-draft path
+        // (`validate_draft_against_record`), so a validated graph always binds a
+        // real slug. Defaulting to the node id instead pointed the engine's
+        // "missing tool" error at the wrong name and could collide with a real
+        // tool, silently invoking one the author never chose; absent a slug the
+        // engine's `tool_call` node now fails loudly on the missing key.
+        WorkflowNodeKind::ToolCall => {}
         _ => {}
     }
 
@@ -391,7 +395,9 @@ mod tests {
             config("strategist"),
             json!({ "agent_ref": "brand_strategist", "prompt": "Turns the brief into an angle + outline." })
         );
-        assert_eq!(config("gate"), json!({}));
+        // The gate carries its boolean discriminant (issue #661): a condition
+        // node must name the `field` it branches on.
+        assert_eq!(config("gate"), json!({ "field": "=item.needs_research" }));
         assert_eq!(
             config("research"),
             json!({
@@ -410,10 +416,11 @@ mod tests {
         assert_eq!(config("done"), json!({}));
     }
 
-    /// A `tool_call` node whose config binds a `slug` keeps that slug; the
-    /// node-id placeholder is only a fallback when config carries none.
+    /// A `tool_call` node's config `slug` is carried into the engine config
+    /// verbatim (issue #661 removed the node-id placeholder fallback; author-time
+    /// validation now guarantees a real slug is always present).
     #[test]
-    fn config_slug_beats_the_node_id_placeholder() {
+    fn config_slug_is_carried_into_engine_config() {
         let src = r#"
             id = "wf"
             name = "WF"
@@ -486,6 +493,8 @@ mod tests {
             kind = "tool_call"
             name = "Call"
             on_error = "continue"
+            [node.config]
+            slug = "csv_export"
             [node.retry]
             max_attempts = 3
             backoff_ms = 250

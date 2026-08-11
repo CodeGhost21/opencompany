@@ -33,6 +33,8 @@ id = "gate"
 kind = "condition"
 name = "Build it?"
 summary = "Commit to build or shelve the idea."
+[node.config]
+field = "=item.build_it"
 
 [[node]]
 id = "staff"

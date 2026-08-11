@@ -40,6 +40,8 @@ id = "gate"
 kind = "condition"
 name = "Needs motion?"
 summary = "Branch on whether motion is in scope."
+[node.config]
+field = "=item.needs_motion"
 
 [[node]]
 id = "motion"
