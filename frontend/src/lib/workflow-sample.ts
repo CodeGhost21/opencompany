@@ -35,11 +35,17 @@ export interface WorkflowNodeData extends Record<string, unknown> {
  */
 export type NodeRunState = "running" | "ok" | "error";
 
-/** Ring + glow per run state, layered over the node's own kind accent. */
+/**
+ * Ring + glow per run state, layered over the node's own kind accent.
+ *
+ * The status vocabulary, so a ring here means what the dot means everywhere
+ * else. It reads clearly over the kind accent precisely because that accent
+ * comes from the identity palette — the two never reach for the same hue.
+ */
 export const RUN_STATE_CLASSES: Record<NodeRunState, string> = {
-  running: "ring-2 ring-sky-500/70 shadow-sky-500/20 animate-pulse",
-  ok: "ring-2 ring-emerald-500/60",
-  error: "ring-2 ring-red-500/80",
+  running: "ring-2 ring-status-running/70 shadow-status-running/20 animate-pulse",
+  ok: "ring-2 ring-status-done/60",
+  error: "ring-2 ring-status-failed/80",
 };
 
 /** Per-kind emoji + accent, mirroring OpenHuman's node-kind metadata. */
@@ -59,12 +65,23 @@ export const NODE_KIND_META: Record<string, { emoji: string; color: NodeColor }>
   sub_workflow: { emoji: "📦", color: "primary" },
 };
 
-/** Tailwind classes per accent, so light/dark theming comes from tokens. */
+/**
+ * Tailwind classes per accent, so light/dark theming comes from tokens.
+ *
+ * The identity palette: a node's accent says what kind of step it is, not how
+ * the run is going. The status hues stay free for the run badge that sits on
+ * top of these nodes (`RUN_STATE_BADGE` in `workflow-node.tsx`) — which is the
+ * whole reason a node tinted sage must not be the same green as a node that
+ * finished.
+ *
+ * The key names are the accents the sample data already refers to; they name a
+ * slot, not a colour.
+ */
 export const COLOR_CLASSES: Record<NodeColor, { border: string; chip: string }> = {
   primary: { border: "border-primary/40", chip: "bg-primary/10" },
-  sage: { border: "border-emerald-500/40", chip: "bg-emerald-500/10" },
-  amber: { border: "border-amber-500/40", chip: "bg-amber-500/10" },
-  coral: { border: "border-rose-500/40", chip: "bg-rose-500/10" },
+  sage: { border: "border-tone-3/40", chip: "bg-tone-3/10" },
+  amber: { border: "border-tone-5/40", chip: "bg-tone-5/10" },
+  coral: { border: "border-tone-4/40", chip: "bg-tone-4/10" },
   neutral: { border: "border-border", chip: "bg-muted" },
 };
 

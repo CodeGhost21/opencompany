@@ -47,7 +47,7 @@ export function NodeDetailPanel({
           </span>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">{node.name}</div>
-            <div className="truncate text-[11px] text-muted-foreground">{node.id}</div>
+            <div className="truncate text-2xs text-muted-foreground">{node.id}</div>
           </div>
         </div>
         <Button variant="ghost" size="sm" className="-mr-1 h-7 px-2" onClick={onClose}>
@@ -61,12 +61,12 @@ export function NodeDetailPanel({
             {node.kind}
           </Badge>
           {node.requiresApproval && (
-            <Badge variant="outline" className="border-amber-500/40 bg-amber-500/10 font-normal">
+            <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft font-normal">
               requires approval
             </Badge>
           )}
           {node.schedule && (
-            <Badge variant="outline" className="border-sky-500/40 bg-sky-500/10 font-normal">
+            <Badge variant="outline" className="border-status-running/40 bg-status-running-soft font-normal">
               scheduled
             </Badge>
           )}
@@ -77,7 +77,7 @@ export function NodeDetailPanel({
         {node.schedule && (
           <DetailField label="Schedule">
             <p className="font-mono text-xs">{node.schedule}</p>
-            <p className="text-[10px] text-muted-foreground">5-field cron, UTC.</p>
+            <p className="text-3xs text-muted-foreground">5-field cron, UTC.</p>
           </DetailField>
         )}
 
@@ -95,7 +95,7 @@ export function NodeDetailPanel({
 
         {hasConfig && (
           <DetailField label="Config">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
               {JSON.stringify(node.config, null, 2)}
             </pre>
           </DetailField>
@@ -109,7 +109,7 @@ export function NodeDetailPanel({
 
         {node.retry && (
           <DetailField label="Retry">
-            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+            <pre className="overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
               {JSON.stringify(node.retry, null, 2)}
             </pre>
           </DetailField>
@@ -195,7 +195,7 @@ function OutputSection({ output }: { output: NodeOutputView }) {
         {output.truncated && (
           <Badge
             variant="outline"
-            className="border-amber-500/40 bg-amber-500/10 font-normal"
+            className="border-status-blocked/40 bg-status-blocked-soft font-normal"
             data-testid="node-output-truncated"
           >
             truncated — clipped to fit
@@ -205,7 +205,7 @@ function OutputSection({ output }: { output: NodeOutputView }) {
           messages.map((m, i) => (
             <div key={i} className={i > 0 ? "border-t pt-2" : undefined}>
               {m.agentRef && (
-                <p className="mb-1 text-[10px] uppercase tracking-wide text-muted-foreground">
+                <p className="mb-1 text-3xs uppercase tracking-wide text-muted-foreground">
                   {m.agentRef}
                 </p>
               )}
@@ -227,7 +227,7 @@ function OutputSection({ output }: { output: NodeOutputView }) {
           <summary className="cursor-pointer text-xs text-muted-foreground">
             Show raw output
           </summary>
-          <pre className="mt-1 overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-[11px] leading-snug">
+          <pre className="mt-1 overflow-auto rounded-lg border bg-muted/40 p-2 font-mono text-2xs leading-snug">
             {JSON.stringify(output.value, null, 2)}
           </pre>
         </details>
@@ -240,7 +240,7 @@ function OutputSection({ output }: { output: NodeOutputView }) {
 function DetailField({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="space-y-1">
-      <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</p>
+      <p className="text-3xs uppercase tracking-wide text-muted-foreground">{label}</p>
       {children}
     </div>
   );

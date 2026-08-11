@@ -2,9 +2,9 @@ import { cn } from "@/lib/utils";
 import { lifecycle } from "@/lib/language";
 
 const TONE_STYLES: Record<string, { dot: string; text: string }> = {
-  live: { dot: "bg-emerald-500", text: "text-emerald-600 dark:text-emerald-400" },
-  idle: { dot: "bg-amber-500", text: "text-amber-600 dark:text-amber-400" },
-  stopped: { dot: "bg-rose-500", text: "text-rose-600 dark:text-rose-400" },
+  live: { dot: "bg-status-done", text: "text-status-done-text" },
+  idle: { dot: "bg-status-blocked", text: "text-status-blocked-text" },
+  stopped: { dot: "bg-status-failed", text: "text-status-failed-text" },
 };
 
 /** A small lifecycle indicator: a colored dot + plain-language label. */

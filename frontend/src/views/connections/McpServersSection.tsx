@@ -650,21 +650,21 @@ function McpHealthBadge({
   if (!health) {
     // Never probed — show only the non-secret auth hint (unchanged behavior).
     return authConfigured ? (
-      <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+      <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
         <Check className="size-3" /> auth set
       </span>
     ) : null;
   }
   if (health.status === "ok") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+      <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
         <Check className="size-3" /> ok · {health.toolCount} tool{health.toolCount === 1 ? "" : "s"}
       </span>
     );
   }
   if (health.status === "needs_config") {
     return (
-      <span className="inline-flex items-center gap-1 text-xs text-amber-600 dark:text-amber-400">
+      <span className="inline-flex items-center gap-1 text-xs text-status-blocked-text">
         <AlertTriangle className="size-3" /> needs config
       </span>
     );

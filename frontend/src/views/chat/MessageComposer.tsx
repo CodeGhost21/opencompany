@@ -171,7 +171,7 @@ export function MessageComposer({
                   onClick={() => setDeliverable(option.value)}
                   data-testid={`composer-deliverable-${option.value}`}
                   className={cn(
-                    "rounded-md px-2 py-1 text-[11px] font-medium transition-colors",
+                    "rounded-md px-2 py-1 text-2xs font-medium transition-colors",
                     deliverable === option.value
                       ? "bg-primary text-primary-foreground"
                       : "text-muted-foreground hover:text-foreground",
@@ -214,7 +214,7 @@ export function MessageComposer({
         </div>
       </div>
       {!compact && (
-        <p className="mt-1.5 px-1 text-[11px] text-muted-foreground">
+        <p className="mt-1.5 px-1 text-2xs text-muted-foreground">
           <kbd className="font-sans font-medium">Enter</kbd> to send ·{" "}
           <kbd className="font-sans font-medium">Shift+Enter</kbd> for a new line
         </p>

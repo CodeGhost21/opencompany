@@ -295,7 +295,7 @@ function MessageRow({
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
           <span className={cn("truncate text-sm", unread && "font-semibold")}>{sender(message)}</span>
-          <span className="shrink-0 text-[11px] text-muted-foreground">{formatTime(message.atMillis)}</span>
+          <span className="shrink-0 text-2xs text-muted-foreground">{formatTime(message.atMillis)}</span>
         </div>
         <p className={cn("truncate text-sm", unread ? "font-medium" : "text-muted-foreground")}>
           {message.outbound && <Send className="mr-1 inline size-3 align-[-1px]" aria-label="Sent" />}

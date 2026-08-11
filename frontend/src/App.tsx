@@ -1,10 +1,14 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { type CSSProperties, lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { Loader2 } from "lucide-react";
 
 import { signInWithHubToken, verifyCode } from "@/api/auth";
 import { embeddedHost } from "@/api/transport/desktop";
 import { ApiError } from "@/api/types";
-import { ConnectionRail } from "@/components/connection-rail";
+import {
+  CONNECTION_RAIL_WIDTH,
+  ConnectionRail,
+  connectionRailVisible,
+} from "@/components/connection-rail";
 import { resolveConfig } from "@/config";
 import {
   addConnection,
@@ -95,7 +99,51 @@ function clearHubResultFromUrl(): void {
   window.history.replaceState({}, "", window.location.pathname + (query ? `?${query}` : ""));
 }
 
+/**
+ * The styleguide answers before anything else does.
+ *
+ * It reads no company and holds no client — it renders the stylesheet and
+ * nothing else — so putting it behind the sign-in gate would only mean that
+ * reviewing the design system required credentials for a running host. This
+ * way `#/styleguide` works against any build, including a static one.
+ *
+ * Checked before `resolveConfig()` so a console with no reachable host still
+ * serves it.
+ */
+function isStyleguideRoute(): boolean {
+  return window.location.hash.replace(/^#\/?/, "").split("?")[0] === "styleguide";
+}
+
 export function App() {
+  /**
+   * Tracked rather than read once, so `#/styleguide` typed into the address
+   * bar of a *running* console switches to it. Without the listener the shell
+   * below would keep the screen, and its own router — which does not know
+   * this route — would canonicalize the unknown hash straight back to
+   * `#/overview`, making the styleguide reachable only by a full reload.
+   */
+  const [styleguide, setStyleguide] = useState(isStyleguideRoute);
+  useEffect(() => {
+    const onHash = () => setStyleguide(isStyleguideRoute());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+
+  if (styleguide) {
+    return (
+      <Suspense fallback={null}>
+        <StandaloneStyleguide />
+      </Suspense>
+    );
+  }
+  return <Console />;
+}
+
+const StandaloneStyleguide = lazy(() =>
+  import("@/views/StyleguideView").then((m) => ({ default: m.StyleguideView })),
+);
+
+function Console() {
   const config = useMemo(() => resolveConfig(), []);
   /**
    * The bootstrap connection.
@@ -275,7 +323,21 @@ export function App() {
           void probe(id);
         }}
       />
-      <div className="min-w-0 flex-1">
+      {/* `--oc-rail-inset` tells the shell's `position: fixed` sidebar where
+          this column actually starts. A fixed element positions against the
+          viewport, so without it the sidebar pins to 0 and slides under the
+          rail — see the note on `sidebar-container`. Zero when no rail is
+          drawn, which is the ordinary single-host web deployment. */}
+      <div
+        className="min-w-0 flex-1"
+        style={
+          {
+            "--oc-rail-inset": connectionRailVisible(connections.length)
+              ? CONNECTION_RAIL_WIDTH
+              : "0px",
+          } as CSSProperties
+        }
+      >
         {active && client && (
           // Keyed by connection: switching hosts remounts rather than
           // reconciling, so no view can carry one host's in-flight state into

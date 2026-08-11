@@ -84,17 +84,17 @@ export function NodeConfigFields({
               onBlurValidate={(v) => onValidate(spec.key, v)}
             />
             {error && (
-              <p id={errorId} className="text-[11px] leading-snug text-destructive">
+              <p id={errorId} className="text-2xs leading-snug text-destructive">
                 {error}
               </p>
             )}
             {spec.hint && (
-              <p className="text-[10px] leading-snug text-muted-foreground">{spec.hint}</p>
+              <p className="text-3xs leading-snug text-muted-foreground">{spec.hint}</p>
             )}
           </div>
         );
       })}
-      {note && <p className="text-[10px] leading-snug text-muted-foreground">{note}</p>}
+      {note && <p className="text-3xs leading-snug text-muted-foreground">{note}</p>}
     </div>
   );
 }

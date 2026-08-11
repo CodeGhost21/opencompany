@@ -829,7 +829,7 @@ export function WorkflowCreateDialog({
               placeholder="e.g. campaign_pipeline"
             />
             {editing && (
-              <p className="text-[11px] leading-snug text-muted-foreground">
+              <p className="text-2xs leading-snug text-muted-foreground">
                 A workflow&apos;s id can&apos;t change. It keys the saved graph, its
                 schedule and its run history.
               </p>
@@ -977,7 +977,7 @@ export function WorkflowCreateDialog({
                     >
                       <div className="min-w-0">
                         <p className="truncate text-sm">{rev.name}</p>
-                        <p className="text-[11px] text-muted-foreground">
+                        <p className="text-2xs text-muted-foreground">
                           {relativeTime(rev.createdAtMillis)}
                         </p>
                       </div>
@@ -1027,7 +1027,7 @@ export function WorkflowCreateDialog({
 function FieldError({ id, message }: { id: string; message?: string }) {
   if (!message) return null;
   return (
-    <p id={id} className="text-[11px] leading-snug text-destructive">
+    <p id={id} className="text-2xs leading-snug text-destructive">
       {message}
     </p>
   );
@@ -1192,7 +1192,7 @@ function NodeRow({
               </>
             )}
             {node.destinationKind === "email" && (
-              <p className="text-[11px] leading-snug text-muted-foreground">
+              <p className="text-2xs leading-snug text-muted-foreground">
                 Only sends if this company grants email and the recipient has
                 already written in.
               </p>
@@ -1296,7 +1296,7 @@ function ScheduleField({
       )}
       <FieldError id={errorId} message={error} />
       {(showCustom || schedule) && (
-        <p className="text-[10px] text-muted-foreground">
+        <p className="text-3xs text-muted-foreground">
           5-field cron. Times are UTC.
         </p>
       )}

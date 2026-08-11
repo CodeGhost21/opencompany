@@ -42,19 +42,41 @@ interface Props {
 /** How a connection's state reads, and what colour says so. */
 const STATUS_COPY: Record<ConnectionStatus, { label: string; dot: string }> = {
   connecting: { label: "Connecting…", dot: "bg-muted-foreground/50" },
-  live: { label: "Connected", dot: "bg-emerald-500" },
-  degraded: { label: "Partly available", dot: "bg-amber-500" },
+  live: { label: "Connected", dot: "bg-status-done" },
+  degraded: { label: "Partly available", dot: "bg-status-blocked" },
   down: { label: "Unreachable", dot: "bg-destructive" },
-  unauthenticated: { label: "Sign-in needed", dot: "bg-amber-500" },
+  unauthenticated: { label: "Sign-in needed", dot: "bg-status-blocked" },
 };
+
+/**
+ * How wide the rail is, as a CSS length — `w-14`.
+ *
+ * Exported because the app shell's sidebar is `position: fixed` and therefore
+ * positions against the viewport, not against the flex column it lives in. It
+ * has to be told how far in that column starts, and this is the only place
+ * that knows.
+ */
+export const CONNECTION_RAIL_WIDTH = "3.5rem";
+
+/**
+ * Whether the rail is on screen.
+ *
+ * One host is the ordinary web deployment, and a rail listing exactly one
+ * thing is furniture. It appears when there is a choice to make.
+ *
+ * Exported so the shell can offset the sidebar by the same condition that
+ * draws the rail — two copies of this rule is how the sidebar ends up clipped
+ * under it again.
+ */
+export function connectionRailVisible(count: number): boolean {
+  return count >= 2;
+}
 
 export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {
   const [adding, setAdding] = useState(false);
   const [url, setUrl] = useState("");
 
-  // One host is the ordinary web deployment, and a rail listing exactly one
-  // thing is furniture. It appears when there is a choice to make.
-  if (connections.length < 2) return null;
+  if (!connectionRailVisible(connections.length)) return null;
 
   return (
     <nav

@@ -189,7 +189,7 @@ export function Overview({ client, company }: Props) {
       {/* The snapshot line: what the page is, when it was taken, and the way to
           take another. The graph is not live, and says so rather than leaving an
           operator to assume a stale wheel is the current company. */}
-      <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-[11px] text-muted-foreground shadow-sm backdrop-blur">
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1.5 rounded-md border bg-background/90 px-2 py-1 text-2xs text-muted-foreground shadow-sm backdrop-blur">
         <span className="truncate">
           {sources.fetchedAt === null
             ? "Loading…"
