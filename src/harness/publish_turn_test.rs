@@ -353,6 +353,7 @@ fn brain_with(
         overlay_budgets: Vec::new(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     };
     (
         // Issue #339: the run store is wired here so a dispatch carrying a

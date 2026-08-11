@@ -141,6 +141,17 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_budgets: sample_budget_overrides(),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
+        setup: Some(sample_setup_answers()),
+    }
+}
+
+/// The answers a first-run setup stored. Non-empty in all three fields so a
+/// backend that persisted only some of them fails the round-trip below.
+fn sample_setup_answers() -> crate::company::setup::SetupAnswers {
+    crate::company::setup::SetupAnswers {
+        industry: "E-commerce — homeware".to_string(),
+        team_hint: "plus customer support".to_string(),
+        automate: "Meta ads, order dispatch".to_string(),
     }
 }
 
@@ -623,6 +634,14 @@ pub async fn assert_export_totality(
         loaded.template_provenance,
         Some(sample_provenance()),
         "template provenance did not round-trip through the store"
+    );
+    // First-run setup's answers persist for every backend too. Phase 2 builds
+    // this company's workflows from them, so a backend that dropped them would
+    // make the operator describe their business a second time.
+    assert_eq!(
+        loaded.setup,
+        Some(sample_setup_answers()),
+        "setup answers did not round-trip through the store"
     );
     // Issue #168: the runtime-authored graph bodies round-trip too — an export
     // that dropped them would lose every console-created workflow.

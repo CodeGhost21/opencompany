@@ -2474,6 +2474,25 @@ pub struct CompanyRecord {
     /// loading without a migration.
     #[serde(default)]
     pub template_provenance: Option<TemplateProvenance>,
+    /// What the operator told first-run setup about their business, stored the
+    /// moment they answer (see `docs/spec/runtime/company-setup.md`).
+    ///
+    /// Kept because **Phase 2 must not ask again.** Phase 1 turns these answers
+    /// into a roster; the workflow phase turns the same answers into workflows,
+    /// and re-interrogating someone who already described their business would
+    /// undo the thing setup exists to buy.
+    ///
+    /// Written even when the operator abandons the flow before the roster
+    /// lands: they told us something true about their company, and it costs
+    /// nothing to remember it. It is deliberately **not** the "has setup run?"
+    /// flag — that question is answered by whether the roster is empty, so a
+    /// record stamped by an abandoned run cannot suppress the offer to try
+    /// again (decision D4).
+    ///
+    /// `None` for every company provisioned before setup existed; the
+    /// `#[serde(default)]` keeps those records loading without a migration.
+    #[serde(default)]
+    pub setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 impl CompanyRecord {
@@ -3665,6 +3684,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 

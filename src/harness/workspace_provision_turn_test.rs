@@ -239,6 +239,7 @@ fn record(overlays: Vec<OverlayAgent>) -> CompanyRecord {
         overlay_budgets: Vec::new(),
         disabled_workflows: Vec::new(),
         template_provenance: None,
+        setup: None,
     }
 }
 

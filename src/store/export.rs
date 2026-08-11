@@ -135,6 +135,13 @@ struct BundleMeta {
     /// importing cleanly (they decode to `None` — no migration).
     #[serde(default)]
     template_provenance: Option<TemplateProvenance>,
+    /// What the operator told first-run setup about their business, carried
+    /// through the bundle so an export→import keeps it — Phase 2 builds
+    /// workflows from these answers, and a company that lost them on a restore
+    /// would be asked to describe itself twice.
+    /// `#[serde(default)]` keeps older bundles importing cleanly.
+    #[serde(default)]
+    setup: Option<crate::company::setup::SetupAnswers>,
 }
 
 /// One exported context chunk: its content address, label, and body.
@@ -159,6 +166,7 @@ struct BundleContents {
     manifest: CompanyManifest,
     lifecycle: String,
     template_provenance: Option<TemplateProvenance>,
+    setup: Option<crate::company::setup::SetupAnswers>,
     ledger: Vec<LedgerEntry>,
     events: Vec<StoredEvent>,
     traces: Vec<CompressedTrace>,
@@ -225,6 +233,7 @@ impl BundleContents {
             manifest: record.manifest,
             lifecycle: record.lifecycle,
             template_provenance: record.template_provenance,
+            setup: record.setup,
             ledger: record.ledger,
             events,
             traces,
@@ -266,6 +275,7 @@ impl BundleContents {
                 overlay_budgets: self.overlay_budgets.clone(),
                 disabled_workflows: self.disabled_workflows.clone(),
                 template_provenance: self.template_provenance.clone(),
+                setup: self.setup.clone(),
             })
             .await?;
         for entry in &self.ledger {
@@ -310,6 +320,7 @@ impl BundleContents {
             overlay_budgets: self.overlay_budgets.clone(),
             disabled_workflows: self.disabled_workflows.clone(),
             template_provenance: self.template_provenance.clone(),
+            setup: self.setup.clone(),
         };
         write_file(
             &dest.join(META_JSON),
@@ -407,6 +418,7 @@ impl BundleContents {
             manifest,
             lifecycle: meta.lifecycle,
             template_provenance: meta.template_provenance,
+            setup: meta.setup,
             ledger,
             events,
             traces,
@@ -943,6 +955,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1021,6 +1034,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1148,6 +1162,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1235,6 +1250,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: Some(provenance.clone()),
+            setup: None,
         })
         .await
         .unwrap();
@@ -1346,6 +1362,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1502,6 +1519,7 @@ mod test {
             // import must never move on its own.
             disabled_workflows: vec!["digest".to_string()],
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -1583,6 +1601,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();

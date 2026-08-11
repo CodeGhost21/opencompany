@@ -2449,6 +2449,7 @@ description = "Runs Acme."
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -2603,6 +2604,7 @@ description = "Builds it."
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -4593,6 +4595,7 @@ members = ["engineer"]
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -4744,6 +4747,7 @@ name = "Design"
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("design"), Some("engineer".to_string()));
@@ -4804,6 +4808,7 @@ members = ["eng1", "eng2"]
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         let (brain, _tasks) = brain_over(dir.path(), record);
         assert_eq!(brain.desk_lead("eng"), Some("cto".to_string()));
@@ -4860,6 +4865,7 @@ members = ["eng1", "eng2"]
                 overlay_budgets: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();

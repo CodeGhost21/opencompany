@@ -1385,6 +1385,10 @@ impl RuntimeBuilder {
             .as_ref()
             .and_then(|r| r.template_provenance.clone())
             .or_else(|| self.template_provenance.clone());
+        // First-run setup's answers, carried forward exactly like the provenance
+        // above: a rebuild must not lose what the operator told us about their
+        // business, or the workflow phase would have to ask again.
+        let setup = existing.as_ref().and_then(|r| r.setup.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
         let brain: Arc<dyn Brain> = match self.brain {
@@ -1684,6 +1688,7 @@ impl RuntimeBuilder {
                                 overlay_budgets: overlay_budgets.clone(),
                                 disabled_workflows: disabled_workflows.clone(),
                                 template_provenance: template_provenance.clone(),
+                                setup: setup.clone(),
                             };
                             // Workflow agent nodes execute on the same pool as the
                             // brain — clone before both moves into `HarnessBrain`.
@@ -1815,6 +1820,7 @@ impl RuntimeBuilder {
                 overlay_budgets,
                 disabled_workflows,
                 template_provenance,
+                setup,
             })
             .await?;
 
@@ -3725,6 +3731,7 @@ mod test {
                 overlay_budgets: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();

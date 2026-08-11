@@ -2137,6 +2137,7 @@ mod test {
                 overlay_budgets: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
@@ -2260,6 +2261,7 @@ mod test {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         };
         FsCompanyStore::new(home.to_path_buf())
             .save(&record)
@@ -2376,6 +2378,7 @@ mod test {
                 overlay_budgets: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();

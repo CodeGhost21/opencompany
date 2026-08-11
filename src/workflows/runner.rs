@@ -839,6 +839,7 @@ description = "Runs Acme."
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 
@@ -926,6 +927,7 @@ allow = ["*"]
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         }
     }
 

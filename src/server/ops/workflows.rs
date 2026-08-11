@@ -2398,6 +2398,7 @@ mod tests {
                     overlay_budgets: Vec::new(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -2474,6 +2475,7 @@ mod tests {
                     overlay_budgets: Vec::new(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -4015,6 +4017,7 @@ mod tests {
                     overlay_budgets: Vec::new(),
                     disabled_workflows: Vec::new(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -4183,6 +4186,7 @@ label = "ok"
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();
@@ -4777,6 +4781,7 @@ label = "ok"
                     disabled_workflows: Vec::new(),
                     lifecycle: "running".to_string(),
                     template_provenance: None,
+                    setup: None,
                 })
                 .await
                 .unwrap();

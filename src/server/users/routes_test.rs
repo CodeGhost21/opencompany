@@ -87,6 +87,7 @@ async fn state_from(
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();
@@ -653,6 +654,7 @@ async fn a_https_deployment_marks_the_cookie_secure() {
             overlay_budgets: Vec::new(),
             disabled_workflows: Vec::new(),
             template_provenance: None,
+            setup: None,
         })
         .await
         .unwrap();

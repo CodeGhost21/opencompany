@@ -509,6 +509,7 @@ mod tests {
                 overlay_budgets: Vec::new(),
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
+                setup: None,
             })
             .await
             .unwrap();
