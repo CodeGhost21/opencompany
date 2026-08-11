@@ -2646,6 +2646,96 @@ mod test {
         let _ = store.db.drop().await;
     }
 
+    /// The boot sweep reclaims a payload whose node document never landed.
+    ///
+    /// This is the crash the write ordering deliberately allows: blob first,
+    /// document second, so an interrupted `create_binary` leaves bytes nothing
+    /// references. Seeded here directly — uploading to the bucket without ever
+    /// inserting the node — because that is precisely the state a crash between
+    /// the two writes produces, and it is not reachable through the port.
+    ///
+    /// The node-backed blob beside it is the half that must be left alone: a
+    /// sweep that reclaimed live payloads would be far worse than the leak it
+    /// fixes.
+    #[tokio::test]
+    async fn the_boot_sweep_reclaims_orphaned_blobs_and_spares_live_ones() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("sweep-co");
+
+        // A live binary node, written through the port.
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "keep".to_string(),
+            name: "keep.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        crate::ports::workspace::WorkspaceStore::create_binary(&*s, &company, &node, b"live-bytes")
+            .await
+            .unwrap();
+
+        // …and a dangling one: the bytes of an interrupted create.
+        s.put_blob(&company, "vanished", "ghost.png", b"orphan-bytes")
+            .await
+            .unwrap();
+        // A blob with no metadata at all — a shape this store never writes, and
+        // therefore unmatchable to any node, so it is an orphan by definition.
+        {
+            use futures::io::AsyncWriteExt;
+            let mut up = s
+                .blobs()
+                .open_upload_stream("nometa.bin")
+                .await
+                .expect("upload");
+            up.write_all(b"no-metadata").await.unwrap();
+            up.close().await.unwrap();
+        }
+
+        let before = s.blobs().find(doc! {}).await.unwrap();
+        assert_eq!(
+            before.try_collect::<Vec<_>>().await.unwrap().len(),
+            3,
+            "two orphans and one live payload are staged"
+        );
+
+        // Constructing a store over the same database runs the sweep.
+        let rebooted = MongoStore::from_database(s.db.clone()).await.unwrap();
+
+        let files = rebooted
+            .blobs()
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(files.len(), 1, "both orphans are reclaimed");
+        assert_eq!(files[0].filename.as_deref(), Some("keep.png"));
+
+        // The live node still serves its bytes — the sweep did not touch it.
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&rebooted, &company, "keep")
+                .await
+                .unwrap()
+                .expect("the live payload survives the sweep");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"live-bytes".to_vec());
+
+        drop_db(&s).await;
+    }
+
     /// Shared-single-DB namespacing: two tenants registering the same template
     /// name land distinct namespaced ids in one database, so the `companies`
     /// unique index never conflicts, and the `owners` rows carry the right
@@ -2849,6 +2939,17 @@ mod test {
     async fn conformance_workspace_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// The reason issue #553 could not defer the Mongo backend: hosted tenants
+    /// run MongoDB, and this is the only lane where the GridFS path — and the
+    /// 17 MiB case that proves the 16 MB BSON document cap is not in play —
+    /// actually executes.
+    #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_binary_store(s.clone()).await;
         drop_db(&s).await;
     }
 

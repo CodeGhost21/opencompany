@@ -2810,6 +2810,11 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workspace_binary_store() {
+        conformance::assert_workspace_binary_store(store()).await;
+    }
+
+    #[tokio::test]
     async fn one_store_serves_every_port_through_arc() {
         // A single Arc<SqliteStore> satisfies all five port trait objects — the
         // shape a platform-mode `build_runtime` injects into every `with_*`.
