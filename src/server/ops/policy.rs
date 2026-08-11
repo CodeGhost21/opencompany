@@ -534,6 +534,17 @@ mod tests {
     /// Every tier the runtime accepts has console text, so none is
     /// unselectable (issue #562).
     ///
+    /// **This assertion can no longer fail on its own, and that is recorded
+    /// rather than hidden.** It compares `selectable_tiers()` against
+    /// `POLICY_MODES`, and since #560 landed `auto` the text table holds exactly
+    /// those four tiers — so deleting the `POLICY_MODES` filter entirely leaves
+    /// this green. A revert-and-check confirmed it.
+    ///
+    /// It is kept because the invariant it states is real and will bite the next
+    /// time a tier is added to `POLICY_MODES` without text. The filter itself is
+    /// pinned by `a_tier_the_host_does_not_accept_is_not_offered`, which drives
+    /// `tiers_for` from synthetic lists and does fail against that revert.
+    ///
     /// Asserted in **one** direction on purpose. A `POLICY_MODES` entry with no
     /// text here is a tier an operator cannot pick — the same class of gap as a
     /// mode the manifest validator rejects, and equally invisible, since every
