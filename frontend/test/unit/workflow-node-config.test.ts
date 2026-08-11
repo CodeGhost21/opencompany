@@ -27,7 +27,7 @@ import {
  */
 
 describe("hasConfigForm", () => {
-  it("covers the five withheld kinds plus condition (#661 M1)", () => {
+  it("covers the five withheld kinds plus condition (#661 M1) and transform (#661 L3)", () => {
     for (const kind of [
       "tool_call",
       "http_request",
@@ -37,10 +37,14 @@ describe("hasConfigForm", () => {
       // `condition` is a core palette kind, but the host now REQUIRES
       // `config.field` at author time (#661 M1), so it carries a form too.
       "condition",
+      // `transform` is also a core palette kind; its `config.set` map had no
+      // control, so an authored transform lowered to a silent identity node
+      // (#661 L3). It carries a form now.
+      "transform",
     ]) {
       expect(hasConfigForm(kind), kind).toBe(true);
     }
-    for (const kind of ["trigger", "agent", "merge", "transform", "output"]) {
+    for (const kind of ["trigger", "agent", "merge", "output"]) {
       expect(hasConfigForm(kind), kind).toBe(false);
       expect(configFieldSpecs(kind)).toEqual([]);
     }
@@ -51,6 +55,16 @@ describe("hasConfigForm", () => {
     expect(specs).toHaveLength(1);
     expect(specs[0].key).toBe("field");
     expect(specs[0].required).toBe(true);
+  });
+
+  it("transform exposes a single optional object `set` field (#661 L3)", () => {
+    const specs = configFieldSpecs("transform");
+    expect(specs).toHaveLength(1);
+    expect(specs[0].key).toBe("set");
+    // OPTIONAL — an absent/empty `set` is a valid engine passthrough.
+    expect(specs[0].required).toBeFalsy();
+    // The engine reads `set` only via `as_object`, so the shape gate is `object`.
+    expect(specs[0].jsonShape).toBe("object");
   });
 });
 
@@ -118,9 +132,49 @@ describe("configFromDraft — valid drafts emit exactly the engine keys", () => 
     });
   });
 
+  it("transform: set map, empty draft omits config entirely (#661 L3)", () => {
+    expect(configFromDraft("transform", { set: '{ "greeting": "=item.name" }' })).toEqual({
+      set: { greeting: "=item.name" },
+    });
+    // An empty set is a passthrough → the whole config is omitted, never `{}`.
+    expect(configFromDraft("transform", { set: "" })).toBeUndefined();
+    // An explicit empty object is authored through verbatim (still a passthrough).
+    expect(configFromDraft("transform", { set: "{}" })).toEqual({ set: {} });
+  });
+
+  it("tool_call: connection_ref rides alongside slug/args, omitted when blank (#661 M6)", () => {
+    expect(
+      configFromDraft("tool_call", {
+        slug: "slack.post",
+        args: '{ "text": "hi" }',
+        connection_ref: "composio:slack:acct_1",
+      }),
+    ).toEqual({ slug: "slack.post", args: { text: "hi" }, connection_ref: "composio:slack:acct_1" });
+
+    // Whitespace-only connection_ref is trimmed to empty and omitted.
+    expect(
+      configFromDraft("tool_call", { slug: "slack.post", args: "", connection_ref: "  " }),
+    ).toEqual({ slug: "slack.post" });
+  });
+
+  it("http_request: connection_ref rides alongside method/url, omitted when blank (#661 M6)", () => {
+    expect(
+      configFromDraft("http_request", {
+        method: "POST",
+        url: "https://api.test/x",
+        connection_ref: "http:acct_2",
+      }),
+    ).toEqual({ method: "POST", url: "https://api.test/x", connection_ref: "http:acct_2" });
+
+    expect(
+      configFromDraft("http_request", { method: "GET", url: "u", connection_ref: "" }),
+    ).toEqual({ method: "GET", url: "u" });
+  });
+
   it("an all-empty draft serializes to undefined (config omitted from the body)", () => {
     expect(configFromDraft("switch", { field: "", expression: "" })).toBeUndefined();
     expect(configFromDraft("http_request", { method: "", url: "" })).toBeUndefined();
+    expect(configFromDraft("transform", { set: "" })).toBeUndefined();
   });
 });
 
@@ -139,6 +193,19 @@ describe("hydrate → serialize round-trips", () => {
     { kind: "switch", config: { field: "kind" } },
     { kind: "output_parser", config: { schema: { type: "object" }, auto_fix: false } },
     { kind: "sub_workflow", config: { workflow_id: "child-1" } },
+    // `transform` flipping to a config form (#661 L3) means saved transform
+    // configs now decompose → rebuild on every save; that MUST be lossless.
+    { kind: "transform", config: { set: { greeting: "=item.name", tag: "fixed" } } },
+    // connection_ref is a known key now (#661 M6), so it round-trips through the
+    // draft — not the extra bag — on both integration kinds.
+    {
+      kind: "tool_call",
+      config: { slug: "gmail.send", args: { to: "=item.email" }, connection_ref: "acct_9" },
+    },
+    {
+      kind: "http_request",
+      config: { method: "GET", url: "u", connection_ref: "http:acct_2" },
+    },
   ];
 
   for (const { kind, config } of cases) {
@@ -149,15 +216,42 @@ describe("hydrate → serialize round-trips", () => {
   }
 });
 
-describe("unknown-key preservation — the data-loss guard", () => {
-  it("keeps an orchestrator's connection_ref on a tool_call across an edit", () => {
+describe("connection_ref is authorable, not an extra-bag rider (#661 M6)", () => {
+  it("hydrates a tool_call connection_ref into the draft, leaving extra empty", () => {
     const config = { slug: "gmail.send", connection_ref: "acct_42", args: { to: "x" } };
     const { draft, extra } = configDraftFrom("tool_call", config);
-    // The unknown key lands in `extra`, not in a form field.
-    expect(extra).toEqual({ connection_ref: "acct_42" });
+    // Now a known key: it lands in the draft field, NOT the extra bag.
+    expect(draft.connection_ref).toBe("acct_42");
+    expect(extra).toEqual({});
     expect(draft.slug).toBe("gmail.send");
-    // …and rides back out verbatim on serialize.
+    // …and serializes back as a top-level config key.
     expect(configFromDraft("tool_call", draft, extra)).toEqual(config);
+  });
+
+  it("blanking connection_ref on an edit deletes the key", () => {
+    const config = { slug: "gmail.send", connection_ref: "acct_42" };
+    const { draft, extra } = configDraftFrom("tool_call", config);
+    draft.connection_ref = "";
+    expect(configFromDraft("tool_call", draft, extra)).toEqual({ slug: "gmail.send" });
+  });
+
+  it("hydrates an http_request connection_ref into the draft, leaving extra empty", () => {
+    const config = { method: "GET", url: "u", connection_ref: "http:acct_2" };
+    const { draft, extra } = configDraftFrom("http_request", config);
+    expect(draft.connection_ref).toBe("http:acct_2");
+    expect(extra).toEqual({});
+    expect(configFromDraft("http_request", draft, extra)).toEqual(config);
+  });
+});
+
+describe("unknown-key preservation — the data-loss guard", () => {
+  it("keeps an unknown sibling key on a transform across an edit (#661 L3)", () => {
+    // transform gaining a config form must not start dropping unknown siblings.
+    const config = { set: { g: "=item.name" }, mystery: "keep-me" };
+    const { draft, extra } = configDraftFrom("transform", config);
+    expect(draft.set).toBe(JSON.stringify({ g: "=item.name" }, null, 2));
+    expect(extra).toEqual({ mystery: "keep-me" });
+    expect(configFromDraft("transform", draft, extra)).toEqual(config);
   });
 
   it("keeps a sub_workflow's execution/concurrency/inputs", () => {
@@ -242,6 +336,19 @@ describe("configFieldProblem — blur-time JSON check", () => {
       );
     }
   });
+
+  it("rejects a transform set that is valid JSON but not an object (#661 L3)", () => {
+    const setSpec = configFieldSpecs("transform").find((s) => s.key === "set")!;
+    // The engine reads `set` via `as_object`, so arrays/scalars are silently
+    // ignored at run time — the shape gate rejects them at author time instead.
+    for (const bad of ["[]", "42", "true", '"a string"', "null"]) {
+      expect(configFieldProblem(setSpec, bad)).toMatch(/must be a JSON object/);
+    }
+    expect(configFieldProblem(setSpec, "{ not json")).toMatch(/must be valid JSON/);
+    expect(configFieldProblem(setSpec, '{ "greeting": "=item.name" }')).toBeNull();
+    // Empty is never nagged on blur.
+    expect(configFieldProblem(setSpec, "")).toBeNull();
+  });
 });
 
 describe("configDraftProblem — submit-time gate", () => {
@@ -308,6 +415,16 @@ describe("configDraftProblem — submit-time gate", () => {
     expect(configDraftProblem("sub_workflow", "flow-1", { workflow_id: "" })).toMatch(
       /needs the id/,
     );
+  });
+
+  it("rejects a transform set whose shape is wrong at submit (#661 L3)", () => {
+    expect(configDraftProblem("transform", "n1", { set: "[]" })).toMatch(/must be a JSON object/);
+    expect(configDraftProblem("transform", "n1", { set: "{ bad" })).toMatch(/must be valid JSON/);
+    // An empty set is a valid passthrough — never blocked.
+    expect(configDraftProblem("transform", "n1", { set: "" })).toBeNull();
+    expect(
+      configDraftProblem("transform", "n1", { set: '{ "greeting": "=item.name" }' }),
+    ).toBeNull();
   });
 
   it("is a no-op for a kind without a config form", () => {
