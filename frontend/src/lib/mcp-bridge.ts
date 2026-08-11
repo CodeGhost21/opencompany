@@ -38,3 +38,24 @@ export function mcpBridgeState(status: CapabilityStatusDto | null | undefined): 
   if (!status || typeof status.mcpInBuild !== "boolean") return "unknown";
   return status.mcpInBuild ? "present" : "absent";
 }
+
+/**
+ * What to tell the operator after a server is added.
+ *
+ * The success path is where the old claim did its damage: a banner stating that
+ * no agent can use tool servers here is worth nothing if the confirmation
+ * toast, fired at the moment the operator acts, still promises that agents pick
+ * the server up. On a build with no bridge the add genuinely succeeded — the
+ * server is stored, and it survives the rebuild that adds the feature — so this
+ * says that, rather than dressing a success up as a failure.
+ *
+ * `unknown` gets the ordinary message: the host has not said the bridge is
+ * missing, and the pickup promise is the host's own (`NEXT_TURN_NOTE`, since
+ * issue #566 — the console said "next rebuild" for a while after the runtime
+ * stopped needing one).
+ */
+export function mcpAddedMessage(name: string, bridge: McpBridgeState): string {
+  return bridge === "absent"
+    ? `Added ${name}. It is stored, but no agent can call it until this deployment is rebuilt with the MCP bridge.`
+    : `Added ${name}. Agents pick it up on their next turn.`;
+}

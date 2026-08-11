@@ -25,7 +25,7 @@ import {
   updateMcpServer,
 } from "@/api/mcp";
 import { ApiError, type McpHealth, type McpServer, type McpToolInfo } from "@/api/types";
-import { type McpBridgeState, mcpBridgeState } from "@/lib/mcp-bridge";
+import { type McpBridgeState, mcpAddedMessage, mcpBridgeState } from "@/lib/mcp-bridge";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -209,7 +209,10 @@ export function McpServersSection({ client, company, canManage, chrome = "inline
       } else if (res.warning) {
         setAddError(res.warning);
       } else {
-        toast.success(`Added ${name.trim()}. Agents pick it up on the next rebuild.`);
+        // The success path has to agree with the banner (issue #567): a toast
+        // promising pickup, fired at the moment the operator acts, undoes a
+        // statement sitting a few pixels above it.
+        toast.success(mcpAddedMessage(name.trim(), bridge));
       }
       setName("");
       setEndpoint("");

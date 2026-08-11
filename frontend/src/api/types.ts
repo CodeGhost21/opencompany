@@ -756,9 +756,10 @@ export interface McpServer {
 }
 
 /**
- * A mutating MCP response: the resulting server, a rebuild reminder, the live
- * probe result (absent on a non-`openhuman` host), and any non-blocking
- * endpoint advisory.
+ * A mutating MCP response: the resulting server, the host's pickup note (since
+ * issue #566 that is next-turn pickup with no restart, not a rebuild reminder),
+ * the live probe result (absent on a non-`openhuman` host), and any
+ * non-blocking endpoint advisory.
  */
 export interface McpMutationResponse {
   server: McpServer;

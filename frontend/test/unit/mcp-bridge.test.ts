@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { mcpBridgeState } from "@/lib/mcp-bridge";
+import { mcpAddedMessage, mcpBridgeState } from "@/lib/mcp-bridge";
 import type { CapabilityStatusDto } from "@/api/types";
 
 /**
@@ -43,5 +43,36 @@ describe("mcpBridgeState", () => {
     // the bridge is missing — the same silence as omitting it.
     const malformed = { configured: false, mcpInBuild: null } as unknown as CapabilityStatusDto;
     expect(mcpBridgeState(malformed)).toBe("unknown");
+  });
+});
+
+/**
+ * The add-success message, which is where the screen's other claim used to
+ * live: "Agents pick it up on the next rebuild" — fired at the moment the
+ * operator acts, and false twice over on a build with no bridge (nothing picks
+ * it up, and since #566 a rebuild is not how pickup happens either).
+ */
+describe("mcpAddedMessage", () => {
+  it("confirms the add without promising pickup when the bridge is missing", () => {
+    const message = mcpAddedMessage("notion", "absent");
+    expect(message).toContain("notion");
+    // Still a success: the server IS stored, and survives the rebuild that adds
+    // the feature. Saying otherwise would report a working add as a failure.
+    expect(message).toMatch(/stored/i);
+    expect(message).not.toMatch(/agents pick it up/i);
+  });
+
+  it("promises next-turn pickup when the bridge is present", () => {
+    const message = mcpAddedMessage("notion", "present");
+    expect(message).toMatch(/next turn/i);
+    // #566: pickup no longer needs a restart, and the console said it did long
+    // after the host stopped saying so.
+    expect(message).not.toMatch(/rebuild|restart/i);
+  });
+
+  it("treats an unanswering host as ordinary, not as broken", () => {
+    // Unknown is not absence: claiming no agent can use the server, on a host
+    // that never said so, is the same class of lie in the other direction.
+    expect(mcpAddedMessage("notion", "unknown")).toBe(mcpAddedMessage("notion", "present"));
   });
 });
