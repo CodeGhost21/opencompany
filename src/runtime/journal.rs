@@ -388,16 +388,21 @@ pub struct ApprovalOrigin {
     ///
     /// **The root, not the raising message.** The console folds a transcript
     /// one level deep — a reply whose parent is itself a reply renders nowhere
-    /// (`frontend/src/views/chat/model.ts`, pinned by the timeline unit test
-    /// "drops a reply whose parent is not in this channel"). So a continuation
-    /// parented to the raising *message* would vanish precisely when that
-    /// message is itself a thread reply, which is the case this issue exists to
-    /// fix. Parenting to the root is also what the chat route already does for
-    /// an ordinary answer — "the answer joins the thread its question was asked
-    /// in, rather than opening one under the question" (issue #364,
-    /// `crate::server::operator`) — so this is that established rule applied to
-    /// the continuation, not a second convention. It is stable under an edit of
-    /// the raising message for the same reason.
+    /// (`buildTimeline` in `frontend/src/views/chat/model.ts`, pinned by the
+    /// timeline unit test "renders a grandchild nowhere: the fold is exactly
+    /// one level deep" in `frontend/test/unit/chat-timeline.test.ts`). That
+    /// test exists for this decision: without it, growing a second fold level
+    /// in the console would make the choice below unnecessary and nothing would
+    /// say so — the routing would survive as an unexplained convention.
+    ///
+    /// So a continuation parented to the raising *message* would vanish
+    /// precisely when that message is itself a thread reply, which is the case
+    /// this issue exists to fix. Parenting to the root is also what the chat
+    /// route already does for an ordinary answer — "the answer joins the thread
+    /// its question was asked in, rather than opening one under the question"
+    /// (issue #364, `crate::server::operator`) — so this is that established
+    /// rule applied to the continuation, not a second convention. It is stable
+    /// under an edit of the raising message for the same reason.
     ///
     /// `None` for a park with no thread behind it — a message posted straight
     /// into a channel, a workflow delivery, a scheduler tick — and for every
