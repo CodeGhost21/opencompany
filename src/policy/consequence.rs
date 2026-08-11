@@ -400,14 +400,35 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
 /// might do anything, so it parks and it cannot be granted standing. Same for a
 /// slug whose toolkit has no catalogue, a missing or non-string `tool`
 /// argument, and — in a build without the harness compiled in — every slug.
+///
+/// ## Two different reasons for the same verdict
+///
+/// "The catalogue has never heard of this slug" and "these arguments carry no
+/// slug at all" both end in a send, and that is right — but only one of them is
+/// a caller bug. Issue #470 survived for as long as it did precisely because
+/// the two were indistinguishable from outside: fixtures named their action
+/// under a key nothing reads, every call fell through to the fallback, and the
+/// verdicts still looked plausible. The verdict stays cautious either way; the
+/// second case now says so in the log, via [`ActionKeyMiss`], so a caller
+/// building the wrong argument shape is visible rather than silently safe.
 fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
     let send = Consequence {
         group: EffectGroup::Send,
         reach: Reach::Consequence,
         standing: Standing::PerCall,
     };
-    let Some(slug) = args.get(COMPOSIO_ACTION_KEY).and_then(|v| v.as_str()) else {
-        return send;
+    let slug = match composio_action_slug(args) {
+        Ok(slug) => slug,
+        Err(miss) => {
+            tracing::warn!(
+                "[policy] a '{COMPOSIO_EXECUTE}' call carries no readable \
+                 '{COMPOSIO_ACTION_KEY}' argument ({}); classifying it as a send, which is \
+                 the cautious answer but not the one the catalogue would have given — the \
+                 caller is building an argument shape the tool's own schema rejects",
+                miss.describe()
+            );
+            return send;
+        }
     };
     if composio_action_is_read(slug) {
         // A read still reaches a third-party account, so `readonly` denies it
@@ -422,6 +443,57 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
     } else {
         send
     }
+}
+
+/// Why a `composio_execute` call carries no action slug this classifier can
+/// read (issue #470).
+///
+/// Every variant classifies as a send, so this changes no verdict. It exists so
+/// the log line can say *which* shape arrived: a caller that omits the key, one
+/// that sends a number where a slug belongs, and one naming an action the
+/// catalogue has never heard of are three different mistakes, and only the last
+/// is a legitimate call to an unclassified action.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionKeyMiss {
+    /// The arguments are not a JSON object at all.
+    NotAnObject,
+    /// An object, but with no [`COMPOSIO_ACTION_KEY`] property — the shape the
+    /// `tool_slug` fixtures of #470 had.
+    KeyAbsent,
+    /// The key is present but not a string.
+    NotAString,
+    /// The key is present and a string, but empty, so no lookup can succeed.
+    Empty,
+}
+
+impl ActionKeyMiss {
+    /// A short phrase for the log line, in the caller's terms.
+    pub(crate) fn describe(self) -> &'static str {
+        match self {
+            Self::NotAnObject => "the arguments are not an object",
+            Self::KeyAbsent => "the key is absent",
+            Self::NotAString => "the key is present but not a string",
+            Self::Empty => "the key is present but empty",
+        }
+    }
+}
+
+/// The action slug in a `composio_execute` call's arguments, or why there
+/// isn't one.
+pub(crate) fn composio_action_slug(args: &serde_json::Value) -> Result<&str, ActionKeyMiss> {
+    let Some(object) = args.as_object() else {
+        return Err(ActionKeyMiss::NotAnObject);
+    };
+    let Some(value) = object.get(COMPOSIO_ACTION_KEY) else {
+        return Err(ActionKeyMiss::KeyAbsent);
+    };
+    let Some(slug) = value.as_str() else {
+        return Err(ActionKeyMiss::NotAString);
+    };
+    if slug.trim().is_empty() {
+        return Err(ActionKeyMiss::Empty);
+    }
+    Ok(slug)
 }
 
 /// Which slice of a tool one standing grant is confined to (issue #457).
@@ -453,7 +525,10 @@ pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String>
     if !tool.eq_ignore_ascii_case(COMPOSIO_EXECUTE) {
         return None;
     }
-    let slug = args.get(COMPOSIO_ACTION_KEY).and_then(|v| v.as_str())?;
+    // Same reader as the classifier, so a call it could not read a slug out of
+    // cannot resolve a toolkit here either — a scoped grant refuses to admit
+    // `None`, which is the safe direction.
+    let slug = composio_action_slug(args).ok()?;
     composio_toolkit_of(slug)
 }
 
@@ -675,6 +750,62 @@ mod tests {
                 "an unclassifiable action must read as a send: {args}"
             );
             assert_eq!(verdict.standing, Standing::PerCall, "{args}");
+        }
+    }
+
+    /// Same verdict, different reasons — and the reasons are now separable
+    /// (issue #470). A slug the catalogue cannot place is a legitimate call to
+    /// an unclassified action; an argument shape with no readable slug is a
+    /// caller bug that the send verdict would otherwise hide, which is exactly
+    /// how the `tool_slug` fixtures passed for as long as they did.
+    #[test]
+    fn a_missing_action_key_is_distinguishable_from_an_unknown_action() {
+        assert_eq!(
+            composio_action_slug(&json!({ "tool": "NOTAREALTOOLKIT_LIST_THINGS" })),
+            Ok("NOTAREALTOOLKIT_LIST_THINGS"),
+            "an uncatalogued slug is still a slug — the catalogue, not this reader, \
+             is what declines it"
+        );
+        for (args, expected) in [
+            (
+                json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+                ActionKeyMiss::KeyAbsent,
+            ),
+            (
+                json!({ "arguments": { "owner": "acme" } }),
+                ActionKeyMiss::KeyAbsent,
+            ),
+            (json!({}), ActionKeyMiss::KeyAbsent),
+            (json!({ "tool": 7 }), ActionKeyMiss::NotAString),
+            (json!({ "tool": null }), ActionKeyMiss::NotAString),
+            (json!({ "tool": "" }), ActionKeyMiss::Empty),
+            (json!({ "tool": "   " }), ActionKeyMiss::Empty),
+            (json!("GMAIL_SEND_EMAIL"), ActionKeyMiss::NotAnObject),
+            (json!(null), ActionKeyMiss::NotAnObject),
+        ] {
+            assert_eq!(composio_action_slug(&args), Err(expected), "{args}");
+            // …and the verdict is unchanged by any of it: the log line is the
+            // only thing that differs, so this can never loosen a decision.
+            assert_eq!(
+                consequence_of(COMPOSIO_EXECUTE, &args).group,
+                EffectGroup::Send,
+                "{args}"
+            );
+        }
+    }
+
+    /// A grant scope is read through the same reader, so a call whose slug the
+    /// classifier could not find cannot resolve a toolkit either — `None`, and
+    /// a scoped grant refuses to admit `None`.
+    #[test]
+    fn an_unreadable_action_key_resolves_no_grant_scope() {
+        for args in [
+            json!({ "tool_slug": "GITHUB_LIST_PULL_REQUESTS" }),
+            json!({ "tool": "" }),
+            json!({ "tool": 7 }),
+            json!({}),
+        ] {
+            assert_eq!(standing_scope_of(COMPOSIO_EXECUTE, &args), None, "{args}");
         }
     }
 
