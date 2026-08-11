@@ -123,7 +123,7 @@ pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company}
 pub use registry::CompanyRegistry;
 #[cfg(feature = "github")]
 pub use repo_manager::HttpRepoHost;
-pub use repo_manager::{Checkout, RepoManager};
+pub use repo_manager::RepoManager;
 pub use run_supervisor::{RunGuard, RunSupervisor};
 pub use scheduler::{
     CATCHUP_WINDOW_MINUTES, Clock, CompanyScheduler, FakeClock, PRUNE_CUTOFF_MINUTES, SystemClock,

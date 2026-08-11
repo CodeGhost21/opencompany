@@ -23,12 +23,11 @@ A stored token with no revoke, or a mirror with no quota, or a bind whose
 failure leaves a live credential behind, are each a real exposure that lives on
 `main` between two merges.
 
-## The two layers
+## The one layer that ships here
 
 | | Location | Written by | Network |
 | --- | --- | --- | --- |
 | **Mirror cache** | `<data_dir>/companies/<slug>/repos/<key>.git` | the host | yes, credentialed |
-| **Checkout** | wherever the caller asks | `git clone --shared` off the mirror | no |
 
 The mirror is bare, host-owned, and **outside every agent workspace**
 (`harness/<company>/<agent>/workspace`). That placement is the point: it is
@@ -41,9 +40,10 @@ quota walk `DataLayout::usage_bytes` already performs. Nothing in the fs store
 reads or creates it; on a mongodb tenant no other part of that directory exists
 at all, so the cache creates its own parents.
 
-`RepoManager::materialize` is implemented and tested in this tier and has no
-caller. The tool that materializes into an agent workspace, and the lifecycle
-that removes the checkout at task end, are the follow-up's.
+There is **no checkout layer here**, and that is a correction rather than a
+scope note — an earlier draft of this tier shipped a `RepoManager::materialize`
+with no caller. See ["The checkout tier's actual
+problem"](#the-checkout-tiers-actual-problem).
 
 ## Credential handling
 
@@ -89,9 +89,9 @@ Two deliberate details:
 - **The helper uses shell builtins only.** Passing the token to an external
   program would put it straight back into an argv.
 
-The mirror's `origin` URL is credential-less, and a materialized checkout's
-`origin` is the mirror's **local path** — so git run against a checkout has no
-credentialed remote to reach for.
+The mirror's `origin` URL is credential-less: the credential is answered for per
+invocation, so the one file that outlives every fetch holds nothing worth
+stealing.
 
 ### The honest limit
 
@@ -127,21 +127,41 @@ Every invocation is also bounded by a deadline. A git that reaches a network it
 cannot finish talking to does not fail — it waits, and the HTTP request waits
 with it.
 
+## The checkout tier's actual problem
+
+The issue proposes hardlinking objects from the cache into each checkout: same
+filesystem, near-instant. It is also shared mutable state — a hardlinked object
+file *is the same inode* as the mirror's, so an agent that can write in its
+workspace can `chmod` and rewrite an object every other agent's checkout
+resolves through.
+
+`git clone --shared` is **not** the answer to that, and this document said it
+was. A `--shared` clone records the mirror's path in
+`.git/objects/info/alternates` and leaves `origin` pointing at it, so a commit
+in the checkout followed by `git push origin HEAD:refs/heads/main` advances the
+host's mirror directly — an agent can poison what every later checkout of that
+repository reads. Git resolves that path out of the checkout's own
+`.git/config`, so no guard on the *command* an agent may run closes it, and
+removing or replacing `origin` does not either: the mirror's path is still
+sitting in the alternates file, and the pushing process is the same uid that
+owns the mirror, so a `chmod` is not a boundary.
+
+Confining a checkout therefore needs one of: an isolated object copy (a clone
+that shares no objects with the cache), or a real filesystem boundary — a
+read-only bind mount, or a distinct uid for the agent shell. That is a design
+decision about the tier that hands an agent a checkout, so it is made there,
+with the code that has to live with it. **No checkout is materialized in this
+tier**, and the follow-up must resolve this before any clone is wired.
+
 ## Two deliberate departures from the issue
 
-**Alternates, not hardlinks.** The issue proposes hardlinking objects from the
-cache into each checkout: same filesystem, near-instant. It is also shared
-mutable state — a hardlinked object file *is the same inode* as the mirror's, so
-an agent that can write in its workspace can `chmod` and rewrite an object every
-other agent's checkout resolves through. `git clone --shared` registers the
-mirror as an alternate object store instead: read-only from the checkout's side,
-and just as instant.
-
-The consequence is that the mirror must never prune. An alternate holds no
-reference a `gc` in the mirror can see, so a prune there can delete objects a
-live checkout still needs. Mirrors are configured `gc.auto=0` and
-`gc.pruneExpire=never`, and **space is reclaimed only by revoking a binding**,
-which deletes the whole mirror at once.
+**Never prune.** Mirrors are configured `gc.auto=0` and `gc.pruneExpire=never`,
+and **space is reclaimed only by revoking a binding**, which deletes the whole
+mirror at once. A prune is pure risk on a cache that is refetched incrementally
+and never read twice, and it also reserves the property the checkout tier needs
+whichever confinement it picks: an alternate object store holds no reference a
+`gc` in the mirror can see, so a prune here could delete objects a live checkout
+is resolving through.
 
 **Refusal, not eviction.** The issue proposes evicting a mirror that pushes the
 cache over quota. A bound repository is operator-configured state, and silently
@@ -223,21 +243,26 @@ directory — a `main` branch, a `topic` branch and a `refs/pull/7/head`. No tes
 in this module touches the network.
 
 Mocking git would test a mock. The bugs this code can actually have — a refspec
-that fetches everything, a checkout whose `origin` still points at the
-credentialed remote, a prune that eats an alternate's objects, a token that
-lands in `.git/config` — are all bugs in how git is *driven*, and only a real
-git catches them.
+that fetches everything, a mirror that prunes objects out from under an
+alternate, a token that lands in `.git/config` — are all bugs in how git is
+*driven*, and only a real git catches them.
 
-The credential tests bind with a sentinel token, then walk every byte the
-mirror and the checkout wrote asserting it appears nowhere, and separately
-assert the environment git receives carries none either.
+The credential tests bind with a sentinel token, then walk every byte the mirror
+wrote asserting it appears nowhere, and separately assert the environment git
+receives carries none either.
+
+Two binds racing on one key are driven concurrently, because the failure they
+guard against only exists in the interleaving — see
+["Concurrent binds"](#concurrent-binds).
 
 ## Not in this tier
 
-The `repo` grant (excluded from `*`, like `composio`), `HarnessDeps.repos` with
-a rebuild fingerprint, `repo_checkout` / `repo_pr` tools, clone-into-sandbox
-lifecycle with deletion at task end, the boot sweep for orphaned checkouts, and
-the grant editor's surfacing of all of it.
+Materializing a checkout at all — see ["The checkout tier's actual
+problem"](#the-checkout-tiers-actual-problem), which the follow-up must answer
+first. Then: the `repo` grant (excluded from `*`, like `composio`),
+`HarnessDeps.repos` with a rebuild fingerprint, `repo_checkout` / `repo_pr`
+tools, clone-into-sandbox lifecycle with deletion at task end, the boot sweep
+for orphaned checkouts, and the grant editor's surfacing of all of it.
 
 No push path exists anywhere: write tier — PR creation, agent-attributed
 commits, namespaced branches, operator approval — is a separate follow-up.

@@ -10,38 +10,40 @@
 //! complete and alone, and the tier that *hands an agent a checkout* builds on
 //! something already whole.
 //!
-//! ## The two layers
+//! ## The one layer that ships here
 //!
-//! 1. **A bare mirror cache**, one per bound repository, at
-//!    `<data_dir>/companies/<slug>/repos/<key>.git`
-//!    ([`DataLayout::company_repos_dir`](crate::store::DataLayout::company_repos_dir)).
-//!    It is host-owned and outside every agent workspace, fetched incrementally
-//!    over the network with the operator's credential, and restricted to the
-//!    branches the binding names plus any `refs/pull/N/head` asked for by name.
-//! 2. **A materialized checkout** ([`RepoManager::materialize`]), a
-//!    `git clone --shared` off that mirror. No network, and `origin` points at
-//!    a local path, so git run against the checkout has no credentialed remote
-//!    to reach for.
+//! **A bare mirror cache**, one per bound repository, at
+//! `<data_dir>/companies/<slug>/repos/<key>.git`
+//! ([`DataLayout::company_repos_dir`](crate::store::DataLayout::company_repos_dir)).
+//! It is host-owned and outside every agent workspace, fetched incrementally
+//! over the network with the operator's credential, and restricted to the
+//! branches the binding names plus any `refs/pull/N/head` asked for by name.
 //!
-//! ## Two places this deliberately departs from the issue text
+//! There is deliberately **no checkout layer here**. Handing an agent a working
+//! tree off this cache is not a line of code, it is a confinement problem — a
+//! checkout made with `git clone --shared` keeps the mirror's path in
+//! `.git/objects/info/alternates` and, if `origin` is left pointing at it, a
+//! plain `git push` writes straight back into the host cache. Neither removing
+//! `origin` nor a same-uid `chmod` closes that: the path is readable in the
+//! checkout and the pushing process runs as the user that owns the mirror. The
+//! answer is an isolated object copy or a real filesystem boundary, and it
+//! belongs with the tier that actually hands out a checkout. See
+//! `docs/spec/runtime/repos.md`, "Not in this tier".
 //!
-//! * **Alternates, not hardlinks.** The issue proposes hardlinking objects from
-//!   the cache into each checkout because it is fast and same-filesystem. It is
-//!   also shared mutable state: a hardlinked object file is *the same inode* as
-//!   the mirror's, so an agent that can write in its workspace can `chmod` and
-//!   rewrite an object every other agent's checkout resolves through. `--shared`
-//!   registers the mirror as an *alternate* object store instead — read-only
-//!   from the checkout's side, and just as instant.
-//!   The consequence is that the mirror must never prune: an alternate holds no
-//!   reference a `gc` in the mirror can see, so a prune there can delete objects
-//!   a live checkout still needs. Both mirrors are configured `gc.auto=0` and
-//!   `gc.pruneExpire=never`, and space comes back only when a binding is
-//!   revoked and its mirror deleted.
+//! ## Where this deliberately departs from the issue text
+//!
 //! * **Refusal, not eviction.** The issue proposes evicting a mirror that pushes
 //!   the cache over quota. A bound repository is operator-configured state, and
 //!   silently deleting it converts a disk problem into an inexplicable "the
 //!   agent can't see our code any more" problem hours later. An over-quota fetch
 //!   fails loudly and says what to do instead.
+//! * **Never prune.** Mirrors are configured `gc.auto=0` and
+//!   `gc.pruneExpire=never`, and space comes back only when a binding is revoked
+//!   and its mirror deleted. Partly because a prune is pure risk on a cache
+//!   nothing reads twice, and partly to reserve the property the checkout tier
+//!   will need: an alternate object store holds no reference a `gc` in the
+//!   mirror can see, so a prune here could delete objects a live checkout is
+//!   resolving through.
 
 /// Hardened host-side `git`, and the credential helper that keeps the token out
 /// of argv, the environment, and every file on disk. See [`git`].
@@ -83,17 +85,6 @@ pub const REPO_INDEX_KEY: &str = "repos/bindings";
 /// The [`SecretStore`] key holding one binding's credential.
 pub fn repo_token_key(key: &str) -> String {
     format!("repos/token/{key}")
-}
-
-/// A materialized checkout.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Checkout {
-    /// Where the working tree was written.
-    pub path: PathBuf,
-    /// The commit the tree is at.
-    pub head_sha: String,
-    /// The ref that was checked out.
-    pub reference: String,
 }
 
 /// Binds repositories to one company and keeps their mirrors current.
@@ -612,65 +603,6 @@ impl RepoManager {
         )))
     }
 
-    // -- materialize ---------------------------------------------------------
-
-    /// Clones a bound repository out of its mirror into `dest`.
-    ///
-    /// No network and no credential: `--shared` alternates into the mirror's
-    /// object store, and `origin` in the resulting checkout is the mirror's
-    /// local path. Git run against this tree therefore has no credentialed
-    /// remote available to it — which is the property the agent tier will be
-    /// built on, and is asserted here rather than there.
-    ///
-    /// PR-A ships this as a manager capability with no caller: the tool that
-    /// materializes into an agent workspace, and the lifecycle that removes it
-    /// at task end, are the follow-up's.
-    pub async fn materialize(&self, key: &str, reference: &str, dest: &Path) -> Result<Checkout> {
-        let _binding = self.get(key).await?;
-        let reference = validate_ref(reference)?;
-        let mirror = self.mirror_path(key);
-        if !mirror.is_dir() {
-            return Err(OpenCompanyError::NotFound(format!(
-                "the mirror for {key} is missing from the cache — revoke and rebind"
-            )));
-        }
-        remove_dir(dest).await?;
-        if let Some(parent) = dest.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                OpenCompanyError::Store(format!("creating {}: {e}", parent.display()))
-            })?;
-        }
-        let mirror_str = mirror.to_string_lossy().to_string();
-        let dest_str = dest.to_string_lossy().to_string();
-        git::run(
-            &self.root,
-            &[
-                "clone",
-                "--quiet",
-                // Alternates, not hardlinks. See this module's header.
-                "--shared",
-                "--branch",
-                &reference,
-                "--single-branch",
-                &mirror_str,
-                &dest_str,
-            ],
-            None,
-            None,
-        )
-        .await?
-        .require("git clone")?;
-
-        let head_sha = git::run(dest, &["rev-parse", "HEAD"], None, None)
-            .await?
-            .require("git rev-parse")?;
-        Ok(Checkout {
-            path: dest.to_path_buf(),
-            head_sha,
-            reference,
-        })
-    }
-
     // -- pull requests -------------------------------------------------------
 
     /// A pull request's metadata and unified diff, fetched host-side.
@@ -703,7 +635,7 @@ impl RepoManager {
     ///
     /// Test-only, and narrow on purpose: it skips [`parse_repo_url`] and
     /// nothing else, so every test below drives the *real* mirror, fetch,
-    /// quota, materialize and revoke paths. Widening the URL validator or
+    /// quota and revoke paths. Widening the URL validator or
     /// standing up a fake HTTPS forge to reach the same code would each be
     /// worse — one weakens a boundary for the benefit of tests, the other
     /// tests a different program.

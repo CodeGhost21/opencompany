@@ -3,10 +3,10 @@
 //! Every test that exercises the mirror builds a bare repository in a temp
 //! directory and binds it over `file://`. That is a deliberate choice about
 //! what is worth proving: mocking `git` would test a mock, and the bugs this
-//! module can actually have — a refspec that fetches everything, a checkout
-//! whose `origin` still points at the credentialed remote, a prune that eats an
-//! alternate's objects, a token that lands in `.git/config` — are all bugs in
-//! how git is *driven*, and only a real git can catch them.
+//! module can actually have — a refspec that fetches everything, a mirror that
+//! prunes objects out from under an alternate, a token that lands in
+//! `.git/config` — are all bugs in how git is *driven*, and only a real git can
+//! catch them.
 //!
 //! The credential tests use the literal token `SENTINEL`, then walk every byte
 //! this module wrote looking for it.
@@ -384,67 +384,29 @@ async fn a_generous_quota_lets_the_bind_through() {
     assert_eq!(mgr.list().await.unwrap().len(), 1);
 }
 
-// -- materialize -------------------------------------------------------------
+// -- mirror configuration ----------------------------------------------------
 
 #[tokio::test]
-async fn a_checkout_alternates_into_the_mirror_and_has_no_remote_credential() {
-    let scratch = Scratch::new("materialize");
+async fn a_mirror_is_configured_never_to_prune() {
+    let scratch = Scratch::new("no-prune");
     let url = fixture_remote(&scratch);
     let (mgr, _) = manager(&scratch);
     mgr.bind_local(&url, "fixture", vec!["main".into()])
         .await
         .unwrap();
 
-    let dest = scratch.join("workspace/repos/fixture");
-    let checkout = mgr.materialize("fixture", "main", &dest).await.unwrap();
-
-    assert_eq!(checkout.reference, "main");
-    assert_eq!(checkout.head_sha.len(), 40, "{}", checkout.head_sha);
-    assert!(dest.join("README.md").is_file(), "the tree was checked out");
-
-    // Alternates, not hardlinks: the objects stay owned by the mirror, so an
-    // agent that can write in its workspace cannot rewrite what the next
-    // checkout resolves through.
-    let alternates = dest.join(".git/objects/info/alternates");
-    assert!(
-        alternates.is_file(),
-        "expected --shared to write alternates"
-    );
-    let alt = std::fs::read_to_string(&alternates).unwrap();
-    assert!(
-        alt.contains(&mgr.mirror_path("fixture").to_string_lossy().to_string()),
-        "{alt}"
-    );
-
-    // `origin` is the local cache path. Git run inside this tree therefore has
-    // no credentialed remote to reach for — the property the agent tier is
-    // going to be built on, asserted here where the clone is made.
-    let origin = git_at(&dest, &["remote", "get-url", "origin"]);
-    assert_eq!(origin, mgr.mirror_path("fixture").to_string_lossy());
-    assert!(!origin.starts_with("https://"), "{origin}");
-
-    // And the mirror is configured never to prune, because a prune there cannot
-    // see this checkout's alternate reference.
+    // Space comes back by revoking a binding, never by pruning: a prune cannot
+    // see an alternate's references, and the checkout tier this cache is built
+    // for will hold exactly those.
     let mirror = mgr.mirror_path("fixture");
     assert_eq!(git_at(&mirror, &["config", "gc.pruneExpire"]), "never");
     assert_eq!(git_at(&mirror, &["config", "gc.auto"]), "0");
 }
 
-#[tokio::test]
-async fn materializing_an_unbound_repository_is_a_not_found() {
-    let scratch = Scratch::new("materialize-missing");
-    let (mgr, _) = manager(&scratch);
-    let err = mgr
-        .materialize("nope", "main", &scratch.join("dest"))
-        .await
-        .unwrap_err();
-    assert!(matches!(err, OpenCompanyError::NotFound(_)), "{err:?}");
-}
-
 // -- credential non-exposure -------------------------------------------------
 
 #[tokio::test]
-async fn the_token_appears_in_no_byte_the_mirror_or_checkout_wrote() {
+async fn the_token_appears_in_no_byte_the_mirror_wrote() {
     let scratch = Scratch::new("sentinel");
     let url = fixture_remote(&scratch);
     let (mgr, secrets) = manager(&scratch);
@@ -470,24 +432,20 @@ async fn the_token_appears_in_no_byte_the_mirror_or_checkout_wrote() {
         mgr.write_index(&index).await.unwrap();
     }
     mgr.fetch("fixture", &[7]).await.unwrap();
-    let dest = scratch.join("workspace/repos/fixture");
-    mgr.materialize("fixture", "main", &dest).await.unwrap();
 
-    // Everything this module wrote: the mirror cache (including the mirror's
-    // `config`, where a credential helper or a userinfo URL would live) and the
-    // whole checkout (including its `.git/config`).
+    // Everything this module wrote: the whole mirror cache, including the
+    // mirror's `config`, where a credential helper or a userinfo URL would
+    // live, and the askpass scratch directory beside it.
     let mut scanned = 0usize;
-    for root in [mgr.root().to_path_buf(), dest.clone()] {
-        for (path, bytes) in all_files(&root) {
-            scanned += 1;
-            assert!(
-                !bytes
-                    .windows(SENTINEL.len())
-                    .any(|w| w == SENTINEL.as_bytes()),
-                "the credential leaked into {}",
-                path.display()
-            );
-        }
+    for (path, bytes) in all_files(mgr.root()) {
+        scanned += 1;
+        assert!(
+            !bytes
+                .windows(SENTINEL.len())
+                .any(|w| w == SENTINEL.as_bytes()),
+            "the credential leaked into {}",
+            path.display()
+        );
     }
     assert!(
         scanned > 5,
