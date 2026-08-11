@@ -7,7 +7,7 @@
 //! operator could fill `Standards/` with the guidance every agent is supposed
 //! to follow and no agent would ever read a word of it.
 //!
-//! Five tools close that gap:
+//! Seven tools close that gap:
 //!
 //! * [`WORKSPACE_LIST_TOOL`] — the bounded path index (path, kind, id,
 //!   revision), with an optional `prefix` for subtree listing.
@@ -21,6 +21,12 @@
 //!   parent already exists (issue #551).
 //! * [`WORKSPACE_WRITE_TOOL`] — overwrite one existing note, guarded by a
 //!   **required** `expected_updated_at` compare-and-swap token.
+//! * [`WORKSPACE_RENAME_TOOL`] — rename or move one node **inside the agent's
+//!   own folder** (issue #671).
+//! * [`WORKSPACE_DELETE_TOOL`] — remove one node from that same folder, guarded
+//!   by the same required token and refusing a folder that still holds
+//!   anything. See [`lifecycle`] for why that confinement is coherence rather
+//!   than containment.
 //!
 //! Every tool hits the store **live at `execute()` time**. There is no
 //! session cache, so a note edited in the console between two turns changes
@@ -40,9 +46,17 @@
 //! for anything an agent produces and mark shared guidance as something to
 //! touch only on purpose; and every node records who created it and who last
 //! wrote it (issue #326), so a mess is legible and reversible rather than
-//! anonymous. Two irreversible operations, rename and delete, are still absent
-//! from this surface entirely — the operator has a console to undo them in and
-//! the agent does not.
+//! anonymous.
+//!
+//! Issue #671 added the other half of that bargain. An agent that can only
+//! produce leaves every superseded draft in place forever, under whatever name
+//! its first attempt gave it — and since issue #607 each of those competes for
+//! a slot in a bounded search result with the note that replaced it. So rename
+//! and delete are on this surface now, confined to `Agents/<agent id>/`:
+//! tidying your own folder is upkeep, while rearranging anybody else's work is
+//! still the operator's call. That confinement is **not** a security boundary —
+//! the same grant already confers unconfined overwrite — and [`lifecycle`] says
+//! so at length rather than letting the scope be mistaken for one.
 //!
 //! That home folder is minted on first use rather than provisioned at boot, so
 //! [`WorkspaceCreateTool`] makes it on demand when the target sits directly
@@ -180,6 +194,17 @@ use crate::harness::build::TOOL_RESULT_BUDGET_BYTES;
 use crate::ports::artifacts::{ArtifactAuthor, ArtifactStore};
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+// Lifecycle over the agent's own folder (issue #671) — delete and rename. In a
+// child module rather than inline: this file is already the largest in
+// `src/harness/`, and the two tools share a scope gate and a set of refusals
+// with each other rather than with anything above. Nothing here becomes `pub`
+// for its benefit — a child module reaches its ancestors' private items.
+mod lifecycle;
+
+pub use lifecycle::{
+    WORKSPACE_DELETE_TOOL, WORKSPACE_RENAME_TOOL, WorkspaceDeleteTool, WorkspaceRenameTool,
+};
 
 /// Tool name: list the company workspace's path index.
 pub const WORKSPACE_LIST_TOOL: &str = "workspace_list";
@@ -364,6 +389,23 @@ impl CompanyWorkspace {
     /// either, which is what keeps the one-node-per-call rule intact.
     fn is_own_home(&self, segments: &[&str]) -> bool {
         matches!(segments, [root, agent] if *root == AGENTS_ROOT && *agent == self.agent_id)
+    }
+
+    /// Whether `segments` name something **inside** this agent's own home —
+    /// `Agents/<this agent's id>/…` at any depth below the folder itself.
+    ///
+    /// The companion to [`is_own_home`](Self::is_own_home), which is an exact
+    /// match and stays one: create needs "is this precisely the folder I may
+    /// mint?", and the lifecycle tools (issue #671) need "is this something
+    /// inside the folder I already own?". Neither answer implies the other, and
+    /// the home folder itself is deliberately in exactly one of them — it is
+    /// mintable, and it is not deletable.
+    ///
+    /// Compared segment-wise against the id fixed at agent-build time, so a
+    /// teammate's home and everything under it answer `false` no matter what a
+    /// tool argument says.
+    fn is_strictly_inside_own_home(&self, segments: &[&str]) -> bool {
+        segments.len() >= 3 && segments[0] == AGENTS_ROOT && segments[1] == self.agent_id
     }
 
     /// Adopt-or-create this agent's own `Agents/<id>/` folder, returning its id.
@@ -608,16 +650,21 @@ fn fence_nonce() -> String {
 ///
 /// # Why the write half is steering, not a rule the code enforces
 ///
-/// Issue #551 settled that agents write **unconfined** — anywhere in the tree,
-/// create as well as overwrite. There is no prefix gate, and adding one would
-/// be theatre while `{WORKSPACE_WRITE_TOOL}` can already overwrite any note (the
-/// strictly more destructive of the two operations). So what keeps the tree
-/// navigable is this paragraph: name the agent's own folder as the default
-/// home, name shared guidance as something to touch only on purpose, and leave
-/// the irreversible operations (rename, delete) with the operator, who is the
-/// only party with a console to undo them in. The safety net underneath is
-/// attribution — every node records who created it and who last wrote it
-/// (issue #326) — not refusal.
+/// Issue #551 settled that agents *write* **unconfined** — anywhere in the
+/// tree, create as well as overwrite. There is no prefix gate on those two, and
+/// adding one would be theatre while `{WORKSPACE_WRITE_TOOL}` can already
+/// overwrite any note (the strictly more destructive of the two operations). So
+/// what keeps the tree navigable is this paragraph: name the agent's own folder
+/// as the default home, and name shared guidance as something to touch only on
+/// purpose. The safety net underneath is attribution — every node records who
+/// created it and who last wrote it (issue #326) — not refusal.
+///
+/// The lifecycle half (issue #671) is the one place the code *does* draw a
+/// line, and the brief has to state it because it is a different line: rename
+/// and delete reach only `{AGENTS_ROOT}/<agent id>/`. That is a division of
+/// labour rather than containment — tidying your own folder is upkeep the
+/// paragraph above already asks for, while reorganising somebody else's work is
+/// a judgement call the operator has a console for.
 pub fn workspace_brief(can_write: bool) -> String {
     let mut brief = format!(
         "\n\n## Company workspace\n\
@@ -646,8 +693,14 @@ pub fn workspace_brief(can_write: bool) -> String {
              which requires the `expected_updated_at` revision from a `{WORKSPACE_READ_TOOL}` of \
              that same note — so read it, apply your change to the full body you were given, and \
              write the whole body back. Every note records who created it and who last wrote it, \
-             so your edits are attributed to you. Renaming and deleting stay the operator's job, \
-             not yours."
+             so your edits are attributed to you. Keeping your own folder in order is part of \
+             producing work in it: give a note the title it earned with \
+             `{WORKSPACE_RENAME_TOOL}`, and clear away a draft you have replaced with \
+             `{WORKSPACE_DELETE_TOOL}`. Both act on one node at a time and both are confined to \
+             `{AGENTS_ROOT}/<your agent id>/`. Deleting is permanent for anything you simply \
+             created — only a note you published keeps a history anywhere else — so remove what is \
+             genuinely superseded rather than what is merely untidy. Renaming or deleting anything \
+             OUTSIDE your own folder stays the operator's job, not yours."
         ));
     }
     brief
@@ -1271,8 +1324,9 @@ impl Tool for WorkspaceWriteTool {
          must pass `expected_updated_at` — the `rev` from a `workspace_read` of that same note — \
          and the write is refused if the note changed since. This replaces the whole body, so \
          include everything you want kept. NOT for adding a new note (that is \
-         `workspace_create`), NOT for renaming or deleting (operator-only), and NOT for your own \
-         scratch files (use the `file_*` tools)."
+         `workspace_create`), NOT for renaming or deleting one (those are `workspace_rename` and \
+         `workspace_delete`, and only inside your own folder), and NOT for your own scratch files \
+         (use the `file_*` tools)."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1794,16 +1848,19 @@ impl Tool for WorkspaceCreateTool {
 
 /// Build the workspace tool set for one agent.
 ///
-/// `can_write` decides whether [`WORKSPACE_CREATE_TOOL`] and
-/// [`WORKSPACE_WRITE_TOOL`] are included; the caller
+/// `can_write` decides whether the four mutating tools are included; the caller
 /// ([`build_agent`](crate::harness::build::build_agent)) derives it from an
 /// **explicit** `workspace` grant, so a bare `*` yields the three read tools
 /// only.
 ///
-/// Create and write ride the same flag on purpose. Overwriting an existing
-/// operator-owned standard is strictly more destructive than adding a new note
-/// beside it, so any grant that permits the first has already permitted the
-/// second.
+/// All four ride the same flag on purpose, and issue #671 did not add a fifth
+/// grant name for the lifecycle pair. Overwriting an existing operator-owned
+/// standard is strictly more destructive than adding a note beside it — and
+/// strictly more destructive than removing or renaming something inside the
+/// agent's *own* folder, which is all `workspace_delete` and `workspace_rename`
+/// can reach. A grant that already confers unconfined overwrite has by that act
+/// conferred the narrower thing; a separate name would suggest a boundary that
+/// the write tool has already walked past.
 pub fn workspace_tools(
     store: Arc<dyn WorkspaceStore>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
@@ -1823,7 +1880,12 @@ pub fn workspace_tools(
     ];
     if can_write {
         tools.push(Box::new(WorkspaceCreateTool::new(workspace.clone())));
-        tools.push(Box::new(WorkspaceWriteTool::new(workspace)));
+        tools.push(Box::new(WorkspaceWriteTool::new(workspace.clone())));
+        // Issue #671, ordered after the two that add and revise: an agent that
+        // can only produce leaves a mess it may not clean, and one that can
+        // only remove has nothing of its own to remove.
+        tools.push(Box::new(WorkspaceRenameTool::new(workspace.clone())));
+        tools.push(Box::new(WorkspaceDeleteTool::new(workspace)));
     }
     tools
 }
@@ -1837,21 +1899,21 @@ mod tests {
 
     /// The agent every test writes as, so an authorship assertion has a name to
     /// check against.
-    const TEST_AGENT: &str = "ceo";
+    pub(super) const TEST_AGENT: &str = "ceo";
 
     /// A [`CompanyWorkspace`] pinned to `company`, writing as [`TEST_AGENT`].
-    fn ws(store: Arc<dyn WorkspaceStore>, company: CompanyId) -> CompanyWorkspace {
+    pub(super) fn ws(store: Arc<dyn WorkspaceStore>, company: CompanyId) -> CompanyWorkspace {
         CompanyWorkspace::new(store, company, TEST_AGENT.to_string())
     }
 
     /// This agent's origin — what a create or a write must stamp.
-    fn agent_origin() -> WorkspaceOrigin {
+    pub(super) fn agent_origin() -> WorkspaceOrigin {
         WorkspaceOrigin::Agent {
             id: TEST_AGENT.to_string(),
         }
     }
 
-    fn folder(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
+    pub(super) fn folder(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
         WorkspaceNode {
             id: id.to_string(),
             name: name.to_string(),
@@ -1866,7 +1928,7 @@ mod tests {
         }
     }
 
-    fn file(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
+    pub(super) fn file(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
         WorkspaceNode {
             id: id.to_string(),
             name: name.to_string(),
@@ -1903,7 +1965,7 @@ mod tests {
         (dir, ops)
     }
 
-    fn text(result: &ToolResult) -> String {
+    pub(super) fn text(result: &ToolResult) -> String {
         result.output()
     }
 
@@ -3881,6 +3943,57 @@ mod tests {
         );
     }
 
+    // -- own-home scope (issue #671) ----------------------------------------
+
+    /// The two home predicates answer different questions and must keep
+    /// answering them differently.
+    ///
+    /// `is_own_home` is create's mint-on-demand exception: exactly the folder,
+    /// nothing else. `is_strictly_inside_own_home` is the lifecycle gate: the
+    /// contents, and never the folder itself. Collapsing either into the other
+    /// would either let an agent delete the folder the company finds its work
+    /// in, or refuse it the call that brings that folder into existence.
+    #[test]
+    fn the_two_home_predicates_disagree_exactly_on_the_folder_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let store: Arc<dyn WorkspaceStore> = Arc::new(FsOps::new(dir.path()));
+        let workspace = ws(store, CompanyId::new("acme"));
+
+        // The folder itself: mintable, never inside.
+        assert!(workspace.is_own_home(&[AGENTS_ROOT, TEST_AGENT]));
+        assert!(!workspace.is_strictly_inside_own_home(&[AGENTS_ROOT, TEST_AGENT]));
+
+        // Inside it, at any depth: never the folder, always inside.
+        for segments in [
+            vec![AGENTS_ROOT, TEST_AGENT, "brief.md"],
+            vec![AGENTS_ROOT, TEST_AGENT, "drafts", "q3", "notes.md"],
+        ] {
+            assert!(!workspace.is_own_home(&segments), "{segments:?}");
+            assert!(
+                workspace.is_strictly_inside_own_home(&segments),
+                "{segments:?}"
+            );
+        }
+
+        // Everything else is neither — a teammate's home and its contents
+        // included, and the `Agents` root itself, which belongs to nobody.
+        for segments in [
+            vec![AGENTS_ROOT],
+            vec![AGENTS_ROOT, "cmo"],
+            vec![AGENTS_ROOT, "cmo", "brief.md"],
+            vec!["Standards", "Engineering standards.md"],
+            // A name that merely starts with the agent's id is a different
+            // folder, because the comparison is segment-wise and not a prefix.
+            vec![AGENTS_ROOT, "ceo-archive", "brief.md"],
+        ] {
+            assert!(!workspace.is_own_home(&segments), "{segments:?}");
+            assert!(
+                !workspace.is_strictly_inside_own_home(&segments),
+                "{segments:?}"
+            );
+        }
+    }
+
     // -- wiring -------------------------------------------------------------
 
     #[test]
@@ -3923,9 +4036,14 @@ mod tests {
                 WORKSPACE_READ_TOOL,
                 WORKSPACE_SEARCH_TOOL,
                 WORKSPACE_CREATE_TOOL,
-                WORKSPACE_WRITE_TOOL
+                WORKSPACE_WRITE_TOOL,
+                // Issue #671. No fifth grant name: the write grant already
+                // confers unconfined overwrite, which reaches further than
+                // own-folder lifecycle does.
+                WORKSPACE_RENAME_TOOL,
+                WORKSPACE_DELETE_TOOL
             ],
-            "create and write ride the same explicit grant"
+            "all four mutations ride the same explicit grant"
         );
     }
 
@@ -3945,17 +4063,35 @@ mod tests {
         assert_eq!(tools[2].permission_level(), PermissionLevel::ReadOnly);
         assert_eq!(tools[3].permission_level(), PermissionLevel::Write);
         assert_eq!(tools[4].permission_level(), PermissionLevel::Write);
+        assert_eq!(tools[5].permission_level(), PermissionLevel::Write);
+        assert_eq!(tools[6].permission_level(), PermissionLevel::Write);
+        assert_eq!(tools.len(), 7, "a tool was added without a declared level");
     }
 
     #[test]
     fn the_brief_is_static_and_mentions_writes_only_when_granted() {
         let read_only = workspace_brief(false);
         assert!(read_only.contains(WORKSPACE_LIST_TOOL));
-        assert!(!read_only.contains(WORKSPACE_WRITE_TOOL));
-        assert!(!read_only.contains(WORKSPACE_CREATE_TOOL));
+        // Describing a tool the agent does not hold is how a turn gets spent
+        // calling something that does not exist — so the read-only brief has to
+        // omit every mutation, the lifecycle pair included.
+        for tool in [
+            WORKSPACE_WRITE_TOOL,
+            WORKSPACE_CREATE_TOOL,
+            WORKSPACE_RENAME_TOOL,
+            WORKSPACE_DELETE_TOOL,
+        ] {
+            assert!(!read_only.contains(tool), "{tool}: {read_only}");
+        }
         let writable = workspace_brief(true);
-        assert!(writable.contains(WORKSPACE_WRITE_TOOL));
-        assert!(writable.contains(WORKSPACE_CREATE_TOOL));
+        for tool in [
+            WORKSPACE_WRITE_TOOL,
+            WORKSPACE_CREATE_TOOL,
+            WORKSPACE_RENAME_TOOL,
+            WORKSPACE_DELETE_TOOL,
+        ] {
+            assert!(writable.contains(tool), "{tool}: {writable}");
+        }
         assert!(writable.contains("expected_updated_at"));
     }
 
@@ -3992,9 +4128,13 @@ mod tests {
     /// mechanism and has to be asserted like one.
     ///
     /// The brief must name the agent's own folder as the default home, mark
-    /// shared guidance as conditional rather than forbidden (the tree is
-    /// unconfined — saying "never" here would be a lie the tools do not back),
-    /// and keep rename/delete with the operator.
+    /// shared guidance as conditional rather than forbidden (create and write
+    /// are unconfined — saying "never" here would be a lie those tools do not
+    /// back), and, since issue #671, ask for tidying while keeping the
+    /// lifecycle pair's confinement and permanence explicit. It must NOT still
+    /// say rename and delete are the operator's, full stop: that sentence
+    /// became false the moment the tools shipped, and an agent that believes it
+    /// will never clean up after itself.
     #[test]
     fn the_brief_steers_toward_the_agents_own_folder() {
         let brief = workspace_brief(true);
@@ -4010,13 +4150,22 @@ mod tests {
             "appears the first time you use it",
             "anywhere in the tree",
             "Standards/",
-            "Renaming and deleting",
+            // Issue #671: tidying is asked for, bounded, and honest about what
+            // a delete costs.
+            "part of producing work in it",
+            "one node at a time",
+            "Deleting is permanent",
+            "OUTSIDE your own folder",
         ] {
             assert!(
                 brief.contains(phrase),
                 "the brief dropped {phrase:?}: {brief}"
             );
         }
+        assert!(
+            !brief.contains("Renaming and deleting stay the operator's job"),
+            "the brief still tells agents they cannot tidy their own folder: {brief}"
+        );
     }
 
     // -- binary nodes (issue #553) ------------------------------------------
