@@ -290,6 +290,13 @@ pub struct HarnessDeps {
     /// cache; nothing durable rides on it (the console run drawer is the durable
     /// record), so a fresh process simply starts with nothing to read back.
     pub run_outputs: crate::harness::orchestrator::RunOutputCache,
+    /// The DURABLE, console-facing per-node run output store (issue #596) —
+    /// distinct from [`Self::run_outputs`] above, which is the in-process,
+    /// evictable agent cache. The workflow runner persists each settled run's
+    /// bounded node output here so a *past* run reopened from History shows what
+    /// every node produced. `None` (the default build, and every unwired test)
+    /// degrades the persist to a no-op, exactly like [`Self::events`].
+    pub run_output_store: Option<Arc<dyn crate::ports::run_output::WorkflowRunOutputStore>>,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -2259,6 +2266,7 @@ description = "Builds the product."
                 pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+                run_output_store: None,
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -2326,6 +2334,7 @@ description = "Builds the product."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2930,6 +2939,7 @@ description = "Builds the product."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3101,6 +3111,7 @@ description = "Builds the product."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -3432,6 +3443,7 @@ description = "Builds the product."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3594,6 +3606,7 @@ description = "Sets direction."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3739,6 +3752,7 @@ description = "Sets direction."
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

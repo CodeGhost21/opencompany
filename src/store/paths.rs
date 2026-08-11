@@ -334,6 +334,19 @@ impl Bundle {
         self.dir.join("run-steps.jsonl")
     }
 
+    /// Path to the per-node run-output log (`run-outputs.jsonl`, one
+    /// [`WorkflowRunOutputRecord`] per line; last-write-wins per `run_id`,
+    /// prune-to-newest-N per company; issue #596).
+    ///
+    /// One shared log rather than a file per run — the same rule
+    /// [`runs_jsonl`](Self::runs_jsonl) states: a run id is caller-minted and must
+    /// never become a path component the store did not mint.
+    ///
+    /// [`WorkflowRunOutputRecord`]: crate::ports::run_output::WorkflowRunOutputRecord
+    pub fn run_outputs_jsonl(&self) -> PathBuf {
+        self.dir.join("run-outputs.jsonl")
+    }
+
     /// The per-company schedule-fire claim subdirectory
     /// (`schedule_fires/<hashed-schedule-id>/<minute>`, one empty-ish marker
     /// file per claimed instant; #241).

@@ -13,6 +13,7 @@ import { toast } from "sonner";
 
 import { listPeople, me as fetchMe, type Person } from "@/api/auth";
 import type { OpenCompanyClient } from "@/api/client";
+import type { TaskDeliverable } from "@/api/tasks";
 import { setInboxEnabled } from "@/api/inbox";
 import {
   ApiError,
@@ -580,7 +581,7 @@ export function ChatView({
    * cannot resolve — the row's own actions are disabled in that window, so this
    * is the belt to that brace.
    */
-  async function send(text: string, parentId?: string) {
+  async function send(text: string, deliverable?: TaskDeliverable, parentId?: string) {
     if (sending) return;
     const target = active.id;
     const chatId = activeThreadId;
@@ -593,7 +594,13 @@ export function ChatView({
     // below — two bubbles for one turn.
     if (chatId) onSendStart?.(chatId);
     try {
-      const reply = await client.chat(text, company, chatId, toHostMessageId(parentId));
+      const reply = await client.chat(
+        text,
+        company,
+        chatId,
+        toHostMessageId(parentId),
+        deliverable,
+      );
       const replies = reply.responses.length
         ? reply.responses.map((r) =>
             makeMessage("company", r.text, {
@@ -838,7 +845,11 @@ export function ChatView({
             <MessageComposer
               placeholder={`Message ${channelTitle(channel)}`}
               disabled={sending}
-              onSend={(text) => void send(text)}
+              onSend={(text, deliverable) => void send(text, deliverable)}
+              // Only the company-channel composer offers "do it once" vs "build
+              // me the workflow" (issue #580): a channel line can open a board
+              // card, so the once-vs-workflow choice belongs at that prompt box.
+              deliverableChoice={active.kind === "channel"}
             />
           </div>
 
@@ -848,7 +859,7 @@ export function ChatView({
               parent={parent}
               replies={threadReplies}
               sending={sending}
-              onSend={(text) => void send(text, parent.id)}
+              onSend={(text) => void send(text, undefined, parent.id)}
               onClose={() => setOpenThreadId(null)}
             />
           )}

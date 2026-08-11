@@ -2289,6 +2289,7 @@ mod test {
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3708,6 +3709,12 @@ mod test {
     /// makes approving it mint a single-use grant rather than execute it
     /// (issue #243) — which is the whole reason a lost continuation hurts: the
     /// grant is spent on a turn that never happens.
+    ///
+    /// The payload names an action the vendored catalogue tags `Write`, so
+    /// `consequence_of` classifies it as a send on its merits. Until issue #470
+    /// it named the slug under `tool_slug`, a key neither the tool nor the
+    /// classifier reads — so it was a call with no action at all, and it
+    /// reached the per-call verdict through the unknown-slug fallback instead.
     fn gated_tool_call() -> crate::ports::types::Effect {
         crate::ports::types::Effect {
             kind: "composio_execute".into(),
@@ -3715,7 +3722,7 @@ mod test {
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            payload: crate::policy::test_support::composio_send_args(),
             agent: Some("ceo".into()),
             run_id: None,
         }
@@ -3723,11 +3730,11 @@ mod test {
 
     /// A tool call an operator MAY grant a standing permission for (issue
     /// #431), which `gated_tool_call` deliberately is not: its Composio payload
-    /// names no action slug, so `consequence_of` cannot classify it as a read
-    /// and it stays a per-call decision. `file_write` is declared grantable in
-    /// `src/policy/consequence.rs` and carries an agent, so it satisfies both
-    /// halves of `check_broadly_grantable` — it mutates, but only the agent's
-    /// own sandboxed workspace.
+    /// names an action the catalogue tags `Write`, so `consequence_of` reads it
+    /// as a send and it stays a per-call decision. `file_write` is declared
+    /// grantable in `src/policy/consequence.rs` and carries an agent, so it
+    /// satisfies both halves of `check_broadly_grantable` — it mutates, but
+    /// only the agent's own sandboxed workspace.
     fn grantable_tool_call() -> crate::ports::types::Effect {
         crate::ports::types::Effect {
             kind: "file_write".into(),
@@ -5363,9 +5370,16 @@ mod test {
             for event in &req.events {
                 match event {
                     CompanyEvent::OperatorMessage { .. } => {
+                        // Deliberately uncatalogued slugs (issue #470): this
+                        // brain exists to park a *number* of distinct calls and
+                        // is indifferent to how any of them classify. They
+                        // still land under the real action key, so each reaches
+                        // the catalogue lookup and misses it, rather than
+                        // carrying no action for the classifier to find.
                         for i in 0..self.parks {
                             let mut effect = gated_tool_call();
-                            effect.payload = serde_json::json!({ "tool_slug": format!("T{i}") });
+                            effect.payload =
+                                crate::policy::test_support::composio_unclassified_args_numbered(i);
                             host.park_effect(effect).await?;
                         }
                     }

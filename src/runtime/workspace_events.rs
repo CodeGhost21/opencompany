@@ -167,6 +167,48 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         Ok(())
     }
 
+    /// A binary node appearing in the tree is the same event as a note
+    /// appearing: something the operator did not type is now there to look at.
+    /// An uploaded image or a published chart therefore reaches an open
+    /// Workspace tab exactly like a note does, which is the whole point of
+    /// announcing at the store instead of at the callers.
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<()> {
+        self.inner.create_binary(company, node, bytes).await?;
+        self.announce(company, &node.id, CHANGE_OPENED).await;
+        Ok(())
+    }
+
+    /// Replaces a payload through, then announces `updated` — unconditionally,
+    /// for the reason [`write`](Self::write) gives.
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<WorkspaceNode> {
+        let node = self
+            .inner
+            .write_binary(company, id, bytes, mime, author)
+            .await?;
+        self.announce(company, id, CHANGE_UPDATED).await;
+        Ok(node)
+    }
+
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+        self.inner.read_bytes(company, id).await
+    }
+
     /// Renames/moves through, then announces `updated` — unless nothing moved.
     ///
     /// **A rename that changes nothing says nothing.** The port takes `None` for
@@ -296,6 +338,9 @@ mod test {
             updated_at_millis: 1,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         }
     }
 

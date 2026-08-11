@@ -19,10 +19,62 @@
 //! body look operator-authored.
 
 use async_trait::async_trait;
+use bytes::Bytes;
+use futures::stream::BoxStream;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::Result;
 use crate::ports::types::CompanyId;
+
+/// A blob's bytes, delivered in chunks.
+///
+/// Reads stream and writes buffer, and the asymmetry is deliberate. A quota
+/// check has to see the whole size *before* anything is stored — that is what
+/// makes a refused write leave nothing behind — so [`create_binary`] takes a
+/// slice. A read has no such constraint and a 200 MiB video has no business
+/// being resident, so it hands back a stream the HTTP layer can forward
+/// straight into a response body.
+///
+/// Not every backend can honour the streaming half equally: `FsOps` streams
+/// from disk and GridFS streams natively, but the sqlite backend holds its blob
+/// in one row and yields it as a single chunk. That chunk is bounded by the
+/// per-file cap rather than by anything sqlite does, which is stated here rather
+/// than discovered in production.
+///
+/// [`create_binary`]: WorkspaceStore::create_binary
+pub type BlobStream = BoxStream<'static, Result<Bytes>>;
+
+/// The message every backend gives when prose is written over a binary node.
+///
+/// Shared rather than written out three times so the refusal cannot drift
+/// between backends — the conformance suite asserts on it, which is only worth
+/// anything if all three produce the same sentence.
+pub fn binary_write_refusal(name: &str, mime: &str) -> String {
+    format!(
+        "`{name}` holds {mime} data, not text. Writing text over it would leave its recorded \
+         size and checksum describing bytes that are no longer there; replace the payload \
+         instead, or delete the node and create a new one."
+    )
+}
+
+/// The size and content digest of a blob, computed from the bytes themselves.
+///
+/// Callers never supply either value. A `sha256` a caller could pass would be a
+/// claim about bytes the store never checked, and the digest exists precisely so
+/// a reader can tell whether the payload they hold is the one that was written —
+/// a claim is worth nothing there. Every backend calls this on the bytes it is
+/// about to persist, so all three answer identically for identical input, which
+/// the shared conformance suite pins.
+pub fn blob_metadata(bytes: &[u8]) -> (u64, String) {
+    let digest = Sha256::digest(bytes);
+    let sha = digest.iter().fold(String::new(), |mut acc, b| {
+        use std::fmt::Write as _;
+        let _ = write!(acc, "{b:02x}");
+        acc
+    });
+    (bytes.len() as u64, sha)
+}
 
 /// Whether a workspace node is a folder or a file.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -109,22 +161,154 @@ pub struct WorkspaceNode {
     /// actually stored.
     #[serde(default)]
     pub updated_by: WorkspaceOrigin,
+    /// The media type of a **binary** node's payload, e.g. `image/png`.
+    ///
+    /// `Some` is the one flag that says "this node holds bytes, not prose", and
+    /// every surface keys off it: the console renders instead of editing, the
+    /// agent tools answer with metadata instead of a body, and the text `write`
+    /// path refuses. See the invariant on [`WorkspaceStore::create_binary`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mime: Option<String>,
+    /// The payload's exact length in bytes. Store-computed; see
+    /// [`blob_metadata`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+    /// The lowercase hex SHA-256 of the payload. Store-computed; see
+    /// [`blob_metadata`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+impl WorkspaceNode {
+    /// Whether this node holds bytes rather than prose.
+    ///
+    /// `mime` is the single discriminator — `size` and `sha256` are derived, and
+    /// a node carrying one of them without a mime would be a store bug rather
+    /// than a shape any caller should have to handle.
+    pub fn is_binary(&self) -> bool {
+        self.mime.is_some()
+    }
+}
+
+/// Wraps already-buffered bytes as a one-chunk [`BlobStream`].
+///
+/// For the backends that hold a payload in memory by the time they can answer
+/// (sqlite's row `BLOB`). A backend that can genuinely stream should not use
+/// this.
+pub fn one_chunk(bytes: Vec<u8>) -> BlobStream {
+    Box::pin(futures::stream::once(async move { Ok(Bytes::from(bytes)) }))
+}
+
+/// Validates a node about to be created as binary and stamps its derived
+/// metadata.
+///
+/// Every backend calls this rather than trusting the node it was handed, so
+/// "`size` and `sha256` are computed, never accepted" is one implementation
+/// instead of three chances to get it wrong.
+pub fn stamped_binary(node: &WorkspaceNode, bytes: &[u8]) -> Result<WorkspaceNode> {
+    use crate::error::OpenCompanyError;
+    if node.kind != NodeKind::File {
+        return Err(OpenCompanyError::InvalidRequest(
+            "a binary node must be a file, not a folder".to_string(),
+        ));
+    }
+    let Some(mime) = node.mime.clone() else {
+        return Err(OpenCompanyError::InvalidRequest(
+            "a binary node must carry a mime type".to_string(),
+        ));
+    };
+    let (size, sha256) = blob_metadata(bytes);
+    Ok(WorkspaceNode {
+        mime: Some(mime),
+        size: Some(size),
+        sha256: Some(sha256),
+        ..node.clone()
+    })
+}
+
+/// Re-stamps an existing binary node for a payload replacement.
+///
+/// Refuses a folder and refuses a *prose* node: neither kind can be converted
+/// into the other by a write, which is the same rule
+/// [`WorkspaceStore::write`] enforces from the other side.
+pub fn rebind_binary(
+    node: &mut WorkspaceNode,
+    bytes: &[u8],
+    mime: Option<&str>,
+    author: WorkspaceOrigin,
+) -> Result<()> {
+    use crate::error::OpenCompanyError;
+    if node.kind != NodeKind::File {
+        return Err(OpenCompanyError::InvalidRequest(
+            "cannot write bytes to a folder".to_string(),
+        ));
+    }
+    if !node.is_binary() {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "`{}` holds text, not binary data; write it as text instead",
+            node.name
+        )));
+    }
+    let (size, sha256) = blob_metadata(bytes);
+    if let Some(mime) = mime {
+        node.mime = Some(mime.to_string());
+    }
+    node.size = Some(size);
+    node.sha256 = Some(sha256);
+    node.updated_at_millis = crate::ports::now_millis();
+    node.updated_by = author;
+    Ok(())
 }
 
 /// Durable per-company workspace tree. Company A's files MUST be invisible to
 /// company B.
+///
+/// # Bytes are a second, additive path (issue #553)
+///
+/// The text half of this port — [`read`](Self::read), [`write`](Self::write),
+/// [`create`](Self::create) — takes and returns `String`, and stays that way.
+/// Seventeen call sites reference this port; widening them to bytes would move
+/// the backlink scan, the seeder, the GraphQL projection, the agent tools and
+/// the REST layer for no gain, because none of them can do anything with a PNG.
+/// So a binary node is reached through [`create_binary`](Self::create_binary),
+/// [`write_binary`](Self::write_binary) and [`read_bytes`](Self::read_bytes),
+/// and every text caller compiles and behaves exactly as it did.
+///
+/// **The invariant**: a binary node is a [`NodeKind::File`] whose
+/// [`mime`](WorkspaceNode::mime), [`size`](WorkspaceNode::size) and
+/// [`sha256`](WorkspaceNode::sha256) are all `Some`. All three are set together
+/// by the store, or none is.
+///
+/// **A text [`read`](Self::read) of a binary node yields an empty body**, the
+/// same answer a folder gives. That is not a placeholder — it is what keeps
+/// `file_with_backlinks`, `rename_move`'s content refetch and the GraphQL
+/// resolver compiling and correct without knowing binaries exist: none of them
+/// can render bytes, and an empty body is the honest thing to hand a
+/// prose-shaped caller. Surfaces that *should* care check
+/// [`WorkspaceNode::is_binary`] and say something better.
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync {
     /// Returns every node in the tree (order unspecified; callers build the
     /// tree from `parent_id`).
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>>;
-    /// Reads one node and, for files, its content. Folders yield an empty body.
+    /// Reads one node and, for files, its content. Folders — and binary nodes —
+    /// yield an empty body; see the trait docs.
     async fn read(&self, company: &CompanyId, id: &str) -> Result<Option<(WorkspaceNode, String)>>;
-    /// Overwrites a file's content, returning the updated node. A folder id is
-    /// an [`OpenCompanyError::InvalidRequest`](crate::error::OpenCompanyError).
+    /// Overwrites a file's content, returning the updated node. A folder id —
+    /// or a **binary** node's id — is an
+    /// [`OpenCompanyError::InvalidRequest`](crate::error::OpenCompanyError).
+    ///
+    /// Refusing a binary node here is what stops the corruption this path would
+    /// otherwise cause silently: the node's `mime`, `size` and `sha256` describe
+    /// a payload, and storing prose behind them would leave every reader — the
+    /// console's download, the digest check, the agent's metadata read — being
+    /// told about bytes that are no longer there. [`write_binary`] is the way to
+    /// replace a payload.
     ///
     /// `author` is stamped onto [`WorkspaceNode::updated_by`]; it is the
     /// caller's identity, never anything derived from `content`.
+    ///
+    /// [`write_binary`]: Self::write_binary
     async fn write(
         &self,
         company: &CompanyId,
@@ -145,6 +329,57 @@ pub trait WorkspaceStore: Send + Sync {
         node: &WorkspaceNode,
         content: Option<&str>,
     ) -> Result<()>;
+    /// Creates a **binary** file node holding `bytes`.
+    ///
+    /// The binary twin of [`create`](Self::create), with the same freshness and
+    /// parent rules. `node.kind` must be [`NodeKind::File`] and `node.mime` must
+    /// be set — the caller inferred the media type and only the caller can.
+    ///
+    /// `node.size` and `node.sha256` are **ignored and recomputed** from `bytes`
+    /// via [`blob_metadata`]. A digest a caller supplied would be an unverified
+    /// claim about the payload, which is the one thing a digest must not be.
+    ///
+    /// `bytes` is a slice rather than a stream on purpose: the quota decorator
+    /// has to know the full size before anything is written, so that a refused
+    /// write leaves no partial blob and no node behind. See [`BlobStream`].
+    async fn create_binary(
+        &self,
+        company: &CompanyId,
+        node: &WorkspaceNode,
+        bytes: &[u8],
+    ) -> Result<()>;
+    /// Replaces a binary node's payload, returning the updated node.
+    ///
+    /// The binary twin of [`write`](Self::write), and the reason re-publishing a
+    /// generated image revises the note the operator has been reading rather
+    /// than opening a rival beside it. A missing id, a folder, or a node that
+    /// holds *text* is an
+    /// [`InvalidRequest`](crate::error::OpenCompanyError::InvalidRequest) — the
+    /// mirror of `write`'s refusal, so neither kind of node can be turned into
+    /// the other by a write.
+    ///
+    /// `mime` of `None` keeps the node's current media type; `size` and
+    /// `sha256` are recomputed, and `author` is stamped onto `updated_by`
+    /// exactly as `write` does.
+    async fn write_binary(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        bytes: &[u8],
+        mime: Option<&str>,
+        author: WorkspaceOrigin,
+    ) -> Result<WorkspaceNode>;
+    /// Reads a binary node's metadata and streams its payload.
+    ///
+    /// `None` when the id names nothing **or** names a node that is not binary —
+    /// a folder or a prose note. Callers use this to serve a download, so
+    /// "there is no payload here" and "there is no node here" lead to the same
+    /// 404 and are deliberately not distinguished.
+    async fn read_bytes(
+        &self,
+        company: &CompanyId,
+        id: &str,
+    ) -> Result<Option<(WorkspaceNode, BlobStream)>>;
     /// Renames and/or reparents a node, returning the updated node. Moving a
     /// folder under its own descendant (a cycle) is rejected.
     ///
@@ -162,6 +397,11 @@ pub trait WorkspaceStore: Send + Sync {
     ) -> Result<WorkspaceNode>;
     /// Deletes a node; folders are removed recursively. Returns whether a node
     /// was removed.
+    ///
+    /// A binary node's payload goes with it — a backend that dropped the node
+    /// and kept the blob would leak the tenant's quota to nothing reachable.
+    /// The conformance suite checks this by asking [`read_bytes`](Self::read_bytes)
+    /// afterwards rather than by trusting the delete's return value.
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
     /// Whether the workspace has no nodes — the gate the seeder checks so a
     /// seeded-then-emptied workspace is never re-seeded.
@@ -238,11 +478,86 @@ mod tests {
                 id: "cmo".to_string(),
             },
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         };
         let json = serde_json::to_string(&node).unwrap();
         assert_eq!(serde_json::from_str::<WorkspaceNode>(&json).unwrap(), node);
         // camelCase on the node, matching every other field on it.
         assert!(json.contains("\"createdBy\""), "{json}");
         assert!(json.contains("\"updatedBy\""), "{json}");
+    }
+
+    /// A prose note carries no blob metadata **on the wire at all** — the three
+    /// fields are `skip_serializing_if`, so the tree read the console makes on
+    /// every mount does not grow three nulls per node, and `mime` being present
+    /// is a reliable "this is binary" test rather than a present-but-null
+    /// ambiguity.
+    #[test]
+    fn a_text_node_serializes_without_the_blob_fields() {
+        let node = WorkspaceNode {
+            id: "n-1".to_string(),
+            name: "voice.md".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert!(!json.contains("mime"), "{json}");
+        assert!(!json.contains("size"), "{json}");
+        assert!(!json.contains("sha256"), "{json}");
+        assert!(!node.is_binary());
+    }
+
+    /// A binary node round-trips all three fields through the exact `node_json`
+    /// path every backend persists, in camelCase like the rest of the node.
+    #[test]
+    fn a_binary_node_round_trips_its_blob_metadata() {
+        let node = WorkspaceNode {
+            id: "n-2".to_string(),
+            name: "chart.png".to_string(),
+            kind: NodeKind::File,
+            parent_id: None,
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: Some(1234),
+            sha256: Some("abc123".to_string()),
+        };
+        let json = serde_json::to_string(&node).unwrap();
+        assert_eq!(serde_json::from_str::<WorkspaceNode>(&json).unwrap(), node);
+        assert!(json.contains("\"sha256\""), "{json}");
+        assert!(node.is_binary());
+    }
+
+    /// The digest is over the bytes, not over any text rendering of them — so a
+    /// payload that is not UTF-8 at all still has one, which is the whole point.
+    #[test]
+    fn blob_metadata_is_the_sha256_of_the_raw_bytes() {
+        // The empty-input SHA-256, a value with a published constant to check
+        // against, so this pins the encoding (lowercase hex) and not just
+        // self-consistency.
+        assert_eq!(
+            blob_metadata(b""),
+            (
+                0,
+                "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".to_string()
+            )
+        );
+        // Invalid UTF-8: a lone continuation byte. Digesting must not care.
+        let (size, sha) = blob_metadata(&[0xff, 0xfe, 0x00]);
+        assert_eq!(size, 3);
+        assert_eq!(sha.len(), 64);
+        assert!(
+            sha.chars()
+                .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase())
+        );
     }
 }

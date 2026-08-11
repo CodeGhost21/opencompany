@@ -278,6 +278,7 @@ fn company_builder(
     )
     .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
     .with_host_base_url(state.config().host_base_url())
+    .with_workspace_quota(state.config().workspace_quota)
     .with_skills_registry(state.shared_skill_registry()?)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
@@ -1063,6 +1064,10 @@ async fn main() -> Result<()> {
                 tenant_namespace,
                 admin_email,
                 tinyhumans_credential,
+                // Issue #553: the workspace's enforced byte limits, read from
+                // the same `[workspace]` section as the soft disk quotas above
+                // and handed to every company's builder below.
+                workspace_quota: workspace_cfg.quota,
                 ..AppConfig::default()
             })
             .with_cors(opencompany::server::cors::CorsConfig::from_env()?)

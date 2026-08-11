@@ -2390,6 +2390,45 @@ async fn state_with_manifest(home: &std::path::Path, manifest: CompanyManifest) 
     state
 }
 
+/// Like [`state_with_manifest`], but seeds operator-added overlay teammates too,
+/// so a test can assert MCP reachability over the full runtime roster — manifest
+/// agents plus overlay agents — the way `build_roster` composes it (issue #568).
+async fn state_with_manifest_and_overlays(
+    home: &std::path::Path,
+    manifest: CompanyManifest,
+    overlay_agents: Vec<crate::ports::types::OverlayAgent>,
+) -> AppState {
+    use crate::ports::CompanyStore;
+    let store = FsCompanyStore::new(home.to_path_buf());
+    let id = CompanyId::new("acme");
+    store
+        .save(&CompanyRecord {
+            id: id.clone(),
+            manifest: manifest.clone(),
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents,
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        })
+        .await
+        .unwrap();
+    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest)
+        .with_id(id.clone())
+        .build()
+        .await
+        .unwrap();
+    let state = AppState::new(AppConfig::default());
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    crate::server::test_support::seed_fixed_admin(&state, "acme").await;
+    state
+}
+
 #[tokio::test]
 async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     let home_dir = home();
@@ -2518,6 +2557,166 @@ async fn mcp_manifest_server_cannot_be_deleted_but_can_be_overridden() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(updated["server"]["source"], "manifest");
     assert_eq!(updated["server"]["enabled"], false);
+    // The mutating response carries reachability too (issue #568), so the console
+    // reflects who can reach the server right after an edit, not only on reload.
+    assert!(
+        updated["server"]["reachableBy"].is_array(),
+        "a mutating response also carries reachableBy"
+    );
+}
+
+/// Issue #568: each listed server carries the ids of the agents whose *effective*
+/// grants reach it — over the full runtime roster, manifest agents plus overlay
+/// teammates. With a company `allow = ["*"]`, an agent that declares no `tools`
+/// (and every overlay teammate, which has no tools row) inherits the wildcard and
+/// reaches everything; an agent that narrows itself to `mcp:notion` reaches only
+/// that server.
+#[tokio::test]
+async fn mcp_reachability_lists_reaching_agents_including_overlay() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:notion\"]\n\
+         [[agent]]\nid = \"eng\"\nrole = \"Engineer\"\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n\
+         [[mcp_server]]\nname = \"linear\"\nendpoint = \"https://linear.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let overlay = crate::ports::types::OverlayAgent {
+        id: "helper".to_string(),
+        name: "Helper".to_string(),
+        role: "Assistant".to_string(),
+        description: None,
+    };
+    let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let reach = |name: &str| -> Vec<String> {
+        let row = list
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"));
+        let mut ids: Vec<String> = row["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+
+    // notion: the narrowed ceo, the wildcard-inheriting eng, and the overlay.
+    assert_eq!(reach("notion"), vec!["ceo", "eng", "helper"]);
+    // linear: only the wildcard holders — ceo scoped itself out of it.
+    assert_eq!(
+        reach("linear"),
+        vec!["eng", "helper"],
+        "ceo narrowed to mcp:notion, so it cannot reach linear"
+    );
+}
+
+/// Issue #568: a server no agent's grants cover comes back with an **empty**
+/// `reachableBy` — the signal the console flags loudly rather than showing a
+/// healthy server that is silently unreachable. Here a narrow company
+/// `allow = ["mcp:docs"]` reaches `docs` but never `notion`.
+#[tokio::test]
+async fn mcp_reachability_flags_a_server_no_agent_can_reach() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"mcp:docs\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n\
+         [[mcp_server]]\nname = \"notion\"\nendpoint = \"https://notion.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let row = |name: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["name"] == name)
+            .unwrap_or_else(|| panic!("server `{name}` is listed"))
+            .clone()
+    };
+    assert_eq!(
+        row("docs")["reachableBy"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["ceo"],
+        "the company allow covers mcp:docs for the one agent"
+    );
+    assert!(
+        row("notion")["reachableBy"].as_array().unwrap().is_empty(),
+        "no agent's grants cover mcp:notion — the flagged zero case"
+    );
+}
+
+/// Issue #568: a **disabled** server reaches nobody, however wide the grants.
+/// `registry_for_agent` filters on `decl.enabled && grants_cover_server(..)`, so
+/// an agent holding `mcp:docs` is handed no such tool while the server is off —
+/// reporting it as reachable would be the console/harness disagreement this
+/// feature exists to remove. Asserted on both readers: the mutating response
+/// that turns the server off, and the later list.
+#[tokio::test]
+async fn mcp_reachability_is_empty_for_a_disabled_server() {
+    let manifest: CompanyManifest = toml::from_str(
+        "[company]\nname = \"Acme\"\n[tools]\nallow = [\"*\"]\n\
+         [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"mcp:docs\"]\n[policy]\nmode = \"full\"\n\
+         [[mcp_server]]\nname = \"docs\"\nendpoint = \"https://docs.example/mcp\"\n",
+    )
+    .unwrap();
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_manifest(&home, manifest).await;
+
+    let reach = |body: &serde_json::Value| -> Vec<String> {
+        body["reachableBy"]
+            .as_array()
+            .expect("reachableBy serializes as an array")
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string())
+            .collect()
+    };
+
+    // Enabled: the one agent's grant covers it.
+    let (status, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reach(&list[0]), vec!["ceo".to_string()]);
+
+    // Disabling it empties reachability in the mutating response itself.
+    let (status, updated) = send(
+        &state,
+        "PUT",
+        "/api/v1/company/mcp/servers/docs",
+        Some(json!({ "enabled": false })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(updated["server"]["enabled"], false);
+    assert!(
+        reach(&updated["server"]).is_empty(),
+        "a disabled server is handed to no agent, so it is reachable by none"
+    );
+
+    // And the list agrees on the next read — the grant is unchanged, the server is off.
+    let (_, list) = send(&state, "GET", "/api/v1/company/mcp/servers", None).await;
+    assert_eq!(list[0]["enabled"], false);
+    assert!(
+        reach(&list[0]).is_empty(),
+        "the list reader applies the same enabled filter as the harness"
+    );
 }
 
 /// Without the `openhuman` feature there is no MCP transport, so live discovery
@@ -6154,6 +6353,9 @@ async fn a_published_note_refuses_the_save_when_its_version_cannot_be_recorded()
             updated_at_millis: 1,
             created_by: WorkspaceOrigin::Operator,
             updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
         },
         Some("the agent's draft"),
     )
@@ -6462,4 +6664,258 @@ async fn a_card_can_be_created_as_a_workflow_deliverable() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(flipped["deliverable"], "workflow");
+}
+
+// ---------------------------------------------------------------------------
+// Binary workspace nodes over HTTP (issue #553)
+// ---------------------------------------------------------------------------
+
+/// Sends a `multipart/form-data` upload with one file part and an optional
+/// `parentId`, hand-rolling the body so the test exercises the real
+/// `Multipart` extractor rather than a stub.
+async fn upload_file(
+    state: &AppState,
+    filename: &str,
+    content_type: Option<&str>,
+    bytes: &[u8],
+    parent_id: Option<&str>,
+) -> (StatusCode, Value) {
+    const BOUNDARY: &str = "----opencompany553boundary";
+    let mut body: Vec<u8> = Vec::new();
+    if let Some(parent) = parent_id {
+        body.extend_from_slice(
+            format!(
+                "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"parentId\"\r\n\r\n{parent}\r\n"
+            )
+            .as_bytes(),
+        );
+    }
+    body.extend_from_slice(
+        format!("--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n")
+            .as_bytes(),
+    );
+    if let Some(ct) = content_type {
+        body.extend_from_slice(format!("Content-Type: {ct}\r\n").as_bytes());
+    }
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(bytes);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+
+    let request = Request::builder()
+        .method("POST")
+        .uri("/api/v1/company/workspace/upload")
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    let status = response.status();
+    let out = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let value = if out.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&out).unwrap_or(Value::Null)
+    };
+    (status, value)
+}
+
+/// The headline of #553 over HTTP: a PNG uploads, appears in the tree with its
+/// metadata, and streams back byte-exactly — the round trip that used to be
+/// impossible because the create route only took a JSON body.
+#[tokio::test]
+async fn an_uploaded_image_round_trips_through_the_blob_route() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    // Not valid UTF-8, so nothing on this path can be quietly routing it
+    // through a `String`.
+    let png: Vec<u8> = vec![
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xfe, 0x00,
+    ];
+    let (status, node) = upload_file(&state, "hero.png", Some("image/png"), &png, None).await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["name"], "hero.png");
+    assert_eq!(node["mime"], "image/png");
+    assert_eq!(node["size"], png.len() as u64);
+    let sha = node["sha256"]
+        .as_str()
+        .expect("a digest is returned")
+        .to_string();
+    assert_eq!(sha.len(), 64, "the store's digest, not the caller's");
+    assert!(
+        node["content"].is_null(),
+        "a payload is never inlined into the node body"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // It is in the tree, with its metadata, so the console can decide how to
+    // render it without opening it.
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let listed = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"] == id.as_str())
+        .expect("the uploaded node is in the tree");
+    assert_eq!(listed["mime"], "image/png");
+    assert_eq!(listed["size"], png.len() as u64);
+
+    // The payload streams back exactly, with the headers a browser needs.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(response.headers()["etag"], format!("\"{sha}\""));
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()
+            .unwrap()
+            .contains("hero.png")
+    );
+    let got = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
+}
+
+/// A Markdown upload stays a **note**, not a payload. Storing it as bytes would
+/// silently cost it the editor, the diff-free text read, backlinks and search —
+/// so the decision is asserted rather than left to whichever branch ran.
+#[tokio::test]
+async fn a_markdown_upload_is_stored_as_a_note_not_as_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "brief.md",
+        Some("text/markdown"),
+        b"# Launch\n\nLinks to [[voice]].",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert!(
+        node["mime"].is_null(),
+        "a note carries no mime — that field is what marks a node binary"
+    );
+    let id = node["id"].as_str().unwrap().to_string();
+
+    // …and it reads back through the *text* route, with backlinks.
+    let (status, file) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(file["content"].as_str().unwrap().contains("# Launch"));
+}
+
+/// A file *typed* as text whose bytes are not UTF-8 becomes a payload. The
+/// decision is made on the bytes, so a mislabelled upload cannot be mangled
+/// into a note.
+#[tokio::test]
+async fn a_mislabelled_text_upload_is_stored_as_bytes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "notes.txt",
+        Some("text/plain"),
+        &[0xff, 0xfe, 0x01],
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["mime"], "text/plain",
+        "it keeps the declared type, but is stored as a payload"
+    );
+    assert_eq!(node["size"], 3);
+}
+
+/// The two read routes are not interchangeable, and asking the wrong one says
+/// which is right instead of answering with an empty body.
+#[tokio::test]
+async fn the_text_and_blob_reads_refuse_each_others_nodes() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, image) = upload_file(&state, "chart.png", Some("image/png"), &[0x89, 0xff], None).await;
+    let image_id = image["id"].as_str().unwrap().to_string();
+    let (_, note) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "voice.md", "kind": "file", "content": "# Voice"})),
+    )
+    .await;
+    let note_id = note["id"].as_str().unwrap().to_string();
+
+    // Text read of a payload: refused, and it names the route that works.
+    let (status, body) = send(
+        &state,
+        "GET",
+        &format!("/api/v1/company/workspace/file/{image_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert!(
+        body.to_string().contains("workspace/blob/"),
+        "the refusal must point at the route that serves it: {body}"
+    );
+
+    // Blob read of a note: a plain 404, exactly as for an id that names
+    // nothing — the two are deliberately indistinguishable.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/workspace/blob/{note_id}"))
+        .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+/// An upload lands under the folder it names, like any other node.
+#[tokio::test]
+async fn an_upload_can_target_a_parent_folder() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Shots", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap().to_string();
+
+    let (status, node) = upload_file(
+        &state,
+        "a.png",
+        Some("image/png"),
+        &[0x89, 0x50],
+        Some(&folder_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(node["parentId"], folder_id.as_str());
 }
