@@ -1174,14 +1174,18 @@ fn spawn_workflow_run(
     workflow: WorkflowFile,
     input: Value,
     dry_run: bool,
-) -> (
+) -> crate::Result<(
     String,
     tokio::task::JoinHandle<crate::Result<crate::ports::WorkflowRun>>,
-) {
+)> {
     // Issue #395: the supervisor registration and the both-arms outcome
     // journalling that used to live here now live in `WorkflowSpawn`, because
     // approving a paused workflow gate starts a run too and owes exactly the
     // same two things. One copy of the discipline, two entry points.
+    //
+    // Issue #401: `spawn` is fallible — a company at its in-flight run ceiling
+    // is refused here, before any task is spawned, and the caller maps that to
+    // a 429.
     //
     // Issue #542: `dry_run` rides through to the spawn task, which stamps it on
     // the run context and skips the outcome journal write when set.
@@ -1248,13 +1252,20 @@ async fn run_workflow(
     // Issue #383: registered and spawned before either mode branches, so the two
     // modes cannot drift in what they start. Issue #228's journalling now lives
     // inside the task rather than around this await.
+    //
+    // Issue #401: the concurrency ceiling is enforced HERE, before the
+    // detach/sync branch below, so both modes refuse identically — a 429 with
+    // the actionable `{error, code: "workflow_run_limit"}` envelope and no run
+    // id, because nothing started. The rejection precedes any task or any
+    // `WorkflowRunStarted`, so there is nothing to unwind.
     let (run_id, handle) = spawn_workflow_run(
         company.runtime.as_ref(),
         runner.clone(),
         file,
         body.input,
         dry_run,
-    );
+    )
+    .map_err(|e| ApiError(e).into_response())?;
 
     if detach {
         // Returned before the engine has walked a node. From here the client

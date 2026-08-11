@@ -489,8 +489,10 @@ pub async fn resume_from_effect(runtime: &CompanyRuntime, effect: &Effect) -> Re
     // approvals request open for the length of a whole workflow run, which is
     // the drop-safety failure issue #380 already paid for once.
     // Issue #542: resuming an approved gate is always a real run — `false`.
+    // Issue #401: `spawn` refuses at the concurrency ceiling; propagate it so
+    // the approval-resume caller surfaces the same `WorkflowRunLimit` refusal.
     let (run_id, _handle) =
-        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false);
+        WorkflowSpawn::new(runtime, runner).spawn(workflow, input, false, false)?;
     tracing::info!(
         company = %runtime.id(),
         workflow = %workflow_id,
