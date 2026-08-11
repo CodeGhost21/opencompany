@@ -3037,10 +3037,17 @@ description = "Builds the product."
         }
     }
 
-    /// A console-added MCP server reaches the agent on the NEXT `ensure` — the
-    /// roster is rebuilt because the effective set re-resolved from the LIVE
-    /// secret store (not the boot snapshot) changed its fingerprint. This is the
-    /// Parallel-Search / BrowserBase freshness bug, proven end-to-end.
+    /// A console-added MCP server reaches the agent on the NEXT `ensure`, with no
+    /// restart — the roster rebuilds because the effective set, re-resolved from
+    /// the LIVE secret store (not the boot snapshot), changed its fingerprint.
+    /// This is the Parallel-Search / BrowserBase freshness bug proven end-to-end,
+    /// and the CI guard for issue #566: the effective-MCP fingerprint is a *term*
+    /// of [`HarnessPool::ensure`]'s staleness check. Both directions are pinned —
+    /// an unchanged set holds the fingerprint (no needless rebuild), an MCP-only
+    /// change moves it (rebuilt in place, without a restart). A refactor that
+    /// drops the term makes the post-change `ensure` early-return without storing
+    /// the new fingerprint: the value stops moving across the mutation and the
+    /// `assert_ne!` fails, rather than the restart requirement quietly returning.
     #[tokio::test]
     async fn ensure_rebuilds_when_a_runtime_mcp_server_is_added() {
         let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
@@ -3089,6 +3096,16 @@ description = "Builds the product."
             .await
             .expect("fingerprinted");
 
+        // Stability direction: with no axis changed, a redundant `ensure` is a
+        // no-op — the gate reuses the cached roster and the fingerprint holds, so
+        // the change-direction assertion below can't pass by coincidence.
+        pool.ensure(&rec, &deps).await.expect("redundant ensure");
+        assert_eq!(
+            pool.mcp_fingerprint_of(&rec.id).await,
+            Some(before),
+            "an unchanged MCP set must not move the fingerprint"
+        );
+
         // Console-add a runtime MCP server directly into the live secret store.
         crate::company::mcp::save_runtime_index(
             &rec.id,
@@ -3108,122 +3125,16 @@ description = "Builds the product."
         .await
         .unwrap();
 
-        // Next ensure re-resolves from the live store → fingerprint changes →
-        // roster rebuilt, so the new server reaches the agent without a restart.
-        pool.ensure(&rec, &deps).await.expect("second ensure");
+        // Change direction: the next ensure re-resolves from the live store →
+        // fingerprint changes → roster rebuilt, so the new server reaches the
+        // agent without a restart.
+        pool.ensure(&rec, &deps).await.expect("post-add ensure");
         let after = pool
             .mcp_fingerprint_of(&rec.id)
             .await
             .expect("fingerprinted");
-        assert_ne!(before, after, "adding a server must change the fingerprint");
-        assert_eq!(
-            pool.resident_companies().await,
-            1,
-            "same company, rebuilt in place"
-        );
-
-        // A third ensure with no change is a no-op (fingerprint stable).
-        pool.ensure(&rec, &deps).await.expect("third ensure");
-        assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
-    }
-
-    /// Issue #566 — the effective-MCP fingerprint is one of the terms in
-    /// [`HarnessPool::ensure`]'s staleness check, which is exactly what lets the
-    /// console promise "no restart": a change confined to the MCP axis, with every
-    /// other fingerprinted input held stable, still rebuilds the roster on the next
-    /// `ensure`. This is the CI guard for that property. A refactor that drops
-    /// `mcp_fingerprint` from the staleness gate makes the second `ensure`
-    /// early-return without storing the new fingerprint — the value stops moving
-    /// across the mutation and the `assert_ne!` below fails, rather than the
-    /// restart requirement quietly returning.
-    #[tokio::test]
-    async fn mcp_fingerprint_participates_in_staleness_check() {
-        let secrets: Arc<dyn SecretStore> = Arc::new(MemSecrets::default());
-        let dir = tempfile::tempdir().unwrap();
-        let deps = HarnessDeps {
-            provider: Arc::new(MockProvider::new("mock: ")),
-            provider_slug: "mock".to_string(),
-            context: Arc::new(MockContext::default()),
-            store: Arc::new(RecordingStore::default()),
-            meter: None,
-            workspace_root: dir.path().to_path_buf(),
-            model_override: None,
-            tasks: None,
-            artifacts: None,
-            skills: None,
-            skills_source_dir: None,
-            skills_registry: std::sync::Arc::from([]),
-            mcp_servers: Vec::new(),
-            facts: None,
-            events: None,
-            delegations: DelegationQueue::default(),
-            workflow_runner: crate::harness::orchestrator::WorkflowRunnerHandle::default(),
-            mcp_failures: McpFailureQueue::default(),
-            pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
-            workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
-            approval_requests: ApprovalRequestQueue::default(),
-            secrets: Some(secrets.clone()),
-            web_allowed_domains: Vec::new(),
-            capabilities: crate::harness::toolbelt::CapabilityFilter::AllowAll,
-            workflow_source_dir: None,
-            plan: None,
-            media: None,
-            composio: None,
-            steer: crate::company::steer::InflightRegistry::default(),
-            run_supervisor: crate::runtime::RunSupervisor::default(),
-            delivery: None,
-            search: None,
-            workspace: None,
-        };
-        let pool = HarnessPool::new();
-        let rec = record();
-
-        // Cold build establishes the baseline fingerprint.
-        pool.ensure(&rec, &deps).await.expect("first ensure");
-        let baseline = pool
-            .mcp_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprinted");
-
-        // Stability direction: with NO axis changed, `ensure` is a no-op — the gate
-        // reuses the cached roster and the fingerprint does not move.
-        pool.ensure(&rec, &deps).await.expect("redundant ensure");
-        assert_eq!(
-            pool.mcp_fingerprint_of(&rec.id).await,
-            Some(baseline),
-            "an unchanged MCP set must not move the fingerprint"
-        );
-        assert_eq!(pool.resident_companies().await, 1);
-
-        // Change ONLY the MCP axis (console-add a server into the live store); every
-        // other fingerprinted input is identical between the two `ensure` calls.
-        crate::company::mcp::save_runtime_index(
-            &rec.id,
-            secrets.as_ref(),
-            &[crate::company::McpServer {
-                name: "browserbase".into(),
-                endpoint: "https://api.browserbase.com/mcp".into(),
-                description: None,
-                command: None,
-                allowed_tools: Vec::new(),
-                disallowed_tools: Vec::new(),
-                timeout_secs: 30,
-                enabled: true,
-                auth_secret: None,
-            }],
-        )
-        .await
-        .unwrap();
-
-        // Change direction: the MCP-only edit alone flips the fingerprint and
-        // rebuilds in place — proving the term is consulted by the staleness gate.
-        pool.ensure(&rec, &deps).await.expect("post-change ensure");
-        let changed = pool
-            .mcp_fingerprint_of(&rec.id)
-            .await
-            .expect("fingerprinted");
         assert_ne!(
-            baseline, changed,
+            before, after,
             "an MCP-only change must move the staleness fingerprint (issue #566)"
         );
         assert_eq!(
@@ -3231,6 +3142,11 @@ description = "Builds the product."
             1,
             "same company, rebuilt in place — not a new residency"
         );
+
+        // Stability after the change too: a further ensure with no new change is
+        // a no-op and the fingerprint holds at its post-change value.
+        pool.ensure(&rec, &deps).await.expect("final no-op ensure");
+        assert_eq!(pool.mcp_fingerprint_of(&rec.id).await, Some(after));
     }
 
     // --- Skill-delta freshness (issue #41) ----------------------------------
