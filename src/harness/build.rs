@@ -1453,7 +1453,12 @@ mod tests {
     fn workspace_tools_are_wired_by_grant_and_store_presence() {
         // No store wired → fail closed, nothing built, whatever the grant.
         let unwired = built_tool_names(&["workspace"], false);
-        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+        for tool in [
+            "workspace_list",
+            "workspace_read",
+            "workspace_search",
+            "workspace_write",
+        ] {
             assert!(
                 !unwired.contains(&tool.to_string()),
                 "no store must mean no `{tool}`: {unwired:?}"
@@ -1470,6 +1475,14 @@ mod tests {
             wildcard.contains(&"workspace_read".to_string()),
             "{wildcard:?}"
         );
+        // Issue #607: search is a read and rides the read side of the gate. It
+        // reads exactly what `workspace_read` already grants, and it is the
+        // cheap path — behind the write grant it would be missing from every
+        // default agent, leaving them on the list-then-read crawl.
+        assert!(
+            wildcard.contains(&"workspace_search".to_string()),
+            "a bare `*` must confer workspace search: {wildcard:?}"
+        );
         assert!(
             !wildcard.contains(&"workspace_write".to_string()),
             "a bare `*` must NOT confer workspace writes: {wildcard:?}"
@@ -1484,7 +1497,12 @@ mod tests {
 
         // No workspace grant at all → nothing, even with a store wired.
         let ungranted = built_tool_names_with_workspace(&["web.*"]);
-        for tool in ["workspace_list", "workspace_read", "workspace_write"] {
+        for tool in [
+            "workspace_list",
+            "workspace_read",
+            "workspace_search",
+            "workspace_write",
+        ] {
             assert!(
                 !ungranted.contains(&tool.to_string()),
                 "an unrelated grant must not confer `{tool}`: {ungranted:?}"
@@ -1513,6 +1531,40 @@ mod tests {
         assert!(
             write_grant.contains(&"workspace_write".to_string()),
             "{write_grant:?}"
+        );
+    }
+
+    /// `workspace_search` rides the `workspace` READ grant and NEVER the
+    /// metered `search` grant (issue #607).
+    ///
+    /// The names invite the wrong wiring, and the wrong wiring would defeat the
+    /// issue: `search` is the paid external-credential grant that carries
+    /// `web_search`, and putting workspace search behind it would mean an agent
+    /// needs a billed backend credential to read its own company's notes — the
+    /// crawl stays, and now it stays for a reason nobody would guess from the
+    /// tool's description. Search reads exactly what `workspace_read` already
+    /// grants, so it costs the operator no additional decision.
+    #[test]
+    fn workspace_search_rides_the_workspace_grant_and_not_the_metered_search_grant() {
+        // The `search` grant alone confers `web_search` — and nothing from the
+        // workspace family, which is not granted here at all.
+        let metered = built_tool_names_with_search(&["search"]);
+        assert!(metered.contains(&"web_search".to_string()), "{metered:?}");
+        assert!(
+            !metered.contains(&"workspace_search".to_string()),
+            "the metered `search` grant must not confer workspace search: {metered:?}"
+        );
+
+        // …and the workspace read grant confers workspace search without
+        // conferring the billed one.
+        let workspace = built_tool_names_with_workspace(&["workspace.read"]);
+        assert!(
+            workspace.contains(&"workspace_search".to_string()),
+            "`workspace.read` must confer workspace search: {workspace:?}"
+        );
+        assert!(
+            !workspace.contains(&"web_search".to_string()),
+            "reading company notes must not require a billed search credential: {workspace:?}"
         );
     }
 
