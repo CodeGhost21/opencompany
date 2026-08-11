@@ -1,9 +1,13 @@
+/* Every `@import` first: CSS requires them before any other rule, and an
+   `@import` sitting after `@plugin` is ignored by a browser reading this file
+   directly (Tailwind resolves them at build time, which is what hid it). */
 @import "tailwindcss";
 @import "tw-animate-css";
-@plugin "@tailwindcss/typography";
 @import "shadcn/tailwind.css";
 @import "@fontsource-variable/geist";
 @import "@fontsource-variable/geist-mono";
+
+@plugin "@tailwindcss/typography";
 
 @custom-variant dark (&:is(.dark *));
 
@@ -26,7 +30,7 @@
  *
  * See `docs/design-system/tokens.md` for the full reference and
  * `docs/brand/README.md` for why these values and not others.
- * ==========================================================================*/
+ * ========================================================================== */
 
 :root {
     /* ------------------------------------------------------------------
@@ -385,7 +389,7 @@
  * `inline` keeps the utility pointing at the variable, so the `.dark`
  * override above reaches it. A plain `@theme` would bake the light value in
  * at build time and dark mode would silently do nothing.
- * ==========================================================================*/
+ * ========================================================================== */
 
 @theme inline {
     --font-sans: "Geist Variable", ui-sans-serif, system-ui, sans-serif;
@@ -567,7 +571,7 @@
  * `@theme` entry pointing at a variable that only exists deeper in the tree
  * does not register at build time — the utility silently falls back to
  * `currentColor`, which paints every frame stark white.
- * ==========================================================================*/
+ * ========================================================================== */
 
 :root {
     --kg-accent: var(--brand-500);

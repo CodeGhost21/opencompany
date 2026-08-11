@@ -44,7 +44,7 @@ var PRIMITIVES = {
 
   'gray/25': '#FCFCFD', 'gray/50': '#F4F4F7', 'gray/100': '#EEEEF3',
   'gray/200': '#E6E6EC', 'gray/300': '#D9D9E3', 'gray/400': '#8C8C9E',
-  'gray/500': '#6E6E80', 'gray/600': '#9797A8', 'gray/800': '#23232C',
+  'gray/500': '#6A6A7B', 'gray/600': '#9797A8', 'gray/800': '#23232C',
   'gray/850': '#1E1E26', 'gray/875': '#17171D', 'gray/900': '#16161D',
   'gray/925': '#131318', 'gray/950': '#0C0C0F',
 
@@ -117,7 +117,11 @@ var SEMANTIC_DARK = [
   ['color/text/primary', 'gray/50', TEXT, '--foreground'],
   ['color/text/muted', 'gray/600', TEXT, '--muted-foreground'],
   ['color/text/brand', 'brand/400', TEXT, '--primary'],
-  ['color/text/on-brand', 'white', TEXT, '--primary-foreground'],
+  // gray/950, not white — mirrors `--primary-foreground` in index.css.
+  // Dark's brand fill is brand/400, and white on it measures 3.27:1
+  // against the 4.5 an 11px badge label needs; gray/950 measures 5.98.
+  // The stylesheet had this right and the generator had drifted from it.
+  ['color/text/on-brand', 'gray/950', TEXT, '--primary-foreground'],
   ['color/text/nav-active', 'brand/300', TEXT, '--sidebar-accent-foreground'],
 
   ['color/border/focus', 'brand/400', STROKE, '--ring'],
@@ -539,6 +543,103 @@ function placeSet(set, name, description, x, y, L) {
   return set;
 }
 
+/**
+ * The console's primary control.
+ *
+ * Variant x State, and only Default/Disabled: hover and pressed are
+ * interaction states the code owns, and duplicating them here would be a
+ * second source of truth for the same value.
+ */
+function buildButton(L, S) {
+  var MATRIX = [
+    ['Primary', 'Default', L['color/action/primary'], L['color/text/on-brand'], null, null],
+    ['Primary', 'Disabled', L['color/action/primary'], L['color/text/on-brand'], null, 0.5],
+    ['Secondary', 'Default', L['color/bg/secondary'], L['color/text/primary'], null, null],
+    ['Secondary', 'Disabled', L['color/bg/secondary'], L['color/text/primary'], null, 0.5],
+    ['Outline', 'Default', L['color/bg/card'], L['color/text/primary'], L['color/border/default'], null],
+    ['Outline', 'Disabled', L['color/bg/card'], L['color/text/primary'], L['color/border/default'], 0.5],
+    ['Ghost', 'Default', null, L['color/text/primary'], null, null],
+    ['Ghost', 'Disabled', null, L['color/text/primary'], null, 0.5],
+    ['Destructive', 'Default', L['color/status/failed-text'], L['color/text/on-brand'], null, null],
+    ['Destructive', 'Disabled', L['color/status/failed-text'], L['color/text/on-brand'], null, 0.5],
+  ];
+  var variants = [];
+  for (var i = 0; i < MATRIX.length; i++) {
+    var m = MATRIX[i];
+    var b = figma.createComponent();
+    b.name = 'Variant=' + m[0] + ', State=' + m[1];
+    b.layoutMode = 'HORIZONTAL';
+    b.primaryAxisSizingMode = 'AUTO';
+    b.counterAxisSizingMode = 'AUTO';
+    b.counterAxisAlignItems = 'CENTER';
+    b.primaryAxisAlignItems = 'CENTER';
+    b.paddingTop = 7;
+    b.paddingBottom = 7;
+    b.setBoundVariable('paddingLeft', S['space/3']);
+    b.setBoundVariable('paddingRight', S['space/3']);
+    b.setBoundVariable('itemSpacing', S['space/1-5']);
+    b.setBoundVariable('topLeftRadius', S['radius/md']);
+    b.setBoundVariable('topRightRadius', S['radius/md']);
+    b.setBoundVariable('bottomLeftRadius', S['radius/md']);
+    b.setBoundVariable('bottomRightRadius', S['radius/md']);
+    b.fills = m[2] ? fillWith(m[2]) : [];
+    if (m[4]) {
+      b.strokes = fillWith(m[4]);
+      b.strokeWeight = 1;
+    }
+    if (m[5] != null) b.opacity = m[5];
+    var label = makeText('Run workflow', 'Geist', 'Medium', 14, m[3]);
+    b.appendChild(label);
+    label.setBoundVariable('fontSize', S['font-size/sm']);
+    variants.push(b);
+  }
+  return variants;
+}
+
+/** The run-status vocabulary: five states, five colours, one shape. */
+function buildStatusBadge(L, S) {
+  var STATES = [
+    ['Idle', 'Idle', 'color/status/idle', 'color/status/idle-text'],
+    ['Running', 'Running', 'color/status/running', 'color/status/running-text'],
+    ['Blocked', 'Needs approval', 'color/status/blocked', 'color/status/blocked-text'],
+    ['Done', 'Done', 'color/status/done', 'color/status/done-text'],
+    ['Failed', 'Failed', 'color/status/failed', 'color/status/failed-text'],
+  ];
+  var variants = [];
+  for (var i = 0; i < STATES.length; i++) {
+    var st = STATES[i];
+    var badge = figma.createComponent();
+    badge.name = 'State=' + st[0];
+    badge.layoutMode = 'HORIZONTAL';
+    badge.primaryAxisSizingMode = 'AUTO';
+    badge.counterAxisSizingMode = 'AUTO';
+    badge.counterAxisAlignItems = 'CENTER';
+    badge.paddingTop = 3;
+    badge.paddingBottom = 3;
+    badge.setBoundVariable('paddingLeft', S['space/2']);
+    badge.setBoundVariable('paddingRight', S['space/2']);
+    badge.setBoundVariable('itemSpacing', S['space/1-5']);
+    badge.cornerRadius = 999;
+    // The soft weight, reached with a bound paint at 14% rather than the
+    // stylesheet's color-mix: Figma has no mix for variables, and the hue
+    // still comes from one place, which is what matters.
+    badge.fills = [boundPaint(L[st[2]], 0.14)];
+
+    // Colour is never the only carrier — the label always accompanies the dot.
+    var dot = figma.createEllipse();
+    dot.name = 'Mark';
+    dot.resize(6, 6);
+    dot.fills = fillWith(L[st[2]]);
+    badge.appendChild(dot);
+
+    var text = makeText(st[1], 'Geist', 'Medium', 11, L[st[3]]);
+    badge.appendChild(text);
+    text.setBoundVariable('fontSize', S['font-size/2xs']);
+    variants.push(badge);
+  }
+  return variants;
+}
+
 function buildInput(L, S) {
   // State=Default / Focus / Invalid / Disabled. Hover is omitted on purpose:
   // it is an interaction state the code owns, and duplicating it here would
@@ -773,6 +874,30 @@ function buildCard(L, S) {
 }
 
 var COMPONENT_SPECS = [
+  {
+    name: 'Button',
+    x: 0, y: 0,
+    build: buildButton,
+    description:
+      "The console's primary control. One primary action per view — two side by side means neither is primary.\n\n" +
+      'Destructive is deliberately a tint of red rather than a solid fill: a solid red button pulls the eye ' +
+      'harder than the primary action, which is backwards for something you mostly want people NOT to click ' +
+      'by accident.\n\n' +
+      'Hover and pressed are owned by the code (frontend/src/components/ui/button.tsx) and not duplicated here.',
+  },
+  {
+    name: 'Status Badge',
+    x: 320, y: 0,
+    build: buildStatusBadge,
+    description:
+      'The run-status vocabulary. Five states, five colours, identical wherever a run appears.\n\n' +
+      'Closed on purpose: do not add a sixth, and never reuse a status hue for something that is not that ' +
+      'status. The moment a green dot can mean two things, the operator has to read the label and the colour ' +
+      'has stopped doing its job.\n\n' +
+      'Each state uses a -mark token for the dot and a -text token for the label. They differ because a mark ' +
+      'only needs 3:1 contrast while text needs 4.5:1 — amber measures 1.99:1 on the light canvas, so those ' +
+      'two would be illegible if the mark value set the words.',
+  },
   {
     name: 'Input',
     x: 860, y: 0,

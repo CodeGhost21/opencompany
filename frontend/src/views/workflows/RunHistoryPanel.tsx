@@ -24,7 +24,7 @@ import { pendingCount, relativeTime, runTone, undeliveredCount } from "./run-hea
  * waiting in Approvals, so it reads as informational, not as a failure. */
 const DELIVERY_TONE: Record<DeliveryStatus, string> = {
   sent: "border-status-done/40 bg-status-done-soft",
-  pending: "border-status-running/40 bg-status-running-soft",
+  pending: "border-status-blocked/40 bg-status-blocked-soft",
   skipped: "border-status-blocked/40 bg-status-blocked-soft",
   denied: "border-status-failed/40 bg-status-failed-soft",
   failed: "border-status-failed/40 bg-status-failed-soft",
@@ -46,7 +46,7 @@ export function DeliveryRows({ deliveries }: { deliveries: DeliveryReport[] }) {
       <div className="flex items-center gap-2">
         <span className="text-xs font-medium">Report delivery</span>
         {pending > 0 && (
-          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-status-running/40 bg-status-running-soft">
+          <Badge variant="outline" className="h-4 px-1.5 text-3xs font-normal border-status-blocked/40 bg-status-blocked-soft">
             {pending} awaiting approval
           </Badge>
         )}

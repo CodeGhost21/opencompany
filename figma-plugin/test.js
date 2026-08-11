@@ -241,6 +241,16 @@ if (typeof figma.ui.onmessage !== 'function') {
   if (noValue.length) problems.push(`${noValue.length} variables have no value`);
   if (root.children.length !== 3) problems.push(`expected 3 pages, got ${root.children.length}`);
 
+  // The component set the README promises. Asserted by name, because the
+  // generator drifting from its own documentation is exactly how this file
+  // came to build six of the eight it claimed.
+  const EXPECTED = ['Button', 'Status Badge', 'Input', 'Badge', 'Alert', 'Avatar', 'Tab', 'Card'];
+  const built = s.components || [];
+  const missing = EXPECTED.filter((n) => !built.includes(n));
+  const extra = built.filter((n) => !EXPECTED.includes(n));
+  if (missing.length) problems.push(`components not built: ${missing.join(', ')}`);
+  if (extra.length) problems.push(`components built but undocumented: ${extra.join(', ')}`);
+
   // Idempotency: a second run must not duplicate anything.
   const before = { v: variables.length, t: textStyles.length, e: effectStyles.length };
   await figma.ui.onmessage({ type: 'run', what: 'all', rebuild: false });
@@ -248,6 +258,13 @@ if (typeof figma.ui.onmessage !== 'function') {
   if (textStyles.length !== before.t) problems.push(`second run added ${textStyles.length - before.t} text styles`);
   if (effectStyles.length !== before.e) problems.push(`second run added ${effectStyles.length - before.e} effect styles`);
   if (root.children.length !== 3) problems.push(`second run changed page count to ${root.children.length}`);
+  const second = sandbox.__summary;
+  if ((second.components || []).length) {
+    problems.push(`second run rebuilt components: ${second.components.join(', ')}`);
+  }
+  const skipped = second.skipped || [];
+  const notSkipped = EXPECTED.filter((n) => !skipped.includes(n));
+  if (notSkipped.length) problems.push(`second run did not skip: ${notSkipped.join(', ')}`);
 
   console.log('\n--- idempotency (second run) ---');
   console.log('  variables:', variables.length, '| text styles:', textStyles.length,

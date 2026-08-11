@@ -108,8 +108,29 @@ const VIEWS = ['overview', 'company', 'chat', 'tasks', 'workspace', 'approvals',
 const browser = await chromium.launch();
 const ctx = await browser.newContext({ viewport: { width: 1440, height: 950 }, deviceScaleFactor: 1.5 });
 const api = ctx.request;
-const { dev_code } = await (await api.post(`${BASE}/api/v1/company/auth/request`, { data: { email: EMAIL } })).json();
-await api.post(`${BASE}/api/v1/company/auth/verify`, { data: { email: EMAIL, code: dev_code } });
+// Assert the sign-in, do not assume it.
+//
+// Destructuring `dev_code` from an unchecked body yields `undefined` on any
+// failure, the verify call proceeds anyway, and the audit then measures the
+// signed-out login screen — a page with almost no text, which passes. That is
+// the false PASS this file's header is about, reached by a different route.
+const requested = await api.post(`${BASE}/api/v1/company/auth/request`, { data: { email: EMAIL } });
+if (!requested.ok()) {
+  throw new Error(`auth/request failed: ${requested.status()} ${await requested.text()}`);
+}
+const { dev_code: devCode } = await requested.json();
+if (!devCode) {
+  throw new Error(
+    'auth/request returned no dev_code. The host echoes one only when no mail is ' +
+      'configured; without it this tool cannot sign in and must not report a pass.',
+  );
+}
+const verified = await api.post(`${BASE}/api/v1/company/auth/verify`, {
+  data: { email: EMAIL, code: devCode },
+});
+if (!verified.ok()) {
+  throw new Error(`auth/verify failed: ${verified.status()} ${await verified.text()}`);
+}
 
 const page = await ctx.newPage();
 const jsErrors = [];

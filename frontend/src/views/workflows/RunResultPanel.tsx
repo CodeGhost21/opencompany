@@ -68,7 +68,7 @@ export function RunResultPanel({
             </Badge>
           )}
           {pendingDeliveryCount > 0 && (
-            <Badge variant="outline" className="border-status-running/40 bg-status-running-soft">
+            <Badge variant="outline" className="border-status-blocked/40 bg-status-blocked-soft">
               {pendingDeliveryCount} report{pendingDeliveryCount === 1 ? "" : "s"} awaiting approval
             </Badge>
           )}

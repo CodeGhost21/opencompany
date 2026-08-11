@@ -1301,8 +1301,7 @@ function WaitingBand({ millis, live }: { millis: number; live: boolean }) {
     <li
       className={cn(
         "flex items-center justify-center gap-1.5 rounded-lg border border-dashed",
-        "border-status-blocked/60 bg-status-blocked-soft text-2xs text-status-blocked-text",
-        "border-status-blocked/40 bg-status-blocked-soft text-status-blocked-text",
+        "border-status-blocked/40 bg-status-blocked-soft text-2xs text-status-blocked-text",
         live && "animate-pulse",
       )}
       style={{ minHeight: height }}
@@ -1839,7 +1838,7 @@ function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; no
   const { waited } = pending;
 
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/60 bg-status-blocked px-3 py-2 text-xs border-status-blocked/30 bg-status-blocked-soft">
+    <div className="flex items-center gap-2 rounded-lg border border-status-blocked/30 bg-status-blocked-soft px-3 py-2 text-xs">
       <Hourglass className="size-3.5 shrink-0 text-status-blocked-text" />
       <span className="min-w-0 flex-1 text-status-blocked-text">
         {pending.count === 1
@@ -1849,7 +1848,7 @@ function AwaitingApprovalRow({ approvals, now }: { approvals: TaskApproval[]; no
       </span>
       <a
         href="#/approvals"
-        className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline text-status-blocked-text"
+        className="shrink-0 font-medium text-status-blocked-text underline-offset-2 hover:underline"
         aria-label={
           pending.count === 1
             ? "Review this task's pending approval on the Approvals page"
