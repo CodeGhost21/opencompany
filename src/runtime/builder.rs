@@ -42,7 +42,8 @@ use crate::ports::types::{
 use crate::ports::{
     AgentEconomy, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore, EventLog,
     FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore, SessionStore,
-    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkspaceStore,
+    SkillStateStore, TaskStore, ToolProvider, UsageMeter, UserStore, WorkflowRevisionStore,
+    WorkspaceStore,
 };
 use crate::runtime::board_events::BoardAnnouncer;
 use crate::runtime::channel::{OPERATOR_CHANNEL, OperatorChannel};
@@ -223,6 +224,7 @@ pub struct RuntimeBuilder {
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
+    workflow_revisions: Option<Arc<dyn WorkflowRevisionStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
     users: Option<Arc<dyn UserStore>>,
@@ -313,6 +315,7 @@ impl RuntimeBuilder {
             facts: None,
             artifacts: None,
             runs: None,
+            workflow_revisions: None,
             usage: None,
             skills: None,
             users: None,
@@ -420,6 +423,7 @@ impl RuntimeBuilder {
         self.facts = Some(handles.facts.clone());
         self.artifacts = Some(handles.artifacts.clone());
         self.runs = Some(handles.runs.clone());
+        self.workflow_revisions = Some(handles.workflow_revisions.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
         self.users = Some(handles.users.clone());
@@ -489,6 +493,15 @@ impl RuntimeBuilder {
     /// Swaps the task-run store (default: fs-backed).
     pub fn with_runs(mut self, runs: Arc<dyn RunStore>) -> Self {
         self.runs = Some(runs);
+        self
+    }
+
+    /// Swaps the workflow-revision store (default: fs-backed).
+    pub fn with_workflow_revisions(
+        mut self,
+        workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    ) -> Self {
+        self.workflow_revisions = Some(workflow_revisions);
         self
     }
 
@@ -817,6 +830,7 @@ impl RuntimeBuilder {
                 facts: self.facts.unwrap_or_else(|| fs_ops.clone()),
                 artifacts: self.artifacts.unwrap_or_else(|| fs_ops.clone()),
                 runs: self.runs.unwrap_or_else(|| fs_ops.clone()),
+                workflow_revisions: self.workflow_revisions.unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),

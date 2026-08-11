@@ -29,7 +29,7 @@ use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
     EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore,
     SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore,
-    WorkspaceStore,
+    WorkflowRevisionStore, WorkspaceStore,
 };
 
 /// The board column a task must enter to be dispatched to its assignee. Read
@@ -124,6 +124,8 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// Per-workflow edit history, for rollback of an edited workflow (#274).
+    pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
@@ -769,6 +771,12 @@ impl CompanyRuntime {
     /// with its status, step trace and cost.
     pub fn runs(&self) -> &Arc<dyn RunStore> {
         &self.ops.runs
+    }
+
+    /// This company's per-workflow edit history (#274), the snapshot ring a
+    /// workflow rollback reads and writes.
+    pub fn workflow_revisions(&self) -> &Arc<dyn WorkflowRevisionStore> {
+        &self.ops.workflow_revisions
     }
 
     /// This company's usage meter (written by the cost hook, read by WS5).
