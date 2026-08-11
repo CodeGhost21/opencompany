@@ -2416,7 +2416,19 @@ async fn mcp_servers_crud_round_trips_and_token_is_write_only() {
     assert_eq!(added["server"]["name"], "notion");
     assert_eq!(added["server"]["source"], "runtime");
     assert_eq!(added["server"]["authConfigured"], true);
-    assert!(added["note"].as_str().unwrap().contains("rebuild"));
+    // Issue #566: a mutating MCP change reaches agents on the company's next turn
+    // (the effective set is re-fingerprinted every `HarnessPool::ensure` cycle), so
+    // the note must NOT instruct a restart. "no restart needed" is fine; the stale
+    // copy told operators to "restart the company" (mirrors the inference guard).
+    let note = added["note"].as_str().unwrap();
+    assert!(
+        note.contains("next turn"),
+        "note should promise next-turn pickup: {note}"
+    );
+    assert!(
+        !note.contains("restart the company"),
+        "mutating MCP response tells operator to restart: {note}"
+    );
 
     // The token must NOT appear anywhere in the add response.
     assert!(
