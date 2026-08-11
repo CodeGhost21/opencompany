@@ -64,13 +64,38 @@ fn mongo_err(e: impl std::fmt::Display) -> OpenCompanyError {
     OpenCompanyError::Store(format!("mongodb error: {e}"))
 }
 
-/// The port contract's "read everything" sentinel (`usize::MAX`) means no
-/// limit; everything else maps onto the driver's `i64` limit.
-fn find_limit(limit: usize) -> Option<i64> {
-    if limit > i64::MAX as usize {
-        None
-    } else {
-        Some(limit as i64)
+/// How a port-contract limit maps onto a MongoDB `find`.
+///
+/// An enum with a distinct `Empty` arm, rather than the `Option<i64>` this used
+/// to be, because the two vocabularies disagree about ZERO and the disagreement
+/// is silent. `find().limit(0)` is MongoDB's *no limit* sentinel; every port in
+/// `crate::ports` means "an empty page" by a limit of zero, as the fs and sqlite
+/// backends implement it. Passing the number straight through therefore returned
+/// the WHOLE collection at the exact input where the caller asked for nothing.
+///
+/// Issue #555: that is how `list_runs` drifted from the other two backends, and
+/// it went unseen because `conformance.rs` — which asserts precisely this case —
+/// had never run against MongoDB in CI. `read_events_from`, `recent_traces` and
+/// `list_inbox` carried the same latent inversion; only the eviction path
+/// happened to guard it with an `if n > 0`.
+///
+/// So the zero case is a variant the compiler makes every call site, present and
+/// future, decide about — it cannot be forgotten into the driver's meaning again.
+enum FindLimit {
+    /// The caller asked for nothing. MUST NOT reach `find().limit()`.
+    Empty,
+    /// The port contract's "read everything" sentinel (`usize::MAX`), or any
+    /// value too large for the driver's `i64`.
+    Unlimited,
+    /// At most this many documents.
+    AtMost(i64),
+}
+
+fn find_limit(limit: usize) -> FindLimit {
+    match limit {
+        0 => FindLimit::Empty,
+        n if n > i64::MAX as usize => FindLimit::Unlimited,
+        n => FindLimit::AtMost(n as i64),
     }
 }
 
@@ -417,8 +442,10 @@ impl EventLog for MongoStore {
                 "seq": {"$gte": seq.value() as i64},
             })
             .sort(doc! {"seq": 1});
-        if let Some(limit) = find_limit(limit) {
-            find = find.limit(limit);
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -508,8 +535,10 @@ impl MemoryStore for MongoStore {
         let mut find = traces
             .find(doc! {"company_id": id.as_ref()})
             .sort(doc! {"seq": -1});
-        if let Some(limit) = find_limit(limit) {
-            find = find.limit(limit);
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -546,17 +575,24 @@ impl MemoryStore for MongoStore {
             EvictionPolicy::KeepRecent { n } => {
                 // Collect the seqs to keep (newest n), delete the rest.
                 //
+                // `KeepRecent { n: 0 }` keeps nothing, so there is no query to
+                // run — and must never become `find().limit(0)`, which would
+                // keep EVERYTHING and evict none of it. This arm is the old
+                // `if n > 0` guard, now stated in the shared vocabulary.
                 let mut keep = Vec::new();
-                if n > 0 {
-                    let mut find = traces
-                        .find(doc! {"company_id": id.as_ref()})
-                        .sort(doc! {"seq": -1});
-                    if let Some(limit) = find_limit(n) {
-                        find = find.limit(limit);
-                    }
-                    let mut cursor = find.await.map_err(mongo_err)?;
-                    while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
-                        keep.push(get_i64(&doc, "seq")?);
+                match find_limit(n) {
+                    FindLimit::Empty => {}
+                    limit => {
+                        let mut find = traces
+                            .find(doc! {"company_id": id.as_ref()})
+                            .sort(doc! {"seq": -1});
+                        if let FindLimit::AtMost(n) = limit {
+                            find = find.limit(n);
+                        }
+                        let mut cursor = find.await.map_err(mongo_err)?;
+                        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+                            keep.push(get_i64(&doc, "seq")?);
+                        }
                     }
                 }
                 traces
@@ -812,8 +848,10 @@ impl crate::ports::inbox::InboxStore for MongoStore {
             .find(doc! {"company_id": company.as_ref(), "inbox": key})
             .sort(doc! {"seq": 1})
             .skip(offset as u64);
-        if let Some(limit) = find_limit(limit) {
-            find = find.limit(limit);
+        match find_limit(limit) {
+            FindLimit::Empty => return Ok(Vec::new()),
+            FindLimit::Unlimited => {}
+            FindLimit::AtMost(n) => find = find.limit(n),
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
@@ -1540,10 +1578,12 @@ impl crate::ports::runs::RunStore for MongoStore {
         let mut find = runs
             .find(query)
             .sort(doc! {"created_ms": -1, "attempt": -1, "run_id": -1});
-        if let Some(limit) = filter.limit
-            && let Some(limit) = find_limit(limit)
-        {
-            find = find.limit(limit);
+        if let Some(limit) = filter.limit {
+            match find_limit(limit) {
+                FindLimit::Empty => return Ok(Vec::new()),
+                FindLimit::Unlimited => {}
+                FindLimit::AtMost(n) => find = find.limit(n),
+            }
         }
         let mut cursor = find.await.map_err(mongo_err)?;
         let mut out = Vec::new();
