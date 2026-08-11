@@ -68,6 +68,8 @@ use crate::ports::types::EffectGroup;
 ///   #238): it changes nothing but the backend bills per request, and parking
 ///   it would be worse than useless — openhuman resolves a `RequireApproval`
 ///   inline, so a parked search is a search that never happens.
+///   [`ExternalRead`](Self::ExternalRead) is the fourth (issue #559), for the
+///   same reason with the billing removed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
     /// Nothing changes and nothing is spent. Runs in every mode, `readonly`
@@ -76,6 +78,18 @@ pub enum Reach {
     /// Nothing changes, but the call is billed. Runs under `supervised`,
     /// denied under `readonly`.
     Money,
+    /// A third party's own data is read with the company's connected
+    /// credential. Nothing changes anywhere and nothing is billed, but the
+    /// account being read is not the company's own — so `supervised` allows it
+    /// and `readonly` still denies it (issue #559).
+    ///
+    /// Distinct from [`Money`](Self::Money) rather than folded into it, and the
+    /// reason is [`costs_money`](Self::costs_money): that predicate feeds the
+    /// daily spend cap, so reusing `Money` here would bill an operator for
+    /// every page of every mailbox they read. Distinct from
+    /// [`Nothing`](Self::Nothing) because a `readonly` desk reaching into a
+    /// counterparty's account is exactly what that tier promises not to do.
+    ExternalRead,
     /// State changes, a counterparty is reached, arbitrary code runs, an
     /// arbitrary address is reached, or operator-owned guidance is overwritten.
     /// Parks under `supervised`, denied under `readonly`.
@@ -410,13 +424,22 @@ fn composio_execute_consequence(args: &serde_json::Value) -> Consequence {
         return send;
     };
     if composio_action_is_read(slug) {
-        // A read still reaches a third-party account, so `readonly` denies it
-        // and `supervised` parks it the first time. What changes is that the
-        // operator now has something to say other than yes-again: the card
-        // offers a standing scope, and the reads stop asking for its duration.
+        // A read reaches a third-party account, so `readonly` denies it — but
+        // it changes nothing and is billed for nothing, so `supervised` lets it
+        // through (issue #559).
+        //
+        // It used to be `Reach::Consequence`, which parks. The intent was that
+        // the operator consent once and grant a standing scope; the effect was
+        // that checking a mailbox interrupted a person, refused the call and
+        // dead-ended the turn — per page, per list. A first-time park is not a
+        // cheap price for a read, it is the whole cost.
+        //
+        // `Standing::Grantable` stays. It stops mattering for `supervised` now
+        // that nothing parks there, but it still governs `readonly` and any
+        // tier added later.
         Consequence {
             group: EffectGroup::Other,
-            reach: Reach::Consequence,
+            reach: Reach::ExternalRead,
             standing: Standing::Grantable,
         }
     } else {
@@ -646,8 +669,10 @@ mod tests {
         );
         assert_eq!(read.group, EffectGroup::Other);
         assert_eq!(read.standing, Standing::Grantable);
-        // …and it still parks the first time, because it does reach GitHub.
-        assert_eq!(read.reach, Reach::Consequence);
+        // …and since issue #559 it does not park: it reaches GitHub, so
+        // `readonly` still denies it, but it changes nothing and costs nothing,
+        // so `supervised` runs it.
+        assert_eq!(read.reach, Reach::ExternalRead);
 
         let send = consequence_of(COMPOSIO_EXECUTE, &json!({ "tool": "GMAIL_SEND_EMAIL" }));
         assert_eq!(send.group, EffectGroup::Send);
@@ -776,6 +801,100 @@ mod tests {
             // They mutate, so `readonly` must still deny and `supervised` must
             // still park the first call.
             assert!(verdict.reach.parks_under_supervision(), "`{tool}`");
+        }
+    }
+
+    /// Issue #559, every acceptance criterion in one place — the four verdicts
+    /// `ExternalRead` has to give, and the one it must not.
+    ///
+    /// The three predicates are the whole of the behaviour: `Reach` is never
+    /// matched exhaustively outside this module, so adding a variant changes
+    /// nothing anywhere until one of these answers differently.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn a_composio_read_runs_under_supervision_and_is_still_denied_under_readonly() {
+        use crate::policy::test_support::{COMPOSIO_READ_SLUG, composio_read_args};
+
+        let read = consequence_of(COMPOSIO_EXECUTE, &composio_read_args());
+        assert_eq!(
+            read.reach,
+            Reach::ExternalRead,
+            "`{COMPOSIO_READ_SLUG}` is tagged `Read` in the vendored catalogue"
+        );
+
+        // 1. Under `supervised` it runs, instead of costing the operator a card.
+        assert!(
+            !read.reach.parks_under_supervision(),
+            "reading a mailbox must not interrupt a person"
+        );
+        // 2. Under `readonly` it is still denied: that tier's contract is that
+        //    nothing outside the company is reached at all.
+        assert!(read.reach.denied_under_readonly());
+        // 3. And it is NOT spend. This is the criterion that rules out reusing
+        //    `Reach::Money`, whose `costs_money()` feeds the daily cap — every
+        //    page of every mailbox would have counted against it.
+        assert!(
+            !read.reach.costs_money(),
+            "a read is not billed; folding it into `Money` would bill it"
+        );
+        assert_ne!(read.group, EffectGroup::Spend);
+
+        // 4. The standing answer is unchanged — it stops mattering for
+        //    `supervised` now that nothing parks there, but still governs
+        //    `readonly` and any tier added later.
+        assert_eq!(read.standing, Standing::Grantable);
+        assert_eq!(read.group, EffectGroup::Other);
+    }
+
+    /// The other half of #559: only the **read** branch moved.
+    ///
+    /// The `send` binding is shared by the missing-key path and the non-read
+    /// path, so these hold structurally — but nothing stops a later edit from
+    /// touching that shared binding, which is the whole reason to assert them.
+    #[test]
+    fn a_composio_send_and_every_unclassifiable_call_still_park() {
+        use crate::policy::test_support::{composio_send_args, composio_unclassified_args};
+
+        let cases: [(&str, serde_json::Value); 6] = [
+            ("a catalogued send", composio_send_args()),
+            ("an uncatalogued action", composio_unclassified_args()),
+            (
+                "an unrecognised slug in a real toolkit",
+                json!({ "tool": "GITHUB_INVENT_A_NEW_VERB" }),
+            ),
+            ("a non-string `tool`", json!({ "tool": 7 })),
+            ("an empty slug", json!({ "tool": "" })),
+            ("a missing `tool` key", json!({ "arguments": { "q": "x" } })),
+        ];
+
+        for (what, args) in cases {
+            let verdict = consequence_of(COMPOSIO_EXECUTE, &args);
+            assert_eq!(verdict.reach, Reach::Consequence, "{what}: {args}");
+            assert!(
+                verdict.reach.parks_under_supervision(),
+                "{what} must still park: {args}"
+            );
+            assert!(verdict.reach.denied_under_readonly(), "{what}: {args}");
+            assert_eq!(verdict.group, EffectGroup::Send, "{what}: {args}");
+            assert_eq!(verdict.standing, Standing::PerCall, "{what}: {args}");
+        }
+    }
+
+    /// `ExternalRead` must not leak into the spend cap from any other tool.
+    ///
+    /// `web_search_is_still_a_priced_call` pins the `Money`→`Spend` direction;
+    /// this pins that no *declared* tool picked up the new variant by accident,
+    /// so the only thing carrying it is the Composio read branch.
+    #[test]
+    fn no_declared_tool_claims_the_external_read_bucket() {
+        let args = json!({});
+        for tool in declared_tools() {
+            assert_ne!(
+                consequence_of(tool, &args).reach,
+                Reach::ExternalRead,
+                "`{tool}` is a declared tool; `ExternalRead` is for the Composio \
+                 read branch, which is classified from its arguments"
+            );
         }
     }
 

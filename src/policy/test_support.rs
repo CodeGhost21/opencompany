@@ -212,9 +212,9 @@ mod tests {
         let verdict = consequence_of(COMPOSIO_EXECUTE, &composio_read_args());
         assert_eq!(verdict.group, EffectGroup::Other);
         assert_eq!(verdict.standing, Standing::Grantable);
-        // Today a read still parks under `supervised`. Issue #559 moves this
-        // off `Consequence`; the two assertions above are what stay put.
-        assert_eq!(verdict.reach, Reach::Consequence);
+        // Issue #559 moved the read off `Consequence`, which is what parks. The
+        // two assertions above are the ones that did not move.
+        assert_eq!(verdict.reach, Reach::ExternalRead);
     }
 
     /// And the other lane, stated rather than left to be discovered: without

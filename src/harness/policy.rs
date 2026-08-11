@@ -1484,6 +1484,66 @@ mod tests {
         );
     }
 
+    /// Issue #559, at the gate an agent actually hits: a Composio read runs
+    /// under `supervised` instead of parking, and nothing is queued for a
+    /// human — while a send on the same tool still parks.
+    ///
+    /// This is the behaviour the issue is about. `a_composio_read_and_a_
+    /// composio_send_are_classified_differently` above pins what the two calls
+    /// *are*; this pins what the desk *does* with them, which is the part an
+    /// operator notices when every page of a mailbox raises a card.
+    #[tokio::test]
+    async fn a_composio_read_runs_under_supervision_without_parking() {
+        let (p, queue) = queued_policy("supervised", &[]);
+
+        assert_eq!(
+            p.check(&request("composio_execute", composio_read_args()))
+                .await,
+            ToolPolicyDecision::Allow,
+            "reading a connected account changes nothing and costs nothing"
+        );
+        assert_eq!(
+            queue.queued(),
+            0,
+            "no card was raised, so no human was interrupted"
+        );
+
+        // Paging the same list is not a second decision, because there was
+        // never a first one. This is the symptom the issue opens with.
+        for _ in 0..5 {
+            let _ = p
+                .check(&request("composio_execute", composio_read_args()))
+                .await;
+        }
+        assert_eq!(queue.queued(), 0);
+
+        // The send half is untouched: same tool, same desk, still parks.
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_send_args()))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(queue.queued(), 1);
+    }
+
+    /// A `readonly` desk still denies the read. That tier's contract is that
+    /// nothing outside the company is reached at all — #559 moves the read out
+    /// of the parking bucket, not out of the reaching-outward one.
+    #[tokio::test]
+    async fn a_readonly_desk_still_denies_a_composio_read() {
+        let p = policy("readonly", &[], None);
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_read_args()))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+        assert!(matches!(
+            p.check(&request("composio_execute", composio_send_args()))
+                .await,
+            ToolPolicyDecision::Deny { .. }
+        ));
+    }
+
     /// `always_approve` parks regardless of tier — including under `full` — so
     /// that arm has to record its request too.
     #[tokio::test]
@@ -2896,11 +2956,25 @@ mod tests {
         );
     }
 
-    /// Issue #457, through the real admission path. Re-classifying the live
-    /// action (the test above) separates a read from a send; it cannot separate
-    /// one provider's read from another's, because both are reads under the same
-    /// tool name for the same teammate. The card said "read from GitHub" and the
-    /// grant has to mean that.
+    /// Issue #457's scope check, pinned **directly** rather than through
+    /// `check()`.
+    ///
+    /// It used to run through the real admission path, asserting that a grant
+    /// scoped to `github` admitted a GitHub read and re-parked a Gmail one.
+    /// Issue #559 made that unobservable from `check()`, and the honest thing
+    /// is to say so rather than relax the assertion until it passes:
+    ///
+    /// * under `supervised` a catalogue read no longer parks at all, so it is
+    ///   allowed by the tier long before the scope is consulted;
+    /// * under `readonly` the brake at step 1 denies every external effect
+    ///   *above* the grant checks, so the scope is not consulted there either;
+    /// * under `full` everything is allowed.
+    ///
+    /// So `standing_grant_allows` is still correct and still worth pinning —
+    /// this test does that — but no tier currently routes a Composio read to
+    /// it. See the note in the PR for #559; the issue's claim that
+    /// `Standing::Grantable` "still governs `readonly`" does not hold against
+    /// the ordering in `check()`.
     #[tokio::test]
     async fn a_grant_scoped_to_one_provider_does_not_admit_another_providers_read() {
         let queue = ApprovalRequestQueue::default();
@@ -2916,41 +2990,47 @@ mod tests {
         ));
 
         // A *different* GitHub read: the operator consented to the provider, so
-        // this is inside the sentence and must keep running. Scoping by action
-        // slug instead would have re-parked here and made the grant worthless.
-        assert_eq!(
-            p.check(&request(
+        // this is inside the sentence. Scoping by action slug instead would
+        // have refused here and made the grant worthless.
+        assert!(
+            p.standing_grant_allows(
                 "composio_execute",
-                serde_json::json!({ "tool": "GITHUB_LIST_PULL_REQUESTS" })
-            ))
-            .await,
-            ToolPolicyDecision::Allow
+                &composio_args("GITHUB_LIST_PULL_REQUESTS")
+            ),
+            "the operator consented to a provider, not to one action slug"
         );
 
         // A mailbox read. Also a catalogue read, also grantable, also `ops`,
-        // also `composio_execute` — every check upstream of the scope says yes.
+        // also `composio_execute` — every check upstream of the scope says yes,
+        // and the scope is the one thing that says no.
         assert!(
-            matches!(
-                p.check(&request(
-                    "composio_execute",
-                    serde_json::json!({ "tool": "GMAIL_FETCH_EMAILS" })
-                ))
-                .await,
-                ToolPolicyDecision::RequireApproval { .. }
-            ),
+            !p.standing_grant_allows("composio_execute", &composio_args("GMAIL_FETCH_EMAILS")),
             "'read from GitHub' is not consent to read the company's mail"
         );
 
-        // An action the catalogue cannot place has no scope to compare, so the
-        // scoped grant refuses it and it parks — unknown is a send, here too.
+        // An action the catalogue cannot place carries no scope, so a scoped
+        // grant refuses it — unknown is a send, here too.
+        assert!(
+            !p.standing_grant_allows("composio_execute", &composio_unclassified_args()),
+            "an unplaceable action has no scope for a scoped grant to admit"
+        );
+
+        // Through the real gate, the unknown action still parks: it is a send,
+        // so the tier does not wave it through and the scoped grant will not
+        // admit it either. This half of the original test survives #559
+        // unchanged, because only the *read* branch moved.
         assert!(matches!(
-            p.check(&request(
-                "composio_execute",
-                serde_json::json!({ "tool": "NOTAREALTOOLKIT_LIST_THINGS" })
-            ))
-            .await,
+            p.check(&request("composio_execute", composio_unclassified_args()))
+                .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
+
+        // Deliberately NOT asserting `check(read) == Allow` here. It would pass
+        // whether or not #559 landed — this policy holds a standing grant that
+        // admits a GitHub read at step 2b, so the tier never gets a say, and
+        // the assertion would prove nothing while looking like it proved the
+        // change. `a_composio_read_runs_under_supervision_without_parking` is
+        // the test for that, and it uses a policy with no grant at all.
 
         assert_eq!(
             grants.standing_count(),
