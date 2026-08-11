@@ -140,6 +140,24 @@ export function OrgChartView({ client, company, focusDeskId }: Props) {
    * (created in another tab, or a refetch that finally succeeds) is still
    * caught.
    */
+  /**
+   * Forget the honoured id when the route target itself changes.
+   *
+   * `focused` exists to survive a *refetch* (same target, new tree), not a
+   * *navigation*. Without this, leaving `#/company/<id>` for the bare chart or
+   * a stale id and then coming back to the same desk hits the `focused.current
+   * === focusDeskId` guard and the link silently does nothing the second time.
+   * Clearing the mark here also stops an unknown target from inheriting the
+   * previous desk's ring.
+   *
+   * Keyed on the target only — `tree` is deliberately absent, so a refetch
+   * still cannot yank the operator back to the linked desk mid-edit.
+   */
+  useEffect(() => {
+    focused.current = null;
+    setFocusMark(null);
+  }, [company, focusDeskId]);
+
   useEffect(() => {
     if (load !== "ready" || !focusDeskId || focused.current === focusDeskId) return;
     const node = chartRef.current?.querySelector<HTMLElement>(

@@ -464,6 +464,54 @@ test("#485 a desk id the chart doesn't have is a silent no-op", async ({ page })
     .toBe("true");
 });
 
+test("#485 following the same desk link twice still lands on it", async ({ page }) => {
+  await mockApi(page);
+
+  // Every hop here is an in-app hash change, never `page.goto`: a full
+  // navigation remounts the chart and resets the very state this pins, so it
+  // would pass whether or not the bug exists.
+  await page.goto("/#/company/growth");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  await expect(deskNode(page, "Growth")).toHaveAttribute("data-desk-focused", "true");
+
+  // Off to the bare chart. The view stays mounted, so whatever it remembers
+  // about the last honoured id survives.
+  await page.evaluate(() => {
+    window.location.hash = "#/company";
+  });
+  await expect(chart(page)).toBeVisible();
+  // The previous desk must not keep wearing the ring once it is no longer the
+  // route's target.
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
+
+  // Back to the same desk. This is the case that regressed: the id matched the
+  // one already honoured, so the arrival was skipped and the link did nothing.
+  await page.evaluate(() => {
+    window.location.hash = "#/company/growth";
+  });
+  const growth = deskNode(page, "Growth");
+  await expect(growth).toHaveAttribute("data-desk-focused", "true");
+  await expect(growth).toBeFocused();
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(1);
+});
+
+test("#485 a stale id does not leave the previous desk wearing the ring", async ({ page }) => {
+  await mockApi(page);
+
+  await page.goto("/#/company/growth");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  await expect(deskNode(page, "Growth")).toHaveAttribute("data-desk-focused", "true");
+
+  // An id the chart does not have is a no-op for *arrival*, but it must still
+  // retire the previous target's mark — otherwise the ring claims a desk the
+  // address no longer names.
+  await page.evaluate(() => {
+    window.location.hash = "#/company/deleted-last-week";
+  });
+  await expect(chart(page)).toBeVisible();
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
+});
+
 test("#485 a membership edit on the chart is there when you get back to chat", async ({ page }) => {
   await mockApi(page);
 
