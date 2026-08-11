@@ -447,9 +447,11 @@ function NoConnection({ starting }: { starting: boolean }) {
   return (
     <FullScreen>
       {starting ? (
-        <Waiting>Starting the host on this computer…</Waiting>
+        <Waiting>
+          <span data-testid="no-connection-starting">Starting the host on this computer…</span>
+        </Waiting>
       ) : (
-        <div className="max-w-sm space-y-2">
+        <div className="max-w-sm space-y-2" data-testid="no-connection">
           <p className="text-sm font-medium">No host to show</p>
           <p className="text-sm text-muted-foreground">
             The host on this computer didn't start — another copy of OpenCompany may be
