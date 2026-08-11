@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import type { CompanyFeed } from "@/hooks/use-company";
 import { approvalSummary, timeAgo, toolAction } from "@/lib/language";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import { isRecord, parseNodeMessages } from "@/views/workflows/run-output";
 
 /**
@@ -301,10 +302,15 @@ function useStandingGrants(client: OpenCompanyClient, company: string | null) {
     // poll-visible in v1 (there is no event for them), and a permission list is
     // not something an operator watches change — a minute is well inside the
     // shortest duration on offer.
-    const timer = setInterval(() => void refreshGrants(), 60_000);
+    //
+    // Gated on visibility since #581. The cadence was never the problem; a tab
+    // left open for a week was, and the load-on-visible read means a returning
+    // operator sees the current grants at once rather than up to a minute of a
+    // list that may already have been revoked elsewhere.
+    const dispose = startVisiblePolling(() => void refreshGrants(), 60_000);
     return () => {
       live = false;
-      clearInterval(timer);
+      dispose();
     };
   }, [client, company, refreshGrants]);
 
