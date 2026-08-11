@@ -172,6 +172,48 @@ pub struct ApprovalRequestQueue {
     grants: GrantSet,
 }
 
+/// What one cycle-end drain took, and what it threw away (issue #561).
+///
+/// Two numbers rather than one, because the second one is the one an operator
+/// needs and never got: `requests` is what they will be asked about, and
+/// `discarded` is how many gated calls this turn made that they will **not** be
+/// asked about and cannot discover any other way — the queue entries are gone
+/// and the turn that produced them is over.
+#[derive(Debug, Default)]
+pub struct DrainedRequests {
+    /// The requests to park, oldest first, at most `cap` of them.
+    pub requests: Vec<ApprovalRequest>,
+    /// How many were dropped for exceeding the cap. Zero on the ordinary path.
+    pub discarded: usize,
+}
+
+impl DrainedRequests {
+    /// The operator-facing sentence for a turn that overflowed the cap, or
+    /// `None` when nothing was dropped.
+    ///
+    /// Lives here rather than at the call site so the chat drain and any future
+    /// consumer word it the same way, and so the count and the sentence cannot
+    /// drift apart.
+    ///
+    /// It deliberately says what the operator must do about it. "Requests were
+    /// discarded" alone invites the reading that the calls happened and only the
+    /// records were lost; they did not happen, they were refused, and the only
+    /// way to get them is to ask the agent again.
+    pub fn overflow_notice(&self, cap: usize) -> Option<String> {
+        (self.discarded > 0).then(|| {
+            let n = self.discarded;
+            let calls = if n == 1 { "call" } else { "calls" };
+            let them = if n == 1 { "it" } else { "them" };
+            format!(
+                "Heads up: {n} further gated tool {calls} from this turn were not raised for \
+                 approval. A single turn can raise at most {cap}, and {n} more needed your \
+                 sign-off than that. They were **not** run and they are **not** on the \
+                 Approvals page — ask the agent again to get {them} back."
+            )
+        })
+    }
+}
+
 impl ApprovalRequestQueue {
     /// Records a gated call, ignoring one already queued for the same tool and
     /// arguments.
@@ -197,12 +239,31 @@ impl ApprovalRequestQueue {
 
     /// Drains up to `cap` queued requests (FIFO) and discards the rest, so one
     /// turn can never flood the operator's queue.
-    pub fn drain(&self, cap: usize) -> Vec<ApprovalRequest> {
+    ///
+    /// # Why this returns a struct rather than a `Vec`
+    ///
+    /// The discard is the whole point of the cap and it used to be invisible:
+    /// this method dropped the overflow on the floor and handed back a `Vec`
+    /// that looked exactly like a complete one. A caller could not tell a turn
+    /// that parked everything from a turn that parked eight of thirteen, so the
+    /// operator was shown eight cards and no indication that five more calls had
+    /// been gated — a queue that quietly truncates reads as "nothing else needed
+    /// approving", which is the opposite of true (issue #561).
+    ///
+    /// Returning [`DrainedRequests`] makes the overflow part of the value. A
+    /// caller that wants only the requests writes `.requests` and is at least
+    /// choosing to; it can no longer happen by not knowing there was a second
+    /// number.
+    pub fn drain(&self, cap: usize) -> DrainedRequests {
         let mut guard = self.inner.lock().expect("approval request queue");
         let take = guard.len().min(cap);
-        let drained: Vec<ApprovalRequest> = guard.drain(..take).collect();
+        let requests: Vec<ApprovalRequest> = guard.drain(..take).collect();
+        let discarded = guard.len();
         guard.clear();
-        drained
+        DrainedRequests {
+            requests,
+            discarded,
+        }
     }
 
     /// Splits off every request queued **at or after** `from`, leaving the ones
@@ -1412,7 +1473,7 @@ mod tests {
             ToolPolicyDecision::RequireApproval { .. }
         ));
 
-        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
         assert_eq!(queued.len(), 1, "the gated call was recorded");
         assert_eq!(queued[0].tool, "composio_execute");
         assert_eq!(queued[0].effect.kind, "composio_execute");
@@ -1474,7 +1535,7 @@ mod tests {
         // group asserted above is the one the operator's card is built from.
         let (p, queue) = queued_policy("supervised", &[]);
         let _ = p.check(&request("composio_execute", send.clone())).await;
-        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].effect.group, EffectGroup::Send);
         assert_eq!(
@@ -1557,7 +1618,7 @@ mod tests {
             .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
-        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let queued = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests;
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].effect.kind, "payment.send");
         assert_eq!(queued[0].effect.amount_usd, Some(40.0));
@@ -1633,8 +1694,87 @@ mod tests {
                 .await;
         }
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
-        assert_eq!(drained.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
         assert_eq!(queue.queued(), 0, "the overflow is discarded, not carried");
+
+        // Issue #561: and the drain says how many it threw away, rather than
+        // handing back a `Vec` indistinguishable from a complete one.
+        assert_eq!(
+            drained.discarded, 4,
+            "12 gated calls, a cap of 8, so 4 were dropped"
+        );
+        let notice = drained
+            .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+            .expect("an overflowing drain has something to tell the operator");
+        assert!(
+            notice.contains('4'),
+            "the count is in the sentence: {notice}"
+        );
+        assert!(
+            notice.contains("not** run") || notice.contains("not run"),
+            "the operator must not read this as 'the calls happened, the records \
+             were lost': {notice}"
+        );
+    }
+
+    /// The ordinary path says nothing. A notice on every turn would train the
+    /// operator to ignore the one that matters.
+    #[tokio::test]
+    async fn a_drain_under_the_cap_reports_no_overflow() {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..(MAX_APPROVAL_REQUESTS_PER_TURN - 1) {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN - 1);
+        assert_eq!(drained.discarded, 0);
+        assert!(
+            drained
+                .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+                .is_none()
+        );
+    }
+
+    /// Exactly at the cap is not an overflow. An off-by-one here would cry wolf
+    /// on the commonest boundary case.
+    #[tokio::test]
+    async fn a_drain_exactly_at_the_cap_reports_no_overflow() {
+        let (p, queue) = queued_policy("supervised", &[]);
+        for i in 0..MAX_APPROVAL_REQUESTS_PER_TURN {
+            let _ = p
+                .check(&request(
+                    "composio_execute",
+                    composio_unclassified_args_numbered(i),
+                ))
+                .await;
+        }
+        let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.requests.len(), MAX_APPROVAL_REQUESTS_PER_TURN);
+        assert_eq!(drained.discarded, 0);
+        assert!(
+            drained
+                .overflow_notice(MAX_APPROVAL_REQUESTS_PER_TURN)
+                .is_none()
+        );
+    }
+
+    /// One dropped request reads as one, not as "1 calls".
+    #[test]
+    fn the_overflow_notice_is_singular_for_a_single_dropped_request() {
+        let drained = DrainedRequests {
+            requests: Vec::new(),
+            discarded: 1,
+        };
+        let notice = drained
+            .overflow_notice(8)
+            .expect("one is still an overflow");
+        assert!(notice.contains("1 further gated tool call "), "{notice}");
+        assert!(!notice.contains("calls"), "{notice}");
     }
 
     // --- Redeeming a grant (issue #243) --------------------------------------
@@ -1923,7 +2063,7 @@ mod tests {
 
         assert_eq!(queue.stamp_run(boundary, "run-1"), 2);
 
-        let drained = queue.drain(10);
+        let drained = queue.drain(10).requests;
         assert_eq!(drained.len(), 3);
         assert_eq!(
             drained[0].effect.run_id, None,
@@ -1984,7 +2124,7 @@ mod tests {
             "the chat cycle's entry is still queued for its own drain"
         );
         assert_eq!(
-            queue.drain(10)[0].tool,
+            queue.drain(10).requests[0].tool,
             "chat.thing",
             "…and it is the same entry, not a survivor of a clear-and-rebuild"
         );
