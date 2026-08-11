@@ -152,6 +152,14 @@ mod test {
     fn an_empty_entry_gates_nothing() {
         assert!(!matches(&list(&["", "   "]), "publish_artifact"));
         assert!(!matches(&[], "publish_artifact"));
+        // The empty *target* is the case that actually reaches the guard in
+        // `gates`. Against any other name an empty entry already falls out of
+        // both arms on its own, so dropping the guard changes nothing and the
+        // two assertions above keep passing — they pin the contract without
+        // exercising the mechanism. Here the guard is the only thing standing
+        // between a blank entry and `"" == ""`, which would make a
+        // whitespace-only line in an operator's list gate a blank effect kind.
+        assert!(!matches(&list(&["", "   "]), ""));
     }
 
     /// The drift guard issue #684 asks for, and the reason the default is
