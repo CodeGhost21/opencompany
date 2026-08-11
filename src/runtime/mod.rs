@@ -121,6 +121,8 @@ pub use cycle::CycleRunner;
 pub use handover::RuntimeHandover;
 pub use rebuild::{BootInputs, RebuildRequest, RuntimeRebuilder, rebuild_company};
 pub use registry::CompanyRegistry;
+#[cfg(feature = "github")]
+pub use repo_manager::HttpRepoHost;
 pub use repo_manager::{Checkout, RepoManager};
 pub use run_supervisor::{RunGuard, RunSupervisor};
 pub use scheduler::{

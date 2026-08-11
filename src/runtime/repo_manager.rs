@@ -46,6 +46,10 @@
 /// Hardened host-side `git`, and the credential helper that keeps the token out
 /// of argv, the environment, and every file on disk. See [`git`].
 mod git;
+/// The real [`RepoHost`] over GitHub's REST API. Gated behind `github`, so the
+/// default build links no HTTP client here. See [`github`].
+#[cfg(feature = "github")]
+mod github;
 #[cfg(test)]
 mod test;
 /// The value types this surface is made of — request, persisted binding, forge
@@ -63,6 +67,8 @@ use crate::ports::SecretStore;
 use crate::ports::now_millis;
 use crate::ports::types::{CompanyId, SecretValue};
 
+#[cfg(feature = "github")]
+pub use github::HttpRepoHost;
 pub use types::{
     BindRequest, PullRequestView, RepoBinding, RepoCoordinates, RepoHost, RepoMeta, TokenKind,
 };
