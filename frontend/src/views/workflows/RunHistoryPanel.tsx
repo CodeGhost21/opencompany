@@ -308,11 +308,18 @@ function RunHistoryRow({
 
           Deliberately not a destructive Alert: nothing failed. It is the same
           tone as the cancelled line — something happened that you need to know,
-          not something that went wrong. */}
+          not something that went wrong.
+
+          Coloured with `--status-blocked-text` rather than a palette amber:
+          that token is the console's "needs your attention, nothing is broken"
+          state, it is the one a gated call already reads as elsewhere, and it
+          themes for both schemes on its own — which the `dark:` pair it
+          replaced had to restate by hand. `text-2xs` is the same 11px rung the
+          sibling lines above use, by name. */}
       {(run.notices ?? []).map((notice, i) => (
         <p
           key={i}
-          className="text-[11px] text-amber-600 dark:text-amber-500"
+          className="text-2xs text-[var(--status-blocked-text)]"
           data-testid="workflow-run-notice"
         >
           {notice}
