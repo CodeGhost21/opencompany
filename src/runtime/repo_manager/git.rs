@@ -398,7 +398,23 @@ mod test {
                     .spawn()
                     .unwrap();
                 let mut stdin = child.stdin.take().unwrap();
-                stdin.write_all(b"SENTINEL\n").await.unwrap();
+                // The username invocation answers a fixed literal *without*
+                // reading stdin — the very property this test exists to prove —
+                // so the helper can exit before this write lands and the pipe
+                // is already closed. `run_git` tolerates the same `EPIPE`
+                // deliberately for the same reason; a test that unwraps here
+                // passes only where the pipe buffer happens to win the race
+                // (macOS) and fails where the child does (Linux CI).
+                //
+                // Still asserted, not swallowed: any error other than a broken
+                // pipe is a real failure.
+                if let Err(err) = stdin.write_all(b"SENTINEL\n").await {
+                    assert_eq!(
+                        err.kind(),
+                        std::io::ErrorKind::BrokenPipe,
+                        "writing the credential failed for a reason other than the helper having already exited: {err}"
+                    );
+                }
                 drop(stdin);
                 let out = child.wait_with_output().await.unwrap();
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
