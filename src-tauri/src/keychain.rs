@@ -197,13 +197,36 @@ fn select() -> Box<dyn SecretStore> {
     Box::new(MemoryStore::default())
 }
 
-/// Whether the OS store can be read at all.
+/// Whether the OS store is *reachable*, as opposed to merely empty.
 ///
-/// A read of a key that does not exist: it costs nothing, needs no write
-/// permission, and distinguishes "empty" from "unreachable" — which is the
-/// whole question. Probed once, because on macOS a failed access can prompt.
+/// Deliberately not `OsKeychain::get(..).is_ok()`. That method folds
+/// `NoStorageAccess` into `Ok(None)` on purpose — for a *read*, a locked store
+/// and an absent entry both mean "no credential here", and neither should
+/// surface to the console as an error. Reusing it as a probe collapses the one
+/// distinction the probe exists to make: a locked keychain answers `Ok(None)`,
+/// the probe reads that as "reachable", `select` commits to `OsKeychain`, and
+/// every later `remember_device` then fails on write — the exact opposite of
+/// the documented degrade-to-memory.
+///
+/// So this looks at the raw error instead. `NoEntry` means reachable and empty,
+/// which is what a fresh install looks like. Anything else means do not commit
+/// to this backend.
+///
+/// Probed once, because on macOS a failed access can prompt.
 fn os_store_answers() -> bool {
-    OsKeychain.get("probe:availability").is_ok()
+    let Ok(entry) = keyring::Entry::new(SERVICE, "probe:availability") else {
+        return false;
+    };
+    match entry.get_password() {
+        // Reachable, and something is there (a stale probe entry from an older
+        // build would land here too — harmless either way).
+        Ok(_) => true,
+        // Reachable and empty: the ordinary first-run answer.
+        Err(keyring::Error::NoEntry) => true,
+        // The store itself is not answering. This is the case the read path
+        // hides and the probe must not.
+        Err(_) => false,
+    }
 }
 
 /// The keychain key holding `connection`'s device session.
@@ -286,6 +309,49 @@ mod test {
         // reported `os`, every test above would be writing to a real keychain —
         // a modal prompt on macOS, and nothing at all on a headless runner.
         assert_eq!(store().name(), "memory");
+    }
+
+    /// A store that is reachable for reads but refuses every write.
+    ///
+    /// What a locked keychain looks like from here, and the shape the old probe
+    /// could not see: `get` answers `Ok(None)` either way, so a probe built on
+    /// the read path called this backend healthy and then failed on the first
+    /// `remember_device`.
+    struct LockedStore;
+
+    impl SecretStore for LockedStore {
+        fn get(&self, _key: &str) -> Result<Option<String>, KeychainError> {
+            Ok(None)
+        }
+        fn set(&self, _key: &str, _value: &str) -> Result<(), KeychainError> {
+            Err(KeychainError::Backend("the keychain is locked".into()))
+        }
+        fn delete(&self, _key: &str) -> Result<(), KeychainError> {
+            Err(KeychainError::Backend("the keychain is locked".into()))
+        }
+        fn name(&self) -> &'static str {
+            "locked"
+        }
+    }
+
+    #[test]
+    fn a_read_cannot_tell_a_locked_store_from_an_empty_one() {
+        // The property that makes the probe's own error inspection necessary:
+        // no amount of reading distinguishes these, so a probe built on `get`
+        // is a probe that always says yes.
+        assert_eq!(LockedStore.get("device-session:x").unwrap(), None);
+        assert_eq!(
+            MemoryStore::default().get("device-session:x").unwrap(),
+            None
+        );
+        // And the difference only shows on write, which is too late to choose a
+        // backend by.
+        assert!(LockedStore.set("device-session:x", "acme.tok").is_err());
+        assert!(
+            MemoryStore::default()
+                .set("device-session:x", "acme.tok")
+                .is_ok()
+        );
     }
 
     #[test]
