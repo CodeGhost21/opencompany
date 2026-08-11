@@ -20,7 +20,7 @@ use super::skills::SkillGql;
 use super::tasks::TaskGql;
 use super::usage::{UsageGql, UsageRangeGql};
 use super::workflows::{WorkflowGql, WorkflowSummaryGql};
-use super::workspace::{FsNodeGql, WorkspaceFileGql};
+use super::workspace::{FsNodeGql, WorkspaceFileGql, WorkspaceSearchResultsGql};
 use super::{
     connections, finances, inbox, memory_facts, skills, tasks, usage, workflows, workspace,
 };
@@ -126,6 +126,17 @@ impl CompanyGql {
     /// One workspace file by id, with content and backlinks; null when absent.
     async fn workspace_file(&self, id: ID) -> async_graphql::Result<Option<WorkspaceFileGql>> {
         workspace::resolve_file(&self.runtime, id.as_str()).await
+    }
+
+    /// Which workspace notes mention `query`, matched case-insensitively as a
+    /// substring of note names and note bodies (issue #607).
+    async fn workspace_search(
+        &self,
+        query: String,
+        prefix: Option<String>,
+        limit: Option<i32>,
+    ) -> async_graphql::Result<WorkspaceSearchResultsGql> {
+        workspace::resolve_search(&self.runtime, &query, prefix.as_deref(), limit).await
     }
 
     /// The company-brain memory facts.

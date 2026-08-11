@@ -1373,6 +1373,82 @@ async fn workflows_summary_lists_an_overlay_workflow_with_no_enabled_entry() {
     assert_eq!(rest_ids, gql_ids, "REST and GraphQL disagree on the id set");
 }
 
+/// `Company.workspaceSearch` (issue #607), over the same shared helper the REST
+/// route and the agent tool use.
+///
+/// The hit shape is what this pins: a nested `FsNode`, the logical path a flat
+/// hit list cannot derive from `parentId`, what matched, and the excerpt — plus
+/// `total`, so a caller can tell a full answer from a first page.
+#[tokio::test]
+async fn workspace_search_resolves_hits_with_paths_and_totals() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_rich_company(&home).await;
+
+    let id = CompanyId::new("acme");
+    let workspace = state.registry().get(&id).unwrap().workspace().clone();
+    let folder = crate::ports::workspace::WorkspaceNode {
+        id: "f-std".to_string(),
+        name: "Standards".to_string(),
+        kind: crate::ports::workspace::NodeKind::Folder,
+        parent_id: None,
+        updated_at_millis: 1_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    workspace.create(&id, &folder, None).await.unwrap();
+    let note = crate::ports::workspace::WorkspaceNode {
+        id: "n-support".to_string(),
+        name: "Support.md".to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: Some("f-std".to_string()),
+        ..folder.clone()
+    };
+    workspace
+        .create(&id, &note, Some("Escalate a REFUND request to the CEO."))
+        .await
+        .unwrap();
+
+    let app = router(state);
+    let value = query(
+        app.clone(),
+        r#"{"query":"{ company(id:\"acme\"){ workspaceSearch(query:\"refund\"){ total hits { path matched excerpt node { id name kind } } } } }"}"#,
+    )
+    .await;
+    let results = &value["data"]["company"]["workspaceSearch"];
+    assert_eq!(results["total"], 1, "{value}");
+    let hits = results["hits"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["path"], "Standards/Support.md");
+    assert_eq!(hits[0]["matched"], "content");
+    assert_eq!(hits[0]["node"]["id"], "n-support");
+    assert_eq!(hits[0]["node"]["kind"], "file");
+    assert!(
+        hits[0]["excerpt"].as_str().unwrap().contains("REFUND"),
+        "{value}"
+    );
+
+    // A name match carries no excerpt — null, not an empty string, so a client
+    // cannot mistake "no body matched" for "the body matched nothing".
+    let value = query(
+        app,
+        r#"{"query":"{ company(id:\"acme\"){ workspaceSearch(query:\"agents\"){ total hits { matched excerpt } } } }"}"#,
+    )
+    .await;
+    let hits = value["data"]["company"]["workspaceSearch"]["hits"]
+        .as_array()
+        .unwrap();
+    assert!(
+        !hits.is_empty(),
+        "the scaffolded `Agents` root matches: {value}"
+    );
+    assert_eq!(hits[0]["matched"], "name");
+    assert!(hits[0]["excerpt"].is_null(), "{value}");
+}
+
 /// The committed SDL snapshot freezes the read contract. Regenerate with
 /// `cargo test -- --ignored regenerate_sdl_snapshot` after any schema change.
 #[test]
