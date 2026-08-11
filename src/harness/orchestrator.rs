@@ -100,6 +100,24 @@ pub const MAX_DELEGATIONS_PER_TURN: usize = 3;
 const RECENT_EVENTS: usize = 10;
 /// How many facts [`QueryCompanyTool`] surfaces.
 const FACT_LIMIT: usize = 20;
+/// Longest a single fact body may render in the insight document before it is
+/// cut with an ellipsis. One verbose fact must not be able to crowd the whole
+/// budget on its own; the full body is still reachable through the fact store.
+const MAX_FACT_BODY_CHARS: usize = 400;
+/// Byte ceiling for the whole Facts section of the insight document.
+///
+/// The insight document is handed to the model through the harness tool-result
+/// path, which hard-cuts anything past
+/// [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES)
+/// — and that outer cut is blind, so a facts list long enough to blow the
+/// budget would take the facts `[TRUNCATED …]` marker AND every section below
+/// it (Recent activity, Saved workflows, Team, Desks) over the edge with it,
+/// including the Desks list `delegate_to_desk` depends on. Bounding the facts
+/// section here — the one section with a `query` narrowing argument to fall
+/// back on — keeps the announcement and the delegation-grounding sections
+/// inside the outer budget. Half the budget leaves the other half for
+/// everything below. Sized against the real ceiling per issue #417.
+const FACTS_SECTION_BUDGET_BYTES: usize = crate::harness::build::TOOL_RESULT_BUDGET_BYTES / 2;
 
 /// The `query_company` tool name.
 pub const QUERY_COMPANY_TOOL: &str = "query_company";
@@ -646,24 +664,44 @@ impl Tool for QueryCompanyTool {
         if facts.is_empty() {
             md.push_str("_No durable facts recorded._\n");
         } else {
+            // Two bounds, so the facts section can never be the thing that
+            // pushes the outer tool-result cut into the sections below it
+            // (issue #420): each body is capped at MAX_FACT_BODY_CHARS, and the
+            // section as a whole stops once its rendered bytes reach
+            // FACTS_SECTION_BUDGET_BYTES. The budget is charged in bytes because
+            // the outer cut is bytes; the body cut counts characters so it can
+            // never split a codepoint.
+            let mut shown = 0usize;
+            let mut section_bytes = 0usize;
             for fact in facts.iter().take(FACT_LIMIT) {
-                md.push_str(&format!(
+                let line = format!(
                     "- **{}**: {}\n",
                     fact.title.trim(),
-                    fact.body.trim()
-                ));
+                    truncate_chars(fact.body.trim(), MAX_FACT_BODY_CHARS)
+                );
+                // Always render at least one fact; past that, stop before a line
+                // would carry the section over its byte budget.
+                if shown > 0 && section_bytes + line.len() > FACTS_SECTION_BUDGET_BYTES {
+                    break;
+                }
+                section_bytes += line.len();
+                md.push_str(&line);
+                shown += 1;
             }
             // Issue #410, the same silent-cut class one tool over: this list was
             // capped at FACT_LIMIT with no marker, so a company past twenty facts
             // handed the orchestrator a partial memory that read as complete —
             // and the narrowing argument that would have fixed it (`query`) was
-            // never mentioned at the point the cut happened.
-            if facts.len() > FACT_LIMIT {
+            // never mentioned at the point the cut happened. The count now covers
+            // both the FACT_LIMIT cap and the byte-budget cut (issue #420); the
+            // marker line itself is charged outside the budget so the
+            // announcement can never be the fact that gets squeezed out.
+            if shown < facts.len() {
                 md.push_str(&format!(
                     "\n[TRUNCATED — {} more fact(s) not shown. This is NOT the whole record. \
                      Narrow it with `{QUERY_COMPANY_TOOL}({{\"query\": \"<substring>\"}})` before \
                      concluding a fact is absent.]\n",
-                    facts.len() - FACT_LIMIT
+                    facts.len() - shown
                 ));
             }
         }
@@ -789,6 +827,25 @@ impl Tool for QueryCompanyTool {
             md,
         ))
     }
+}
+
+/// Cut `s` to at most `max` characters, marking a cut with a trailing ellipsis.
+///
+/// Sibling of [`memory_loop::truncate_chars`](crate::harness::memory_loop) —
+/// kept a private copy here rather than coupled to it, since the two callers
+/// share only the shape, not a contract. The ellipsis is budgeted *inside*
+/// `max`: taking `max` characters and then appending would return `max + 1` and
+/// quietly exceed the cap it advertises. Cutting counts characters, never
+/// bytes, so a multibyte body can never be split mid-codepoint.
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let head: String = s.chars().take(max - 1).collect();
+    format!("{head}…")
 }
 
 /// A short, non-sensitive one-line summary of an event for the insight surface.
@@ -3931,6 +3988,118 @@ members = ["nobody"]
         );
         assert!(out.contains("7 more fact(s) not shown"), "{out}");
         assert!(out.contains("query_company"), "{out}");
+    }
+
+    /// Issue #420, the residual: the whole insight document is handed to the
+    /// model through the harness tool-result path, which hard-cuts anything past
+    /// its byte budget — blindly. A facts list long enough would carry that cut
+    /// into the sections below it, dropping the facts `[TRUNCATED]` marker and
+    /// the Desks list `delegate_to_desk` reads. So each fact body is capped and
+    /// the facts section is bounded in bytes; the marker and every later section
+    /// stay inside the outer budget. Cutting a body counts characters, never
+    /// bytes, so a multibyte body cannot panic mid-codepoint.
+    #[tokio::test]
+    async fn query_company_bounds_the_insight_document_size() {
+        use crate::ports::FactStore;
+        use crate::ports::facts::{FactKind, FactRecord};
+
+        struct Facts(Vec<FactRecord>);
+        #[async_trait]
+        impl FactStore for Facts {
+            async fn list(
+                &self,
+                _c: &CompanyId,
+                _q: Option<&str>,
+                _k: Option<FactKind>,
+            ) -> crate::Result<Vec<FactRecord>> {
+                Ok(self.0.clone())
+            }
+            async fn upsert(&self, _c: &CompanyId, _f: &FactRecord) -> crate::Result<()> {
+                Ok(())
+            }
+            async fn delete(&self, _c: &CompanyId, _id: &str) -> crate::Result<bool> {
+                Ok(false)
+            }
+        }
+
+        let mk = |i: usize, body: String| FactRecord {
+            id: format!("f-{i}"),
+            kind: FactKind::Fact,
+            title: format!("Fact {i}"),
+            body,
+            source: "ceo".to_string(),
+            updated_at_millis: i as u64,
+        };
+        let render = |facts: Vec<FactRecord>| async move {
+            let store: Arc<dyn FactStore> = Arc::new(Facts(facts));
+            QueryCompanyTool::new(CompanyId::new("acme"), Some(store), None, None, None)
+                .execute(json!({}))
+                .await
+                .expect("execute")
+                .output_for_llm(true)
+        };
+
+        // (e) A single multi-KB multibyte body: cut on a char boundary, marked
+        // with an ellipsis, exactly the cap wide, and no panic.
+        let out = render(vec![mk(0, "é".repeat(5_000))]).await;
+        let line = out
+            .lines()
+            .find(|l| l.starts_with("- **Fact 0**: "))
+            .expect("fact line");
+        let body = line.strip_prefix("- **Fact 0**: ").unwrap();
+        assert!(body.ends_with('…'), "a cut body is marked: {body:?}");
+        assert_eq!(
+            body.chars().count(),
+            MAX_FACT_BODY_CHARS,
+            "the body is cut to exactly the cap"
+        );
+        assert!(
+            body.chars().take(MAX_FACT_BODY_CHARS - 1).all(|c| c == 'é'),
+            "the cut landed on a codepoint boundary, not inside one"
+        );
+
+        // (f) Enough capped bodies to blow the section byte budget. The count
+        // reflects the budget cut, not merely FACT_LIMIT, and the marker plus
+        // every section below Facts survives the outer tool-result cut.
+        let heavy: Vec<FactRecord> = (0..FACT_LIMIT)
+            .map(|i| mk(i, "é".repeat(MAX_FACT_BODY_CHARS)))
+            .collect();
+        let out = render(heavy).await;
+        let shown = out.matches("- **Fact ").count();
+        assert!(
+            (1..FACT_LIMIT).contains(&shown),
+            "the byte budget must cut before FACT_LIMIT yet keep at least one: shown={shown}"
+        );
+        assert!(
+            out.contains(&format!("{} more fact(s) not shown", FACT_LIMIT - shown)),
+            "the marker counts the budget cut: {out}"
+        );
+        for header in [
+            "[TRUNCATED",
+            "## Recent activity",
+            "## Saved workflows",
+            "## Team",
+            "## Desks",
+        ] {
+            assert!(
+                out.contains(header),
+                "the facts cut must not carry the outer budget into `{header}`: {out}"
+            );
+        }
+
+        // (g) A small document is byte-for-byte the pre-guard behavior: bodies
+        // under the cap render verbatim and nothing is announced.
+        let out = render(vec![
+            mk(0, "Body 0".to_string()),
+            mk(1, "Body 1".to_string()),
+        ])
+        .await;
+        assert!(
+            out.contains("## Facts\n- **Fact 0**: Body 0\n- **Fact 1**: Body 1\n"),
+            "the small-document path is unchanged: {out}"
+        );
+        assert!(!out.contains("TRUNCATED"), "nothing was cut: {out}");
+        assert!(!out.contains('…'), "nothing was truncated: {out}");
     }
 
     #[tokio::test]
