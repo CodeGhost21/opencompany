@@ -1515,8 +1515,14 @@ impl RuntimeBuilder {
                             // onto the runtime below.
                             let steer = crate::company::steer::InflightRegistry::new();
                             steer_registry = Some(steer.clone());
-                            // Same shape, same reason (issue #383).
-                            let supervisor = crate::runtime::RunSupervisor::new();
+                            // Same shape, same reason (issue #383). Issue #401:
+                            // the per-company concurrency ceiling comes from the
+                            // manifest (validated `>= 1`), so this supervisor —
+                            // the one the harness deps and the console cancel
+                            // route both hold — enforces that cap on every run.
+                            let supervisor = crate::runtime::RunSupervisor::with_limit(
+                                self.manifest.workflows.max_in_flight_runs,
+                            );
                             run_supervisor = Some(supervisor.clone());
                             // Resolve the company's effective MCP servers to data
                             // (manifest ∪ runtime index, credentials materialized)

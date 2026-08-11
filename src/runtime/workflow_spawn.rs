@@ -109,23 +109,36 @@ impl WorkflowSpawn {
     /// [`record_run_finished`] must not write a `WorkflowRunFinished` for it any
     /// more than the runner writes a `WorkflowRunStarted`. Every entry point but
     /// the run route passes `false`; a scheduled or resumed run is always real.
+    ///
+    /// # Fallible before it spawns (issue #401)
+    ///
+    /// [`begin`](RunSupervisor::begin) admits the run against the company's
+    /// concurrency ceiling *before* any task exists, so a company at its cap
+    /// gets an `Err(WorkflowRunLimit)` here and **nothing is started** — no
+    /// task, no `WorkflowRunStarted`, no run id. A dry run counts too: it drives
+    /// the real engine and spends real inference, so it is registered like any
+    /// other run and the flag is only stamped afterwards.
     pub fn spawn(
         self,
         workflow: WorkflowFile,
         input: Value,
         scheduled: bool,
         dry_run: bool,
-    ) -> (String, JoinHandle<Result<WorkflowRun>>) {
+    ) -> Result<(String, JoinHandle<Result<WorkflowRun>>)> {
         // Issue #371 mints the id above the runner so the error arm can still
         // correlate; issue #383 mints it HERE, through the supervisor, so the
         // same id is also an address an operator can send "stop" to.
         // Deliberately not a second identifier — the run id the console already
         // correlates SSE frames on IS the cancellation handle.
         //
+        // Issue #401: `begin` is the concurrency choke point and is fallible —
+        // over the cap it refuses here, before the `tokio::spawn` below, so a
+        // rejected run leaves nothing behind to journal or reap.
+        //
         // Issue #542: the dry flag is stamped on the freshly-minted context
         // AFTER `begin`, so the supervisor is untouched — a dry run registers
         // and cancels exactly like a real one.
-        let (mut ctx, guard) = self.supervisor.begin(&workflow.id, scheduled);
+        let (mut ctx, guard) = self.supervisor.begin(&workflow.id, scheduled)?;
         ctx.dry_run = dry_run;
         let run_id = ctx.run_id.clone();
         let handle = tokio::spawn(async move {
@@ -174,6 +187,6 @@ impl WorkflowSpawn {
             }
             result
         });
-        (run_id, handle)
+        Ok((run_id, handle))
     }
 }
