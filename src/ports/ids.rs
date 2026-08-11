@@ -51,6 +51,75 @@ pub fn generate_id() -> String {
     format!("{millis:012x}-{counter:012x}")
 }
 
+/// The stem [`agent_slug`] falls back to when a display name yields nothing a
+/// roster id may legally be.
+pub const AGENT_SLUG_FALLBACK: &str = "teammate";
+
+/// The longest slug [`agent_slug`] will return, in bytes (all ASCII, so also in
+/// characters). A roster id becomes a workspace folder name and a path segment
+/// in every search hit that quotes it; a name pasted from a paragraph should not
+/// turn into a path nobody can read across.
+const AGENT_SLUG_MAX: usize = 64;
+
+/// Derives a readable, snake_case roster id from a teammate's display name.
+///
+/// `"Dana Designer"` becomes `dana_designer` — the same grammar the manifest
+/// validator enforces on hand-authored `[[agent]].id`s (lowercase letters,
+/// digits and underscores, starting with a letter), so a runtime-added teammate
+/// and a blueprint one name their `Agents/<id>/` folder the same way. Before
+/// this, runtime teammates took [`generate_id`] and read as
+/// `Agents/019fad5ada20-000000000003/` (issue #686).
+///
+/// Deliberately **underscores, not hyphens** — unlike
+/// [`company_id_from_name`](crate::runtime::company_id_from_name), whose output
+/// is a company slug and answers to no such validator. The roster id grammar is
+/// already set by the manifest, and a hyphen dialect would make a third id shape
+/// to reason about rather than one fewer.
+///
+/// # Not unique on its own
+///
+/// This is pure normalization: two teammates named "Designer" both slug to
+/// `designer`. Nothing should call it to *mint* an id —
+/// [`CompanyRecord::mint_agent_id`](crate::ports::types::CompanyRecord::mint_agent_id)
+/// is the minting entry point, and it resolves collisions against the roster
+/// the slug has to be unique within.
+///
+/// # Degenerate names
+///
+/// A name with no ASCII letter to start on — `"***"`, `""`, `"24/7 Support"`,
+/// an all-non-ASCII name — has no readable slug in it, and no transliteration is
+/// attempted. Those return [`AGENT_SLUG_FALLBACK`], which mints as `teammate`,
+/// `teammate_2`, … exactly like any other stem. That is the same trade
+/// `company_id_from_name` makes with `"company"`.
+pub fn agent_slug(display_name: &str) -> String {
+    let mut slug = String::with_capacity(display_name.len().min(AGENT_SLUG_MAX));
+    let mut prev_underscore = false;
+    for ch in display_name.chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch.to_ascii_lowercase());
+            prev_underscore = false;
+        } else if !prev_underscore {
+            // Every other run of characters — spaces, punctuation, emoji, CJK —
+            // collapses to a single separator rather than one per character.
+            slug.push('_');
+            prev_underscore = true;
+        }
+    }
+    // Trim first, then cap: the cap must not be spent on separators that were
+    // going to be dropped anyway. Every pushed character is ASCII, so slicing
+    // by byte index can never split one.
+    let trimmed = slug.trim_matches('_');
+    let capped = trimmed[..trimmed.len().min(AGENT_SLUG_MAX)].trim_end_matches('_');
+    // A slug that does not start with a lowercase letter would fail the
+    // manifest's own `is_snake_case` check, so it is not a legal roster id at
+    // all — digit-leading names land here alongside empty ones.
+    if capped.starts_with(|c: char| c.is_ascii_lowercase()) {
+        capped.to_string()
+    } else {
+        AGENT_SLUG_FALLBACK.to_string()
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -62,5 +131,90 @@ mod test {
         assert_ne!(a, b);
         // Zero-padded fixed-width hex makes lexicographic order match mint order.
         assert!(b > a, "expected {b} > {a}");
+    }
+
+    #[test]
+    fn agent_slug_lowercases_and_joins_words_with_underscores() {
+        assert_eq!(agent_slug("Dana Designer"), "dana_designer");
+        assert_eq!(agent_slug("Backend Engineer"), "backend_engineer");
+        assert_eq!(agent_slug("QA2"), "qa2");
+    }
+
+    #[test]
+    fn agent_slug_collapses_and_trims_separator_runs() {
+        assert_eq!(agent_slug("Designer!!"), "designer");
+        assert_eq!(agent_slug("  Head   of   Ops  "), "head_of_ops");
+        assert_eq!(agent_slug("__Dana--Designer__"), "dana_designer");
+        assert_eq!(agent_slug("Ana Maria (Growth)"), "ana_maria_growth");
+    }
+
+    /// A name with no ASCII letter to start on has no readable slug in it, and
+    /// none is invented — it takes the shared stem instead.
+    #[test]
+    fn agent_slug_falls_back_for_names_with_no_legal_stem() {
+        for name in ["***", "", "   ", "24/7 Support", "設計者", "🙂", "7", "_"] {
+            assert_eq!(
+                agent_slug(name),
+                AGENT_SLUG_FALLBACK,
+                "expected the fallback stem for {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn agent_slug_caps_length_without_a_trailing_separator() {
+        // The cap is a hard byte cap, not a word boundary: a word straddling it
+        // is truncated rather than dropped, which keeps the rule one sentence.
+        let long = "Chief ".repeat(40);
+        let slug = agent_slug(&long);
+        assert_eq!(slug.len(), AGENT_SLUG_MAX);
+        assert!(slug.starts_with("chief_chief_"), "{slug}");
+        assert!(
+            !slug.ends_with('_'),
+            "cap left a dangling separator: {slug}"
+        );
+
+        // When the cap lands exactly on a separator, that separator goes with
+        // it — a roster id never ends in `_`.
+        let aligned = "abcdefg ".repeat(20);
+        let slug = agent_slug(&aligned);
+        assert_eq!(slug.len(), AGENT_SLUG_MAX - 1, "{slug}");
+        assert!(slug.ends_with("abcdefg"), "{slug}");
+
+        let dense = "a".repeat(100);
+        assert_eq!(agent_slug(&dense).len(), AGENT_SLUG_MAX);
+    }
+
+    /// The one property that matters: whatever comes out is something the
+    /// manifest validator would accept as a roster id. Coupled to the real
+    /// `is_snake_case` rather than a copy of its rules, so a change to the
+    /// grammar fails here instead of shipping ids the validator rejects.
+    #[test]
+    fn every_slug_satisfies_the_manifest_id_grammar() {
+        let mut names: Vec<String> = [
+            "Dana Designer",
+            "Designer!!",
+            "***",
+            "",
+            "24/7 Support",
+            "設計者",
+            "🙂 Growth 🙂",
+            "O'Brien-Smith, Jr.",
+            "___",
+            "9Lives",
+            "a",
+        ]
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+        names.push("Chief ".repeat(40));
+        names.push("a".repeat(100));
+        for name in &names {
+            let slug = agent_slug(name);
+            assert!(
+                crate::company::is_snake_case(&slug),
+                "slug {slug:?} from name {name:?} is not a legal roster id"
+            );
+        }
     }
 }

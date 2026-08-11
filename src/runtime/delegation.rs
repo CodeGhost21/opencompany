@@ -162,6 +162,27 @@ pub(crate) struct DeskReply {
     pub(crate) steps: Vec<TurnStep>,
 }
 
+/// What was already decided about the operator message a drain belongs to,
+/// before the model said anything (issues #463, #267).
+///
+/// Two facts carried together because they answer the same question and because
+/// a pair of bare `bool` parameters at a call site is a swap waiting to happen.
+/// Both default to `false`, which is the honest reading for every drain with no
+/// operator message in scope — a dispatched card's turn, the approval
+/// re-dispatch — neither of which has a message to have carded or triaged.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct MessageContext {
+    /// The REST chat handler already opened a To-do card for this message
+    /// (issue #463), so no path below may open a second one.
+    pub(crate) carded_by_handler: bool,
+    /// The message triaged as
+    /// [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage)
+    /// (issue #267). A hand-off still **runs** — consulting a desk is how a
+    /// question the orchestrator cannot answer alone gets answered — but it
+    /// opens no card, because nobody commissioned work.
+    pub(crate) answering: bool,
+}
+
 /// Whether a drain may run the hand-offs it finds, or must drop them.
 ///
 /// The CEO-relay turn is the one caller that must drop: a second hand-off from
@@ -354,6 +375,63 @@ impl<'a> DelegationRunner<'a> {
         message: &str,
         chat_id: Option<&str>,
     ) -> Result<OperatorTurn> {
+        // What this message IS, decided once (issue #267).
+        //
+        // Evaluated here, and only here, for one reason: this is the only place
+        // the operator's OWN words are still in scope. `run_delegation` receives
+        // the instruction the model wrote, which is a different sentence — a
+        // guard placed there would be asking the triage about the model's prose
+        // rather than about the message the handler classified. #442 put the
+        // stand-down in `open_direct_work_card` only, so a recognised imperative
+        // the orchestrator handed off produced the REST card AND the delegation
+        // card. One message, one card — so every card-opening path below reads
+        // this same answer.
+        let triage = crate::company::task_intent::triage_message(operator_words(message));
+        // Issue #267, Layer B: on a question, the model may not WRITE to the
+        // board — but it keeps every means of answering, including the one that
+        // runs somebody else's turn.
+        //
+        // Layer A (the REST handler) already declines to card a question, but
+        // that closes one of two doors. The other is the model calling
+        // `spawn_task` / `delegate_to_desk` / `assign_task` / `review_task`
+        // itself — which is exactly where the "Tell what is there in the tasks
+        // list" card came from, a pure read that only wanted one
+        // `query_company` call. A brief cannot close that door; it is guidance,
+        // and behaviour follows structure rather than caveats.
+        //
+        // The claim is what closes it, and it reuses semantics that already
+        // exist rather than adding a second mechanism. It is **narrowed**, not
+        // withheld (issue #267 review): under `claim_answering` the queue still
+        // drains, `push_within_cap` refuses the three pure board writes with
+        // `Staged::NoDrain` — in the model's own turn, telling it not to retry
+        // and not to report the action as done — and lets a hand-off through.
+        //
+        // Withholding the claim outright was over-broad. `delegate_to_desk` is
+        // not only a board write: it is how a question the orchestrator cannot
+        // answer alone gets routed to a desk that can, and taking it away left
+        // "what did the design desk ship this week?" unanswerable. Its *card*
+        // is the part that must not happen on a question turn, and that is
+        // suppressed one layer down in `run_delegation` — exactly the shape
+        // `open_direct_work_card` already uses. So the claim on the queue
+        // removes the ability to write, and nothing removes the ability to
+        // reply.
+        //
+        // The read tools are untouched throughout — `query_company`,
+        // `run_workflow` and `read_run_output` execute inline and never reach
+        // the queue.
+        //
+        // `Chatter` deliberately does NOT gate at all. It is the ambiguous
+        // bucket, and taking board tools away on a maybe would turn a triage
+        // miss into work the company silently refuses to do — the expensive
+        // direction of the issue's own tie-breaker (a missed card costs one
+        // follow-up message).
+        //
+        // Cross-brain: this is the harness path only. `HostedMedullaBrain` has
+        // no delegation stack at all (issue #176), so there is no model
+        // board-write path to gate there; when #176 copies this drain site
+        // through the canonical `delegation_tools` seam, the conditional claim
+        // comes with it. Layer A above fronts both brains in the meantime.
+        let answering = triage.is_answer();
         // Claim the delegation queue for this turn and its drain (issue #453).
         //
         // The acquire-clear subsumes the bare `clear()` this used to open with —
@@ -367,24 +445,36 @@ impl<'a> DelegationRunner<'a> {
         // Additive beside the `approvals` handle #474 wired: they do not
         // interact — one reads a count either side of a turn, this one owns the
         // queue's write window.
-        let _claim = self.queue.claim();
+        let _claim = match answering {
+            true => self.queue.claim_answering(),
+            false => self.queue.claim(),
+        };
         // Issue #463: did the REST chat handler already card this message?
-        //
-        // Evaluated ONCE, here, and for one reason: this is the only place the
-        // operator's OWN words are still in scope. `run_delegation` receives the
-        // instruction the model wrote, which is a different sentence — a guard
-        // placed there would be asking the detector about the model's prose
-        // rather than about the message the handler classified. #442 put the
-        // stand-down in `open_direct_work_card` only, so a recognised imperative
-        // the orchestrator handed off produced the REST card AND the delegation
-        // card. One message, one card — so every card-opening path below reads
-        // this same answer.
-        let carded_by_handler =
-            crate::company::task_intent::detect_task_intent(operator_words(message)).is_some();
+        let carded_by_handler = triage.title().is_some();
+        // Everything below that could open a card reads these two facts about
+        // the operator's message rather than re-deriving them from text that is
+        // no longer the operator's (issues #463, #267).
+        let ctx = MessageContext {
+            carded_by_handler,
+            answering,
+        };
         // …and *which* card that is, when it is still on the board. Adopting it
         // is what carries "one message, one card" through the publish drain too:
         // the caller files a published deliverable onto `spawned_task` rather
         // than minting a second card beside this one (issue #463).
+        //
+        // Adoption is NOT a settle, and one path notices (issue #678). When the
+        // orchestrator answers "create a workflow named X" by authoring the
+        // graph in-turn with the inline `create_workflow` tool, this card is
+        // adopted — the bubble links to it — but nothing moves it out of To-do:
+        // `CreateWorkflowTool` stages onto the `WorkflowRefQueue`, which is
+        // drained only by the dispatched-card path in `HarnessBrain::run_task`,
+        // and the publish drain settles from `pending_publishes`, which
+        // `create_workflow` never populates. The operator does get the workflow;
+        // the card is what lags. Fixing it needs a `workflow_refs` handle here
+        // AND a notion of task output without a run row (`TaskOutput.run_id` is
+        // required and a chat turn has no run) — both #183's territory, so it is
+        // tracked rather than bolted on.
         let handler_card = match carded_by_handler {
             true => self.chat_handler_card(message).await?,
             false => None,
@@ -397,7 +487,7 @@ impl<'a> DelegationRunner<'a> {
         // the tracking decision stops depending on which agent answered or which
         // tools it happens to carry.
         let mut direct_card = self
-            .open_direct_work_card(responder, message, chat_id, carded_by_handler)
+            .open_direct_work_card(responder, message, chat_id, ctx)
             .await?;
         // Issue #465: sampled either side of the turn so the settle below reads
         // what *this* turn parked, not what the cycle was already holding from
@@ -447,9 +537,7 @@ impl<'a> DelegationRunner<'a> {
         // why the operator bubble linked to nothing on a recognised imperative
         // even though the board carried a card for it.
         let mut spawned_task: Option<String> = handler_card.or(direct_card_id);
-        let drained = self
-            .drain_and_execute(chat_id, carded_by_handler, HandOffs::Run)
-            .await?;
+        let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Run).await?;
         if let Some(id) = drained.spawned_task {
             spawned_task.get_or_insert(id);
         }
@@ -482,9 +570,26 @@ impl<'a> DelegationRunner<'a> {
             // the turn that wanted it happened to be a relay, which is invisible
             // from the operator's side. Board writes are executed; hand-offs are
             // still dropped, so the bound stays exactly one extra turn.
-            let drained = self
-                .drain_and_execute(chat_id, carded_by_handler, HandOffs::Drop)
-                .await?;
+            //
+            // On a question turn the relay's board writes are held back too, and
+            // that is deliberate rather than an oversight of the paragraph above
+            // (issue #267 review). `_claim` is still live here — the relay runs
+            // inside the same `claim_answering` scope as the turn that asked —
+            // so `push_within_cap` refuses a relay `spawn_task` with
+            // `NoDrainReason::Triage`, in the relay's own turn, and the model is
+            // told this message was a question rather than that its context
+            // cannot do board work. #442's reasoning does not survive the
+            // narrowing: it says the relay is better placed to decide something
+            // should be *tracked*, and #267 says a message the operator posed as
+            // a question mints no card by any door. The relay is a door, and
+            // seeing the answer first does not change who asked — replying to
+            // "is the build ok?" with a card nobody asked for is the exact
+            // behaviour #267 exists to stop. A relay that genuinely must
+            // commission work has the same recourse the first turn has: say so,
+            // and let the operator ask for it. Pinned by
+            // `the_relay_turns_card_is_held_back_on_a_question_turn` and its
+            // non-question sibling.
+            let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Drop).await?;
             if let Some(id) = drained.spawned_task {
                 spawned_task.get_or_insert(id);
             }
@@ -545,7 +650,7 @@ impl<'a> DelegationRunner<'a> {
     pub(crate) async fn drain_and_execute(
         &self,
         chat_id: Option<&str>,
-        carded_by_handler: bool,
+        ctx: MessageContext,
         hand_offs: HandOffs,
     ) -> Result<Drained> {
         let mut drained = Drained::default();
@@ -561,9 +666,7 @@ impl<'a> DelegationRunner<'a> {
                 );
                 continue;
             }
-            let out = self
-                .run_delegation(delegation, chat_id, carded_by_handler)
-                .await?;
+            let out = self.run_delegation(delegation, chat_id, ctx).await?;
             if let Some(id) = out.spawned_task {
                 drained.spawned_task.get_or_insert(id);
             }
@@ -669,7 +772,8 @@ impl<'a> DelegationRunner<'a> {
                 // therefore no chat-handler card to defer to. It opens no card
                 // of its own regardless — `for_task` is set, which
                 // `open_work_card` refuses on first.
-                self.run_delegation(delegation, None, false).await?;
+                self.run_delegation(delegation, None, MessageContext::default())
+                    .await?;
                 if let Some(desk) = desk {
                     card.note = Some(append_note(
                         card.note.as_deref(),
@@ -696,7 +800,9 @@ impl<'a> DelegationRunner<'a> {
                 self.hand_card_over(card, delegator, &member, instruction_of(&delegation))
                     .await?;
             }
-            let outcome = self.run_delegation(delegation, None, false).await?;
+            let outcome = self
+                .run_delegation(delegation, None, MessageContext::default())
+                .await?;
             match (owns_card, outcome.desk_reply, outcome.cancelled) {
                 // The delegate answered: they own the card and it settles from
                 // their output.
@@ -829,6 +935,49 @@ impl<'a> DelegationRunner<'a> {
         Ok(Some(card))
     }
 
+    /// The card a **hand-off** opens (issue #442, path two), or `None` when
+    /// this hand-off must not open one.
+    ///
+    /// # It stands down on a question, and only the card does (issue #267)
+    ///
+    /// `delegate_to_desk` is the one delegation that ANSWERS. It runs the
+    /// desk's lead and hands their reply back for the orchestrator to relay, so
+    /// it is how a question the orchestrator cannot answer alone — "what did the
+    /// design desk ship this week?" — reaches somebody who can. Refusing the
+    /// tool on a question turn therefore cost the operator the answer, not just
+    /// a card.
+    ///
+    /// So the tool runs and this suppresses the card, which is the same shape
+    /// [`open_direct_work_card`](Self::open_direct_work_card) uses one path
+    /// over and for the same reason: nobody commissioned work, so nothing
+    /// should be tracked — but somebody did ask a question, so somebody should
+    /// answer it. Everything else about the hand-off is untouched: the delegate
+    /// runs, their steps fold onto the operator timeline, and the CEO-relay
+    /// hand-back surfaces their answer.
+    ///
+    /// With no card there is nothing to settle and nothing to report on
+    /// `spawned_task`, which is the honest reading — the console's "Card
+    /// opened" chip must not claim a card that does not exist.
+    async fn open_hand_off_work_card(
+        &self,
+        member: &str,
+        instruction: &str,
+        chat_id: Option<&str>,
+        ctx: MessageContext,
+    ) -> Result<Option<TaskRecord>> {
+        if ctx.answering {
+            tracing::debug!(
+                company = %self.company,
+                delegate = %member,
+                "[delegation] not opening a hand-off card: the operator asked a question, so the \
+                 desk lead answers it without the board carrying work nobody commissioned"
+            );
+            return Ok(None);
+        }
+        self.open_work_card(member, instruction, chat_id, ctx.carded_by_handler)
+            .await
+    }
+
     /// The card for a **desk lead or teammate asked directly** (issue #442,
     /// path one), or `None` when this turn is not that.
     ///
@@ -862,17 +1011,42 @@ impl<'a> DelegationRunner<'a> {
     /// `carded_by_handler`, because the hand-off path needed the same guard and
     /// only [`handle_operator_message`](Self::handle_operator_message) can
     /// answer the question (issue #463).
+    /// # It also stands down on a question (issue #267)
+    ///
+    /// This is the **third** card path, and it is the one a triage layer would
+    /// miss if it only looked at the orchestrator: asking a desk lead "what did
+    /// you ship this week?" runs their turn directly, and [`is_trackable_work`]
+    /// — whose default is `true` by design — reads a sentence that long as work
+    /// and cards it. `answering` is the operator's own message triaged as
+    /// [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage),
+    /// which is a positive statement that the message was a read, so it
+    /// outranks that default.
+    ///
+    /// Deliberately narrower than the queue claim above: this suppresses a card,
+    /// it does not take any tool away, and the desk lead still answers exactly
+    /// as before. Since #267's review it is no longer the odd one out —
+    /// [`open_hand_off_work_card`](Self::open_hand_off_work_card) stands down
+    /// the same way, so every card path treats a question identically and the
+    /// tool set is narrowed in exactly one place.
     async fn open_direct_work_card(
         &self,
         responder: &str,
         message: &str,
         chat_id: Option<&str>,
-        carded_by_handler: bool,
+        ctx: MessageContext,
     ) -> Result<Option<TaskRecord>> {
         if responder == self.orchestrator_id() {
             return Ok(None);
         }
-        self.open_work_card(responder, message, chat_id, carded_by_handler)
+        if ctx.answering {
+            tracing::debug!(
+                company = %self.company,
+                responder = %responder,
+                "[delegation] not opening a direct card: the operator asked a question"
+            );
+            return Ok(None);
+        }
+        self.open_work_card(responder, message, chat_id, ctx.carded_by_handler)
             .await
     }
 
@@ -1009,17 +1183,20 @@ impl<'a> DelegationRunner<'a> {
     /// relay. No sub-agent re-delegation in v1: desk members carry no delegation
     /// tools, so their turns queue nothing.
     ///
-    /// `carded_by_handler` is [`handle_operator_message`](Self::handle_operator_message)'s
-    /// answer to "did the REST chat handler already card the operator message
-    /// this drain belongs to?" (issue #463). It is threaded in rather than
-    /// recomputed because the only text in scope here is the instruction the
-    /// model wrote, which is not what the handler classified. A dispatched
-    /// card's drain has no operator message and passes `false`.
+    /// `ctx` carries what
+    /// [`handle_operator_message`](Self::handle_operator_message) already
+    /// decided about the operator message this drain belongs to — whether the
+    /// REST chat handler carded it (issue #463) and whether it triaged as a
+    /// question (issue #267). Both are threaded in rather than recomputed
+    /// because the only text in scope here is the instruction the *model*
+    /// wrote, which is a different sentence from the one those decisions were
+    /// made about. A dispatched card's drain has no operator message and passes
+    /// [`MessageContext::default`].
     pub(crate) async fn run_delegation(
         &self,
         delegation: Delegation,
         chat_id: Option<&str>,
-        carded_by_handler: bool,
+        ctx: MessageContext,
     ) -> Result<DelegationOutcome> {
         match delegation {
             Delegation::SpawnTask {
@@ -1097,7 +1274,7 @@ impl<'a> DelegationRunner<'a> {
                 // (issue #463), or when the instruction is not a piece of work —
                 // see `is_trackable_work`.
                 let mut card = self
-                    .open_work_card(&member, &instruction, chat_id, carded_by_handler)
+                    .open_hand_off_work_card(&member, &instruction, chat_id, ctx)
                     .await?;
                 // Register the delegated turn so an operator can CANCEL it
                 // mid-flight (cancel-only in v1 — pause/redirect are rejected at
@@ -1742,6 +1919,15 @@ investor update for the quarter\n]"
         /// (issue #465), pushed onto the shared approval queue exactly as the
         /// real [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) does.
         parks: Vec<String>,
+        /// Board writes this turn attempts **through the real tool boundary**
+        /// ([`DelegationQueue::push_within_cap`]) rather than through
+        /// [`queues`](Self::queues), which is the test escape hatch and bypasses
+        /// both the cap and the #453 commitment.
+        ///
+        /// Issue #267 needs the boundary: the whole gate is that a `spawn_task`
+        /// on a question turn is REFUSED in the model's own turn, and a fixture
+        /// that pushed straight onto the queue could never observe the refusal.
+        tool_pushes: Vec<Delegation>,
     }
 
     impl Turn {
@@ -1756,6 +1942,16 @@ investor update for the quarter\n]"
             Self {
                 reply: reply.to_string(),
                 queues,
+                ..Self::default()
+            }
+        }
+
+        /// A turn that reaches for a board tool the way the model does — through
+        /// the tool boundary, where it can be refused (issue #267).
+        fn tooling(reply: &str, tool_pushes: Vec<Delegation>) -> Self {
+            Self {
+                reply: reply.to_string(),
+                tool_pushes,
                 ..Self::default()
             }
         }
@@ -1793,12 +1989,16 @@ investor update for the quarter\n]"
         /// The board as it looked at the START of each turn, so a test can prove
         /// a card existed *while* an agent worked rather than only afterwards.
         board_at_turn: Mutex<Vec<Vec<(String, String)>>>,
-        /// Whether the delegation queue was **claimed** while each turn ran
-        /// (issue #453). This is what a real tool reads to decide between
+        /// How the delegation queue was **claimed** while each turn ran (issues
+        /// #453, #267). This is what a real tool reads to decide between
         /// staging and refusing, so recording it here is how a test proves the
         /// turn was entitled to delegate at all — rather than only that the
-        /// drain happened to run afterwards.
-        committed_at_turn: Mutex<Vec<bool>>,
+        /// drain happened to run afterwards. Since #267's review it also
+        /// distinguishes the narrowed answering claim from the full one.
+        committed_at_turn: Mutex<Vec<orchestrator::DrainClaim>>,
+        /// What the tool boundary answered for each
+        /// [`Turn::tool_pushes`] entry, in order across all turns (issue #267).
+        staged: Mutex<Vec<orchestrator::Staged>>,
         tasks: Arc<dyn TaskStore>,
         company: CompanyId,
     }
@@ -1812,9 +2012,16 @@ investor update for the quarter\n]"
                 calls: Mutex::new(Vec::new()),
                 board_at_turn: Mutex::new(Vec::new()),
                 committed_at_turn: Mutex::new(Vec::new()),
+                staged: Mutex::new(Vec::new()),
                 tasks: fx.tasks.clone(),
                 company: fx.record.id.clone(),
             }
+        }
+
+        /// What the tool boundary answered every [`Turn::tool_pushes`] call, in
+        /// order (issue #267).
+        fn staged(&self) -> Vec<orchestrator::Staged> {
+            self.staged.lock().expect("staged").clone()
         }
 
         /// `(agent_id, message)` for every turn run, in order.
@@ -1828,9 +2035,15 @@ investor update for the quarter\n]"
             self.board_at_turn.lock().expect("board")[n].clone()
         }
 
-        /// Whether the delegation queue was claimed while turn `n` ran (issue
-        /// #453).
+        /// Whether the delegation queue was claimed at all while turn `n` ran
+        /// (issue #453).
         fn committed_at_turn(&self, n: usize) -> bool {
+            self.claim_at_turn(n) != orchestrator::DrainClaim::Unclaimed
+        }
+
+        /// *How* the delegation queue was claimed while turn `n` ran — full, or
+        /// narrowed to answering (issue #267).
+        fn claim_at_turn(&self, n: usize) -> orchestrator::DrainClaim {
             self.committed_at_turn.lock().expect("committed")[n]
         }
 
@@ -1856,7 +2069,7 @@ investor update for the quarter\n]"
             self.committed_at_turn
                 .lock()
                 .expect("committed")
-                .push(self.queue.drain_committed());
+                .push(self.queue.claim_state());
             let turn = self
                 .script
                 .lock()
@@ -1865,6 +2078,14 @@ investor update for the quarter\n]"
                 .unwrap_or_else(|| panic!("unscripted turn: {agent_id} <- {message}"));
             for delegation in turn.queues {
                 self.queue.push(delegation);
+            }
+            // …and the ones that go through the boundary a real tool goes
+            // through, recording what it answered (issue #267).
+            for delegation in turn.tool_pushes {
+                let staged = self
+                    .queue
+                    .push_within_cap(delegation, orchestrator::MAX_DELEGATIONS_PER_TURN);
+                self.staged.lock().expect("staged").push(staged);
             }
             for tool in turn.parks {
                 self.approvals
@@ -1965,6 +2186,7 @@ members = ["engineer"]
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -2167,7 +2389,11 @@ members = ["engineer"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::reply("done")]);
         let outcome = fx
             .runner(&turns)
-            .run_delegation(handoff("draft the launch plan"), None, false)
+            .run_delegation(
+                handoff("draft the launch plan"),
+                None,
+                MessageContext::default(),
+            )
             .await
             .expect("delegation runs");
         assert!(outcome.spawned_task.is_some());
@@ -2192,7 +2418,11 @@ members = ["engineer"]
         let turns = ScriptedTurns::new(&fx, vec![Turn::cancelled("half-written")]);
         let outcome = fx
             .runner(&turns)
-            .run_delegation(handoff("write the migration plan"), None, false)
+            .run_delegation(
+                handoff("write the migration plan"),
+                None,
+                MessageContext::default(),
+            )
             .await
             .expect("delegation runs");
         assert!(outcome.cancelled);
@@ -2233,7 +2463,11 @@ members = ["engineer"]
         let outcome = fx
             .runner(&turns)
             .for_task("card-1")
-            .run_delegation(handoff("write the migration plan"), None, false)
+            .run_delegation(
+                handoff("write the migration plan"),
+                None,
+                MessageContext::default(),
+            )
             .await
             .expect("delegation runs");
         assert!(outcome.spawned_task.is_none());
@@ -2534,6 +2768,323 @@ members = ["engineer"]
         assert!(turn.spawned_task.is_none());
     }
 
+    // ── Issue #267: a question may not write to the board, by either door ────
+
+    /// The gate itself. On a question the queue is claimed for **answering
+    /// only**, so the model's own `spawn_task` is refused inside its turn —
+    /// with the `NoDrain` refusal, which is the one that tells it not to retry
+    /// — and no card exists afterwards.
+    ///
+    /// This is the door Layer A cannot close. "Tell what is there in the tasks
+    /// list" has no action verb and no request frame, so the REST handler never
+    /// saw it as work; it became a card because the orchestrator called
+    /// `spawn_task` on a pure read.
+    #[tokio::test]
+    async fn a_question_turn_has_its_board_tools_refused_and_leaves_no_card() {
+        let question = "Tell what is there in the tasks list";
+        assert!(
+            crate::company::task_intent::triage_message(question).is_answer(),
+            "fixture must triage as a question, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::tooling(
+                "here is the list",
+                vec![Delegation::SpawnTask {
+                    title: "Tell what is there in the tasks list".to_string(),
+                    note: None,
+                    assignee: None,
+                }],
+            )],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", question, None)
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.claim_at_turn(0),
+            orchestrator::DrainClaim::Answering,
+            "a question turn runs under the narrowed claim"
+        );
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::NoDrain(
+                orchestrator::NoDrainReason::Triage
+            )],
+            "the refusal must be the do-not-retry one, and it must name the triage as the \
+             cause rather than blaming a context that cannot do board work"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "a question left work on the board"
+        );
+        assert!(turn.spawned_task.is_none());
+        // The reply still comes back: the gate removes the ability to write, not
+        // the ability to answer.
+        assert_eq!(turn.reply, "here is the list");
+    }
+
+    /// The other two pure board writes are refused on the same turn, for the
+    /// same reason: they change the board and return nothing to say, so they
+    /// have no answering role.
+    ///
+    /// Pinned separately from `spawn_task` because the narrowed claim decides
+    /// per delegation kind, and a filter that let `assign_task` through would
+    /// pass every test above.
+    #[tokio::test]
+    async fn the_lifecycle_writes_are_refused_on_a_question_turn_too() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::tooling(
+                "here is the list",
+                vec![
+                    Delegation::AssignTask {
+                        task_id: "card-1".to_string(),
+                        assignee: "engineer".to_string(),
+                        note: None,
+                    },
+                    Delegation::ReviewTask {
+                        task_id: "card-1".to_string(),
+                        decision: lifecycle::ReviewDecision::Approve,
+                        note: None,
+                    },
+                ],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", "Tell what is there in the tasks list", None)
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Triage),
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Triage),
+            ],
+            "neither lifecycle write may stage on a question turn"
+        );
+    }
+
+    /// **Issue #267 review, finding 2.** `delegate_to_desk` is not only a board
+    /// write — it is how a question the orchestrator cannot answer alone gets
+    /// routed to a desk that can. Refusing it alongside the board writes left
+    /// "what did the design desk ship this week?" answerable by nobody.
+    ///
+    /// So on a question turn the hand-off RUNS — it stages, the desk lead's
+    /// turn happens, and the CEO-relay hand-back surfaces their answer — and
+    /// only its *card* is suppressed. Every assertion here is one half of that:
+    /// the tool was not refused, three turns really ran, the answer came back,
+    /// and the board stayed empty.
+    #[tokio::test]
+    async fn a_hand_off_runs_on_a_question_turn_but_opens_no_card() {
+        let question = "Tell what is there in the tasks list";
+        assert!(
+            crate::company::task_intent::triage_message(question).is_answer(),
+            "fixture must triage as a question, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "asking engineering",
+                    vec![handoff("what have you shipped?")],
+                ),
+                Turn::reply("we shipped the importer"),
+                Turn::reply("engineering shipped the importer"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", question, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued],
+            "the hand-off must NOT be refused: it is how the question gets answered"
+        );
+        let calls = turns.calls();
+        assert_eq!(
+            calls.len(),
+            3,
+            "the orchestrator, the desk lead and the relay all ran: {calls:?}"
+        );
+        assert_eq!(
+            calls[1].0, "engineer",
+            "the desk lead really ran: {calls:?}"
+        );
+        assert_eq!(
+            turn.reply, "engineering shipped the importer",
+            "and the operator gets the relayed answer"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "nobody commissioned work, so nothing is tracked"
+        );
+        assert!(
+            turn.spawned_task.is_none(),
+            "and the bubble claims no card, because there is none"
+        );
+    }
+
+    /// The same hand-off on a message that is NOT a question still opens its
+    /// card, so the suppression above is keyed on the triage rather than having
+    /// quietly disabled the #442 card path.
+    ///
+    /// Paired with the test above for the reason `a_desk_that_finished_cleanly_
+    /// still_lands_in_review` is paired with its own opposite: a "fix" that
+    /// simply stopped opening hand-off cards would satisfy one of them.
+    #[tokio::test]
+    async fn the_same_hand_off_on_a_non_question_still_opens_its_card() {
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "asking engineering",
+                    vec![handoff("Read the pricing repo and write modules.md")],
+                ),
+                Turn::reply("modules.md is written"),
+                Turn::reply("engineering wrote it up"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", "the pricing repo needs a map", Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(turns.staged(), vec![orchestrator::Staged::Queued]);
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards.len(),
+            1,
+            "the hand-off card is still opened: {cards:?}"
+        );
+        assert_eq!(cards[0].assignee, "engineer");
+        assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// `Chatter` is NOT gated. It is the ambiguous bucket, and taking board
+    /// tools away on a maybe would turn a triage miss into work the company
+    /// silently refuses to do.
+    #[tokio::test]
+    async fn an_ambiguous_message_keeps_its_board_tools() {
+        let neutral = "the deck looks good to me";
+        assert_eq!(
+            crate::company::task_intent::triage_message(neutral),
+            crate::company::task_intent::MessageTriage::Chatter,
+            "fixture must be the ambiguous bucket, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling(
+                    "noted — I'll track the follow-up",
+                    vec![Delegation::SpawnTask {
+                        title: "Follow up on the deck".to_string(),
+                        note: None,
+                        assignee: None,
+                    }],
+                ),
+                Turn::reply("relayed"),
+            ],
+        );
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", neutral, None)
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            turns.committed_at_turn(0),
+            "chatter must still run under a claim"
+        );
+        assert_eq!(turns.staged(), vec![orchestrator::Staged::Queued]);
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "the delegation still ran: {cards:?}");
+        assert_eq!(cards[0].title, "Follow up on the deck");
+        assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+    }
+
+    /// `Track` is unchanged: a real instruction still runs under a claim, still
+    /// delegates, and the #463 stand-down still holds.
+    #[tokio::test]
+    async fn a_tracked_instruction_still_delegates_under_a_claim() {
+        let imperative = "draft the launch plan for next quarter";
+        assert!(
+            crate::company::task_intent::detect_task_intent(imperative).is_some(),
+            "fixture must be a message the chat handler cards"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("handing it over", vec![handoff("Draft the launch plan.")]),
+                Turn::reply("drafted"),
+                Turn::reply("the desk drafted it"),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        assert!(turns.committed_at_turn(0), "an instruction turn is claimed");
+        assert_eq!(turns.staged(), vec![orchestrator::Staged::Queued]);
+        assert_eq!(
+            turns.calls().len(),
+            3,
+            "the hand-off, the desk turn and the relay all ran: {:?}",
+            turns.calls()
+        );
+        // Stand-down intact: the handler's card is the card, and this path,
+        // finding none on the board, opens none either (issue #463).
+        assert!(fx.cards().await.is_empty(), "no second card");
+    }
+
+    /// The third card path (issue #442 path one), which a triage layer looking
+    /// only at the orchestrator would miss: asking a desk lead a question about
+    /// their own work runs their turn directly, and `is_trackable_work` — whose
+    /// default is `true` — used to read a sentence that long as work.
+    #[tokio::test]
+    async fn a_desk_lead_asked_a_question_directly_opens_no_card() {
+        // Long enough and free enough of question punctuation that the
+        // opposite-defaults detector on this path calls it work on its own.
+        let question = "Tell me what you shipped this week and what is still open on your plate";
+        assert!(
+            is_trackable_work(question),
+            "the fixture must be work by the direct path's own default, or the \
+             stand-down under test is doing nothing"
+        );
+        assert!(
+            crate::company::task_intent::triage_message(question).is_answer(),
+            "…and a question by the triage, which is what must outrank it"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("shipped the importer")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("engineer", question, Some("eng_desk"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            fx.cards().await.is_empty(),
+            "asking a desk lead what they shipped opened a card"
+        );
+        assert!(turn.spawned_task.is_none());
+        assert_eq!(turn.reply, "shipped the importer");
+    }
+
     /// The orchestrator's own chat turn is not tracked here. It is the front
     /// door — every message arrives there — and what it does with *work* is hand
     /// it off, which opens a card on the other path.
@@ -2554,15 +3105,87 @@ members = ["engineer"]
     /// the desk answered, which is exactly when the orchestrator is best placed
     /// to decide something should be followed up — and that decision used to be
     /// dropped by design.
+    ///
+    /// Driven through [`Turn::tooling`] on purpose (issue #267, review round 2):
+    /// the relay's `spawn_task` goes through the real
+    /// [`DelegationQueue::push_within_cap`] boundary, so this pins that the
+    /// board write is *accepted* there rather than only that a delegation pushed
+    /// onto the queue behind the boundary's back gets executed. The fixture
+    /// message is deliberately not a question — the sibling below is the other
+    /// half.
     #[tokio::test]
     async fn the_relay_turn_can_no_longer_lose_a_card() {
+        let instruction = "the pricing repo needs a map";
+        assert!(
+            !crate::company::task_intent::triage_message(instruction).is_answer(),
+            "the fixture must NOT be a question, or #267 holds the relay's card back \
+             and this proves nothing about #442"
+        );
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(
             &fx,
             vec![
-                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::tooling("asking", vec![handoff("what's the status of the build?")]),
                 Turn::reply("it's red — someone should fix the flaky test"),
-                Turn::queueing(
+                Turn::tooling(
+                    "it's red; I've opened a card",
+                    vec![Delegation::SpawnTask {
+                        title: "Fix the flaky test".to_string(),
+                        note: None,
+                        assignee: None,
+                    }],
+                ),
+            ],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", instruction, None)
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued, orchestrator::Staged::Queued],
+            "the relay turn's board write is accepted at the tool boundary, not \
+             merely executed once past it"
+        );
+        let cards = fx.cards().await;
+        assert!(
+            cards.iter().any(|c| c.title == "Fix the flaky test"),
+            "the relay's card survives: {cards:?}"
+        );
+    }
+
+    /// …and the other half: on a **question** the relay's board write is held
+    /// back too, refused at the boundary with the triage named as the cause.
+    ///
+    /// This is the #442 × #267 interaction, and it is deliberate rather than an
+    /// oversight. #442 restored the relay's board writes because a card the
+    /// relay opens is not a re-delegation — it is the orchestrator deciding,
+    /// having now seen what came back, that something should be tracked. #267
+    /// says a message the operator posed as a question mints no card by *any*
+    /// door, and the relay turn is a door: it runs under the same live
+    /// `claim_answering` as the turn that asked, so the narrowing reaches it.
+    /// Answering "is the build ok?" with a card nobody asked for is exactly the
+    /// behaviour #267 exists to stop, and the relay seeing the answer first does
+    /// not change who asked.
+    ///
+    /// The refusal is [`orchestrator::NoDrainReason::Triage`], not `Unwired` —
+    /// the claim is live throughout, so the relay is told *this message* is a
+    /// question rather than that its context can never do board work.
+    #[tokio::test]
+    async fn the_relay_turns_card_is_held_back_on_a_question_turn() {
+        let question = "is the build ok?";
+        assert!(
+            crate::company::task_intent::triage_message(question).is_answer(),
+            "fixture must triage as a question, or this proves nothing"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![
+                Turn::tooling("asking", vec![handoff("what's the status of the build?")]),
+                Turn::reply("it's red — someone should fix the flaky test"),
+                Turn::tooling(
                     "it's red; I've opened a card",
                     vec![Delegation::SpawnTask {
                         title: "Fix the flaky test".to_string(),
@@ -2574,28 +3197,49 @@ members = ["engineer"]
         );
         let turn = fx
             .runner(&turns)
-            .handle_operator_message("chief", "is the build ok?", None)
+            .handle_operator_message("chief", question, None)
             .await
             .expect("operator message handled");
 
-        let cards = fx.cards().await;
-        assert_eq!(cards.len(), 1, "the relay's card survives: {cards:?}");
-        assert_eq!(cards[0].title, "Fix the flaky test");
-        assert_eq!(turn.spawned_task.as_deref(), Some(cards[0].id.as_str()));
+        assert_eq!(
+            turns.claim_at_turn(2),
+            orchestrator::DrainClaim::Answering,
+            "the answering claim is still live for the relay turn"
+        );
+        assert_eq!(
+            turns.staged(),
+            vec![
+                orchestrator::Staged::Queued,
+                orchestrator::Staged::NoDrain(orchestrator::NoDrainReason::Triage),
+            ],
+            "the hand-off answers and stages; the relay's card is refused, and the \
+             refusal names the triage rather than blaming an unwired context"
+        );
+        assert!(
+            fx.cards().await.is_empty(),
+            "a question minted a card through the relay"
+        );
+        assert!(turn.spawned_task.is_none());
     }
 
     /// …while the rule the discard existed for still holds: a relay may relay,
     /// never re-delegate. A hand-off queued by the relay turn is dropped, so
     /// there is no second desk turn and no loop.
+    ///
+    /// Through the real boundary too: the relay's hand-off *stages* — it
+    /// answers, so even the narrowed claim admits it — and is dropped at the
+    /// drain by [`HandOffs::Drop`]. Which is the point: the loop is stopped by
+    /// the drain's own rule and not incidentally by #267's gate, so the bound
+    /// survives on a non-question message as well.
     #[tokio::test]
     async fn the_relay_turn_still_cannot_re_delegate() {
         let fx = Fixture::new();
         let turns = ScriptedTurns::new(
             &fx,
             vec![
-                Turn::queueing("asking", vec![handoff("what's the status of the build?")]),
+                Turn::tooling("asking", vec![handoff("what's the status of the build?")]),
                 Turn::reply("green"),
-                Turn::queueing("relaying", vec![handoff("now write the release notes")]),
+                Turn::tooling("relaying", vec![handoff("now write the release notes")]),
             ],
         );
         fx.runner(&turns)
@@ -2603,6 +3247,12 @@ members = ["engineer"]
             .await
             .expect("operator message handled");
 
+        assert_eq!(
+            turns.staged(),
+            vec![orchestrator::Staged::Queued, orchestrator::Staged::Queued],
+            "the relay's hand-off is not refused at the boundary — it is dropped at \
+             the drain, which is what bounds the turn count"
+        );
         // Three turns total — orchestrator, desk, relay. A fourth would be the
         // re-delegation the drain exists to prevent.
         let calls = turns.calls();

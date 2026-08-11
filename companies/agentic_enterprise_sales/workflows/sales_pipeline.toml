@@ -40,6 +40,8 @@ id = "gate"
 kind = "condition"
 name = "Qualified?"
 summary = "Advance or nurture the lead."
+[node.config]
+field = "=item.qualified"
 
 [[node]]
 id = "proposal"

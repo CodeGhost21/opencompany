@@ -13,6 +13,12 @@ id = "concept"
 kind = "trigger"
 name = "New concept"
 summary = "A game or feature concept is greenlit."
+# The `QA passed?` gate loops a failed build back to `gameplay` for rework. A
+# guarded cycle needs an explicit bound or the engine rejects it (tinyflows
+# `IllegalCycle`): OpenCompany has no `loop` node kind, so the trigger's
+# `recursion_limit` is the sanctioned way to cap the rework passes.
+[node.config]
+recursion_limit = 100
 
 [[node]]
 id = "world"
@@ -61,6 +67,8 @@ id = "gate"
 kind = "condition"
 name = "QA passed?"
 summary = "Ship or send back for rework."
+[node.config]
+field = "=item.qa_passed"
 
 [[node]]
 id = "marketing"
@@ -106,12 +114,12 @@ to = "gate"
 [[edge]]
 from = "gate"
 to = "marketing"
-label = "pass"
+label = "yes"
 
 [[edge]]
 from = "gate"
 to = "gameplay"
-label = "fail"
+label = "no"
 
 [[edge]]
 from = "marketing"

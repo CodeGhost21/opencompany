@@ -177,10 +177,10 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         company: &CompanyId,
         node: &WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
-        self.inner.create_binary(company, node, bytes).await?;
+    ) -> Result<WorkspaceNode> {
+        let stamped = self.inner.create_binary(company, node, bytes).await?;
         self.announce(company, &node.id, CHANGE_OPENED).await;
-        Ok(())
+        Ok(stamped)
     }
 
     /// Replaces a payload through, then announces `updated` — unconditionally,
@@ -237,6 +237,34 @@ impl WorkspaceStore for WorkspaceAnnouncer {
             self.announce(company, id, CHANGE_UPDATED).await;
         }
         Ok(node)
+    }
+
+    /// Promotes a staged file and emits the same logical changes the former
+    /// delete-plus-rename sequence emitted, but only after the atomic store
+    /// operation has decided its winner.
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<WorkspaceNode>> {
+        let promoted = self
+            .inner
+            .swap_files(company, expected_id, replacement_id, name)
+            .await?;
+        match &promoted {
+            Some(node) => {
+                self.announce(company, expected_id, CHANGE_REMOVED).await;
+                self.announce(company, &node.id, CHANGE_UPDATED).await;
+            }
+            None => {
+                // `create(_binary)` announced the private staging node as
+                // opened; the losing swap consumed it, so close that loop.
+                self.announce(company, replacement_id, CHANGE_REMOVED).await;
+            }
+        }
+        Ok(promoted)
     }
 
     /// Deletes through, and announces only when a node was actually removed —

@@ -10,21 +10,43 @@
 //! and that resolution happens **server-side** here — never from agent input and
 //! never from manifest free-text.
 //!
-//! Two sources, in strict precedence:
+//! Three sources, in strict precedence:
 //!
-//! 1. **The company's own token**, stored in its [`SecretStore`] under
+//! 1. **The company's own Composio token**, stored in its [`SecretStore`] under
 //!    [`TOKEN_KEY`] by the console. A company that brings its own Composio
-//!    identity keeps it, always.
-//! 2. **This instance's platform identity** — the
+//!    identity keeps it, always. This is the self-hosting escape hatch, not a
+//!    deployment mode.
+//! 2. **The company's own TinyHumans credential** —
+//!    [`company_key`](crate::company::company_key), the one key its admin set on
+//!    this tenant. The backend derives the Composio entity from whatever bearer
+//!    it is handed, and a TinyHumans key is a bearer it recognises, so no
+//!    separate Composio token and no per-tenant provider app is needed to
+//!    connect a provider (issue #586).
+//! 3. **This instance's platform identity** — the
 //!    [`TinyhumansTokenSource`](crate::company::credentials::TinyhumansTokenSource)
 //!    the runtime authenticates with everywhere else. On the hosted platform that
 //!    is a projected, audience-bound token the cluster rotates in place, so it is
 //!    read **per call**, never captured when the roster is built.
 //!
-//! With neither, resolution yields `None` and no tools are wired (fail closed) —
-//! an absent credential must mean "no tools", never a borrowed identity. Two
-//! companies pasting the *same* token would share one entity; that cannot be
-//! prevented client-side and is documented as a deployment caveat.
+//! Tiers 2 and 3 are not resolved here: they are
+//! [`company_key::resolve`](crate::company::company_key::resolve), the one seam
+//! a brokered surface resolves a company identity through. That is what makes
+//! rotating the company key reach every surface wired to it rather than
+//! whichever remembered to re-read — Composio today, with inference and
+//! embeddings still on the environment until #585.
+//!
+//! With none of the three, resolution yields `None` and no tools are wired (fail
+//! closed) — an absent credential must mean "no tools", never a borrowed
+//! identity. Two companies pasting the *same* token would share one entity; that
+//! cannot be prevented client-side and is documented as a deployment caveat.
+//!
+//! ## One connection, every agent
+//!
+//! Nothing here is scoped to the member who connected a provider. The credential
+//! is resolved from the *company's* store, every agent in the company resolves
+//! the same one, and the backend derives one entity from it — so a provider
+//! connected once is usable by every agent in the company, which is the
+//! behaviour issue #586 asks for.
 //!
 //! ## Rotation must not churn the roster
 //!
@@ -56,13 +78,14 @@ use std::sync::Arc;
 
 use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
-use crate::ports::types::{CompanyId, SecretValue};
+use crate::ports::types::CompanyId;
 
 // The credential key + backend routing live in the always-compiled
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
 pub use crate::company::composio::{
     COMPOSIO_BACKEND_URL_ENV, TINYHUMANS_API_URL_ENV, TOKEN_KEY, backend_url_or_default,
+    resolve_credential,
 };
 
 /// A per-tenant Composio configuration: the backend URL, how the outbound bearer
@@ -107,21 +130,27 @@ impl TenantComposio {
     /// Resolve a per-tenant Composio config, or `None` (fail closed) when no
     /// credential can be obtained at all.
     ///
-    /// Precedence: the company's **own** token under [`TOKEN_KEY`] in the secret
-    /// store wins; otherwise this instance's platform identity (`token_source`)
-    /// is used. A company that pasted its own Composio token therefore keeps it
-    /// even on the hosted platform, and a company that pasted nothing borrows no
-    /// one else's identity — it presents the identity of the instance it runs in,
-    /// which the backend resolves to that instance's owner.
+    /// Precedence: the company's **own Composio** token under [`TOKEN_KEY`] wins
+    /// — a company that pasted one keeps it even on the hosted platform. Failing
+    /// that, the shared brokered-credential seam
+    /// [`company_key::resolve`](crate::company::company_key::resolve) answers:
+    /// the company's own TinyHumans key, else this instance's platform identity.
+    /// A company that pasted nothing borrows no one else's identity — it presents
+    /// its own key if it has one, otherwise the identity of the instance it runs
+    /// in, which the backend resolves to that instance's owner.
     ///
     /// The URL resolves from [`COMPOSIO_BACKEND_URL_ENV`], then the tenant API
     /// base [`TINYHUMANS_API_URL_ENV`], then [`DEFAULT_BACKEND_URL`] — see
     /// [`backend_url_or_default`]. `toolkits` is the manifest allowlist, threaded
     /// through unchanged.
     ///
-    /// A secret-store read error degrades to the token source (and, failing that,
-    /// to `None`) rather than bubbling — a transient store hiccup must not brick
-    /// the roster build.
+    /// A secret-store read error yields `None` — **fail closed, no tools this
+    /// cycle** — rather than falling through to the instance identity. This is
+    /// the roster path, so it must not bubble and brick a build; but an *unknown*
+    /// credential must no more mean a borrowed identity than an absent one does.
+    /// A company whose store hiccups loses its Composio tools for a cycle and
+    /// gets them back on the next; it never quietly acts as somebody else. See
+    /// [`company_key::resolve`](crate::company::company_key::resolve).
     pub async fn resolve(
         company: &CompanyId,
         secrets: &dyn SecretStore,
@@ -130,21 +159,32 @@ impl TenantComposio {
         api_url_env: Option<String>,
         token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
-        let stored = match secrets.get(company, TOKEN_KEY).await {
-            Ok(Some(SecretValue(token))) => Credential::from_value(token),
-            _ => Credential::None,
+        let credential = match crate::company::composio::resolve_credential(
+            company,
+            secrets,
+            token_source,
+        )
+        .await
+        {
+            Ok(credential) => credential,
+            Err(err) => {
+                tracing::warn!(
+                    company = %company,
+                    error = %err,
+                    "[composio] could not read this company's credential; withholding tools \
+                     for this cycle rather than presenting another identity"
+                );
+                return None;
+            }
         };
-        let credential = match (stored, token_source) {
-            // The company's own token always wins.
-            (stored @ Credential::Value(_), _) => stored,
-            (_, Some(source)) => Credential::from_source(source),
-            (_, None) => return None,
-        };
-        Some(Self::new(
-            backend_url_or_default(backend_url_env, api_url_env),
-            credential,
-            toolkits,
-        ))
+        match credential {
+            Credential::None => None,
+            credential => Some(Self::new(
+                backend_url_or_default(backend_url_env, api_url_env),
+                credential,
+                toolkits,
+            )),
+        }
     }
 
     /// The credential this config presents. Status and fingerprinting only —
@@ -170,8 +210,17 @@ impl TenantComposio {
     ///
     /// The credential contributes its **identity**, not its bytes: a projected
     /// platform token rotates every few minutes, and hashing the value would
-    /// rebuild the whole roster on that schedule. A pasted per-company token does
-    /// contribute its value, since changing it is a real identity change.
+    /// rebuild the whole roster on that schedule. A pasted per-company token —
+    /// and the company's own TinyHumans key — does contribute its value, since
+    /// an admin changing either is a real identity change and must reach the
+    /// agents on the next cycle.
+    ///
+    /// **Internal only — never log, serialize, or journal this.** Because it is
+    /// value-derived over a live credential, anyone who can read it can confirm
+    /// a guessed key against it: cheap to check, expensive to discover has been
+    /// leaking. It is compared for equality inside [`HarnessPool`] and goes
+    /// nowhere else. If a rebuild needs explaining, say that the identity
+    /// changed — not what it hashes to.
     pub fn fingerprint(config: &Option<TenantComposio>) -> u64 {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -214,10 +263,85 @@ fn slug_toolkit(slug: &str) -> String {
     slug.split('_').next().unwrap_or("").to_ascii_lowercase()
 }
 
+/// One connected Composio account, projected for the console (issue #404).
+///
+/// Composio models a connection as an **account**, not as a boolean: a company
+/// can hold two Gmail connections, and telling them apart is the entire point of
+/// a detail view. [`list_connection_states`] deliberately folds this down to one
+/// `(toolkit, connected)` pair per toolkit for the tile grid and the
+/// reconciliation probe, both of which only ever ask "is this provider wired".
+/// Everything that needs to *manage* a connection reads these rows instead.
+///
+/// **Non-secret projection.** Composio returns no token material on this route,
+/// and nothing here is derived from the tenant bearer. The [`id`](Self::id) is a
+/// Composio-side handle, not a credential: it is the argument
+/// [`delete_connection`] takes, and it is useless without the bearer that scopes
+/// it to this company.
+///
+/// Always compiled, so the console DTO that mirrors it (`ops::composio`) can be
+/// defined in a build without the `composio` feature — only the functions that
+/// produce these rows are gated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComposioConnectionRow {
+    /// Composio's connection id — what [`delete_connection`] revokes.
+    pub id: String,
+    /// Toolkit slug, normalized (`gmail`, `googlecalendar`).
+    pub toolkit: String,
+    /// Composio's raw status string (`ACTIVE`, `INITIATED`, `EXPIRED`, …).
+    ///
+    /// Forwarded verbatim rather than reduced to [`connected`](Self::connected),
+    /// because "connected: false" reads as *not set up* while an expired
+    /// connection was set up and needs re-authorizing — a different sentence and
+    /// a different button. The console maps the vocabulary; the host does not
+    /// pretend to know every value Composio may add.
+    pub status: String,
+    /// Whether this connection is usable — `ACTIVE` or `CONNECTED`,
+    /// case-insensitively, matching the vendored client's own `is_active`.
+    pub connected: bool,
+    /// When Composio recorded the connection, ISO-8601, when it says.
+    pub created_at: Option<String>,
+    /// The account label this connection acts as, when the provider published
+    /// one: the account email, else a workspace/team name, else a handle.
+    ///
+    /// Derived here rather than in the console so the precedence is stated once
+    /// and tested once — it mirrors OpenHuman's `deriveConnectionLabel`, which
+    /// is the experience this issue ports. `None` is honest: plenty of toolkits
+    /// publish no identity at all, and inventing one from the slug would render
+    /// as a fact the operator cannot check.
+    pub account: Option<String>,
+}
+
+/// Why a disconnect did not happen.
+///
+/// Two variants because they are two different sentences to an operator, and —
+/// caught by running the route rather than by a test — two different HTTP
+/// statuses. Collapsing both into one error type reported a refused id as
+/// `502 Bad Gateway`: "the provider is down", about a call that was never made,
+/// for an id the guard rejected locally. The caller cannot re-derive the
+/// distinction from an error string, so the type carries it.
+#[derive(Debug)]
+pub enum DisconnectError {
+    /// The id names nothing this company can see, so there is nothing to
+    /// revoke. A client mistake, not an outage.
+    NotFound(String),
+    /// The call reached Composio, and Composio failed or declined it. Already
+    /// scrubbed of the tenant bearer.
+    Upstream(anyhow::Error),
+}
+
+impl std::fmt::Display for DisconnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound(message) => f.write_str(message),
+            Self::Upstream(err) => write!(f, "{err}"),
+        }
+    }
+}
+
 #[cfg(feature = "composio")]
 pub use live::{
-    ComposioMetering, authorize_connect_url, composio_tools, list_catalog_toolkits,
-    list_connection_states,
+    ComposioMetering, authorize_connect_url, composio_tools, delete_connection,
+    list_catalog_toolkits, list_connection_states, list_connections_detailed,
 };
 
 #[cfg(feature = "composio")]
@@ -400,36 +524,130 @@ mod live {
         }
     }
 
-    /// The per-toolkit connected state the console renders as provider rows: one
-    /// `(toolkit, connected)` pair per toolkit that has at least one connection,
-    /// with `connected == true` when **any** connection for that toolkit is
-    /// active. Backs the console's `GET …/composio/connections` route.
+    /// Every connected account this company holds, one row per **connection**
+    /// rather than per toolkit (issue #404). Backs the console's provider detail
+    /// view and the disconnect it offers.
     ///
-    /// Filtered to the tenant allowlist (mirrors the `composio_list_connections`
-    /// agent tool) so a connection outside the company's grant is never
-    /// surfaced. Sorted by toolkit for a stable render order. Any upstream error
-    /// is scrubbed of the tenant bearer before it bubbles.
-    pub async fn list_connection_states(config: &TenantComposio) -> Result<Vec<(String, bool)>> {
-        tracing::debug!(allowlist = ?config.toolkits, "[composio] ops list_connections");
+    /// Filtered to the tenant allowlist exactly as [`list_connection_states`] is
+    /// — the two share this call, so a connection outside the company's grant is
+    /// invisible to both, and cannot be reached by guessing its id either (see
+    /// [`delete_connection`]). Sorted by `(toolkit, id)` for a stable render
+    /// order. Any upstream error is scrubbed of the tenant bearer before it
+    /// bubbles.
+    pub async fn list_connections_detailed(
+        config: &TenantComposio,
+    ) -> Result<Vec<ComposioConnectionRow>> {
+        tracing::debug!(allowlist = ?config.toolkits, "[composio] ops list_connections_detailed");
         let (client, secrets) = live_call(config).await?;
         let resp = match client.list_connections().await {
             Ok(resp) => resp,
             Err(err) => return Err(anyhow::anyhow!(scrub(&format!("{err}"), &secrets))),
         };
+        let mut rows: Vec<ComposioConnectionRow> = resp
+            .connections
+            .into_iter()
+            .filter_map(|conn| {
+                let toolkit = conn.normalized_toolkit();
+                if !toolkit_allowed(&config.toolkits, &toolkit) {
+                    return None;
+                }
+                let connected = conn.is_active();
+                Some(ComposioConnectionRow {
+                    id: conn.id,
+                    toolkit,
+                    status: conn.status,
+                    connected,
+                    created_at: conn.created_at,
+                    // Same precedence as OpenHuman's `deriveConnectionLabel`:
+                    // email, then workspace, then handle. A field present but
+                    // blank is treated as absent — a whitespace label would
+                    // render as an empty parenthetical, which reads as a bug.
+                    account: [conn.account_email, conn.workspace, conn.username]
+                        .into_iter()
+                        .flatten()
+                        .map(|v| v.trim().to_string())
+                        .find(|v| !v.is_empty()),
+                })
+            })
+            .collect();
+        rows.sort_by(|a, b| a.toolkit.cmp(&b.toolkit).then_with(|| a.id.cmp(&b.id)));
+        Ok(rows)
+    }
+
+    /// The per-toolkit connected state the console renders as provider tiles: one
+    /// `(toolkit, connected)` pair per toolkit that has at least one connection,
+    /// with `connected == true` when **any** connection for that toolkit is
+    /// active. Backs the console's `GET …/composio/connections` route and the
+    /// reconciliation probe in `ops::connections_read`.
+    ///
+    /// A projection over [`list_connections_detailed`] rather than a second call
+    /// shape: one network round-trip, one allowlist filter, one scrub. The fold
+    /// is what the tile grid wants and all the probe can use — both ask only
+    /// "is this provider wired" — but it is lossy, so anything that manages a
+    /// connection reads the rows instead.
+    pub async fn list_connection_states(config: &TenantComposio) -> Result<Vec<(String, bool)>> {
+        let rows = list_connections_detailed(config).await?;
         let mut states: std::collections::BTreeMap<String, bool> =
             std::collections::BTreeMap::new();
-        for conn in resp.connections {
-            let toolkit = conn.normalized_toolkit();
-            if !toolkit_allowed(&config.toolkits, &toolkit) {
-                continue;
-            }
-            let active = conn.is_active();
+        for row in rows {
             states
-                .entry(toolkit)
-                .and_modify(|c| *c = *c || active)
-                .or_insert(active);
+                .entry(row.toolkit)
+                .and_modify(|c| *c = *c || row.connected)
+                .or_insert(row.connected);
         }
         Ok(states.into_iter().collect())
+    }
+
+    /// Revoke one connected account by its Composio connection id (issue #404).
+    /// Backs the console's `DELETE …/composio/connections/{id}`.
+    ///
+    /// **The id is checked against this tenant's own filtered list first**, and
+    /// an unknown one fails before any delete is attempted. Two reasons, and the
+    /// second is the load-bearing one:
+    ///
+    /// * The backend scopes a delete to the caller's bearer, so another
+    ///   company's connection was never reachable — but a connection belonging
+    ///   to *this* company under a toolkit its manifest does **not** allow is
+    ///   reachable by that bearer, and is deliberately invisible to every read
+    ///   here. Letting an id delete what no read will show would make the
+    ///   allowlist a display filter rather than a boundary.
+    /// * It turns "already disconnected" into a clear answer instead of whatever
+    ///   the upstream returns for a stale id.
+    ///
+    /// Returns `Ok(())` on a completed revoke. A refusal (`deleted: false`) is an
+    /// error rather than a silent success: the console's next line tells the
+    /// operator the account is gone, and it must not say so on the strength of a
+    /// call the backend declined.
+    pub async fn delete_connection(
+        config: &TenantComposio,
+        connection_id: &str,
+    ) -> std::result::Result<(), DisconnectError> {
+        let connection_id = connection_id.trim();
+        if connection_id.is_empty() {
+            return Err(DisconnectError::NotFound(
+                "a connection id is required".to_string(),
+            ));
+        }
+        let known = list_connections_detailed(config)
+            .await
+            .map_err(DisconnectError::Upstream)?;
+        if !known.iter().any(|row| row.id == connection_id) {
+            return Err(DisconnectError::NotFound(
+                "no such connection for this company".to_string(),
+            ));
+        }
+        tracing::debug!(connection_id = %connection_id, "[composio] ops delete_connection");
+        let (client, secrets) = live_call(config).await.map_err(DisconnectError::Upstream)?;
+        match client.delete_connection(connection_id).await {
+            Ok(resp) if resp.deleted => Ok(()),
+            Ok(_) => Err(DisconnectError::Upstream(anyhow::anyhow!(
+                "Composio declined to delete the connection"
+            ))),
+            Err(err) => Err(DisconnectError::Upstream(anyhow::anyhow!(scrub(
+                &format!("{err}"),
+                &secrets
+            )))),
+        }
     }
 
     /// The backend's live Composio toolkit catalog — every slug it will let
@@ -1048,6 +1266,11 @@ mod live {
 mod tests {
     use super::*;
 
+    // Used by the resolver tests below; the module body itself resolves its
+    // credential through `company::composio::resolve_credential`.
+    use crate::company::company_key;
+    use crate::ports::types::SecretValue;
+
     // The three helper tests below follow their subjects behind the `composio`
     // feature: `toolkit_allowed` / `slug_toolkit` do not exist in an
     // `openhuman`-without-`composio` build.
@@ -1113,7 +1336,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_closed() {
         use crate::ports::SecretStore;
-        use crate::ports::types::{CompanyId, SecretValue};
+        use crate::ports::types::CompanyId;
         use crate::store::FsSecretStore;
 
         let dir = tempfile::Builder::new()
@@ -1210,6 +1433,180 @@ mod tests {
         assert_eq!(staged.backend_url, "https://staging-api.tinyhumans.ai");
 
         unsafe { std::env::remove_var("TINYHUMANS_API_KEY") };
+    }
+
+    /// Issue #586: the company's own TinyHumans key sits between its pasted
+    /// Composio token and the instance's identity, and it is enough on its own —
+    /// a company with a key set connects providers with no Composio token and no
+    /// per-tenant provider app.
+    #[tokio::test]
+    async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instance() {
+        use crate::company::credentials::CredentialSource;
+        use crate::ports::SecretStore;
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-companykey-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+        let source = || Arc::new(TinyhumansTokenSource::static_key("platform-identity"));
+
+        company_key::store_key(&company, &secrets, "th_company_key")
+            .await
+            .unwrap();
+
+        // With no instance identity at all, the company key alone credentials
+        // Composio — the case this issue exists to fix, since a pod with no
+        // projected token previously had to fall back to a pasted token.
+        let resolved = TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None)
+            .await
+            .expect("the company key resolves without any instance identity");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+        assert_eq!(resolved.credential().source(), CredentialSource::Company);
+
+        // And it outranks the instance's identity: the company acts as itself,
+        // not as the pod it happens to run in.
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+
+        // A pasted Composio token still outranks it — the BYO hatch survives.
+        secrets
+            .set(&company, TOKEN_KEY, SecretValue("byo-composio".to_string()))
+            .await
+            .unwrap();
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("byo-composio"));
+        assert_eq!(resolved.credential().source(), CredentialSource::Static);
+
+        // Clearing the BYO token falls back to the company key, not to the
+        // instance — clearing one tier must not silently re-borrow another.
+        secrets
+            .set(&company, TOKEN_KEY, SecretValue(String::new()))
+            .await
+            .unwrap();
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(token_of(&resolved).await.as_deref(), Some("th_company_key"));
+
+        // Clearing the company key too falls all the way back to the instance.
+        company_key::store_key(&company, &secrets, "")
+            .await
+            .unwrap();
+        let resolved =
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, Some(source()))
+                .await
+                .expect("resolves");
+        assert_eq!(
+            token_of(&resolved).await.as_deref(),
+            Some("platform-identity")
+        );
+    }
+
+    /// The roster path's half of the store-error contract: it must **fail
+    /// closed** — no tools this cycle — rather than fall through to the
+    /// instance identity or bubble and brick the build.
+    ///
+    /// Fewer tools for a cycle is recoverable and visible. Silently presenting
+    /// a different identity is neither: it would attribute whatever the agents
+    /// did in that window to the wrong account.
+    #[tokio::test]
+    async fn an_unreadable_store_withholds_tools_rather_than_borrowing_an_identity() {
+        use crate::ports::types::CompanyId;
+
+        struct BrokenSecrets;
+
+        #[async_trait::async_trait]
+        impl SecretStore for BrokenSecrets {
+            async fn get(
+                &self,
+                _c: &CompanyId,
+                _key: &str,
+            ) -> crate::Result<Option<crate::ports::types::SecretValue>> {
+                Err(crate::error::OpenCompanyError::Store("boom".into()))
+            }
+            async fn set(
+                &self,
+                _c: &CompanyId,
+                _key: &str,
+                _v: crate::ports::types::SecretValue,
+            ) -> crate::Result<()> {
+                Err(crate::error::OpenCompanyError::Store("boom".into()))
+            }
+        }
+
+        let company = CompanyId::new("acme");
+        let resolved = TenantComposio::resolve(
+            &company,
+            &BrokenSecrets,
+            Vec::new(),
+            None,
+            None,
+            // An instance identity IS available — and must still not be used,
+            // because we cannot tell whether this company has a key of its own.
+            Some(Arc::new(TinyhumansTokenSource::static_key(
+                "platform-identity",
+            ))),
+        )
+        .await;
+        assert!(
+            resolved.is_none(),
+            "an unreadable store must withhold the tools, not present the instance's identity"
+        );
+    }
+
+    /// The rotation guarantee (issue #586 acceptance): rotating the company key
+    /// moves the roster fingerprint, so agents cannot be left on the previous
+    /// credential after a console rotation.
+    #[tokio::test]
+    async fn rotating_the_company_key_moves_the_composio_fingerprint() {
+        use crate::ports::types::CompanyId;
+        use crate::store::FsSecretStore;
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-composio-rotate-")
+            .tempdir()
+            .expect("tempdir");
+        let secrets = FsSecretStore::new(dir.path());
+        let company = CompanyId::new("acme");
+
+        let resolve = async || {
+            TenantComposio::resolve(&company, &secrets, Vec::new(), None, None, None).await
+        };
+
+        company_key::store_key(&company, &secrets, "key-a")
+            .await
+            .unwrap();
+        let before = TenantComposio::fingerprint(&resolve().await);
+
+        company_key::store_key(&company, &secrets, "key-b")
+            .await
+            .unwrap();
+        let after = TenantComposio::fingerprint(&resolve().await);
+        assert_ne!(
+            before, after,
+            "a rotated company key must rebuild the roster, or agents keep the old credential"
+        );
+
+        // And clearing it is a change too — the roster must drop the tools.
+        company_key::store_key(&company, &secrets, "")
+            .await
+            .unwrap();
+        assert_eq!(
+            TenantComposio::fingerprint(&resolve().await),
+            TenantComposio::fingerprint(&None),
+            "a cleared credential resolves to nothing, so no tools are wired"
+        );
     }
 
     /// The bearer a config would present right now.
@@ -1328,13 +1725,26 @@ mod ops_helper_tests {
     /// Mock `GET /agent-integrations/composio/connections` — gmail has one
     /// active + one pending row (→ connected), slack only pending (→ not
     /// connected), notion active (filtered out unless allowlisted).
+    ///
+    /// The identity fields exercise each arm of the account-label precedence
+    /// (issue #404): `c1` publishes an email, `c2` only a blank one plus a
+    /// workspace, `c3` only a username, `c4` nothing at all.
     async fn connections_handler() -> axum::Json<Value> {
         axum::Json(json!({
             "success": true,
             "data": { "connections": [
-                { "id": "c1", "toolkit": "gmail", "status": "ACTIVE" },
-                { "id": "c2", "toolkit": "gmail", "status": "INITIATED" },
-                { "id": "c3", "toolkit": "slack", "status": "INITIATED" },
+                {
+                    "id": "c1", "toolkit": "gmail", "status": "ACTIVE",
+                    "createdAt": "2026-08-01T10:00:00Z",
+                    "accountEmail": " ops@acme.test ",
+                    "username": "ignored-when-an-email-is-present"
+                },
+                {
+                    "id": "c2", "toolkit": "gmail", "status": "INITIATED",
+                    "accountEmail": "   ",
+                    "workspace": "Acme Workspace"
+                },
+                { "id": "c3", "toolkit": "slack", "status": "INITIATED", "username": "acme-bot" },
                 { "id": "c4", "toolkit": "notion", "status": "ACTIVE" }
             ] }
         }))
@@ -1450,6 +1860,137 @@ mod ops_helper_tests {
             states,
             vec![("gmail".to_string(), true), ("slack".to_string(), false)],
             "gmail active (one ACTIVE row), slack pending only, notion filtered out"
+        );
+    }
+
+    /// Issue #404: the detail view needs the account behind a connection, not
+    /// just that one exists. Pins the whole projection — per-connection rows
+    /// (two for gmail, where the fold gives one), the raw status, the account
+    /// label precedence, and the `(toolkit, id)` order — against the same
+    /// allowlist filter the fold applies.
+    #[tokio::test]
+    async fn list_connections_detailed_projects_each_account_with_its_identity() {
+        let url = spawn_backend().await;
+        let rows = list_connections_detailed(&config(&url, vec!["gmail".into(), "slack".into()]))
+            .await
+            .expect("list connections");
+
+        // Compared as whole rows rather than as a tuple projection, so a field
+        // added to `ComposioConnectionRow` later cannot slip past this
+        // assertion unexamined.
+        let expect = |id: &str,
+                      toolkit: &str,
+                      status: &str,
+                      connected: bool,
+                      created_at: Option<&str>,
+                      account: Option<&str>| ComposioConnectionRow {
+            id: id.to_string(),
+            toolkit: toolkit.to_string(),
+            status: status.to_string(),
+            connected,
+            created_at: created_at.map(str::to_string),
+            account: account.map(str::to_string),
+        };
+        assert_eq!(
+            rows,
+            vec![
+                // Email wins over the username the same row carries, and is
+                // trimmed.
+                expect(
+                    "c1",
+                    "gmail",
+                    "ACTIVE",
+                    true,
+                    Some("2026-08-01T10:00:00Z"),
+                    Some("ops@acme.test"),
+                ),
+                // A blank email is not an email: falls through to the workspace.
+                // Kept as its own row rather than folded into c1 — this is the
+                // "two Gmail accounts" case a disconnect has to tell apart.
+                expect(
+                    "c2",
+                    "gmail",
+                    "INITIATED",
+                    false,
+                    None,
+                    Some("Acme Workspace"),
+                ),
+                // Username is the last resort.
+                expect("c3", "slack", "INITIATED", false, None, Some("acme-bot")),
+            ],
+            "one row per connection, sorted by (toolkit, id); notion filtered out \
+             by the allowlist exactly as the fold filters it"
+        );
+    }
+
+    /// The fold the tile grid and the reconciliation probe read must keep
+    /// meaning what it meant before #404 widened the call underneath it —
+    /// `connected` is still "any account active", not "the first one".
+    #[tokio::test]
+    async fn the_per_toolkit_fold_still_summarises_the_detailed_rows() {
+        let url = spawn_backend().await;
+        let cfg = config(&url, vec!["gmail".into(), "slack".into()]);
+        let rows = list_connections_detailed(&cfg).await.expect("rows");
+        let states = list_connection_states(&cfg).await.expect("states");
+
+        let folded: std::collections::BTreeMap<String, bool> =
+            rows.into_iter().fold(Default::default(), |mut acc, r| {
+                let e = acc.entry(r.toolkit).or_insert(false);
+                *e = *e || r.connected;
+                acc
+            });
+        assert_eq!(
+            states,
+            folded.into_iter().collect::<Vec<_>>(),
+            "the states route is exactly the OR-fold of the detailed rows"
+        );
+    }
+
+    /// Issue #404 + #403: an id this company's own reads will not show must not
+    /// be deletable by naming it. The mock serves no DELETE route at all, so a
+    /// request that got as far as dialling would fail loudly rather than pass —
+    /// the refusal has to come from the guard, before the call.
+    #[tokio::test]
+    async fn disconnect_refuses_an_id_outside_this_companys_visible_connections() {
+        let url = spawn_backend().await;
+        // `c4` (notion) is a real, active connection upstream — but this
+        // company's manifest does not grant notion, so no read here surfaces
+        // it. That is the case the guard exists for: the bearer *could* delete
+        // it, and the allowlist must be a boundary rather than a display filter.
+        let err = delete_connection(&config(&url, vec!["gmail".into()]), "c4")
+            .await
+            .expect_err("a connection outside the grant is not deletable");
+        // The *variant* is the assertion, not the message: it is what decides
+        // the status code the console sees, and asserting only on the string
+        // is what let a refusal ship as a `502`.
+        assert!(
+            matches!(err, DisconnectError::NotFound(_)),
+            "a refused id must be NotFound, not an upstream failure: {err:?}"
+        );
+
+        // And an id that exists nowhere at all fails the same way.
+        let err = delete_connection(&config(&url, vec!["gmail".into()]), "nope")
+            .await
+            .expect_err("an unknown id is not deletable");
+        assert!(
+            matches!(err, DisconnectError::NotFound(_)),
+            "unexpected error: {err:?}"
+        );
+    }
+
+    /// An empty / whitespace id is refused before the list is even fetched —
+    /// and as a client mistake, not as an unreachable backend.
+    #[tokio::test]
+    async fn disconnect_refuses_a_blank_id_before_any_network_call() {
+        // Unreachable backend — the argument check must fire first. If it did
+        // not, this would surface as `Upstream`, which is what the assertion
+        // below rules out.
+        let err = delete_connection(&config("http://127.0.0.1:1", vec!["gmail".into()]), "  ")
+            .await
+            .expect_err("a blank id is refused");
+        assert!(
+            matches!(err, DisconnectError::NotFound(_)),
+            "unexpected error: {err:?}"
         );
     }
 

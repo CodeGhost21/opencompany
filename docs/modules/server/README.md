@@ -334,6 +334,41 @@ there is **no Slack provider** at all (the backend's only Slack credential is an
 internal alerting bot), so Slack has no hosted route except Composio, which runs
 its own OAuth.
 
+### One connection status, for one console list (issue #582)
+
+`GET …/connections` is the **only** answer to "what is connected". It reconciles
+the native `oauth/{provider}` catalog with a live Composio probe into one row per
+provider, marking which namespaces reported it in `via` — and the console renders
+exactly one provider grid from it (`frontend/src/lib/provider-grid.ts`).
+
+That took removing a gate. `composio_view` used to discard the Composio half
+unless the company explicitly granted the `composio` tool namespace, while
+`GET …/composio/connections` — which the console's *other* provider list read —
+never consulted the grant. The two lists therefore disagreed by construction, not
+by timing: 13 of the 21 shipped companies grant no `composio`, so for most of
+them one screen said both "connected" and "not connected" about the same account,
+and the second list's Connect button was actionable.
+
+The grant governs whether **agents receive Composio tools**. It never governed
+whether a handshake completes — `resolve_tenant` reads the credential and the
+toolkit allowlist and nothing else, so the sign-in the gate hid worked perfectly
+well from the surface that ignored it. It is now reported (`granted` on
+`GET …/composio`) and stated as a caveat next to the connected badge, rather than
+silently deciding what the page may show.
+
+Two consequences worth knowing:
+
+- The probe now runs for any company holding a credential, not only granting
+  ones. It stays bounded by `COMPOSIO_PROBE_TIMEOUT` and still degrades to
+  `unverified` rather than to a confident "not connected".
+- `reconcile` is split from `project_connections` purely as a test seam: the
+  probe is a network call with no injection point, and the removed gate lived on
+  the far side of it, which is how it survived unasserted.
+
+No host route releases a Composio connection — `…/connections/{provider}/disconnect`
+blanks this host's own secret — so the console offers Disconnect only for a row
+whose `via` includes `native`.
+
 ## tiny.place A2A inbound + discovery (`tinyplace` feature)
 
 Behind the `tinyplace` feature the server mounts the agent-to-agent surface

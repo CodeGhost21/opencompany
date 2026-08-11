@@ -20,6 +20,7 @@ import {
   ChevronDown,
   ChevronUp,
   CreditCard,
+  EyeOff,
   FileSignature,
   FileText,
   Globe,
@@ -89,6 +90,15 @@ export function ApprovalHeadline({
         <p className="font-medium">{approvalAction(a)}</p>
         {a.amount_usd != null && (
           <p className="text-xs font-medium text-muted-foreground">{money(a.amount_usd)}</p>
+        )}
+        {/*
+         * #618: an absent amount normally means "this effect involves no
+         * money". When it was withheld it means the opposite could be true, and
+         * a member reading a hidden payment as a free action is exactly the
+         * misreading the flag exists to prevent.
+         */}
+        {a.amount_usd == null && a.contents_hidden && (
+          <p className="text-xs font-medium text-muted-foreground italic">Amount hidden</p>
         )}
       </div>
       {actions && <div className="flex shrink-0 gap-2">{actions}</div>}
@@ -163,6 +173,23 @@ export function ApprovalMeta({
 export function ApprovalPayload({ approval }: { approval: ApprovalSummary }) {
   const lines = useMemo(() => payloadLines(approval), [approval]);
   const [expanded, setExpanded] = useState(false);
+
+  // Withheld by role (#618) — say so. Returning `null` here would be the one
+  // wrong answer: it is what an approval with no arguments renders as, so a
+  // member would read a hidden payment as an ordinary empty card. The point of
+  // the flag is that "nothing to show" and "not shown to you" must not look
+  // alike.
+  if (approval.contents_hidden) {
+    return (
+      <div className="flex items-center gap-2 rounded-lg border border-dashed bg-muted/40 px-3 py-2 text-xs text-muted-foreground">
+        <EyeOff className="size-3.5 shrink-0" />
+        <span>
+          Details hidden by your role. An admin can see what this approval will do and decide it.
+        </span>
+      </div>
+    );
+  }
+
   if (lines.length === 0) return null;
 
   const clampable =

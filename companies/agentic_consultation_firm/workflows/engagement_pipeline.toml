@@ -40,6 +40,8 @@ id = "gate"
 kind = "condition"
 name = "Model needed?"
 summary = "Branch on whether the case needs a model."
+[node.config]
+field = "=item.model_needed"
 
 [[node]]
 id = "model"

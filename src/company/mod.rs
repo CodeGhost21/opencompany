@@ -9,6 +9,7 @@
 /// Always compiled — the console's workspace and artifact routes reach it in
 /// every build, and only the publish drain's half is behind `openhuman`.
 pub mod artifact_mirror;
+pub mod company_key;
 pub mod composio;
 #[cfg(test)]
 mod content_test;
@@ -69,6 +70,11 @@ pub mod workspace_seed;
 use std::path::Path;
 
 pub use credentials::{Credential, CredentialSource, TinyhumansTokenSource, TokenTier};
+/// The roster-id grammar check, shared with the runtime id minter so a slug and
+/// a hand-authored `[[agent]].id` are held to one rule (issue #686). Not `pub`:
+/// outside the crate the validator speaks through `CompanyManifest::validate`.
+#[cfg(test)]
+pub(crate) use manifest::is_snake_case;
 pub use manifest::{LEGACY_MANIFEST_FILE, Located, MANIFEST_FILE, discover};
 pub use skill_file::{SkillDoc, load_dir_skills, parse_skill_md, render_skill_md};
 pub use types::{
@@ -89,6 +95,7 @@ pub use workflow_file::{
 // `parse_workflow` above for validation before writing to disk.
 pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
+    required_config_problems,
 };
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.

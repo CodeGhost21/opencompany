@@ -132,6 +132,72 @@ pub(crate) async fn seed_fixed_admin(state: &AppState, company: &str) {
         .expect("seed_fixed_admin: create session");
 }
 
+/// A second fixed session token, for a **Member** rather than an admin.
+///
+/// Same safety property as [`FIXED_TEST_TOKEN`]: only its hash is stored.
+pub(crate) const FIXED_MEMBER_TEST_TOKEN: &str = "fixed-test-member-session-token-not-a-secret";
+
+/// Seeds a non-admin user whose session uses [`FIXED_MEMBER_TEST_TOKEN`].
+///
+/// Exists because the harness signs every request in as an admin
+/// ([`seed_fixed_admin`]), which is the wrong account for testing anything
+/// role-gated: a redaction verified only as an admin passes identically against
+/// no redaction at all. Issue #618 is the first per-role *field* restriction in
+/// the product, so proving it needs the account that is supposed to be denied.
+pub(crate) async fn seed_fixed_member(state: &AppState, company: &str) {
+    let id = CompanyId::new(company);
+    let runtime = state
+        .registry()
+        .get(&id)
+        .expect("seed_fixed_member: company is not registered");
+    let now = now_millis();
+    let user_id = generate_id();
+    runtime
+        .users()
+        .upsert_user(
+            &id,
+            &UserRecord {
+                id: user_id.clone(),
+                email: "harness-member@example.test".to_string(),
+                display_name: None,
+                role: UserRole::Member,
+                status: UserStatus::Active,
+                password_hash: None,
+                must_change_password: false,
+                created_at_millis: now,
+                last_seen_at_millis: None,
+                updated_at_millis: now,
+            },
+        )
+        .await
+        .expect("seed_fixed_member: upsert user");
+    runtime
+        .sessions()
+        .create(
+            &id,
+            &SessionRecord {
+                id: generate_id(),
+                token_hash: sha256_hex(FIXED_MEMBER_TEST_TOKEN),
+                user_id,
+                created_at_millis: now,
+                expires_at_millis: now + 60 * 60 * 1000,
+                user_agent: None,
+                kind: crate::ports::SessionKind::Browser,
+                label: None,
+            },
+        )
+        .await
+        .expect("seed_fixed_member: create session");
+}
+
+/// The `Cookie` header for [`seed_fixed_member`]'s session in `company`.
+pub(crate) fn member_cookie(company: &str) -> String {
+    format!(
+        "{}={FIXED_MEMBER_TEST_TOKEN}",
+        session_cookie_name(&CompanyId::new(company)).expect("cookie-safe company id")
+    )
+}
+
 /// The `Cookie` header for [`seed_fixed_admin`]'s session in `company`.
 pub(crate) fn fixed_cookie(company: &str) -> String {
     format!(

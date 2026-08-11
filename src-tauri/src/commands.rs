@@ -21,6 +21,12 @@ use crate::proxy::{Connection, Credential, ProxyRequest, ProxyResponse, SharedPr
 pub struct EmbeddedInfo {
     pub base_url: String,
     pub data_dir: String,
+    /// Who is answering there, as opposed to where.
+    ///
+    /// Carried because `base_url` holds an ephemeral port and so cannot be an
+    /// identity: keyed on the address, the console reads every launch as a
+    /// first meeting and leaves the previous launch's row behind, dead (#615).
+    pub instance_id: String,
 }
 
 /// Registers (or re-registers) a host this client talks to.
@@ -249,6 +255,7 @@ pub fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Option<EmbeddedIn
     state.embedded.as_ref().map(|host| EmbeddedInfo {
         base_url: host.base_url(),
         data_dir: state.data_dir.display().to_string(),
+        instance_id: host.instance_id().to_string(),
     })
 }
 

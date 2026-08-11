@@ -65,12 +65,20 @@ impl CompanyGql {
     }
 
     /// The approvals currently awaiting the operator for this company.
-    async fn approvals(&self) -> Vec<ApprovalGql> {
-        self.runtime
-            .pending_approvals()
-            .into_iter()
-            .map(ApprovalGql::from)
-            .collect()
+    ///
+    /// Contents are role-gated exactly as on the REST list (issue #618). This
+    /// is the surface that made the question worth asking: it maps the same
+    /// projection, so a redaction applied only to the REST handlers would leave
+    /// the whole boundary reachable through one GraphQL field.
+    async fn approvals(&self, ctx: &Context<'_>) -> async_graphql::Result<Vec<ApprovalGql>> {
+        let auth = ctx.data::<GqlAuth>()?;
+        Ok(crate::server::approval_visibility::for_principal(
+            auth,
+            self.runtime.pending_approvals(),
+        )
+        .into_iter()
+        .map(ApprovalGql::from)
+        .collect())
     }
 
     /// The company roster: manifest teammates plus operator-added overlays.
@@ -341,6 +349,12 @@ pub struct ApprovalGql {
     /// Epoch-millis the effect was parked. `Float` round-trips the full u64
     /// range that would overflow GraphQL's `Int`.
     pub at_millis: f64,
+    /// Whether `amountUsd` was withheld from this reader by their role (#618).
+    ///
+    /// Carried for the same reason it is on the REST summary: a `null` amount
+    /// otherwise means "this effect involves no money", and a Member looking at
+    /// a withheld payment would read it as a free action.
+    pub contents_hidden: bool,
 }
 
 impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
@@ -350,6 +364,7 @@ impl From<crate::runtime::types::ApprovalSummary> for ApprovalGql {
             kind: summary.kind,
             amount_usd: summary.amount_usd,
             at_millis: summary.at_millis as f64,
+            contents_hidden: summary.contents_hidden,
         }
     }
 }

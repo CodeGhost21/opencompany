@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ApprovalSummary, CompanyStatus } from "@/api/types";
+import { startVisiblePolling } from "@/lib/visible-poll";
 
 const POLL_MS = 5000;
 
@@ -46,13 +47,20 @@ export function useCompany(
     }
   }, [client, company]);
 
+  // Issue #581: gated on visibility. This hook has one instance per open
+  // console tab, and its refresh is two requests — so an ungated interval meant
+  // every tab left in the background kept costing the host 24 requests a minute
+  // for a company nobody was looking at. The mount fetch stays here rather than
+  // moving into the poller: the poller deliberately does not load on start, and
+  // the hidden → visible catch-up read it does perform covers the staleness of
+  // a tab coming back.
   useEffect(() => {
     mounted.current = true;
     void refresh();
-    const timer = setInterval(() => void refresh(), POLL_MS);
+    const dispose = startVisiblePolling(() => void refresh(), POLL_MS);
     return () => {
       mounted.current = false;
-      clearInterval(timer);
+      dispose();
     };
   }, [refresh]);
 

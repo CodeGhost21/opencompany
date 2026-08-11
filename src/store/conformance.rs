@@ -121,12 +121,31 @@ fn sample_budget_overrides() -> Vec<crate::ports::types::BudgetOverride> {
     ]
 }
 
+/// A populated `[policy]` override, so every store's round-trip proves a
+/// console-set tier survives persistence (issue #562).
+///
+/// Both fields are `Some`, and `always_approve` is deliberately **not** the
+/// manifest default — a round-trip that stored the manifest's own list would
+/// pass whether or not the override had been persisted at all.
+fn sample_policy_override() -> crate::ports::types::PolicyOverride {
+    use crate::ports::types::{Actor, ActorKind, PolicyOverride};
+    PolicyOverride {
+        mode: Some("auto".to_string()),
+        always_approve: Some(vec!["payment.send".to_string()]),
+        set_by: Actor {
+            kind: ActorKind::User,
+            id: "user-conformance".to_string(),
+        },
+        at_millis: 1_700_000_000_002,
+    }
+}
+
 /// Builds a running record for `id` carrying a non-empty desk-order overlay (so
 /// the store round-trip covers the operator desk-hierarchy field, issue #131), a
 /// runtime-authored workflow body (issue #168), a populated budget-override set
-/// (issue #343), a paused workflow id (issue #276), and stamped with the sample
-/// template provenance (so round-trips assert it survives persistence, issue
-/// #85).
+/// (issue #343), a `[policy]` override (issue #562), a paused workflow id
+/// (issue #276), and stamped with the sample template provenance (so round-trips
+/// assert it survives persistence, issue #85).
 fn record(id: &CompanyId) -> CompanyRecord {
     CompanyRecord {
         id: id.clone(),
@@ -142,6 +161,7 @@ fn record(id: &CompanyId) -> CompanyRecord {
         overlay_desks: Vec::new(),
         overlay_workflows: vec![sample_overlay_workflow()],
         overlay_budgets: sample_budget_overrides(),
+        overlay_policy: Some(sample_policy_override()),
         disabled_workflows: vec!["digest".to_string()],
         template_provenance: Some(sample_provenance()),
     }
@@ -258,6 +278,21 @@ pub async fn assert_isolation_by_company(
             .iter()
             .any(|entry| entry.agent_id == "writer" && entry.budget_usd_daily.is_none()),
         "the explicitly-uncapped override decayed into an absent or zeroed entry"
+    );
+    // The operator's `[policy]` override survives too (issue #562). Seeding the
+    // fixture is not enough on its own: without this assertion a backend that
+    // dropped the field would still pass, which is the failure the populated
+    // fixture exists to catch.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not survive save/load"
+    );
+    assert_eq!(
+        loaded.effective_policy().mode,
+        "auto",
+        "the effective tier did not survive the round-trip, so a restart would \
+         silently move the company back to the manifest's gate"
     );
     // Issue #276: a paused workflow survives save/load. A backend that dropped
     // this field would re-arm every schedule an operator had switched off, and
@@ -642,6 +677,14 @@ pub async fn assert_export_totality(
         sample_budget_overrides(),
         "overlay_budgets did not round-trip through the store"
     );
+    // Issue #562: the console-set tier round-trips on every backend, for the
+    // same reason — an approval gate that forgets across a restart is not a gate.
+    assert_eq!(
+        loaded.overlay_policy,
+        Some(sample_policy_override()),
+        "overlay_policy did not round-trip through the store"
+    );
+    assert_eq!(loaded.effective_policy().mode, "auto");
     // Issue #276: the pause switch round-trips on every backend, for the same
     // reason the caps do — a switch that forgets across a restart is not a
     // safety switch.
@@ -2374,13 +2417,38 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     ws.create(&alpha, &folder_node("shots", "Shots"), None)
         .await
         .unwrap();
-    ws.create_binary(
-        &alpha,
-        &node("img", "hero.png", Some("image/png"), Some("shots")),
-        &png,
-    )
-    .await
-    .unwrap();
+    let stamped = ws
+        .create_binary(
+            &alpha,
+            &node("img", "hero.png", Some("image/png"), Some("shots")),
+            &png,
+        )
+        .await
+        .unwrap();
+
+    // -- The create RETURNS the stamped node (issue #668) ------------------
+    //
+    // Asserted with populated values, never `None`: a `None` here would pass
+    // against a backend that dropped the field entirely, which is the one thing
+    // this is meant to catch. The digest is the reason the signature returns a
+    // node at all — a caller that records it must be unable to obtain it from
+    // anywhere but the store.
+    let (expected_size, expected_sha) = crate::ports::workspace::blob_metadata(&png);
+    assert_eq!(
+        stamped.sha256.as_deref(),
+        Some(expected_sha.as_str()),
+        "create_binary must hand back the digest it computed, not an empty field"
+    );
+    assert_eq!(
+        stamped.size,
+        Some(expected_size),
+        "and the size it computed with it"
+    );
+    assert_eq!(
+        stamped.id, "img",
+        "the returned node is the one just created"
+    );
+    assert_eq!(stamped.mime.as_deref(), Some("image/png"));
 
     // -- Metadata is computed, not accepted -------------------------------
     let (meta, stream) = ws.read_bytes(&alpha, "img").await.unwrap().unwrap();
@@ -2390,7 +2458,6 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         Some(png.len() as u64),
         "size must come from the bytes, not from the caller's claim"
     );
-    let (_, expected_sha) = crate::ports::workspace::blob_metadata(&png);
     assert_eq!(
         meta.sha256.as_deref(),
         Some(expected_sha.as_str()),
@@ -2584,6 +2651,61 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
         big_sha,
         "…and byte-exactly"
     );
+
+    // -- Atomic staged-file swap -----------------------------------------
+    let old = WorkspaceNode {
+        mime: None,
+        size: None,
+        sha256: None,
+        ..node("swap-old", "report.md", None, None)
+    };
+    ws.create(&alpha, &old, Some("# old")).await.unwrap();
+    ws.create_binary(
+        &alpha,
+        &node(
+            "swap-new",
+            "report.md.publishing-test",
+            Some("application/pdf"),
+            None,
+        ),
+        b"new-payload",
+    )
+    .await
+    .unwrap();
+    let promoted = ws
+        .swap_files(&alpha, "swap-old", "swap-new", "report.md")
+        .await
+        .unwrap()
+        .expect("the expected node is still current");
+    assert_eq!(promoted.id, "swap-new");
+    assert_eq!(promoted.name, "report.md");
+    assert!(ws.read(&alpha, "swap-old").await.unwrap().is_none());
+    let (_, stream) = ws.read_bytes(&alpha, "swap-new").await.unwrap().unwrap();
+    assert_eq!(drain(stream).await, b"new-payload".to_vec());
+
+    // A stale compare-and-swap loses and consumes its private stage, payload
+    // included. This is what prevents two concurrent publishers from leaving
+    // either a duplicate final path or quota-charging garbage behind.
+    ws.create_binary(
+        &alpha,
+        &node(
+            "swap-loser",
+            "report.md.publishing-loser",
+            Some("application/pdf"),
+            None,
+        ),
+        b"loser",
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.swap_files(&alpha, "already-gone", "swap-loser", "report.md")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(ws.read(&alpha, "swap-loser").await.unwrap().is_none());
+    assert!(ws.read_bytes(&alpha, "swap-loser").await.unwrap().is_none());
 
     // -- A binary node must carry a mime ----------------------------------
     assert!(

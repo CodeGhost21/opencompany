@@ -328,6 +328,28 @@ impl ArtifactRecord {
         }
     }
 
+    /// Rewrites the newest revision's body — the reconciliation a publish owes
+    /// when the storage outcome it described turns out differently (#663).
+    ///
+    /// # Why amending is right here, and only here
+    ///
+    /// The chain is the authoritative version history, so rewriting a recorded
+    /// body is not something to do casually. This is confined to the drain that
+    /// *created* the version: the body was composed before the workspace was
+    /// asked (the ordering is deliberate — the record is written first so a node
+    /// is never created for an unrecorded deliverable), so the version spends a
+    /// moment describing an outcome that has not happened yet. Amending it is
+    /// how that moment ends with the truth rather than with a claim.
+    ///
+    /// It is **not** a general edit path: an operator revision is a new version,
+    /// with its own authorship, which is what `human_edit_diff` reads. A no-op
+    /// on an empty record.
+    pub fn amend_latest_body(&mut self, body: impl Into<String>) {
+        if let Some(latest) = self.versions.last_mut() {
+            latest.body = body.into();
+        }
+    }
+
     /// The workspace node the newest revision was mirrored into, if any.
     ///
     /// The re-publish and console-edit paths both ask this question — "is there

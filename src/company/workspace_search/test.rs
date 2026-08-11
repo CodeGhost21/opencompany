@@ -585,7 +585,7 @@ impl WorkspaceStore for FixedTree {
         _company: &CompanyId,
         _node: &WorkspaceNode,
         _bytes: &[u8],
-    ) -> crate::Result<()> {
+    ) -> crate::Result<WorkspaceNode> {
         unreachable!("search never creates")
     }
     async fn write_binary(
@@ -613,6 +613,15 @@ impl WorkspaceStore for FixedTree {
         _parent: Option<Option<&str>>,
     ) -> crate::Result<WorkspaceNode> {
         unreachable!("search never renames")
+    }
+    async fn swap_files(
+        &self,
+        _company: &CompanyId,
+        _expected_id: &str,
+        _replacement_id: &str,
+        _name: &str,
+    ) -> crate::Result<Option<WorkspaceNode>> {
+        unreachable!("search never swaps files")
     }
     async fn delete(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
         unreachable!("search never deletes")

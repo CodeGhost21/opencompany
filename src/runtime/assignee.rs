@@ -166,10 +166,16 @@ pub fn resolve(record: &CompanyRecord, assignee: &str) -> AssigneeResolution {
         return AssigneeResolution::Agent(id);
     }
     // Then operator-added teammates by display name. Tried only after the id
-    // namespace so a display name can never shadow a real id. `ops::team` mints
-    // these with `id: generate_id()`, so the name is the only string the
-    // operator ever sees — matching ids alone made every teammate they added
-    // unassignable on a free-text Assignee field (#214 review).
+    // namespace so a display name can never shadow a real id. `ops::team` used
+    // to mint these with `id: generate_id()`, making the name the only string
+    // the operator ever saw — matching ids alone left every teammate they added
+    // unassignable on a free-text Assignee field (#214 review). Since #686 the
+    // id is a readable slug, so the typical new teammate now resolves on the
+    // line above; this arm still earns its keep for the two cases a slug does
+    // not cover — teammates added before #686, which keep their generated ids
+    // forever, and any teammate renamed since (the id is minted once and never
+    // follows a rename, so the current display name may be the *only* string
+    // the operator recognises).
     let by_name = record.overlay_agent_ids_by_name(key);
     match by_name.len() {
         0 => AssigneeResolution::Unknown(key.to_string()),
@@ -200,6 +206,7 @@ mod tests {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -396,9 +403,11 @@ members = ["ceo"]
     }
 
     /// An operator-added teammate is reachable by the only string the operator
-    /// ever sees. `server::ops::team` mints these with `id: generate_id()`, so
-    /// an id-only match made every teammate the operator added unassignable on
-    /// a free-text Assignee field with no picker (#214 review).
+    /// may recognise. `server::ops::team` minted these with `id: generate_id()`
+    /// before #686, so an id-only match made every teammate the operator added
+    /// unassignable on a free-text Assignee field with no picker (#214 review).
+    /// The fixture keeps a generated-shaped id deliberately: those records still
+    /// exist and are never migrated, so this arm must keep working for them.
     #[test]
     fn an_operator_added_teammate_resolves_by_display_name() {
         let mut record = acme();

@@ -32,6 +32,16 @@ interface DesktopBridge {
 export interface EmbeddedInfo {
   baseUrl: string;
   dataDir: string;
+  /**
+   * Who is listening at `baseUrl`, as opposed to where.
+   *
+   * Optional here though the core always sends it, because this is the one
+   * field a *stale* build of the shell would omit: the console is bundled into
+   * the binary, but a developer running `pnpm dev` against an older `cargo`
+   * build is an ordinary Tuesday. Absent degrades to the pre-identity
+   * behaviour rather than to a connection keyed on `undefined`.
+   */
+  instanceId?: string;
 }
 
 /**

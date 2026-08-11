@@ -207,14 +207,25 @@ it. Responses mirror the TypeScript models in `src/lib/*` and `src/api/types.ts`
   revenue, byCategory, transactions). **Caveat:** the inference-cost component
   of spend is `0` until openhuman#4940 (as with Usage).
 
-### Connections — `src/views/ConnectionsView.tsx`, `src/lib/connections.ts`
-- OAuth catalog with connect/disconnect and connected-account state.
+### Connections — `src/views/ConnectionsView.tsx`, `src/lib/provider-grid.ts`
+- **One** provider grid with connect/disconnect and connected-account state,
+  plus the credential sections above it (MCP, inference, company key, Composio
+  token, channels).
 - **Source:** ✅ real (feature `oauth`) — `Company.connections` (GraphQL) reads
   manifest intent (`[[connection]]`) + live OAuth status; `POST
   …/connections/{provider}/start` returns the authorize URL,
   `…/disconnect` drops tokens, and `GET /api/v1/oauth/callback` completes the
   flow. Without the `oauth` feature the write routes `404 not_wired` and the
   console shows the read-only catalog.
+- **One list, one answer (issue #582).** The page used to render two provider
+  lists — `ComposioSection`'s grid off `GET …/composio/connections`, and a
+  categorised grid of eleven hardcoded tiles off `GET …/connections` — which
+  applied different rules to the same Composio state and so disagreed on screen.
+  Now: `GET …/connections` is the sole status source, the backend's Composio
+  catalog is the sole list of what can be connected, `src/lib/connections.ts` is
+  native-route metadata rather than a list, and `src/lib/provider-grid.ts` merges
+  the three into the rows `ProvidersSection` renders. `ComposioSection` keeps
+  only the credential layer.
 
 ### Domain & Email (Settings) — `src/components/domain-settings.tsx`, `src/lib/domain.ts`
 - Custom domain with generated DNS records (verification TXT, CNAME, DKIM, SPF)

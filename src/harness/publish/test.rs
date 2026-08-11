@@ -306,6 +306,109 @@ fn a_binary_version_records_a_description_and_not_the_bytes() {
     assert!(body.contains("company workspace"), "{body}");
 }
 
+/// Issue #663. The body composed **before** the store is asked must not assert
+/// that the file is there — that claim was unconditional, and it survived a
+/// workspace refusal, leaving the record promising a file that does not exist.
+#[test]
+fn a_pending_binary_version_does_not_claim_the_file_is_stored() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 16],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body_for(PayloadStorage::Pending);
+    assert!(
+        !body.contains("stored as a file"),
+        "nothing has been stored yet: {body}"
+    );
+    assert!(
+        !body.contains("Open it there"),
+        "and the operator must not be sent to look for it: {body}"
+    );
+}
+
+/// Issue #668. A stored version carries the digest **the store** computed, which
+/// is what lets a reader tell two versions apart and see whether a re-publish
+/// changed anything.
+#[test]
+fn a_stored_binary_version_records_the_stores_digest() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 16],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body_for(PayloadStorage::Stored {
+        sha256: Some("abc123"),
+    });
+    assert!(body.contains("sha256 abc123"), "{body}");
+    assert!(body.contains("stored as a file"), "{body}");
+}
+
+/// The defect #668 describes in one assertion: two versions of one binary that
+/// coincide in mime and length used to be **literally equal strings**, so the
+/// history could not say which was which. The digest is what separates them.
+#[test]
+fn two_binary_versions_of_the_same_length_differ_by_their_digest() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 120_000],
+        mime: "image/png".to_string(),
+    };
+    let v1 = payload.artifact_body_for(PayloadStorage::Stored {
+        sha256: Some("1111111111111111"),
+    });
+    let v2 = payload.artifact_body_for(PayloadStorage::Stored {
+        sha256: Some("2222222222222222"),
+    });
+    assert_ne!(
+        v1, v2,
+        "two versions of one deliverable must not be the same sentence"
+    );
+
+    // The control: without a digest they collapse back into one string, which
+    // is exactly the state this issue is about.
+    let bare = payload.artifact_body_for(PayloadStorage::Stored { sha256: None });
+    assert_eq!(
+        bare,
+        payload.artifact_body_for(PayloadStorage::Stored { sha256: None }),
+        "the no-digest body is the indistinguishable case, and it says so"
+    );
+    assert!(
+        bare.contains("no digest recorded"),
+        "a backend that recorded none must say so rather than imply identity: {bare}"
+    );
+}
+
+/// Issue #663's other half: when the workspace refuses the file, the record
+/// withdraws the claim instead of leaving it standing.
+///
+/// It must also NOT carry the store's error text — a version body is permanent
+/// and a backend error can name host paths.
+#[test]
+fn a_refused_binary_version_withdraws_the_storage_claim() {
+    let payload = PublishPayload::Bytes {
+        bytes: vec![0u8; 16],
+        mime: "image/png".to_string(),
+    };
+    let body = payload.artifact_body_for(PayloadStorage::Refused);
+    assert!(body.contains("NOT stored"), "{body}");
+    assert!(
+        !body.contains("Open it there"),
+        "the operator must not be sent to a file that is not there: {body}"
+    );
+}
+
+/// Prose is unaffected by any of this: for text the version IS the content, so
+/// it is complete whatever the tree did.
+#[test]
+fn a_prose_version_is_its_content_whatever_the_store_did() {
+    let payload = PublishPayload::Text("# Spec".to_string());
+    for storage in [
+        PayloadStorage::Pending,
+        PayloadStorage::Stored { sha256: None },
+        PayloadStorage::Refused,
+    ] {
+        assert_eq!(payload.artifact_body_for(storage), "# Spec");
+    }
+}
+
 // ── The tool ──────────────────────────────────────────────────────────────
 
 #[tokio::test]

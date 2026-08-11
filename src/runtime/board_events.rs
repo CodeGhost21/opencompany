@@ -1,8 +1,9 @@
 //! Issue #464: the board announces its own writes.
 //!
 //! A card can come into being on several paths — chat intake's deterministic
-//! `detect_task_intent`, a delegation opening a card for a desk, the publish
-//! drain, the console's `POST …/tasks` — and before this nothing on the company
+//! triage (`company::task_intent::triage_message`, which opens a card only for
+//! the messages it classes as work), a delegation opening a card for a desk,
+//! the publish drain, the console's `POST …/tasks` — and before this nothing on the company
 //! feed said so. The durable task events all describe a card that *already*
 //! exists ([`TaskDispatched`](CompanyEvent::TaskDispatched) fires on the
 //! `in_progress` edge, [`DeskTaskCompleted`](CompanyEvent::DeskTaskCompleted) on

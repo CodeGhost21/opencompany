@@ -416,10 +416,10 @@ export function availableCategories(rows: readonly ProviderRow[]): ProviderCateg
  * cleared the chip would be the more common design and the more annoying one:
  * it throws away half of what the operator already told us.
  */
-export function filterByCategory(
-  rows: readonly ProviderRow[],
+export function filterByCategory<T extends ProviderRow>(
+  rows: readonly T[],
   category: ProviderCategory,
-): ProviderRow[] {
+): T[] {
   if (category === "All") return [...rows];
   return rows.filter((row) => row.category === category);
 }
@@ -433,7 +433,10 @@ export function filterByCategory(
  * types "invoices" and should still reach Stripe. That third case is new with
  * #600 — before it, there was no description on the wire to match against.
  */
-export function filterProviderRows(rows: readonly ProviderRow[], query: string): ProviderRow[] {
+export function filterProviderRows<T extends ProviderRow>(
+  rows: readonly T[],
+  query: string,
+): T[] {
   const q = query.trim().toLowerCase();
   if (!q) return [...rows];
   return rows.filter(
@@ -455,11 +458,11 @@ export function filterProviderRows(rows: readonly ProviderRow[], query: string):
  * button that stood between the operator and the catalog is gone rather than
  * relabelled.
  */
-export function visibleProviderRows(
-  rows: readonly ProviderRow[],
+export function visibleProviderRows<T extends ProviderRow>(
+  rows: readonly T[],
   category: ProviderCategory,
   query: string,
-): ProviderRow[] {
+): T[] {
   return filterProviderRows(filterByCategory(rows, category), query);
 }
 

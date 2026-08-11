@@ -35,12 +35,14 @@
 //!   the metered `search` one: it reads exactly what `workspace_read` already
 //!   grants, so requiring a billed backend credential for it would price the
 //!   cheap discovery path above the list-then-read crawl it replaces.
-//!   `workspace_write` is added
-//!   only under an **explicit** `workspace` / `workspace.write` grant — a bare
-//!   `*` does not confer it — and is guarded by a required compare-and-swap
-//!   revision token. Unlike the file tools these are scoped by the store, not
-//!   the filesystem: every call resolves through one company-scoped `tree()`
-//!   read, so no host path is ever built from agent input.
+//!   `workspace_create` / `workspace_write` and, since issue #671,
+//!   `workspace_rename` / `workspace_delete` are added only under an
+//!   **explicit** `workspace` / `workspace.write` grant — a bare `*` does not
+//!   confer them. `workspace_write` and `workspace_delete` are each guarded by
+//!   a required compare-and-swap revision token, and the lifecycle pair reaches
+//!   only `Agents/<agent id>/`. Unlike the file tools these are scoped by the
+//!   store, not the filesystem: every call resolves through one company-scoped
+//!   `tree()` read, so no host path is ever built from agent input.
 //! * **Delegation is orchestrator-only.** `query_company` / `spawn_task` /
 //!   `delegate_to_desk` (and the other orchestrator roster/workflow tools) are
 //!   wired only when `is_orchestrator`; a **dispatched** desk/roster agent never
@@ -445,28 +447,35 @@ pub fn build_agent(
     //  1. READS follow the ordinary namespace rule, so a catch-all `*` confers
     //     them — the whole point of #237 is that shared guidance should be
     //     reachable by default.
-    //  2. CREATE + WRITE need an **EXPLICIT** `workspace` (or
-    //     `workspace.write`) grant (`grants_workspace_write_explicit`); `*`
+    //  2. CREATE + WRITE + RENAME + DELETE need an **EXPLICIT** `workspace`
+    //     (or `workspace.write`) grant (`grants_workspace_write_explicit`); `*`
     //     does NOT confer them, mirroring the media/composio precedent, because
-    //     they mutate a tree every other agent then trusts. Both ride the one
-    //     flag: overwriting an existing standard is strictly more destructive
-    //     than adding a note beside it, so a grant that permits the first has
-    //     already permitted the second.
+    //     they mutate a tree every other agent then trusts. All four ride the
+    //     one flag: overwriting an existing standard is strictly more
+    //     destructive than adding a note beside it, and strictly more
+    //     destructive than removing or moving something inside the agent's own
+    //     folder — so a grant that permits the first has already permitted the
+    //     rest, and issue #671 deliberately added no fifth grant name.
     //
     // Unwired-store is fail-closed: with no `deps.workspace` no tool is built
     // and the agent behaves exactly as it did before this cell.
     //
-    // Note what does and does not contain a write here, now that create is
-    // agent-reachable (#551). It is NOT intra-company isolation — an agent may
-    // create and overwrite anywhere in its company's tree, by design. What
-    // holds is: company tenancy (the store is pinned to one `CompanyId` at
-    // build time, and every tool resolves inside a single company-scoped tree
-    // read); the explicit grant above; the write tool's required
-    // `expected_updated_at` CAS token; policy parking, since `workspace_write`
-    // and `workspace_create` are both `Reach::Consequence` and never grantable
-    // standing (`policy::consequence`); and authorship, since every node
-    // records who created it and who last wrote it (#326). Rename and delete
-    // remain operator-only — they are not on this surface at all.
+    // Note what does and does not contain a write here, now that create
+    // (#551) and the lifecycle pair (#671) are agent-reachable. It is NOT
+    // intra-company isolation — an agent may create and overwrite anywhere in
+    // its company's tree, by design. What holds is: company tenancy (the store
+    // is pinned to one `CompanyId` at build time, and every tool resolves
+    // inside a single company-scoped tree read); the explicit grant above; the
+    // required `expected_updated_at` CAS token on `workspace_write` and
+    // `workspace_delete`; policy parking, since all four mutations are
+    // `Reach::Consequence` and never grantable standing
+    // (`policy::consequence`); and authorship, since every node records who
+    // created it and who last wrote it (#326).
+    //
+    // Rename and delete additionally reach only `Agents/<agent id>/`. Read that
+    // as a division of labour, not as a security boundary: the same grant
+    // already confers unconfined overwrite, which is the broader power. See the
+    // `workspace_tools::lifecycle` module docs.
     //
     // Not mapped in `toolbelt::namespace_of`, so these stay intrinsic to the
     // capability filter (the `file_tools` precedent): the reads are free and
@@ -1465,6 +1474,8 @@ mod tests {
             "workspace_read",
             "workspace_search",
             "workspace_write",
+            "workspace_rename",
+            "workspace_delete",
         ] {
             assert!(
                 !unwired.contains(&tool.to_string()),
@@ -1490,17 +1501,26 @@ mod tests {
             wildcard.contains(&"workspace_search".to_string()),
             "a bare `*` must confer workspace search: {wildcard:?}"
         );
-        assert!(
-            !wildcard.contains(&"workspace_write".to_string()),
-            "a bare `*` must NOT confer workspace writes: {wildcard:?}"
-        );
+        for tool in ["workspace_write", "workspace_rename", "workspace_delete"] {
+            assert!(
+                !wildcard.contains(&tool.to_string()),
+                "a bare `*` must NOT confer `{tool}`: {wildcard:?}"
+            );
+        }
 
-        // Explicit `workspace` → reads + write.
+        // Explicit `workspace` → reads + all four mutations. The lifecycle pair
+        // (issue #671) rides this grant rather than a new one: it reaches only
+        // the agent's own folder, which is narrower than the unconfined
+        // overwrite the same grant already confers.
         let explicit = built_tool_names_with_workspace(&["workspace"]);
-        assert!(
-            explicit.contains(&"workspace_write".to_string()),
-            "{explicit:?}"
-        );
+        for tool in [
+            "workspace_create",
+            "workspace_write",
+            "workspace_rename",
+            "workspace_delete",
+        ] {
+            assert!(explicit.contains(&tool.to_string()), "{tool}: {explicit:?}");
+        }
 
         // No workspace grant at all → nothing, even with a store wired.
         let ungranted = built_tool_names_with_workspace(&["web.*"]);
@@ -1509,6 +1529,8 @@ mod tests {
             "workspace_read",
             "workspace_search",
             "workspace_write",
+            "workspace_rename",
+            "workspace_delete",
         ] {
             assert!(
                 !ungranted.contains(&tool.to_string()),
@@ -1529,16 +1551,20 @@ mod tests {
             read_grant.contains(&"workspace_read".to_string()),
             "{read_grant:?}"
         );
-        assert!(
-            !read_grant.contains(&"workspace_write".to_string()),
-            "`workspace.read` must not confer writes: {read_grant:?}"
-        );
+        for tool in ["workspace_write", "workspace_rename", "workspace_delete"] {
+            assert!(
+                !read_grant.contains(&tool.to_string()),
+                "`workspace.read` must not confer `{tool}`: {read_grant:?}"
+            );
+        }
 
         let write_grant = built_tool_names_with_workspace(&["workspace.write"]);
-        assert!(
-            write_grant.contains(&"workspace_write".to_string()),
-            "{write_grant:?}"
-        );
+        for tool in ["workspace_write", "workspace_rename", "workspace_delete"] {
+            assert!(
+                write_grant.contains(&tool.to_string()),
+                "{tool}: {write_grant:?}"
+            );
+        }
     }
 
     /// `workspace_search` rides the `workspace` READ grant and NEVER the

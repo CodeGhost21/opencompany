@@ -337,6 +337,20 @@ export interface ApprovalSummary {
    */
   payload?: unknown;
   /**
+   * Whether {@link payload} and {@link amount_usd} were withheld from **this
+   * reader** because of their role (#618).
+   *
+   * Membership decides whether you may know an approval exists; role decides
+   * whether you may read its contents. An admin never sees this set.
+   *
+   * The console must not treat a withheld approval as an empty one. `payload`
+   * being absent already means "the effect carries no arguments", so without
+   * this flag a hidden payment and a no-argument tool call are the same bytes —
+   * and a member would read "nothing to show" where the truth is "not shown to
+   * you". Render the difference; see `ApprovalPayload`.
+   */
+  contents_hidden?: boolean;
+  /**
    * The chat thread this approval was raised in (#379) — the **host** thread id,
    * which is a desk id for a channel and a roster agent id for a direct message.
    * Resolve it to a console channel id with `channelIdForThread`.
@@ -723,11 +737,15 @@ export interface InboxMessageDto {
  * - `attested` — this instance carries a platform-minted identity, so
  *   connections are the platform's to run. Nothing to register here, and the
  *   console offers no local Connect.
+ * - `company` — this company's own TinyHumans credential (issue #586). Reported
+ *   by the Composio plane, which brokers through it. The native OAuth catalog
+ *   does **not** route through the company key today, so this value does not
+ *   appear on a native-only provider — see `api/credential.ts`.
  * - `static` — a token this company already stored, or this host's own
  *   registered provider application (the self-hosted hatch). Connect works.
  * - `none` — neither, so no Connect can succeed on this host.
  */
-export type ConnectionCredentialSource = "attested" | "static" | "none";
+export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";
 
 /**
  * One third-party connection's state, from `GET .../connections`.

@@ -40,6 +40,8 @@ id = "gate"
 kind = "condition"
 name = "Pencils out?"
 summary = "Advance to purchase or pass."
+[node.config]
+field = "=item.pencils_out"
 
 [[node]]
 id = "rehab"

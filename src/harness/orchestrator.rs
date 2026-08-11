@@ -66,8 +66,8 @@ use openhuman_core::openhuman as oh;
 use oh::tools::traits::{PermissionLevel, Tool, ToolResult};
 
 use crate::company::{
-    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowFile, create_company_workflow,
-    list_workflows_union, load_workflow_union,
+    Agent as ManifestAgent, RawEdge, RawNode, RawWorkflow, WorkflowDestinationDef, WorkflowFile,
+    WorkflowNodeKind, create_company_workflow, list_workflows_union, load_workflow_union,
 };
 use crate::error::OpenCompanyError;
 use crate::harness::lifecycle::ReviewDecision;
@@ -76,7 +76,7 @@ use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::tasks::{TaskOutputAction, TaskOutputWorkflow};
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq, OverlayAgent};
-use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner, generate_id};
+use crate::ports::{CompanyStore, WorkflowRun, WorkflowRunner};
 
 /// The manifest cognition-tier that marks the orchestrator agent.
 ///
@@ -190,39 +190,68 @@ pub fn is_delegation_tool(tool: &str) -> bool {
 /// whichever tool was chosen. What the brief has to do now is stop the model
 /// *double-tracking* (a `spawn_task` beside every hand-off), which is why it
 /// tells it what `spawn_task` is still for.
+///
+/// # Answering leads, and the tool list stopped being the shape (issue #267)
+///
+/// The discrimination rule was already here — *"act on the board only when it
+/// genuinely helps — otherwise answer directly and concisely"* — as the closing
+/// clause of a brief that spent its length enumerating seven action tools and
+/// how to use each. **The structure read as an invitation to act with a caveat
+/// attached, and behaviour followed the structure rather than the caveat.** Six
+/// cards sat unworked in `backlog` on a live company, and four of them were
+/// asks to *create a workflow* that the orchestrator could have authored in the
+/// turn it was asked.
+///
+/// So the default moved to the front and the enumeration was trimmed to fit
+/// underneath it. Two things changed in substance rather than order:
+///
+/// * *A question about state is never a card* is now stated, not implied.
+/// * `create_workflow` is framed as **something to do this turn**, not a
+///   capability to mention. That is what un-deadens the four workflow cards'
+///   class: Layer A still opens the `Track` card for "create a workflow named
+///   X" — it *is* an instruction — but the orchestrator now completes it
+///   instead of leaving it to rot.
+///
+/// This is guidance, and the two deterministic layers in
+/// [`triage_message`](crate::company::task_intent::triage_message) and
+/// `DelegationRunner::handle_operator_message` are what make the outcome not
+/// depend on it.
+///
+/// # Budget
+///
+/// Persona-appended, so it sits OUTSIDE the issue-#417
+/// [`TOOL_RESULT_BUDGET_BYTES`](crate::harness::build::TOOL_RESULT_BUDGET_BYTES)
+/// insight-document budget and cannot crowd out the Desks section
+/// `delegate_to_desk` depends on. Kept no longer than it already was regardless
+/// — see `the_brief_leads_with_answering_and_did_not_grow`.
 pub fn orchestrator_brief() -> String {
     " You are also this company's orchestrator: the single point of contact for the operator. \
-Answer from whole-company context. Two decisions come up constantly and they are INDEPENDENT — do \
-not collapse them into one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, \
-hand it to that desk with `delegate_to_desk` rather than answering from your own guess; when it is \
-yours to answer, answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you \
-must not pick a tool in order to influence it. Anything substantial handed to a desk is opened as a \
-board card automatically, and so is anything substantial an operator asks a desk or teammate \
-directly — the hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for \
-the same work, and never prefer one over the other to get something tracked. Reach for `spawn_task` \
-only for work that belongs on the board but must NOT start in this turn: something for later, for \
-somebody else, or waiting on a person. Use `query_company` to ground answers in the \
-company's durable facts, recent activity, saved workflows, team roster, and desks — it is the \
-source of truth for what workflows exist, who is on the team, and which desks can take work, so \
-consult it before answering \"what workflows/teammates do we have?\" or before delegating, rather \
-than guessing or naming a skill \
-— `delegate_to_desk` to hand a turn to a desk's lead \
-member, naming the desk by an id `query_company` lists under Desks (a desk is not a person: \
-handing work to a teammate's name is not a delegation), \
-`spawn_task` to open a card for work that should wait rather than start now, `run_workflow` to execute one of the \
-company's saved workflows by id (for example to advance or finish a task that is waiting on a \
-workflow run) — you can run workflows yourself; never claim the run_workflow tool is unavailable — \
-`create_workflow` to author and save a brand-new workflow graph (a trigger plus agent / tool / \
-condition / output steps) when a repeatable process is worth capturing — it's enabled immediately \
-and runnable with run_workflow — and `add_agent` to bring on a new teammate (a name, role, and \
-optional mandate) when the company genuinely needs one — it becomes a real, addressable member of \
-the team starting next turn. \
-You also own the board's lifecycle: `assign_task` to set or change who owns an existing card (this \
-records ownership only — moving the card to In Progress is what starts the work), and \
-`review_task` to record your verdict on a card awaiting review, either `approve` when the work is \
-accepted or `revise` to send it back to To-do for another pass. \
-Delegate, run or create a workflow, add a teammate, or act on the board only when it genuinely \
-helps — otherwise answer directly and concisely."
+MOST MESSAGES ARE QUESTIONS OR QUICK READS. Answer them from whole-company context and touch \
+nothing else. A question about state — what is on the board, what workflows exist, who is on the \
+team, what happened — is NEVER a card. Use `query_company`: it is the source of truth for the \
+company's durable facts, recent activity, saved workflows, team roster and desks, so consult it \
+before answering rather than guessing, then answer directly and concisely. A board write is the \
+exception and needs a reason. \
+When there IS work, two decisions come up and they are INDEPENDENT — do not collapse them into \
+one. (1) WHO SHOULD DO THIS: when a request belongs to a specialist desk, hand it to that desk \
+with `delegate_to_desk`, naming the desk by an id `query_company` lists under Desks (a desk is not \
+a person: handing work to a teammate's name is not a delegation); when it is yours to answer, \
+answer it. (2) SHOULD THIS BE TRACKED: you do not have to decide this, and you must not pick a \
+tool in order to influence it. Anything substantial handed to a desk is opened as a board card \
+automatically, and so is anything substantial an operator asks a desk or teammate directly — the \
+hand-off IS the card, so never call `spawn_task` alongside a `delegate_to_desk` for the same work, \
+and never prefer one over the other to get something tracked. Reach for `spawn_task` only for work \
+that belongs on the board but must NOT start in this turn: something for later, for somebody else, \
+or waiting on a person. \
+WHEN YOU CAN DO THE WORK IN THIS TURN, DO IT — do not park it as a card for later. Asked to \
+capture a repeatable process (\"create a workflow that…\"), author it NOW with `create_workflow` — \
+a trigger plus agent / tool / condition / output steps — and say it is ready; it is enabled \
+immediately and runnable. `run_workflow` executes a saved workflow by id, including to advance a \
+task waiting on a run; you can run workflows yourself, so never claim that tool is unavailable. \
+`add_agent` brings on a new teammate when the company genuinely needs one. \
+You also own the board's lifecycle: `assign_task` sets who owns an existing card (ownership only — \
+moving it to In Progress is what starts the work), and `review_task` records `approve` or `revise` \
+on a card awaiting review."
         .to_string()
 }
 
@@ -271,6 +300,24 @@ pub enum Delegation {
     },
 }
 
+impl Delegation {
+    /// Whether this delegation is a way of **answering** the operator, rather
+    /// than only a write to the board (issue #267).
+    ///
+    /// Only [`DelegateToDesk`](Self::DelegateToDesk) is. It runs a teammate's
+    /// turn and hands their reply back for the orchestrator to relay, so it is
+    /// how a question the orchestrator cannot answer alone reaches somebody who
+    /// can — "what did the design desk ship this week?" is unanswerable without
+    /// it. [`SpawnTask`](Self::SpawnTask), [`AssignTask`](Self::AssignTask) and
+    /// [`ReviewTask`](Self::ReviewTask) change the board and return nothing to
+    /// say, so they have no answering role and stay refused on a question turn.
+    ///
+    /// This is what [`DrainClaim::Answering`] filters on.
+    pub fn answers(&self) -> bool {
+        matches!(self, Self::DelegateToDesk { .. })
+    }
+}
+
 /// A shared, in-memory queue the delegation tools push onto and the harness
 /// brain drains. Cheap to [`Clone`] (a shared handle); the same underlying
 /// queue is seen by the tools captured into the orchestrator agent and by the
@@ -303,10 +350,10 @@ pub enum Delegation {
 #[derive(Clone, Default)]
 pub struct DelegationQueue {
     inner: Arc<Mutex<Vec<Delegation>>>,
-    /// Whether some drain site has promised to drain what is staged here
-    /// (issue #453). `false` — nothing drains — is the default and the
+    /// What the live claim on this queue permits (issues #453, #267).
+    /// [`DrainClaim::Unclaimed`] — nothing drains — is the default and the
     /// fail-safe direction.
-    committed: Arc<Mutex<bool>>,
+    committed: Arc<Mutex<DrainClaim>>,
     /// Desk keys a `delegate_to_desk` call named that the company does not have
     /// (issue #272).
     ///
@@ -337,9 +384,18 @@ impl DelegationQueue {
             .push(delegation);
     }
 
-    /// Whether a drain site has committed to draining this queue (issue #453).
-    pub fn drain_committed(&self) -> bool {
+    /// What the live claim on this queue permits (issues #453, #267).
+    pub fn claim_state(&self) -> DrainClaim {
         *self.committed.lock().expect("delegation commitment")
+    }
+
+    /// Whether a drain site has committed to draining this queue (issue #453).
+    ///
+    /// True for **both** claim kinds: an answering claim drains exactly like a
+    /// full one, it merely narrows what may be staged. Callers that need the
+    /// distinction want [`claim_state`](Self::claim_state).
+    pub fn drain_committed(&self) -> bool {
+        self.claim_state() != DrainClaim::Unclaimed
     }
 
     /// Claims this queue for a drain site that promises to drain it, for as long
@@ -354,8 +410,29 @@ impl DelegationQueue {
     /// the claim's scope *is* the window in which delegating works.
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
     pub fn claim(&self) -> DelegationClaim {
+        self.claim_as(DrainClaim::Full)
+    }
+
+    /// Claims this queue for a turn whose operator message triaged as a
+    /// question (issue #267).
+    ///
+    /// Identical to [`claim`](Self::claim) in every way that matters to the
+    /// drain — it runs, and it runs the same code — but only delegations that
+    /// [`answer`](Delegation::answers) may be staged under it. The three pure
+    /// board writes are refused at the tool boundary in the model's own turn.
+    ///
+    /// This exists because withholding the claim outright was too blunt: it
+    /// took `delegate_to_desk` away too, and that tool is how a question the
+    /// orchestrator cannot answer alone gets routed to a desk that can.
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim_answering(&self) -> DelegationClaim {
+        self.claim_as(DrainClaim::Answering)
+    }
+
+    /// The shared body of the two claim constructors.
+    fn claim_as(&self, state: DrainClaim) -> DelegationClaim {
         self.clear();
-        *self.committed.lock().expect("delegation commitment") = true;
+        *self.committed.lock().expect("delegation commitment") = state;
         DelegationClaim {
             queue: self.clone(),
         }
@@ -391,8 +468,14 @@ impl DelegationQueue {
     /// therefore distinct [`Staged`] variants and never collapsed.
     #[must_use = "a refused delegation must be reported to the model, not dropped"]
     pub fn push_within_cap(&self, delegation: Delegation, cap: usize) -> Staged {
-        if !self.drain_committed() {
-            return Staged::NoDrain;
+        match self.claim_state() {
+            DrainClaim::Unclaimed => return Staged::NoDrain(NoDrainReason::Unwired),
+            // Issue #267: the operator asked a question. A hand-off is how one
+            // gets answered, so it stages; the pure board writes do not.
+            DrainClaim::Answering if !delegation.answers() => {
+                return Staged::NoDrain(NoDrainReason::Triage);
+            }
+            DrainClaim::Answering | DrainClaim::Full => {}
         }
         let mut guard = self.inner.lock().expect("delegation queue");
         if guard.len() >= cap {
@@ -483,10 +566,76 @@ impl DelegationQueue {
 pub enum Staged {
     /// Queued; some drain site will execute it as this turn completes.
     Queued,
-    /// Nothing has claimed the queue, so nothing would ever execute it.
-    NoDrain,
+    /// Nothing that would execute *this* delegation has claimed the queue. The
+    /// [`NoDrainReason`] says which of the two very different causes it was.
+    NoDrain(NoDrainReason),
     /// This turn has already queued [`MAX_DELEGATIONS_PER_TURN`].
     OverCap,
+}
+
+/// Why a delegation found nothing that would drain it (issues #453, #267).
+///
+/// One refusal used to speak for both of these, and they are not the same
+/// condition: one is a context that can never do board work, the other is a
+/// fully capable company reading *this message* as a question. Sharing a
+/// sentence made the refusal wrong for the second case — "board actions are
+/// unavailable in this context" is false when they would have worked on a
+/// differently-phrased message — and, worse, made the two indistinguishable in
+/// the logs, so the rate at which the triage gate fires could not be measured
+/// after shipping a keyword classifier with teeth.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoDrainReason {
+    /// No drain site claimed the queue at all ([`DrainClaim::Unclaimed`]):
+    /// nothing in this context can carry out board work, for any message.
+    Unwired,
+    /// The queue is claimed for answering ([`DrainClaim::Answering`]): the
+    /// operator's message triaged as a question, so board writes are held back
+    /// for **this message only** (issue #267).
+    Triage,
+}
+
+impl NoDrainReason {
+    /// The value the `reason` log field carries, so the two causes can be
+    /// counted apart in production.
+    ///
+    /// `drain_unwired` rather than the `no_drain_wired` this shipped with: the
+    /// old value parsed just as readily as "a no-drain **was** wired", the
+    /// opposite of what it records, and this label is the field the whole
+    /// countability argument rests on (issue #267 review).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Unwired => "drain_unwired",
+            Self::Triage => "triaged_as_question",
+        }
+    }
+}
+
+impl std::fmt::Display for NoDrainReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// What the live claim on a [`DelegationQueue`] permits (issues #453, #267).
+///
+/// The gate on a question turn is a *narrowing* rather than a withdrawal, and
+/// this is where the difference lives. Before #267's review the answering case
+/// was expressed by simply not claiming, which could only say "no board work at
+/// all" — and that took `delegate_to_desk` with it, leaving the orchestrator
+/// unable to consult a desk about the very question it was asked.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DrainClaim {
+    /// No drain site has claimed the queue: nothing may be staged, because
+    /// nothing would ever execute it. The default and the fail-safe direction.
+    #[default]
+    Unclaimed,
+    /// A drain site has claimed the queue and will execute anything staged.
+    Full,
+    /// A drain site has claimed the queue for a turn whose operator message
+    /// triaged as [`MessageTriage::Answer`](crate::company::task_intent::MessageTriage)
+    /// (issue #267). The drain runs exactly as under [`Full`](Self::Full); only
+    /// delegations that [`answer`](Delegation::answers) may be staged.
+    Answering,
 }
 
 /// The live claim on a [`DelegationQueue`] — proof that some drain site is
@@ -508,7 +657,7 @@ pub struct DelegationClaim {
 
 impl Drop for DelegationClaim {
     fn drop(&mut self) {
-        *self.queue.committed.lock().expect("delegation commitment") = false;
+        *self.queue.committed.lock().expect("delegation commitment") = DrainClaim::Unclaimed;
         self.queue.clear();
     }
 }
@@ -1062,6 +1211,14 @@ fn summarize_event(event: &CompanyEvent) -> String {
             kind,
             ..
         } => format!("workflow {workflow_id} delivered {kind} report from node {node}"),
+        // Issue #617. Structural only, and without the policy's `reason` for
+        // the same rule the arms above follow.
+        CompanyEvent::WorkflowChildCallNotOffered {
+            child_workflow_id,
+            node,
+            tool,
+            ..
+        } => format!("workflow child {child_workflow_id} ran {tool} at node {node} unapproved"),
     }
 }
 
@@ -1128,7 +1285,9 @@ impl Tool for SpawnTaskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => return Ok(ToolResult::error(no_drain(SPAWN_TASK_TOOL, &effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(SPAWN_TASK_TOOL, &effect, why)));
+            }
         }
         Ok(ToolResult::success(format!(
             "Queued a task card: \"{title}\". It will be opened on the board this turn."
@@ -1253,8 +1412,12 @@ impl Tool for DelegateToDeskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => {
-                return Ok(ToolResult::error(no_drain(DELEGATE_TO_DESK_TOOL, &effect)));
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(
+                    DELEGATE_TO_DESK_TOOL,
+                    &effect,
+                    why,
+                )));
             }
         }
         Ok(ToolResult::success(format!(
@@ -1335,7 +1498,9 @@ impl Tool for AssignTaskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => return Ok(ToolResult::error(no_drain(ASSIGN_TASK_TOOL, &effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(ASSIGN_TASK_TOOL, &effect, why)));
+            }
         }
         // Staged truth, not the past tense (issue #453). Nothing has been
         // written yet; the drain this turn's claim promises is what writes it.
@@ -1420,7 +1585,9 @@ impl Tool for ReviewTaskTool {
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
-            Staged::NoDrain => return Ok(ToolResult::error(no_drain(REVIEW_TASK_TOOL, &effect))),
+            Staged::NoDrain(why) => {
+                return Ok(ToolResult::error(no_drain(REVIEW_TASK_TOOL, &effect, why)));
+            }
         }
         // Issue #453: the card has NOT moved yet. It moves when the drain runs,
         // and the drain runs because this turn is claimed — which is what makes
@@ -1457,7 +1624,7 @@ operator which items you got to and which you did not, and raise the rest in you
 }
 
 /// The refusal a delegation tool returns when **nothing will drain** what it
-/// would queue (issue #453) — modelled on
+/// would queue (issues #453, #267) — modelled on
 /// [`cannot_publish_here`](crate::harness::publish) one module over.
 ///
 /// It has to do two jobs, and they are not the two [`over_cap`] does. It must
@@ -1466,17 +1633,53 @@ operator which items you got to and which you did not, and raise the rest in you
 /// the failure this replaces was one the agent could not detect: it was told the
 /// card had moved, so it told the operator the card had moved, and the next
 /// turn's `clear()` threw the delegation away.
-fn no_drain(tool: &str, effect: &str) -> String {
+///
+/// # One sentence could not do both causes
+///
+/// It was written for a genuinely inert context and then inherited, unchanged,
+/// by [`NoDrainReason::Triage`] — a **fully capable** company whose triage read
+/// this message as a question. There, "nothing here can carry out board work"
+/// and "board actions are unavailable in this context" are both false as the
+/// operator will hear them: board actions work fine, and would have worked on a
+/// differently-phrased message. Paired with a triage miss the experience was
+/// *ask for a landing page → "I could not do it; board actions are
+/// unavailable"*, with no hint that rephrasing would work.
+///
+/// So the triage case gets its own text, which says what was actually read,
+/// keeps the do-not-report-it-as-done half that both causes need, and gives the
+/// model something recoverable to offer: restate it as a request.
+///
+/// # The log field is the measurement
+///
+/// `reason` is on the warn as well as in the message. The triage gate ships a
+/// keyword classifier with teeth, and its residual miss rate is exactly the
+/// number worth having afterwards — with both causes emitting identical text
+/// there was no way to count one without the other. Kept at `warn` rather than
+/// demoted to `info`: a refusal here means either the model over-reached on a
+/// question or the triage misread a request, and both are worth seeing.
+fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
     tracing::warn!(
         tool = %tool,
-        "[delegation] a delegation tool was called from a turn with no claimed drain; refusing \
-         rather than queuing into a queue nothing will drain"
+        reason = %reason,
+        "[delegation] a delegation tool found no drain that would execute it; refusing in the \
+         model's own turn rather than queuing into a queue nothing will drain"
     );
-    format!(
-        "Refused: nothing here can carry out board work, so {effect}. Board actions are \
-         unavailable in this context. Do not retry — it will fail the same way — and do NOT report \
-         the action as done or describe the card as moved. Say plainly that you could not do it."
-    )
+    match reason {
+        NoDrainReason::Unwired => format!(
+            "Refused: nothing here can carry out board work, so {effect}. Board actions are \
+             unavailable in this context. Do not retry — it will fail the same way — and do NOT \
+             report the action as done or describe the card as moved. Say plainly that you could \
+             not do it."
+        ),
+        NoDrainReason::Triage => format!(
+            "Refused: this message was read as a question rather than a request to do work, so \
+             {effect}. Board writes are held back for this message only — answer it from what you \
+             can read, and hand it to a desk if somebody else knows better. Do not retry this \
+             call; it will fail the same way. Do NOT report the action as done or describe the \
+             card as moved. If the operator did mean it as work, say so plainly and ask them to \
+             restate it as a direct request."
+        ),
+    }
 }
 
 /// Reads a required non-empty string argument, trimmed.
@@ -1626,7 +1829,11 @@ impl Tool for AddAgentTool {
         // existing overlay teammate, so a trigger-happy orchestrator can't
         // accumulate indistinguishable duplicates. Matching on name alone is
         // intentional — the orchestrator supplies display names, and an id
-        // collision with a manifest agent is handled by `build_roster`.
+        // collision with a manifest agent is handled by `mint_agent_id` below.
+        //
+        // It does not subsume that check: this compares overlay *names*, so a
+        // call naming "Backend Engineer" on a company whose manifest declares
+        // `backend_engineer` passes here and still needs a suffixed id.
         let name_lower = name.to_ascii_lowercase();
         if record
             .overlay_agents
@@ -1637,8 +1844,12 @@ impl Tool for AddAgentTool {
                 "A teammate named \"{name}\" already exists. Pick a different name, or remove the existing one first."
             )));
         }
+        // Same readable-id rule as the console route (issue #686), under the
+        // same per-company write lock, so the two minting sites cannot hand out
+        // one id twice.
+        let id = record.mint_agent_id(&name);
         let agent = OverlayAgent {
-            id: generate_id(),
+            id: id.clone(),
             name: name.clone(),
             role: role.clone(),
             description,
@@ -1646,8 +1857,13 @@ impl Tool for AddAgentTool {
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
 
+        // The id is in the result because the orchestrator has to be able to
+        // address the teammate it just created — delegating to it, or putting it
+        // on a desk, takes the id, not the display name. The console gets the
+        // same answer from `TeamMemberDto.id`; before this the agent-facing half
+        // had no way to learn it at all.
         Ok(ToolResult::success(format!(
-            "Added {name} as {role} to the team. They'll be reachable as a teammate starting next turn."
+            "Added {name} (id `{id}`) as {role} to the team. They'll be reachable as a teammate starting next turn."
         )))
     }
 }
@@ -2648,22 +2864,55 @@ impl Tool for ReadRunOutputTool {
 /// routes return (`id`/`name`/`description?`/`nodes`/`edges`), so a graph the
 /// orchestrator authors is indistinguishable from one authored in the console.
 ///
-/// **This is deliberately a narrower surface than the REST body**, and the node
-/// shape below is where that shows: it accepts only `id`/`kind`/`name`/`summary`
-/// /`agent`, omitting `config`, `onError`, `retry`, `requiresApproval` — and
-/// `schedule` (issue #169). The omission is the policy, not an oversight:
+/// **This is deliberately a narrower surface than the REST body, but the
+/// narrowing is POLICY fields only** — the node shape below omits `schedule`
+/// (issue #169), `onError`, `retry`, and `requiresApproval`, and nothing else.
+/// Those four are unattended-run policy: a field the model cannot set is a field
+/// it cannot get wrong, and each carries real consequence — retry/error policy
+/// changes failure behavior, and a `schedule` makes a workflow run *on its own,
+/// forever*, with no operator in the loop at the moment it fires. So
+/// **agent-authored workflows stay manual-run only**: schedules are
+/// operator-authored, through the console's creator or `POST …/workflows`, where
+/// a human chose the cron. An agent can build the graph; a human decides whether
+/// it runs unattended.
 ///
-/// * A field the model cannot set is a field it cannot get wrong. Each of these
-///   carries real consequence — retry/error policy changes failure behavior, and
-///   a `schedule` makes a workflow run *on its own, forever*, with no operator
-///   in the loop at the moment it fires.
-/// * So **agent-authored workflows are manual-run only**. Schedules are
-///   operator-authored, through the console's creator or `POST …/workflows`,
-///   where a human chose the cron. An agent can build the graph; a human decides
-///   whether it runs unattended.
+/// The FUNCTIONAL fields `config` and `destination` are accepted (issue #661,
+/// H1): four of the six node kinds this tool advertises are inert without them.
+/// A `tool_call` names the tool to run in `config.slug`; an `http_request` puts
+/// its method/url in `config`; a `condition` branches on a `config` expression;
+/// an `output` may route its report via `destination`. Omitting these did not
+/// make the tool safer — it made the tool advertise `tool_call`/`http_request`/
+/// `condition`/`output` while being unable to author a working one (on current
+/// main `validate_draft_against_record` now *rejects* every config-less
+/// `tool_call` as "names no `slug`"). Both fields flow into the same validated
+/// `create_company_workflow` core the REST route and the builder use, so they
+/// inherit that core's validation rather than adding any of their own.
+///
+/// **`tool_call` args are LITERAL only — no templated `=`-expressions (issue
+/// #674).** At runtime a workflow `tool_call` node has *saved-node* position:
+/// #614's more-permissive rule (not #338's unbounded-reach agent rule) governs
+/// it, justified because a saved node passed TWO operator gates — a manifest
+/// `[tools].allow` grant AND an operator authoring the node. But a node this
+/// tool authors was authored by the *agent*, not an operator, so it reaches
+/// runtime with only ONE operator gate (the grant) while still being treated as
+/// a saved node. `config.args` passes through verbatim and `=`-expressions in
+/// args are a live runtime feature (see `workflows::gate`'s
+/// `every_reachable_workflow_tool_is_classified_by_name_alone`), so an agent
+/// could author `tool_call{slug:"shell", args:{command:"=<expr over upstream
+/// output>"}}` — clearing every author-time gate, taking saved-node position,
+/// with model-chosen templated args: exactly #674's carve-out for
+/// templated-from-upstream args, which are not pre-declared and must follow the
+/// stricter agent rule. To keep the two-operator-gate model intact, the
+/// [`TryFrom`] below **rejects any `tool_call` node whose `config` carries a
+/// string beginning with `=`** (tinyflows' `is_expression` convention). Literal
+/// args only here; templated wiring stays with the console + `POST …/workflows`,
+/// where an operator picks the args. NOTE: #674's templated-args carve-out is
+/// framed for saved (operator-authored) nodes; that it needs revisiting for
+/// agent-authored nodes *generally* — not only this tool — is flagged, not fixed
+/// here.
 ///
 /// Whether agents should be able to schedule themselves is an open product
-/// question. If the answer becomes yes, add the field here and to
+/// question. If the answer becomes yes, add the policy field here and to
 /// [`RawWorkflow`] construction below — the model and validation already support
 /// it, so nothing else has to change.
 #[derive(serde::Deserialize)]
@@ -2694,6 +2943,18 @@ struct CreateWorkflowArgNode {
     summary: Option<String>,
     #[serde(default)]
     agent: Option<String>,
+    /// Free-form, kind-specific node config carried as JSON on the wire and
+    /// converted to a `toml::Value` on the way into [`RawNode`] (issue #661): a
+    /// `tool_call`'s `slug` (+ `args`), an `http_request`'s `method`/`url`, a
+    /// `condition`'s `field` expression. A JSON `null` anywhere inside is a
+    /// caller error — TOML has no null — refused in [`TryFrom`] below.
+    #[serde(default)]
+    config: Option<serde_json::Value>,
+    /// Where an `output` node's report goes (`owner`/`email`/`channel` + an
+    /// optional `target`). Reuses the REST route's [`WorkflowDestinationDef`];
+    /// the shared create core enforces each kind's target contract.
+    #[serde(default)]
+    destination: Option<WorkflowDestinationDef>,
 }
 
 #[derive(serde::Deserialize)]
@@ -2707,29 +2968,133 @@ struct CreateWorkflowArgEdge {
     label: Option<String>,
 }
 
-impl From<CreateWorkflowArgs> for RawWorkflow {
-    fn from(args: CreateWorkflowArgs) -> Self {
-        Self {
+/// The dotted location of the first `=`-expression string found anywhere in
+/// `value`, or `None` when it holds only literal values.
+///
+/// Matches tinyflows' `expr::is_expression` convention exactly — a string that
+/// *starts with* `=` (no whitespace trim) is an expression the engine would
+/// resolve at run time. Walks nested objects and arrays; array elements are
+/// numeric segments, so a hit reads like `args.cc.0` — the same shape
+/// tinyflows' `NullResolution.location` uses.
+fn first_expression_location(value: &serde_json::Value, path: &str) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) if s.starts_with('=') => Some(path.to_string()),
+        serde_json::Value::Object(map) => map.iter().find_map(|(key, child)| {
+            let next = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            first_expression_location(child, &next)
+        }),
+        serde_json::Value::Array(items) => items.iter().enumerate().find_map(|(index, child)| {
+            let next = if path.is_empty() {
+                index.to_string()
+            } else {
+                format!("{path}.{index}")
+            };
+            first_expression_location(child, &next)
+        }),
+        _ => None,
+    }
+}
+
+/// Whether a JSON `null` appears anywhere inside `value` (recursively).
+///
+/// The JSON→TOML conversion in [`TryFrom`] fails for more than one reason — a
+/// `null` (TOML has no null) but also, e.g., an integer outside `i64` range — so
+/// the caller uses this to only append the "drop null-valued keys" remedy when a
+/// null is actually the cause, and otherwise lets the raw converter error speak.
+fn json_contains_null(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Null => true,
+        serde_json::Value::Object(map) => map.values().any(json_contains_null),
+        serde_json::Value::Array(items) => items.iter().any(json_contains_null),
+        _ => false,
+    }
+}
+
+impl TryFrom<CreateWorkflowArgs> for RawWorkflow {
+    /// A prosumer-language conversion error. Every fallible step is a node's JSON
+    /// `config`: a non-object shape, a templated `=`-expression on a `tool_call`
+    /// (issue #674 — see the struct doc), or a value TOML cannot store (e.g. a
+    /// `null`). The caller maps each straight onto a [`ToolResult::error`].
+    type Error = String;
+
+    fn try_from(args: CreateWorkflowArgs) -> Result<Self, String> {
+        let mut nodes = Vec::with_capacity(args.nodes.len());
+        for n in args.nodes {
+            let config = match n.config {
+                Some(json) => {
+                    // The schema types `config` as an object; a scalar or array
+                    // (e.g. `"config": "web_fetch"`) would otherwise persist as an
+                    // inert TOML value — silently on an `http_request`/`condition`
+                    // node. Refuse it here as an agent-actionable error.
+                    if !json.is_object() {
+                        return Err(format!(
+                            "node `{}` has a non-object `config` — `config` must be a JSON object \
+                             (e.g. `{{\"slug\": \"web_fetch\"}}`), not a bare string, number, or \
+                             list.",
+                            n.id
+                        ));
+                    }
+                    // Issue #674 boundary: an agent-authored `tool_call` carries
+                    // saved-node runtime position, so templated `=`-expression
+                    // args would clear every author-time gate with model-chosen
+                    // values (see the struct doc). Literal args only — reject any
+                    // `=`-prefixed string anywhere in the config.
+                    if n.kind == WorkflowNodeKind::ToolCall.as_str()
+                        && let Some(location) = first_expression_location(&json, "")
+                    {
+                        return Err(format!(
+                            "node `{}` puts a templated `=`-expression at `config.{location}` — an \
+                             agent-authored `tool_call` accepts LITERAL args only, not \
+                             `=`-expressions over upstream output. Use the console (or `POST \
+                             …/workflows`) for templated wiring, where an operator picks the args.",
+                            n.id
+                        ));
+                    }
+                    // JSON config → TOML value. TOML has no `null`, so a `null`
+                    // anywhere in the config is a caller error, not a 500 on
+                    // write — the same rule the REST create route and the workflow
+                    // builder apply. Other conversion failures (e.g. an integer
+                    // outside `i64` range) get the converter's own message, with
+                    // the null hint appended only when a null is the cause.
+                    Some(toml::Value::try_from(&json).map_err(|err| {
+                        if json_contains_null(&json) {
+                            format!(
+                                "node `{}` has config that can't be stored ({err}) — TOML has no \
+                                 null; drop null-valued keys.",
+                                n.id
+                            )
+                        } else {
+                            format!("node `{}` has config that can't be stored ({err}).", n.id)
+                        }
+                    })?)
+                }
+                None => None,
+            };
+            nodes.push(RawNode {
+                id: n.id,
+                kind: n.kind,
+                name: n.name,
+                summary: n.summary,
+                agent: n.agent,
+                // Policy fields stay omitted — agent-authored graphs are
+                // manual-run only (see the struct doc above).
+                schedule: None,
+                config,
+                on_error: None,
+                retry: None,
+                requires_approval: None,
+                destination: n.destination,
+            });
+        }
+        Ok(Self {
             id: args.id,
             name: args.name,
             description: args.description,
-            nodes: args
-                .nodes
-                .into_iter()
-                .map(|n| RawNode {
-                    id: n.id,
-                    kind: n.kind,
-                    name: n.name,
-                    summary: n.summary,
-                    agent: n.agent,
-                    schedule: None,
-                    config: None,
-                    on_error: None,
-                    retry: None,
-                    requires_approval: None,
-                    destination: None,
-                })
-                .collect(),
+            nodes,
             edges: args
                 .edges
                 .into_iter()
@@ -2739,7 +3104,7 @@ impl From<CreateWorkflowArgs> for RawWorkflow {
                     label: e.label,
                 })
                 .collect(),
-        }
+        })
     }
 }
 
@@ -2804,7 +3169,7 @@ impl Tool for CreateWorkflowTool {
     }
 
     fn description(&self) -> &str {
-        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Use this to capture a repeatable process; then run it with run_workflow."
+        "Author and save a new workflow graph for the company, then enable it so it can be run with run_workflow. A workflow is a directed graph: exactly one `trigger` node (what starts it) plus any of `agent` (a roster teammate does a step — set `agent` to that teammate's id), `tool_call`, `http_request`, `condition`, and `output` nodes, joined by `edges` ({from, to, optional label}). Node ids must be unique; every `agent` node must name a real teammate. Per-kind config: a `tool_call` node REQUIRES `config.slug` and runs ONLY a wired shell/code/web/search tool (e.g. `shell`, `apply_patch`, `web_fetch`, `web_search`), with LITERAL `config.args` only (no `=`-expressions — use the console for templated wiring) — for Composio, GitHub, or media/image/video actions use an `agent` node instead, NOT a `tool_call` (those are agent-turn tool families; a non-wired slug is refused when the node runs). An `http_request` node needs `config.method` and `config.url`. A `condition` node needs a `config.field` boolean expression, with its outgoing edges labeled `yes`/`no`. An `output` node may carry a `destination` ({kind: `owner`/`email`/`channel`, and a `target` for email/channel). Never put a null value inside `config` — it can't be stored. Workflows authored here are manual-run only (no schedule). Use this to capture a repeatable process; then run it with run_workflow."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -2837,7 +3202,25 @@ impl Tool for CreateWorkflowTool {
                             },
                             "name": { "type": "string", "description": "Human-readable node name." },
                             "summary": { "type": "string", "description": "Optional short description of the step." },
-                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." }
+                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
+                            "config": {
+                                "type": "object",
+                                "description": "Kind-specific settings, a JSON object. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; `args` must be LITERAL values, not `=`-expressions; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
+                            },
+                            "destination": {
+                                "type": "object",
+                                "description": "On an `output` node only: where the report goes.",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["owner", "email", "channel"],
+                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
+                                    },
+                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
+                                },
+                                "required": ["kind"],
+                                "additionalProperties": false
+                            }
                         },
                         "required": ["id", "kind", "name"],
                         "additionalProperties": false
@@ -2872,13 +3255,22 @@ impl Tool for CreateWorkflowTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
-        let draft: RawWorkflow = match serde_json::from_value::<CreateWorkflowArgs>(args) {
-            Ok(args) => args.into(),
+        let parsed = match serde_json::from_value::<CreateWorkflowArgs>(args) {
+            Ok(parsed) => parsed,
             Err(err) => {
                 tracing::debug!(company = %self.company, error = %err, "create_workflow: unreadable args");
                 return Ok(ToolResult::error(format!(
                     "Couldn't read the workflow definition: {err}. Provide `id`, `name`, and `nodes` (with an `edges` list)."
                 )));
+            }
+        };
+        // The only fallible conversion step is a node's JSON `config` (TOML has
+        // no null). Surface it as an agent-actionable error, never a panic.
+        let draft: RawWorkflow = match RawWorkflow::try_from(parsed) {
+            Ok(draft) => draft,
+            Err(msg) => {
+                tracing::debug!(company = %self.company, error = %msg, "create_workflow: unstorable config");
+                return Ok(ToolResult::error(msg));
             }
         };
 
@@ -2947,6 +3339,59 @@ mod tests {
             tools: Vec::new(),
             budget_usd_daily: None,
         }
+    }
+
+    /// Issue #267: the brief's **shape** is the thing under test, because the
+    /// shape is what the model followed. Answering has to lead, the
+    /// never-a-card rule has to be stated rather than implied, authoring a
+    /// workflow has to read as something done in this turn, and the whole thing
+    /// has to be no longer than the version it replaced — a "rebalance" that
+    /// grew the brief would just be more prose competing with the lead.
+    #[test]
+    fn the_brief_leads_with_answering_and_did_not_grow() {
+        let brief = orchestrator_brief();
+
+        // The default leads. Measured by position, not by presence: the old
+        // brief contained the same rule as its closing clause and behaviour
+        // followed the enumeration instead.
+        let answer_first = brief
+            .find("MOST MESSAGES ARE QUESTIONS OR QUICK READS")
+            .expect("the answering default is stated");
+        for later in [
+            "delegate_to_desk",
+            "spawn_task",
+            "create_workflow",
+            "add_agent",
+            "assign_task",
+            "review_task",
+        ] {
+            let at = brief.find(later).unwrap_or_else(|| panic!("names {later}"));
+            assert!(
+                answer_first < at,
+                "`{later}` is introduced before the answering default"
+            );
+        }
+
+        assert!(
+            brief.contains("is NEVER a card"),
+            "the never-a-card rule must be stated, not implied: {brief}"
+        );
+        // The #442 two-decisions block survives the restructure.
+        assert!(brief.contains("they are INDEPENDENT"), "{brief}");
+        assert!(brief.contains("the hand-off IS the card"), "{brief}");
+        // A "create a workflow" ask is authored now, not parked.
+        assert!(
+            brief.contains("author it NOW with `create_workflow`"),
+            "the automate path must read as this-turn work: {brief}"
+        );
+
+        // The length of the brief this replaced. A ceiling, not a target.
+        const PREVIOUS_LEN: usize = 2784;
+        assert!(
+            brief.len() <= PREVIOUS_LEN,
+            "the brief grew to {} (was {PREVIOUS_LEN})",
+            brief.len()
+        );
     }
 
     /// Issue #276: both directions of the arming summary, including the name
@@ -3196,7 +3641,7 @@ mod tests {
                 },
                 MAX_DELEGATIONS_PER_TURN,
             ),
-            Staged::NoDrain,
+            Staged::NoDrain(NoDrainReason::Unwired),
             "an EMPTY unclaimed queue is still a queue nothing drains"
         );
         assert_eq!(queue.queued(), 0);
@@ -3302,6 +3747,119 @@ mod tests {
             assert!(!text.contains("delegations"), "{name}: {text}");
         }
         assert_eq!(queue.queued(), 0, "nothing may be staged by a refusal");
+    }
+
+    /// **Issue #267 review, finding 3.** The two no-drain causes stop sharing a
+    /// sentence.
+    ///
+    /// Written for a genuinely inert context, the refusal was then inherited by
+    /// a fully capable company whose triage read the message as a question —
+    /// where "board actions are unavailable in this context" is simply false as
+    /// the operator will hear it. Paired with a triage miss the experience was
+    /// *ask for a landing page → "I could not do it; board actions are
+    /// unavailable"*, with nothing to suggest that rephrasing would work.
+    ///
+    /// The halves both causes need stay on both; what differs is what the model
+    /// is told happened, and what it can offer next.
+    #[tokio::test]
+    async fn the_triage_refusal_says_it_read_a_question_and_offers_a_way_forward() {
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim_answering();
+        let refused = SpawnTaskTool::new(queue.clone())
+            .execute(json!({ "title": "Build the landing page" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "{}", refused.text());
+        let text = refused.text();
+
+        assert!(
+            text.contains("read as a question"),
+            "it must name what actually happened: {text}"
+        );
+        assert!(
+            text.contains("this message only"),
+            "…and scope it to this message, not to the whole context: {text}"
+        );
+        assert!(
+            text.contains("restate it"),
+            "…and leave the model something recoverable to offer: {text}"
+        );
+        // The two claims that are false here, and were the whole complaint.
+        assert!(
+            !text.contains("nothing here can carry out board work"),
+            "a capable company must not claim it cannot do board work: {text}"
+        );
+        assert!(
+            !text.contains("unavailable in this context"),
+            "the context is fine; the message was a question: {text}"
+        );
+        // …while everything both causes owe the model survives.
+        assert!(text.contains("Do not retry"), "{text}");
+        assert!(text.contains("report the action as done"), "{text}");
+        assert!(
+            text.contains("the card \"Build the landing page\" was NOT opened"),
+            "the tool's own effect clause is untouched: {text}"
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// …and the inert-context refusal keeps saying the thing that is true only
+    /// of it, so the split is a split rather than a rename.
+    #[tokio::test]
+    async fn the_unwired_refusal_still_says_the_context_cannot_do_board_work() {
+        let queue = DelegationQueue::default();
+        let refused = SpawnTaskTool::new(queue.clone())
+            .execute(json!({ "title": "Ship it" }))
+            .await
+            .expect("execute");
+        let text = refused.text();
+        assert!(refused.is_error, "{text}");
+        assert!(
+            text.contains("nothing here can carry out board work"),
+            "{text}"
+        );
+        assert!(!text.contains("read as a question"), "{text}");
+    }
+
+    /// The measurement finding 3 asks for: the two causes are distinguishable
+    /// as data, not only as prose. Without this the rate at which the triage
+    /// gate fires — the residual miss rate of a keyword classifier with teeth —
+    /// could not be counted apart from a genuinely unwired context.
+    #[test]
+    fn the_two_no_drain_causes_are_countable_apart() {
+        let queue = DelegationQueue::default();
+        let spawn = || Delegation::SpawnTask {
+            title: "Build the landing page".to_string(),
+            note: None,
+            assignee: None,
+        };
+        assert_eq!(
+            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN),
+            Staged::NoDrain(NoDrainReason::Unwired)
+        );
+        let claim = queue.claim_answering();
+        assert_eq!(
+            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN),
+            Staged::NoDrain(NoDrainReason::Triage)
+        );
+        // …and a hand-off is not refused at all under the same claim, because it
+        // is how the question gets answered (finding 2).
+        assert_eq!(
+            queue.push_within_cap(
+                Delegation::DelegateToDesk {
+                    desk: "eng".to_string(),
+                    instruction: "what did you ship?".to_string(),
+                },
+                MAX_DELEGATIONS_PER_TURN,
+            ),
+            Staged::Queued
+        );
+        drop(claim);
+        assert_ne!(
+            NoDrainReason::Unwired.as_str(),
+            NoDrainReason::Triage.as_str(),
+            "the log field must separate them"
+        );
     }
 
     /// The defect #419 names: the tool told the model "it will be opened on the
@@ -4266,6 +4824,7 @@ name = "Morning"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -4301,6 +4860,92 @@ name = "Morning"
             Some("Owns acquisition experiments.")
         );
         assert!(!added.id.is_empty(), "a stable id must be minted");
+    }
+
+    /// Issue #686 — the tool mints the same readable, name-derived id the
+    /// console route does, and hands it back in the result so the orchestrator
+    /// can delegate to the teammate it just created.
+    #[tokio::test]
+    async fn add_agent_tool_mints_a_readable_id_and_reports_it() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Dana Designer", "role": "Designer" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+        assert!(
+            result.text().contains("`dana_designer`"),
+            "the id must be in the result, not only in the record: {}",
+            result.text()
+        );
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(record.overlay_agents[0].id, "dana_designer");
+    }
+
+    /// The name guard still fires, and it fires *before* minting — so a
+    /// duplicate display name is refused rather than quietly given a `_2` id.
+    /// Two teammates the orchestrator cannot tell apart is the thing that guard
+    /// exists to stop, and readable ids do not make it less true.
+    #[tokio::test]
+    async fn add_agent_tool_still_refuses_a_duplicate_display_name() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        for _ in 0..1 {
+            let first = tool
+                .execute(json!({ "name": "Dana Designer", "role": "Designer" }))
+                .await
+                .expect("execute");
+            assert!(!first.is_error, "{}", first.text());
+        }
+
+        let second = tool
+            .execute(json!({ "name": "dana designer", "role": "Illustrator" }))
+            .await
+            .expect("execute");
+        assert!(second.is_error, "{}", second.text());
+        assert!(
+            second.text().contains("already exists"),
+            "{}",
+            second.text()
+        );
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(
+            record.overlay_agents.len(),
+            1,
+            "the refusal must not have persisted a `dana_designer_2`"
+        );
+    }
+
+    /// A name colliding with a **manifest** agent's id passes the name guard —
+    /// it compares overlay names — and is caught by the minter instead. The
+    /// roster-level consequence is pinned in `harness::tests`.
+    #[tokio::test]
+    async fn add_agent_tool_suffixes_past_a_manifest_agent_id() {
+        let company = CompanyId::new("acme");
+        let mut record = seeded_record(&company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"backend_engineer\"\nrole = \"Backend Engineer\"\n",
+        )
+        .expect("valid manifest");
+        let store = Arc::new(MemStore::seeded(record));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Backend Engineer", "role": "Platform" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(record.overlay_agents[0].id, "backend_engineer_2");
     }
 
     #[tokio::test]
@@ -4799,6 +5444,7 @@ name = "Morning"
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -5138,6 +5784,510 @@ name = "Morning"
             result.output_for_llm(false).contains("Couldn't read"),
             "{result:?}"
         );
+    }
+
+    /// Like [`record_with_assistant`], but the company `[tools].allow` grants the
+    /// `web` namespace so a `web_fetch` `tool_call` clears the author-time grant
+    /// gate under the `openhuman` build (issue #661).
+    fn record_granting_web(company: &CompanyId) -> CompanyRecord {
+        let mut record = record_with_assistant(company);
+        record.manifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[tools]\nallow = [\"web\"]\n[[agent]]\nid = \"assistant\"\nrole = \"Assistant\"\n",
+        )
+        .expect("valid manifest");
+        record
+    }
+
+    /// Issue #661 (H1): a `tool_call` node authored with `config.slug` persists
+    /// the slug into the saved graph — the tool advertises `tool_call` and can
+    /// now actually author a working one. Round-trip proof: the rendered TOML on
+    /// the record carries `slug = "web_fetch"`.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_tool_call_config_slug() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "fetcher",
+                "name": "Fetcher",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "https://example.com" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            record.overlay_workflows[0]
+                .toml
+                .contains("slug = \"web_fetch\""),
+            "the persisted graph carries the tool slug: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #661 (H1): an `output` node's `destination` flows through into the
+    /// saved graph — the persisted TOML carries the routed address.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_output_destination() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "reporter",
+                "name": "Reporter",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "done",
+                        "kind": "output",
+                        "name": "Report",
+                        "destination": { "kind": "email", "target": "ada@example.com" }
+                    }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        let saved = &record.overlay_workflows[0].toml;
+        assert!(
+            saved.contains("target = \"ada@example.com\""),
+            "the persisted graph routes to the destination address: {saved}"
+        );
+    }
+
+    /// Issue #661 (H1): a `tool_call` with no `slug` is still rejected — the
+    /// inherited author-time gate, now reachable with a useful message instead of
+    /// the tool being unable to author a `tool_call` at all.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_tool_call_without_slug() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "bad",
+                "name": "Bad",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    { "id": "grab", "kind": "tool_call", "name": "Grab" },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("slug"),
+            "the refusal names the missing slug: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): the exact GitHub/Composio failure mode — a `tool_call`
+    /// naming an agent-turn tool family (`composio_execute`) can never run on a
+    /// workflow `tool_call` node, so it is refused at save. Gated on `openhuman`
+    /// because the namespace resolution (`namespace_of`) lives behind it.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_agent_turn_tool_call() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "gh",
+                "name": "GitHub",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "call",
+                        "kind": "tool_call",
+                        "name": "Call",
+                        "config": { "slug": "composio_execute" }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "call" },
+                    { "from": "call", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("agent-turn"),
+            "the refusal explains it is an agent-turn family, not a workflow tool: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): a JSON `null` inside a node's `config` can't be stored —
+    /// TOML has no null — so the fallible `TryFrom` conversion refuses it as an
+    /// agent-actionable error, never a panic or a silently-dropped key.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_null_config_value() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "nullish",
+                "name": "Nullish",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": null } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("TOML has no null"),
+            "the refusal explains why the config can't be stored: {result:?}"
+        );
+    }
+
+    /// Issue #674 boundary: an agent-authored `tool_call` whose `config.args`
+    /// carries a templated `=`-expression is rejected — that node would take
+    /// saved-node runtime position with model-chosen templated args, collapsing
+    /// the two-operator-gate model. The refusal names the node and points at the
+    /// console for templated wiring. Feature-independent: the check runs in the
+    /// `TryFrom`, before any namespace/grant gate.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_tool_call_expression_args() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "templated",
+                "name": "Templated",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "=item.url" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        let msg = result.output_for_llm(false);
+        assert!(
+            msg.contains("=`-expression") && msg.contains("config.args.url"),
+            "the refusal names the templated expression and its location: {result:?}"
+        );
+        // Nothing was persisted — the reject happens before the store write.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(
+            record.overlay_workflows.is_empty(),
+            "a rejected draft persists nothing"
+        );
+    }
+
+    /// Issue #674 boundary, positive half: the same `tool_call` with a LITERAL
+    /// arg (no `=` prefix) persists — the restriction is on templated
+    /// `=`-expressions, not on args as such.
+    #[tokio::test]
+    async fn create_workflow_tool_persists_tool_call_literal_args() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_granting_web(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "literal",
+                "name": "Literal",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "url": "https://example.com" } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{result:?}");
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert_eq!(record.overlay_workflows.len(), 1);
+        assert!(
+            record.overlay_workflows[0]
+                .toml
+                .contains("url = \"https://example.com\""),
+            "the persisted graph carries the literal arg: {}",
+            record.overlay_workflows[0].toml
+        );
+    }
+
+    /// Issue #661 (H1): the `=`-expression restriction is scoped to `tool_call`.
+    /// A `condition` node legitimately branches on a `config.field` expression,
+    /// so a `=`-prefixed field must NOT be rejected — proving the guard doesn't
+    /// over-reach into the kinds that resolve expressions by design.
+    #[tokio::test]
+    async fn create_workflow_tool_allows_condition_expression_field() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(
+            company.clone(),
+            None,
+            store.clone(),
+            None,
+            WorkflowRefQueue::default(),
+        );
+        let result = tool
+            .execute(json!({
+                "id": "brancher",
+                "name": "Brancher",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "check",
+                        "kind": "condition",
+                        "name": "Check",
+                        "config": { "field": "=item.ok" }
+                    },
+                    { "id": "yes", "kind": "output", "name": "Yes" },
+                    { "id": "no", "kind": "output", "name": "No" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "check" },
+                    { "from": "check", "to": "yes", "label": "yes" },
+                    { "from": "check", "to": "no", "label": "no" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(
+            !result.is_error,
+            "a condition's `=`-expression field is allowed: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1): a non-object `config` (here a bare string on an
+    /// `http_request` node — the path that would otherwise persist silently) is
+    /// refused with an agent-actionable message, not saved as an inert TOML
+    /// scalar.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_non_object_config() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "scalar",
+                "name": "Scalar",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "call",
+                        "kind": "http_request",
+                        "name": "Call",
+                        "config": "GET https://example.com"
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "call" },
+                    { "from": "call", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result.output_for_llm(false).contains("non-object `config`"),
+            "the refusal explains config must be a JSON object: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1) — item #2: a `destination` on a non-`output` node is
+    /// already rejected end-to-end by the shared `validate` (`render_workflow` →
+    /// `parse_workflow` inside `create_company_workflow`), so the create_workflow
+    /// tool inherits the catch with no duplicated validation of its own. This
+    /// pins that end-to-end behaviour; the shared-validator hardening is #682's.
+    #[tokio::test]
+    async fn create_workflow_tool_rejects_destination_on_non_output() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "misrouted",
+                "name": "Misrouted",
+                "nodes": [
+                    {
+                        "id": "start",
+                        "kind": "trigger",
+                        "name": "Start",
+                        "destination": { "kind": "owner" }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [ { "from": "start", "to": "done" } ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        assert!(
+            result
+                .output_for_llm(false)
+                .contains("only `output` nodes route a report"),
+            "the shared validator's destination-placement message surfaces: {result:?}"
+        );
+    }
+
+    /// Issue #661 (H1) — item #3: the JSON→TOML conversion remedy is conditional.
+    /// A failure that is NOT about a null (here a `u64` beyond `i64` range) must
+    /// get the converter's own message WITHOUT the misleading "TOML has no null"
+    /// hint — the null case keeps that hint (`create_workflow_tool_rejects_null_config_value`).
+    #[tokio::test]
+    async fn create_workflow_tool_non_null_conversion_error_omits_null_hint() {
+        let company = CompanyId::new("acme");
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(record_with_assistant(&company)));
+        let tool = CreateWorkflowTool::new(company, None, store, None, WorkflowRefQueue::default());
+        let result = tool
+            .execute(json!({
+                "id": "toobig",
+                "name": "TooBig",
+                "nodes": [
+                    { "id": "start", "kind": "trigger", "name": "Start" },
+                    {
+                        "id": "grab",
+                        "kind": "tool_call",
+                        "name": "Grab",
+                        "config": { "slug": "web_fetch", "args": { "n": 18446744073709551615u64 } }
+                    },
+                    { "id": "done", "kind": "output", "name": "Report" }
+                ],
+                "edges": [
+                    { "from": "start", "to": "grab" },
+                    { "from": "grab", "to": "done" }
+                ]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "{result:?}");
+        let msg = result.output_for_llm(false);
+        assert!(
+            msg.contains("can't be stored"),
+            "names the failure: {result:?}"
+        );
+        assert!(
+            !msg.contains("TOML has no null"),
+            "a non-null conversion failure must not misdirect to the null remedy: {result:?}"
+        );
+    }
+
+    #[test]
+    fn first_expression_location_walks_nested_config() {
+        // Matches tinyflows' `is_expression`: a leading `=` (no trim).
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "command": "=item.x" } }), ""),
+            Some("args.command".to_string())
+        );
+        // Array elements become numeric segments.
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "cc": ["a", "=item.y"] } }), ""),
+            Some("args.cc.1".to_string())
+        );
+        // Literals — including a `=` in the MIDDLE — are not expressions.
+        assert_eq!(
+            first_expression_location(&json!({ "args": { "q": "a=b", "s": "ls -la" } }), ""),
+            None
+        );
+    }
+
+    #[test]
+    fn json_contains_null_is_recursive() {
+        assert!(json_contains_null(&json!({ "args": { "url": null } })));
+        assert!(json_contains_null(&json!(["ok", [null]])));
+        assert!(!json_contains_null(
+            &json!({ "args": { "url": "https://x" } })
+        ));
     }
 
     // ---- read_run_output (issue #418) ----

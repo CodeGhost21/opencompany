@@ -13,8 +13,8 @@ use std::ops::Range;
 
 use serde::{Deserialize, Serialize};
 
-use crate::company::CompanyManifest;
-use crate::ports::ids::{generate_id, now_millis};
+use crate::company::{CompanyManifest, POLICY_MODES, Policy};
+use crate::ports::ids::{agent_slug, generate_id, now_millis};
 use crate::ports::workflow_runner::DeliveryReport;
 
 // ---------------------------------------------------------------------------
@@ -475,7 +475,17 @@ pub enum CompanyEvent {
     /// else.
     ToolAccessChanged {
         /// What changed, as a stable wire word: `credential_set`,
-        /// `credential_cleared`, or `provider_authorization_started`.
+        /// `credential_cleared`, `company_key_set`, `company_key_cleared`, or
+        /// `provider_authorization_started`.
+        ///
+        /// The `credential_*` pair is the **Composio** token
+        /// ([`ops::composio`](crate::server::ops::composio)); the `company_key_*`
+        /// pair is the company's own TinyHumans identity
+        /// ([`ops::company_key`](crate::server::ops::company_key), issue #586).
+        /// Two vocabularies rather than one because the changes have different
+        /// blast radii — swapping a Composio token repoints one integration,
+        /// rotating the company key repoints every surface wired to it — and an
+        /// audit reader has to be able to tell them apart.
         ///
         /// The last is deliberately *started*, not *completed*: Composio runs
         /// the OAuth on its own side with no callback here, so all this host
@@ -1134,6 +1144,49 @@ pub enum CompanyEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         target: Option<String>,
     },
+    /// A call inside a `sub_workflow` child ran **without** being offered for
+    /// approval, on a company whose policy would have parked the same call at
+    /// the top level (issue #617).
+    ///
+    /// # Why this is a journal line and not a fix
+    ///
+    /// A child graph is resolved and run *inside* the engine, so its nodes never
+    /// reach the gate pass that #460 and #614 added. Gating them is not
+    /// available: tinyflows cannot resume a child across the sub-workflow
+    /// boundary, and a paused child halts the parent with an unresumable error —
+    /// so marking the child's node would convert a run that works into one that
+    /// fails with no card to decide. Until the engine can resume across that
+    /// boundary, the honest thing is to keep running and **say so**.
+    ///
+    /// That is what this records. An operator auditing what the company was
+    /// asked to approve would otherwise see a hole with nothing explaining it;
+    /// this turns the hole into a line naming the child, the node and the call.
+    /// It is an audit record of a known limitation, not a decision anybody made.
+    ///
+    /// Journaled best-effort at child *resolution*, so it lands whether or not
+    /// the child's node is ultimately reached — the point is that the call was
+    /// never offered, and a run that stops earlier for another reason does not
+    /// make that less true. Deliberately **not** written for a dry run, which
+    /// executes nothing.
+    ///
+    /// Additive: an entirely new `kind`, so no journal written before it existed
+    /// carries it, and its presence changes how no existing variant serializes.
+    WorkflowChildCallNotOffered {
+        /// The graph the run started from — the one an operator recognises.
+        workflow_id: String,
+        /// The child graph the call actually sits in. Equal to `workflow_id`
+        /// only if a workflow references itself, which the cycle guard rejects.
+        child_workflow_id: String,
+        /// The run that resolved the child.
+        run_id: String,
+        /// The node inside the child that makes the call.
+        node: String,
+        /// The tool it would run — a `tool_call` node's slug, or `http_request`.
+        tool: String,
+        /// The policy's own words for why this call would have been parked at
+        /// the top level, so the line says what the operator was not asked.
+        reason: String,
+    },
 }
 
 impl CompanyEvent {
@@ -1172,6 +1225,7 @@ impl CompanyEvent {
             Self::TaskDiscussionRedacted { .. } => "TaskDiscussionRedacted",
             Self::WorkflowEnabledChanged { .. } => "WorkflowEnabledChanged",
             Self::WorkflowReportDelivered { .. } => "WorkflowReportDelivered",
+            Self::WorkflowChildCallNotOffered { .. } => "WorkflowChildCallNotOffered",
             Self::WorkflowRunFinished { .. } => "WorkflowRunFinished",
             Self::WorkflowRunStarted { .. } => "WorkflowRunStarted",
             Self::WorkflowNodeStarted { .. } => "WorkflowNodeStarted",
@@ -1279,6 +1333,17 @@ impl CompanyEvent {
             // next re-run, which is the exact failure the variant exists to
             // prevent. See its own docs.
             | Self::WorkflowReportDelivered { .. } => Permanent,
+            // Issue #617: permanent, and it is the clearest kind of evidence
+            // this enum carries — the record that a consequential call ran
+            // WITHOUT the operator being asked. Pruning it would delete the only
+            // trace that the company acted unapproved, which is precisely the
+            // question an approvals audit exists to answer. It fails the "is
+            // this evidence" test in the strongest possible direction.
+            //
+            // Nothing reads it back today, and that does not soften the class:
+            // the reader is a person reviewing what happened, not a boot-time
+            // fold.
+            Self::WorkflowChildCallNotOffered { .. } => Permanent,
         }
     }
 }
@@ -2297,6 +2362,96 @@ impl BudgetOverride {
     }
 }
 
+/// An operator-set override of the company's `[policy]` block, persisted on the
+/// [`CompanyRecord`] so a tier change wins over the manifest without rewriting
+/// `company.toml` and without a redeploy (issue #562).
+///
+/// The company-scoped twin of [`BudgetOverride`], and it exists for the same
+/// reason: the manifest is a **boot snapshot** baked into the tenant image, so
+/// before this the shipped tier was the only tier an operator could ever run —
+/// and the tier is what decides whether they drown in approval cards.
+///
+/// # Why an overlay and not a manifest write
+///
+/// This is the constraint that shapes the whole feature. A rebuild
+/// (`runtime::builder`) re-persists `record.manifest` **from the seed**, merging
+/// only `[workflows].enabled` from the overlays; every other field is
+/// seed-authoritative, *"and for `[tools]` / `[policy]` that is a security
+/// property — a record-wins merge would let a runtime grant outlive the operator
+/// revoking it in version control."*
+///
+/// So writing `[policy].mode` into `record.manifest` would be wiped by the next
+/// rebuild **and** would contradict a stated invariant. An overlay is a
+/// different thing: it is not a merge into the blueprint, it is a durable,
+/// attributed operator decision that survives the rebuild the way
+/// [`overlay_budgets`](CompanyRecord::overlay_budgets) does, and that
+/// [`CompanyRecord::effective_policy`] resolves *ahead* of the manifest at read
+/// time.
+///
+/// # Version control still wins when it speaks
+///
+/// The invariant above is about the seed winning a *merge*, and an override that
+/// simply outlived every seed edit would reproduce its named harm by another
+/// route: an operator tightens `[policy]` in `company.toml`, redeploys, and the
+/// looser console override silently wins — a runtime write outliving a seed
+/// rollback. #343 makes the opposite trade for spend caps and is right to; a cap
+/// is a number, not the gate.
+///
+/// So there are **two** clearing paths, and they answer different questions:
+///
+/// - `runtime::builder::carry_policy_override` drops the override when the
+///   seed's `[policy]` **changes** — and only then, so a routine redeploy that
+///   said nothing does not silently revert the operator.
+/// - `DELETE …/policy` is how an operator clears their own override without
+///   touching version control.
+///
+/// Between seed edits the override is durable, which is what makes it usable at
+/// all, and every one is **attributed** (`set_by` + `at_millis`) so the console
+/// can show who moved the gate and when.
+///
+/// # Absent fields mean "not overridden"
+///
+/// Both fields are optional and independent, so an operator can move the tier
+/// without touching the always-ask list, or edit the list while leaving the tier
+/// where the manifest put it. `None` is never "empty" — an explicitly emptied
+/// always-ask list is `Some(vec![])`, which is a real state an operator can
+/// choose and which must not collapse into "fall back to the manifest's three
+/// defaults".
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PolicyOverride {
+    /// The autonomy tier to run, or `None` to leave the manifest's in force.
+    ///
+    /// A `POLICY_MODES` word. Validated at the write route rather than here:
+    /// this type is inert data. [`CompanyRecord::effective_policy`] ignores an
+    /// unknown stored value and keeps the manifest's tier, so version skew can
+    /// never loosen a stricter seed policy.
+    #[serde(default)]
+    pub mode: Option<String>,
+    /// The always-ask effect kinds, or `None` to leave the manifest's in force.
+    ///
+    /// `Some(vec![])` is an operator deliberately clearing the list, which is
+    /// **not** the same as `None`. It is the operator's real lever and it wins
+    /// over every tier including `full`, so the two must stay distinguishable.
+    #[serde(default)]
+    pub always_approve: Option<Vec<String>>,
+    /// Who set it. A tier that can be loosened anonymously is not much of a gate.
+    pub set_by: Actor,
+    /// When it was set (epoch millis).
+    pub at_millis: u64,
+}
+
+impl PolicyOverride {
+    /// Does this override actually change anything?
+    ///
+    /// An override with both fields `None` carries only attribution, and
+    /// resolving it is a no-op. The write route rejects one rather than
+    /// persisting a row that says nothing but whose presence the console renders
+    /// as "overridden".
+    pub fn is_empty(&self) -> bool {
+        self.mode.is_none() && self.always_approve.is_none()
+    }
+}
+
 /// The operator overlays persisted as a single JSON blob by the string-column
 /// stores (sqlite + mongodb `overlay_json`). The filesystem store keeps the two
 /// collections as typed fields on its own `Meta` instead.
@@ -2329,6 +2484,12 @@ pub struct OverlayBlob {
     /// loads them as empty — which is exactly "the manifest still decides".
     #[serde(default)]
     pub budgets: Vec<BudgetOverride>,
+    /// The operator's `[policy]` override (issue #562). Absent on rows written
+    /// before console policy writes existed, and `#[serde(default)]` reads that
+    /// absence as `None` — "the manifest's `[policy]` still decides", which is
+    /// the pre-#562 behaviour exactly.
+    #[serde(default)]
+    pub policy: Option<PolicyOverride>,
     /// The workflow ids the operator has switched off (issue #276). Absent on
     /// rows written before the pause switch existed, and `#[serde(default)]`
     /// reads that absence as "nothing is paused" — the pre-#276 behaviour
@@ -2352,6 +2513,7 @@ impl OverlayBlob {
             desks: record.overlay_desks.clone(),
             workflows: record.overlay_workflows.clone(),
             budgets: record.overlay_budgets.clone(),
+            policy: record.overlay_policy.clone(),
             disabled_workflows: record.disabled_workflows.clone(),
             provenance: record.template_provenance.clone(),
         }
@@ -2376,6 +2538,7 @@ impl OverlayBlob {
                     desks: Vec::new(),
                     workflows: Vec::new(),
                     budgets: Vec::new(),
+                    policy: None,
                     disabled_workflows: Vec::new(),
                     provenance: None,
                 })
@@ -2383,6 +2546,20 @@ impl OverlayBlob {
         }
     }
 }
+
+/// Ids [`CompanyRecord::mint_agent_id`] will never hand to a teammate, however
+/// free the roster leaves them: the always-present operator channel and the two
+/// workspace system roots.
+///
+/// Held as references to the real constants rather than re-typed literals, so a
+/// rename of any of the three moves this list with it instead of quietly
+/// unreserving a name. Compared case-insensitively, which is why `Agents` and
+/// `Desks` cover a minted (always-lowercase) `agents` / `desks`.
+pub const RESERVED_AGENT_IDS: [&str; 3] = [
+    crate::runtime::OPERATOR_CHANNEL,
+    crate::company::workspace_scaffold::AGENTS_ROOT,
+    crate::company::workspace_scaffold::DESKS_ROOT,
+];
 
 /// A durable company record: charter/roster (manifest) plus ledger and
 /// lifecycle state.
@@ -2436,6 +2613,13 @@ pub struct CompanyRecord {
     /// check untrusted input with [`Self::duplicate_budget_agent_id`].
     #[serde(default)]
     pub overlay_budgets: Vec<BudgetOverride>,
+    /// The operator's `[policy]` override, if one is set (issue #562).
+    ///
+    /// `None` — the manifest's `[policy]` applies, exactly as before this
+    /// existed. Read through [`Self::effective_policy`], never directly, so the
+    /// approval gate and the console cannot disagree about which tier is live.
+    #[serde(default)]
+    pub overlay_policy: Option<PolicyOverride>,
     /// Workflow ids the operator has switched **off** (issue #276). A workflow
     /// named here keeps its graph, stays listed and stays runnable by hand, and
     /// is skipped by
@@ -2574,6 +2758,96 @@ impl CompanyRecord {
             || self.overlay_agents.iter().any(|a| a.id == agent_id)
     }
 
+    /// Mints the roster id for a teammate about to be added under
+    /// `display_name`: [`agent_slug`] of the name, suffixed `_2`, `_3`, … until
+    /// it collides with nothing this record already routes on (issue #686).
+    ///
+    /// **The only way a write path should name a new overlay teammate.** Both
+    /// minting sites — the console `POST …/team` route and the orchestrator's
+    /// `add_agent` tool — call it under the shared per-company write lock, so
+    /// the check and the save that follows it cannot interleave.
+    ///
+    /// # Why a suffix rather than a refusal
+    ///
+    /// An unsuffixed id colliding with a **manifest** agent would be silently
+    /// dropped: `build_roster` skips any overlay id a manifest agent already
+    /// claims, so the teammate would persist in the record, never materialise,
+    /// and report no error. Refusing instead would take away a capability that
+    /// exists today — `POST …/team` accepts duplicate display names — and would
+    /// leave the tool's caller with a failed call and no human to recover it.
+    ///
+    /// # What counts as taken
+    ///
+    /// Every namespace a key typed into an Assignee field or a chat address can
+    /// land in, compared case-insensitively:
+    ///
+    /// * manifest and overlay teammate ids ([`Self::resolve_roster_agent_id`]);
+    /// * desk ids **and desk display names** — [`assignee::resolve`] tries desks
+    ///   first and [`Self::resolve_desk_id`] matches a desk name ignoring case,
+    ///   so a teammate id equal to a desk's name would be unaddressable. The
+    ///   comparison is against the name **as written**, not its slug: nothing
+    ///   routes on the slug of a desk name, so a desk called "Content Desk"
+    ///   leaves `content_desk` free while one called "Content" does not;
+    /// * [`RESERVED_AGENT_IDS`] — the operator channel and the two workspace
+    ///   system roots.
+    ///
+    /// [`assignee::resolve`]: crate::runtime::assignee::resolve
+    ///
+    /// # The id is minted once and never follows a rename
+    ///
+    /// `PATCH …/team/{agent_id}` edits a teammate's name, role and description
+    /// and deliberately leaves the id alone. A name-keyed id would orphan
+    /// everything already filed under the old one — the teammate's
+    /// `Agents/<id>/` folder, its `WorkspaceOrigin::Agent` stamps, its budget
+    /// override row, its desk memberships, its inbox — which is the same trap
+    /// name-keyed DM ids sprang on the console's chat journals (issue #364).
+    /// So a slug records what a teammate was called when it was created, and
+    /// nothing more; the display name is the thing that stays current.
+    ///
+    /// # Removing a teammate frees its slug again
+    ///
+    /// `DELETE …/team/{agent_id}` drops the overlay row (and its budget
+    /// override), after which re-adding the same name mints the same bare slug.
+    /// The new teammate then **adopts the old one's `Agents/<slug>/` folder**,
+    /// and that folder's `Agent` origin stamps re-attribute to it. That is the
+    /// intended remedy for a typo'd name — the same human, correcting
+    /// themselves, keeping the work — but it does mean remove-plus-re-add is not
+    /// a way to give a teammate a clean slate. `Agents/<slug>/` is a folder
+    /// named for a seat, not a chain of custody for whoever last sat in it.
+    pub fn mint_agent_id(&self, display_name: &str) -> String {
+        let stem = agent_slug(display_name);
+        if !self.roster_id_taken(&stem) {
+            return stem;
+        }
+        (2usize..)
+            .map(|n| format!("{stem}_{n}"))
+            .find(|candidate| !self.roster_id_taken(candidate))
+            .expect("an unbounded suffix sweep always reaches a free id")
+    }
+
+    /// Whether `candidate` already names something this record routes on, so
+    /// [`Self::mint_agent_id`] must step past it. See that method for why each
+    /// namespace counts.
+    fn roster_id_taken(&self, candidate: &str) -> bool {
+        if RESERVED_AGENT_IDS
+            .iter()
+            .any(|reserved| candidate.eq_ignore_ascii_case(reserved))
+        {
+            return true;
+        }
+        if self.resolve_roster_agent_id(candidate).is_some() {
+            return true;
+        }
+        self.manifest
+            .group_chats
+            .iter()
+            .map(|c| (&c.id, &c.name))
+            .chain(self.overlay_desks.iter().map(|d| (&d.id, &d.name)))
+            .any(|(id, name)| {
+                id.eq_ignore_ascii_case(candidate) || name.eq_ignore_ascii_case(candidate)
+            })
+    }
+
     /// Resolves an operator-typed teammate key to its canonical roster id,
     /// searching manifest agents first and then the overlay teammates.
     ///
@@ -2603,11 +2877,19 @@ impl CompanyRecord {
     /// `name_key` case-insensitively.
     ///
     /// The companion to [`Self::resolve_roster_agent_id`] for the half of the
-    /// roster that has no typable id. `server::ops::team` mints an overlay
-    /// teammate with `id: generate_id()`, so an operator who adds "Shane" never
-    /// sees anything but the name — matching on ids alone made every teammate
-    /// they added unassignable, on a board whose Assignee field is free text
-    /// with no picker. Manifest agents keep their id-only namespace: their ids
+    /// roster that has no typable id. `server::ops::team` minted an overlay
+    /// teammate with `id: generate_id()` before #686, so an operator who added
+    /// "Shane" never saw anything but the name — matching on ids alone made
+    /// every teammate they added unassignable, on a board whose Assignee field
+    /// is free text with no picker.
+    ///
+    /// A teammate added since #686 carries a readable slug and resolves by id,
+    /// but this stays load-bearing: records written before it keep their
+    /// generated ids (nothing migrates them), and
+    /// [`Self::mint_agent_id`] deliberately does not re-mint on a rename, so a
+    /// renamed teammate's current name is reachable only here.
+    ///
+    /// Manifest agents keep their id-only namespace: their ids
     /// (`ceo`, `engineer`) are human-authored and typable, and
     /// [`Self::resolve_roster_agent_id`] is tried first, so a display name can
     /// never shadow a real id.
@@ -2677,6 +2959,50 @@ impl CompanyRecord {
         self.overlay_budgets
             .retain(|held| held.agent_id != entry.agent_id);
         self.overlay_budgets.push(entry);
+    }
+
+    /// The `[policy]` actually in force: the operator's override where it sets a
+    /// field, the manifest's `[policy]` everywhere else (issue #562).
+    ///
+    /// **The single source of truth for "which tier is this company running"**,
+    /// in the shape of [`Self::effective_budget`]. `build_roster`'s
+    /// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy), the workflow
+    /// capability bundle and the console read through here, so a tier changed in
+    /// the console cannot be honoured by one and ignored by another.
+    ///
+    /// Returns an owned [`Policy`] rather than a borrow because the effective
+    /// value may not exist anywhere to borrow from — it is a field-wise merge of
+    /// two sources.
+    ///
+    /// The merge is per field and `None` means "not overridden", so an operator
+    /// who moved the tier has not thereby silently reset the always-ask list to
+    /// the manifest's. An explicitly emptied list (`Some(vec![])`) survives as
+    /// empty; only an absent field falls through. An unknown stored mode also
+    /// falls through to the manifest: it can arise under version skew, and
+    /// allowing the policy parser to downgrade it to `supervised` would loosen
+    /// a `readonly` manifest.
+    pub fn effective_policy(&self) -> Policy {
+        let manifest = &self.manifest.policy;
+        let Some(override_) = &self.overlay_policy else {
+            return manifest.clone();
+        };
+        Policy {
+            mode: override_
+                .mode
+                .as_deref()
+                .filter(|mode| POLICY_MODES.contains(mode))
+                .map(str::to_owned)
+                .unwrap_or_else(|| manifest.mode.clone()),
+            always_approve: override_
+                .always_approve
+                .clone()
+                .unwrap_or_else(|| manifest.always_approve.clone()),
+            // Not overridable from the console today. Left reading the manifest
+            // rather than added to `PolicyOverride` speculatively: the issue asks
+            // for the tier and the always-ask list, and a spend threshold whose
+            // console control does not exist would be a field nothing can write.
+            auto_approve_under_usd: manifest.auto_approve_under_usd,
+        }
     }
 
     /// The first `agent_id` on this record carrying more than one override, if
@@ -3663,6 +3989,7 @@ mod test {
             overlay_desks: Vec::new(),
             overlay_workflows: Vec::new(),
             overlay_budgets: Vec::new(),
+            overlay_policy: None,
             disabled_workflows: Vec::new(),
             template_provenance: None,
         }
@@ -3825,6 +4152,37 @@ mod test {
         assert_eq!(parsed.desk_order, record.overlay_desk_order);
     }
 
+    /// The persisted overlay blob round-trips the `[policy]` override, and a
+    /// blob written before it existed still parses (issue #562).
+    ///
+    /// Both halves matter. Without the first, a serialization path that dropped
+    /// the field would move an operator's approval gate back to the manifest on
+    /// the next load, silently. Without the second, every company record written
+    /// before this feature would fail to parse at all.
+    #[test]
+    fn overlay_blob_round_trips_the_policy_override() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("auto"), Some(vec!["payment.send"])));
+
+        let blob = OverlayBlob::from_record(&record);
+        let json = serde_json::to_string(&blob).expect("serialize blob");
+        let parsed = OverlayBlob::parse(&json).expect("parse blob");
+        assert_eq!(parsed.policy, record.overlay_policy);
+
+        // A blob from before this field existed loads as "not overridden",
+        // which is the pre-#562 behaviour exactly.
+        let legacy = r#"{"agents":[],"desk_members":[],"budgets":[]}"#;
+        let blob = OverlayBlob::parse(legacy).expect("blob without a policy key");
+        assert!(
+            blob.policy.is_none(),
+            "an older record must load with the manifest's policy in charge"
+        );
+
+        // And so does the oldest form of all, the bare agent array.
+        let bare = OverlayBlob::parse("[]").expect("legacy array");
+        assert!(bare.policy.is_none());
+    }
+
     /// An object-form blob written before `desk_order` existed still parses, and
     /// the legacy bare-array form still parses — both with an empty order.
     #[test]
@@ -3856,6 +4214,139 @@ mod test {
         assert!(record.is_roster_agent("ceo"));
         assert!(record.is_roster_agent("nova"));
         assert!(!record.is_roster_agent("ghost"));
+    }
+
+    /// A record with one manifest agent and no desks, for the minting tests.
+    fn mint_record() -> CompanyRecord {
+        desk_record(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"backend_engineer\"\nrole = \"Backend Engineer\"\n",
+            Vec::new(),
+        )
+    }
+
+    fn add_overlay(record: &mut CompanyRecord, id: &str, name: &str) {
+        record.overlay_agents.push(OverlayAgent {
+            id: id.into(),
+            name: name.into(),
+            role: "Worker".into(),
+            description: None,
+        });
+    }
+
+    /// A free slug is minted bare — the whole point of issue #686 is that the
+    /// common case reads as `Agents/dana_designer/`.
+    #[test]
+    fn mint_agent_id_takes_the_bare_slug_when_it_is_free() {
+        let record = mint_record();
+        assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer");
+        assert_eq!(record.mint_agent_id("Designer!!"), "designer");
+        assert_eq!(record.mint_agent_id("24/7 Support"), "teammate");
+    }
+
+    /// The collision that matters: an overlay id equal to a **manifest** id is
+    /// skipped by `build_roster`, so the teammate would save and never
+    /// materialise. Suffixing is what keeps it reachable.
+    #[test]
+    fn mint_agent_id_suffixes_past_a_manifest_agent() {
+        let record = mint_record();
+        assert_eq!(
+            record.mint_agent_id("Backend Engineer"),
+            "backend_engineer_2"
+        );
+    }
+
+    /// Repeated adds of one name walk `_2`, `_3`, … in order, so the ids a
+    /// company ends up with are a function of its roster and not of arrival
+    /// timing.
+    #[test]
+    fn mint_agent_id_walks_suffixes_deterministically() {
+        let mut record = mint_record();
+        let first = record.mint_agent_id("Designer");
+        assert_eq!(first, "designer");
+        add_overlay(&mut record, &first, "Designer");
+
+        let second = record.mint_agent_id("Designer");
+        assert_eq!(second, "designer_2");
+        add_overlay(&mut record, &second, "Designer");
+
+        assert_eq!(record.mint_agent_id("Designer"), "designer_3");
+
+        // A degenerate name is not a special case — it suffixes like any other.
+        add_overlay(&mut record, "teammate", "***");
+        assert_eq!(record.mint_agent_id("🙂"), "teammate_2");
+    }
+
+    /// Case is not a difference: an overlay id typed with capitals still blocks
+    /// the lowercase slug, because `resolve_roster_agent_id` folds case and two
+    /// teammates one capital apart would be one unroutable key.
+    #[test]
+    fn mint_agent_id_treats_a_case_variant_id_as_taken() {
+        let mut record = mint_record();
+        add_overlay(&mut record, "Dana_Designer", "Dana Designer");
+        assert_eq!(record.mint_agent_id("Dana Designer"), "dana_designer_2");
+    }
+
+    /// Desks resolve *before* teammates in `assignee::resolve`, by id and by
+    /// case-insensitive display name — so a minted id equal to either would be
+    /// unreachable, and both are stepped past.
+    #[test]
+    fn mint_agent_id_steps_past_desk_ids_and_desk_names() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n\
+             [[group_chat]]\nid = \"growth\"\nname = \"Content\"\nmembers = [\"ceo\"]\n";
+        let mut record = desk_record(manifest, Vec::new());
+
+        // By desk id.
+        assert_eq!(record.mint_agent_id("Growth"), "growth_2");
+        // By desk display name, which `resolve_desk_id` matches ignoring case.
+        assert_eq!(record.mint_agent_id("content"), "content_2");
+
+        // A desk name that is not itself slug-shaped is *not* reserved: nothing
+        // routes on the slug of a desk name, only on the name as written, so
+        // `content_desk` shadows no key that "Content Desk" answers to.
+        record.overlay_desks.push(OverlayDesk {
+            id: "design".into(),
+            name: "Design Studio".into(),
+            description: None,
+            members: Vec::new(),
+        });
+        assert_eq!(record.mint_agent_id("Design Studio"), "design_studio");
+        // …while the overlay desk's id is reserved exactly like a manifest one.
+        assert_eq!(record.mint_agent_id("Design"), "design_2");
+    }
+
+    /// The operator channel and the workspace system roots are never handed to
+    /// a teammate, on an otherwise empty roster.
+    #[test]
+    fn mint_agent_id_never_returns_a_reserved_id() {
+        let record = desk_record("[company]\nname = \"Acme\"\n", Vec::new());
+        assert_eq!(record.mint_agent_id("Operator"), "operator_2");
+        assert_eq!(record.mint_agent_id("Agents"), "agents_2");
+        assert_eq!(record.mint_agent_id("desks"), "desks_2");
+        assert_eq!(RESERVED_AGENT_IDS, ["operator", "Agents", "Desks"]);
+    }
+
+    /// Whatever is minted is a legal roster id, suffix included — the same
+    /// grammar the manifest validator holds a hand-authored id to.
+    #[test]
+    fn every_minted_id_satisfies_the_manifest_id_grammar() {
+        let mut record = mint_record();
+        for name in [
+            "Dana Designer",
+            "Backend Engineer",
+            "***",
+            "24/7 Support",
+            "Operator",
+            "設計者",
+        ] {
+            let id = record.mint_agent_id(name);
+            assert!(
+                crate::company::is_snake_case(&id),
+                "minted id {id:?} from {name:?} is not a legal roster id"
+            );
+            add_overlay(&mut record, &id, name);
+        }
     }
 
     /// The persisted overlay blob reads both the current object form and the
@@ -3986,6 +4477,132 @@ mod test {
             },
             at_millis: 1_700_000_000_000,
         }
+    }
+
+    // ---- `[policy]` override (issue #562) --------------------------------
+
+    const POLICY_MANIFEST: &str = "[company]\nname = \"Acme\"\n\
+         [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+         [policy]\nmode = \"supervised\"\n\
+         always_approve = [\"payment.send\", \"filing.submit\"]\n";
+
+    fn policy_entry(mode: Option<&str>, always: Option<Vec<&str>>) -> PolicyOverride {
+        PolicyOverride {
+            mode: mode.map(str::to_string),
+            always_approve: always.map(|v| v.into_iter().map(str::to_string).collect()),
+            set_by: Actor {
+                kind: ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            at_millis: 1_700_000_000_000,
+        }
+    }
+
+    /// With no override stored, `effective_policy` is the manifest verbatim —
+    /// the pre-#562 behaviour, and the net that says adding this field changed
+    /// nothing for a company that never uses it.
+    #[test]
+    fn effective_policy_falls_back_to_the_manifest() {
+        let record = desk_record(POLICY_MANIFEST, Vec::new());
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "supervised");
+        assert_eq!(
+            effective.always_approve,
+            vec!["payment.send", "filing.submit"]
+        );
+    }
+
+    /// A stored override beats the manifest. This is the "no redeploy" property
+    /// at its source: nothing here consults `company.toml` once a row exists.
+    #[test]
+    fn a_stored_policy_override_beats_the_manifest() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("full"), None));
+        assert_eq!(record.effective_policy().mode, "full");
+    }
+
+    /// Version skew can leave an override written by a newer host on a build
+    /// that does not recognise its tier. Falling through to `supervised` would
+    /// loosen a `readonly` seed, so the manifest wins for that field while any
+    /// independently valid always-ask override remains in force.
+    #[test]
+    fn an_unknown_stored_policy_mode_cannot_loosen_the_manifest() {
+        let manifest = POLICY_MANIFEST.replace("mode = \"supervised\"", "mode = \"readonly\"");
+        let mut record = desk_record(&manifest, Vec::new());
+        record.overlay_policy = Some(policy_entry(
+            Some("future-tier"),
+            Some(vec!["external.publish"]),
+        ));
+
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "readonly");
+        assert_eq!(effective.always_approve, vec!["external.publish"]);
+    }
+
+    /// The two fields are independent: moving the tier must not silently reset
+    /// the always-ask list to the manifest's, nor the reverse.
+    ///
+    /// This is the merge that makes the console usable — the tier control and
+    /// the always-ask editor are separate widgets, and each `PUT` names only
+    /// what it changed. If either field reset the other, using one control would
+    /// quietly undo the other, and the always-ask list is the operator's real
+    /// lever: it wins over every tier including `full`.
+    #[test]
+    fn overriding_one_policy_field_leaves_the_other_alone() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+
+        record.overlay_policy = Some(policy_entry(Some("full"), None));
+        let effective = record.effective_policy();
+        assert_eq!(effective.mode, "full");
+        assert_eq!(
+            effective.always_approve,
+            vec!["payment.send", "filing.submit"],
+            "moving the tier must not discard the manifest's always-ask list"
+        );
+
+        record.overlay_policy = Some(policy_entry(None, Some(vec!["external.publish"])));
+        let effective = record.effective_policy();
+        assert_eq!(
+            effective.mode, "supervised",
+            "editing the always-ask list must not move the tier"
+        );
+        assert_eq!(effective.always_approve, vec!["external.publish"]);
+    }
+
+    /// An emptied always-ask list is a real state, not a fallback.
+    ///
+    /// `Some(vec![])` is an operator deliberately clearing the list; `None` is
+    /// "not overridden". If these collapsed, an operator clearing the list would
+    /// instead get the manifest's three defaults back — silently re-imposing the
+    /// gates they had just removed, and with no way to express what they meant.
+    #[test]
+    fn an_emptied_always_approve_list_is_not_a_fallback() {
+        let mut record = desk_record(POLICY_MANIFEST, Vec::new());
+
+        record.overlay_policy = Some(policy_entry(None, Some(vec![])));
+        assert!(
+            record.effective_policy().always_approve.is_empty(),
+            "an explicitly emptied always-ask list must survive as empty"
+        );
+
+        record.overlay_policy = Some(policy_entry(None, None));
+        assert_eq!(
+            record.effective_policy().always_approve,
+            vec!["payment.send", "filing.submit"],
+            "an absent field must fall through to the manifest"
+        );
+    }
+
+    /// `auto_approve_under_usd` is not overridable and keeps reading the
+    /// manifest, so the merge cannot silently drop a threshold it does not carry.
+    #[test]
+    fn the_spend_threshold_is_untouched_by_a_policy_override() {
+        let manifest = "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"analyst\"\nrole = \"Analyst\"\n\
+             [policy]\nmode = \"supervised\"\nauto_approve_under_usd = 2.5\n";
+        let mut record = desk_record(manifest, Vec::new());
+        record.overlay_policy = Some(policy_entry(Some("full"), Some(vec![])));
+        assert_eq!(record.effective_policy().auto_approve_under_usd, Some(2.5));
     }
 
     /// Issue #343: with no override stored, `effective_budget` is the manifest

@@ -382,6 +382,7 @@ impl CompanyStore for MongoStore {
             overlay_desks: overlay.desks,
             overlay_workflows: overlay.workflows,
             overlay_budgets: overlay.budgets,
+            overlay_policy: overlay.policy,
             disabled_workflows: overlay.disabled_workflows,
             template_provenance: overlay.provenance,
         }))
@@ -2037,6 +2038,24 @@ impl crate::ports::skills_state::SkillStateStore for MongoStore {
 /// [`MongoStore::blob_filter`].
 const BLOB_BUCKET: &str = "workspace_blobs";
 
+/// How long a blob must have existed before [`MongoStore::sweep_orphan_blobs`]
+/// will treat "no node document" as *abandoned* rather than *in flight*
+/// (issue #664).
+///
+/// The window the sweep must not delete into is between `put_blob` returning
+/// and the `workspace_nodes` insert landing — normally milliseconds, but a
+/// concurrent boot only has to land inside it once to destroy a live upload,
+/// and the damage is permanent: a node whose download 404s and whose `size`
+/// still counts against the quota.
+///
+/// An hour is far longer than that window and deliberately so. The cost of
+/// being generous is bounded and dull — a genuinely abandoned blob occupies
+/// disk until the first boot after it becomes old enough, which may be much
+/// later on a long-lived deployment — while the cost of being tight is
+/// destroying a tenant's upload. The asymmetry is the whole argument, so do not
+/// tune this down without one.
+const ORPHAN_BLOB_MIN_AGE_MS: i64 = 60 * 60 * 1000;
+
 impl MongoStore {
     /// The workspace payload bucket.
     fn blobs(&self) -> mongodb::gridfs::GridFsBucket {
@@ -2139,6 +2158,32 @@ impl MongoStore {
     /// failure is safe: a sweep that cannot complete is logged and the store is
     /// returned anyway, because refusing to open a company's storage over
     /// reclaimable disk would trade an invisible cost for a total outage.
+    ///
+    /// ## Only blobs older than [`ORPHAN_BLOB_MIN_AGE_MS`] (issue #664)
+    ///
+    /// "No node document" describes an abandoned blob **and** a blob whose
+    /// writer is still running, and the two are indistinguishable by reference
+    /// alone. Without an age bound this sweep deletes live uploads: a second
+    /// process — a rolling deploy, a restarted replica, another tenant's
+    /// container on a shared database — boots between a peer's `put_blob` and
+    /// its node insert, sees a blob with no node, and reclaims it. The peer's
+    /// insert then lands, and the company keeps a node whose download 404s
+    /// forever while its recorded `size` still counts against `tree_quota_gb`.
+    /// Neither half self-heals, because this sweep only ever deletes blobs
+    /// without nodes and never nodes without blobs.
+    ///
+    /// That is the failure the write ordering exists to avoid, reintroduced by
+    /// the thing meant to clean up after it — and the *shared-single-DB* mode
+    /// makes it cross-tenant, since this is the one query in this backend that
+    /// carries no `company_id` (see the multi-tenancy note at the top of this
+    /// module). An age bound closes both: an in-flight upload is young, an
+    /// abandoned one is not, and the filter runs server-side so a young blob is
+    /// never even read.
+    ///
+    /// **Not fixed by reordering the writes.** Node-first would replace an
+    /// invisible orphan with a node whose bytes are absent — the outcome
+    /// `fs_ops::create_binary` rejects in as many words ("only one of those is
+    /// survivable"). The ordering is right; the sweep was wrong.
     async fn sweep_orphan_blobs(&self) -> Result<u64> {
         let live: std::collections::HashSet<(String, String)> = {
             let mut cursor = self
@@ -2156,7 +2201,17 @@ impl MongoStore {
             out
         };
         let bucket = self.blobs();
-        let mut cursor = bucket.find(doc! {}).await.map_err(mongo_err)?;
+        // Server-side, so a blob younger than the bound is never even read —
+        // and so the bound cannot be defeated by a `continue` added later to
+        // the loop below. `uploadDate` is GridFS's own field on the files
+        // document, written when the upload completes.
+        let cutoff = mongodb::bson::DateTime::from_millis(
+            (now_millis() as i64).saturating_sub(ORPHAN_BLOB_MIN_AGE_MS),
+        );
+        let mut cursor = bucket
+            .find(doc! { "uploadDate": { "$lt": cutoff } })
+            .await
+            .map_err(mongo_err)?;
         let mut removed = 0;
         while let Some(file) = cursor.try_next().await.map_err(mongo_err)? {
             let key = file.metadata.as_ref().and_then(|m| {
@@ -2345,7 +2400,7 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         company: &CompanyId,
         node: &crate::ports::workspace::WorkspaceNode,
         bytes: &[u8],
-    ) -> Result<()> {
+    ) -> Result<crate::ports::workspace::WorkspaceNode> {
         use crate::ports::workspace::NodeKind;
         let node = crate::ports::workspace::stamped_binary(node, bytes)?;
         let nodes = self.workspace_nodes(company).await?;
@@ -2381,7 +2436,9 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             })
             .await
             .map_err(mongo_err)?;
-        Ok(())
+        // The stamped node, so the digest a caller records can only have come
+        // from the store (issue #668).
+        Ok(node)
     }
 
     async fn write_binary(
@@ -2539,6 +2596,137 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             .await
             .map_err(mongo_err)?;
         Ok(node)
+    }
+
+    async fn swap_files(
+        &self,
+        company: &CompanyId,
+        expected_id: &str,
+        replacement_id: &str,
+        name: &str,
+    ) -> Result<Option<crate::ports::workspace::WorkspaceNode>> {
+        use crate::ports::workspace::NodeKind;
+
+        let nodes = self.collection("workspace_nodes");
+        let Some(staged_doc) = nodes
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+            })
+            .await
+            .map_err(mongo_err)?
+        else {
+            return Err(OpenCompanyError::CompanyNotFound(format!(
+                "workspace node {replacement_id}"
+            )));
+        };
+        let staged_json = get_str(&staged_doc, "node_json")?.to_string();
+        let replacement: crate::ports::workspace::WorkspaceNode =
+            serde_json::from_str(&staged_json)?;
+        if replacement.kind != NodeKind::File {
+            return Err(OpenCompanyError::InvalidRequest(
+                "only files can be promoted from a staging path".to_string(),
+            ));
+        }
+
+        let expected_doc = nodes
+            .find_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": expected_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        let expected = expected_doc
+            .as_ref()
+            .map(
+                |document| -> Result<crate::ports::workspace::WorkspaceNode> {
+                    let json = get_str(document, "node_json")?;
+                    Ok(serde_json::from_str(&json)?)
+                },
+            )
+            .transpose()?;
+        let still_current = expected.as_ref().is_some_and(|node| {
+            node.kind == NodeKind::File
+                && node.name == name
+                && node.parent_id == replacement.parent_id
+        });
+
+        // Detach the private staging document before changing the expected
+        // document's id: `(company_id, node_id)` is unique. The GridFS payload
+        // deliberately stays in place, already keyed by `replacement_id`.
+        // A crash here leaves the old deliverable intact and, at worst, an
+        // orphan the boot sweep reclaims.
+        let detached = nodes
+            .delete_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": replacement_id,
+                "node_json": &staged_json,
+            })
+            .await
+            .map_err(mongo_err)?;
+        if detached.deleted_count != 1 {
+            return Err(OpenCompanyError::Conflict(
+                "the staged workspace replacement changed before it could be promoted".to_string(),
+            ));
+        }
+
+        if !still_current {
+            self.drop_blobs(company, replacement_id, None).await?;
+            return Ok(None);
+        }
+
+        let expected_doc = expected_doc.expect("still_current requires an expected document");
+        let expected_json = get_str(&expected_doc, "node_json")?.to_string();
+        let expected_content = expected_doc
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+        let staged_content = staged_doc
+            .get("content")
+            .cloned()
+            .unwrap_or_else(|| mongodb::bson::Bson::String(String::new()));
+        let mut promoted = replacement;
+        promoted.name = name.to_string();
+        promoted.updated_at_millis = now_millis();
+
+        // One document update is the compare-and-swap. Including the complete
+        // old JSON and content makes an in-place writer count as a competing
+        // revision even if two timestamps happen to share a millisecond.
+        let swapped = nodes
+            .update_one(
+                doc! {
+                    "company_id": company.as_ref(),
+                    "node_id": expected_id,
+                    "node_json": &expected_json,
+                    "content": expected_content,
+                },
+                doc! {"$set": {
+                    "node_id": replacement_id,
+                    "node_json": serde_json::to_string(&promoted)?,
+                    "content": staged_content,
+                    "updated_ms": promoted.updated_at_millis as i64,
+                }},
+            )
+            .await
+            .map_err(mongo_err)?;
+        if swapped.matched_count == 0 {
+            self.drop_blobs(company, replacement_id, None).await?;
+            return Ok(None);
+        }
+
+        // The new document already points at durable replacement bytes. Old
+        // bytes are now unreachable; a cleanup failure must not turn a
+        // successful atomic swap into a reported publish failure, because the
+        // boot orphan sweep can safely finish this work later.
+        if let Err(err) = self.drop_blobs(company, expected_id, None).await {
+            tracing::warn!(
+                company = %company,
+                node_id = %expected_id,
+                error = %err,
+                "workspace file swap succeeded but old GridFS payload cleanup was deferred"
+            );
+        }
+        Ok(Some(promoted))
     }
 
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
@@ -2729,6 +2917,24 @@ mod test {
         let _ = store.db.drop().await;
     }
 
+    /// Ages every staged blob past [`ORPHAN_BLOB_MIN_AGE_MS`] (issue #664).
+    ///
+    /// The sweep only reclaims blobs old enough to be abandoned, so a test that
+    /// uploads bytes and reboots in the same millisecond is staging an
+    /// *in-flight* upload, not an orphaned one. Rewriting `uploadDate` is how a
+    /// test says "and then an hour passed" without sleeping for one.
+    async fn age_blobs_past_the_sweep_threshold(store: &MongoStore) {
+        let old = mongodb::bson::DateTime::from_millis(
+            now_millis() as i64 - ORPHAN_BLOB_MIN_AGE_MS - 60_000,
+        );
+        store
+            .db
+            .collection::<Document>(&format!("{BLOB_BUCKET}.files"))
+            .update_many(doc! {}, doc! { "$set": { "uploadDate": old } })
+            .await
+            .expect("backdate staged blobs");
+    }
+
     /// The boot sweep reclaims a payload whose node document never landed.
     ///
     /// This is the crash the write ordering deliberately allows: blob first,
@@ -2786,6 +2992,12 @@ mod test {
             "two orphans and one live payload are staged"
         );
 
+        // The orphans have to be *old* to be orphans (issue #664). Staged
+        // seconds ago they are indistinguishable from a peer's in-flight
+        // upload, and the sweep now spares them for that reason — see
+        // `a_recent_orphan_is_left_alone_because_it_may_be_an_in_flight_upload`.
+        age_blobs_past_the_sweep_threshold(&s).await;
+
         // Constructing a store over the same database runs the sweep.
         let rebooted = MongoStore::from_database(s.db.clone()).await.unwrap();
 
@@ -2815,6 +3027,91 @@ mod test {
             }
         }
         assert_eq!(got, b"live-bytes".to_vec());
+
+        drop_db(&s).await;
+    }
+
+    /// Issue #664: the boot sweep must not delete a concurrent writer's upload.
+    ///
+    /// The state staged here is not a crash — it is the perfectly ordinary
+    /// instant *inside* a healthy `create_binary`, after `put_blob` has
+    /// returned and before the node insert lands. A second process booting then
+    /// (a rolling deploy, a restarted replica, another tenant's container on a
+    /// shared database) sees a blob with no node and, before this fix, reclaimed
+    /// it. The writer's insert would then land on top, leaving a node whose
+    /// download 404s forever and whose `size` still counts against the quota —
+    /// unreclaimable, because the sweep only deletes blobs without nodes and
+    /// never nodes without blobs.
+    ///
+    /// Deliberately *not* backdated: recency is the whole signal.
+    #[tokio::test]
+    async fn a_recent_orphan_is_left_alone_because_it_may_be_an_in_flight_upload() {
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("inflight-co");
+
+        // Exactly what a concurrent `create_binary` has written so far.
+        s.put_blob(&company, "arriving", "arriving.png", b"in-flight-bytes")
+            .await
+            .unwrap();
+
+        // A second process boots against the same database and sweeps.
+        let rebooted = MongoStore::from_database(s.db.clone()).await.unwrap();
+
+        let files = rebooted
+            .blobs()
+            .find(doc! {})
+            .await
+            .unwrap()
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert_eq!(
+            files.len(),
+            1,
+            "a blob younger than the threshold is an upload in progress, not an orphan"
+        );
+        assert_eq!(files[0].filename.as_deref(), Some("arriving.png"));
+
+        // And the writer's insert, landing after the sweep, yields a node whose
+        // bytes are actually there — the whole point.
+        let node = crate::ports::workspace::WorkspaceNode {
+            id: "arriving".to_string(),
+            name: "arriving.png".to_string(),
+            kind: crate::ports::workspace::NodeKind::File,
+            parent_id: None,
+            updated_at_millis: now_millis(),
+            created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+            mime: Some("image/png".to_string()),
+            size: None,
+            sha256: None,
+        };
+        rebooted
+            .collection("workspace_nodes")
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "node_id": &node.id,
+                "node_json": serde_json::to_string(&node).unwrap(),
+                "content": "",
+                "updated_ms": node.updated_at_millis as i64,
+            })
+            .await
+            .unwrap();
+
+        let (_, stream) =
+            crate::ports::workspace::WorkspaceStore::read_bytes(&rebooted, &company, "arriving")
+                .await
+                .unwrap()
+                .expect("the upload that was in flight during the sweep still has its bytes");
+        let mut got = Vec::new();
+        {
+            use futures::StreamExt;
+            let mut stream = stream;
+            while let Some(chunk) = stream.next().await {
+                got.extend_from_slice(&chunk.unwrap());
+            }
+        }
+        assert_eq!(got, b"in-flight-bytes".to_vec());
 
         drop_db(&s).await;
     }
@@ -2852,6 +3149,7 @@ mod test {
                 overlay_desks: Vec::new(),
                 overlay_workflows: Vec::new(),
                 overlay_budgets: Vec::new(),
+                overlay_policy: None,
                 disabled_workflows: Vec::new(),
                 template_provenance: None,
             };

@@ -18,6 +18,7 @@
 pub mod artifacts;
 pub mod capabilities;
 pub mod channels;
+pub mod company_key;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
@@ -31,6 +32,7 @@ pub mod mail;
 pub mod mailer;
 pub mod mcp;
 pub mod memory;
+pub mod policy;
 /// Issue #245 (operator half): bind a real repository to a company, list what
 /// is bound, revoke one. The whole credential path, with **no agent surface**
 /// behind it — no grant, no tool. See [`repos`].
@@ -157,6 +159,7 @@ pub fn router() -> Router<AppState> {
         .merge(capabilities::router())
         .merge(connections_read::router())
         .merge(channels::router())
+        .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
         .merge(finances::router())
@@ -174,6 +177,7 @@ pub fn router() -> Router<AppState> {
         .merge(repos::router())
         .merge(inference::router())
         .merge(team::router())
+        .merge(policy::router())
         .merge(workflows::router())
         .merge(mail::router());
     #[cfg(feature = "oauth")]

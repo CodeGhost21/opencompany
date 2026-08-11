@@ -1757,6 +1757,12 @@ impl CompanyRuntime {
                 // which matters for `composio_execute`, where the same tool is
                 // grantable reading a repository and not grantable sending mail.
                 broadly_grantable: p.effect.agent.is_some() && p.effect.may_be_granted_standing(),
+                // Always false here. Whether a *reader* may see the contents is
+                // a property of who is asking, and this projection is
+                // deliberately principal-free (issue #618) — the redaction
+                // happens at the edge, in `server::approval_visibility`, so
+                // per-role logic stays out of the domain layer.
+                contents_hidden: false,
             })
             .collect()
     }
