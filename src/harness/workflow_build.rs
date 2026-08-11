@@ -96,6 +96,15 @@ const MAX_OUTPUT_TOKENS: u32 = 4_000;
 const MAX_SUMMARY_CHARS: usize = 400;
 const MAX_REASON_CHARS: usize = 1_200;
 
+/// Bounds on the plan the card carries before it is rendered into the prompt.
+/// The card's title and note are already capped; the plan was the one unbounded
+/// input on a metered path — `record_workflow_build_usage` meters input tokens,
+/// and `evidence_prompt` renders every step, prerequisite and the verification
+/// whole. These cap the count and the per-step free text (issue #580).
+const MAX_PLAN_STEPS: usize = 30;
+const MAX_PLAN_PREREQS: usize = 30;
+const MAX_STEP_DETAIL_CHARS: usize = 400;
+
 /// The node kinds the builder prompt actually specifies. Deliberately narrower
 /// than [`WORKFLOW_NODE_KINDS`](crate::company::WORKFLOW_NODE_KINDS): the model
 /// is only told how to shape these, so offering it the rest of the engine
@@ -111,6 +120,36 @@ fn cap(text: &str, chars: usize) -> String {
         return trimmed.to_string();
     }
     trimmed.chars().take(chars).collect::<String>() + "…"
+}
+
+/// A copy of the plan bounded for the prompt (issue #580): at most
+/// [`MAX_PLAN_STEPS`] steps and [`MAX_PLAN_PREREQS`] prerequisites, with each
+/// step's title and detail and the description and verification strings capped.
+/// Bounds only what [`evidence_prompt`] actually renders, matching the [`cap`]
+/// treatment the other two free-text card fields already get, so an oversized
+/// plan can't run up the input tokens the pass meters.
+fn bounded_plan(plan: crate::ports::tasks::TaskPlan) -> crate::ports::tasks::TaskPlan {
+    use crate::ports::tasks::{PlanStep, TaskPlan};
+    TaskPlan {
+        description: cap(&plan.description, MAX_REASON_CHARS),
+        steps: plan
+            .steps
+            .into_iter()
+            .take(MAX_PLAN_STEPS)
+            .map(|s| PlanStep {
+                title: cap(&s.title, MAX_SUMMARY_CHARS),
+                detail: cap(&s.detail, MAX_STEP_DETAIL_CHARS),
+                ..s
+            })
+            .collect(),
+        prerequisites: plan
+            .prerequisites
+            .into_iter()
+            .take(MAX_PLAN_PREREQS)
+            .collect(),
+        verification: cap(&plan.verification, MAX_REASON_CHARS),
+        ..plan
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -659,7 +698,7 @@ async fn gather_evidence(
         company_name: record.manifest.company.name.clone(),
         card_title: cap(&card.title, MAX_SUMMARY_CHARS),
         card_note: card.note.as_deref().map(|n| cap(n, MAX_REASON_CHARS)),
-        plan: card.plan.clone(),
+        plan: card.plan.clone().map(bounded_plan),
         roster,
         existing_names,
         existing_ids,

@@ -210,6 +210,43 @@ fn the_host_assigns_a_safe_unique_id() {
     assert_eq!(safe_workflow_id("!!!", "!!!", &existing), "workflow");
 }
 
+/// A large plan is bounded before it reaches the prompt: the step and
+/// prerequisite counts are capped and each step's free text is truncated, so an
+/// oversized plan can't run up the input tokens the pass meters (issue #580).
+#[test]
+fn a_large_plan_is_bounded_for_the_prompt() {
+    use crate::ports::tasks::TaskPlan;
+    let steps: Vec<_> = (0..40)
+        .map(|_| serde_json::json!({ "title": "t".repeat(600), "detail": "d".repeat(600) }))
+        .collect();
+    let prereqs: Vec<_> = (0..40)
+        .map(|_| serde_json::json!({ "kind": "connection", "name": "gh", "status": "satisfied", "note": "" }))
+        .collect();
+    let plan: TaskPlan = serde_json::from_value(serde_json::json!({
+        "description": "x".repeat(2_000),
+        "steps": steps,
+        "prerequisites": prereqs,
+        "risks": [],
+        "verification": "v".repeat(2_000),
+        "scope": "everything",
+        "plannedAtMillis": 1,
+    }))
+    .unwrap();
+
+    let bounded = bounded_plan(plan);
+    assert_eq!(bounded.steps.len(), MAX_PLAN_STEPS, "step count is capped");
+    assert_eq!(
+        bounded.prerequisites.len(),
+        MAX_PLAN_PREREQS,
+        "prerequisite count is capped"
+    );
+    // `cap` appends a one-char ellipsis when it truncates.
+    assert!(bounded.steps[0].detail.chars().count() <= MAX_STEP_DETAIL_CHARS + 1);
+    assert!(bounded.steps[0].title.chars().count() <= MAX_SUMMARY_CHARS + 1);
+    assert!(bounded.description.chars().count() <= MAX_REASON_CHARS + 1);
+    assert!(bounded.verification.chars().count() <= MAX_REASON_CHARS + 1);
+}
+
 /// The host dedups the name like the id, case-insensitively (matching the create
 /// path's uniqueness check), so a clash settles here instead of at apply.
 #[test]
