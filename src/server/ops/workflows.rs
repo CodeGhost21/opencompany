@@ -1584,6 +1584,16 @@ struct WorkflowRunOutcome {
     /// when false, like `running`.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     cancelled: bool,
+    /// System notices raised about this run (issue #638) — today, that a node
+    /// gated more tool calls than the per-batch cap allows and the excess was
+    /// discarded.
+    ///
+    /// Not an `error`: the run succeeded. The history panel renders these as a
+    /// warning rather than a failure, so a run that overflowed still reads as
+    /// the success it was, with something the operator needs to know attached.
+    /// Omitted when empty, like `nodes` — which is nearly every run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    notices: Vec<String>,
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -1702,6 +1712,7 @@ async fn list_runs(
                     // whose signal has already been fired, because it has not
                     // wound down yet.
                     cancelled: false,
+                    notices: Vec::new(),
                 });
             }
             CompanyEvent::WorkflowNodeFinished {
@@ -1733,6 +1744,7 @@ async fn list_runs(
                 pending_approvals,
                 error,
                 cancelled,
+                notices,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -1750,6 +1762,7 @@ async fn list_runs(
                     entry.error = error;
                     entry.running = false;
                     entry.cancelled = cancelled;
+                    entry.notices = notices;
                     continue;
                 }
                 // …else stand alone. Two ways to get here, both legitimate: a
@@ -1770,6 +1783,7 @@ async fn list_runs(
                     started_at_millis: None,
                     running: false,
                     cancelled,
+                    notices,
                 });
             }
             _ => {}
@@ -2864,6 +2878,7 @@ mod tests {
                         pending_approvals: Vec::new(),
                         error: error.map(str::to_string),
                         cancelled: false,
+                        notices: Vec::new(),
                     },
                 )
                 .await
@@ -3097,6 +3112,7 @@ mod tests {
                         pending_approvals: Vec::new(),
                         error: error.map(str::to_string),
                         cancelled: false,
+                        notices: Vec::new(),
                     },
                 )
                 .await
@@ -4231,6 +4247,7 @@ mod tests {
                             deliveries: Vec::new(),
                             cancelled: true,
                             nodes: Vec::new(),
+                            notices: Vec::new(),
                         });
                     }
                 }
@@ -4241,6 +4258,7 @@ mod tests {
                     deliveries: Vec::new(),
                     cancelled: false,
                     nodes: Vec::new(),
+                    notices: Vec::new(),
                 })
             }
         }
@@ -4867,6 +4885,7 @@ label = "ok"
                         status: crate::ports::types::WorkflowNodeStatus::Ok,
                         elapsed_ms: 3,
                     }],
+                    notices: Vec::new(),
                 })
             }
         }

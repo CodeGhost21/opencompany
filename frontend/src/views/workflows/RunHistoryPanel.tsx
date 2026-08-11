@@ -300,6 +300,24 @@ function RunHistoryRow({
           Finished — this run routed no reports.
         </p>
       )}
+      {/* Issue #638. Rendered ALONGSIDE the outcome above rather than as one
+          more branch of it, because a notice is not a terminal state — a run
+          can succeed, be stopped, or fail and still have discarded gated calls
+          the operator needs to know about. Folding it into the chain would have
+          made it invisible for every outcome except the one branch it sat in.
+
+          Deliberately not a destructive Alert: nothing failed. It is the same
+          tone as the cancelled line — something happened that you need to know,
+          not something that went wrong. */}
+      {(run.notices ?? []).map((notice, i) => (
+        <p
+          key={i}
+          className="text-[11px] text-amber-600 dark:text-amber-500"
+          data-testid="workflow-run-notice"
+        >
+          {notice}
+        </p>
+      ))}
     </div>
   );
 }

@@ -71,6 +71,30 @@ pub struct WorkflowRun {
     /// written before this field existed still loads, as an empty list.
     #[serde(default)]
     pub nodes: Vec<WorkflowRunNodeRow>,
+    /// System notices raised *about* this run that the operator needs and that
+    /// no other field can carry (issue #638).
+    ///
+    /// Today there is exactly one producer: a node whose turn gated more tool
+    /// calls than [`MAX_APPROVAL_REQUESTS_PER_TURN`](crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN)
+    /// allows, whose excess is discarded. The chat path says that out loud as
+    /// its own bubble (#561); a run has no conversation to speak on, so before
+    /// this the only trace was a `tracing::warn!` — and a log line is not the
+    /// operator learning anything.
+    ///
+    /// **Deliberately not `error`.** A run that overflowed the cap did not
+    /// fail: its nodes ran, its output is valid, and marking it failed would
+    /// inflate the failure count and hide a real failure among them. Same
+    /// reasoning [`cancelled`](Self::cancelled) is a flag rather than an error
+    /// string.
+    ///
+    /// **And not a `DeliveryReport` row**, which is per-`output`-node and per
+    /// delivery attempt: a run with no `output` node produces no rows at all,
+    /// and this notice is about the run, not about a delivery.
+    ///
+    /// `#[serde(default)]` so a payload written before this field existed still
+    /// loads, as empty — and empty is the overwhelmingly common case.
+    #[serde(default)]
+    pub notices: Vec<String>,
 }
 
 /// One node's structural outcome inside a run (issue #542).

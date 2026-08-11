@@ -629,6 +629,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: false,
+            notices: Vec::new(),
         };
 
         let wired = wire_event(7, &event);
@@ -667,6 +668,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: true,
+            notices: Vec::new(),
         };
 
         let wired = wire_event(7, &event);

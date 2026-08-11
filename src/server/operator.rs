@@ -905,6 +905,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             pending_approvals,
             error,
             cancelled,
+            notices,
         } => {
             let mut o = envelope("workflow_run_finished");
             o["workflowId"] = json!(workflow_id);
@@ -925,6 +926,13 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // operator who just pressed Cancel would get "ran successfully".
             if *cancelled {
                 o["cancelled"] = json!(true);
+            }
+            // Issue #638: same presence-check discipline again. Omitted on the
+            // overwhelming majority of runs, which raise nothing — so a console
+            // that checks for the key gets "was there anything to tell me?"
+            // without having to compare against an empty list.
+            if !notices.is_empty() {
+                o["notices"] = json!(notices);
             }
             o
         }
@@ -4945,6 +4953,7 @@ mod test {
             pending_approvals: vec!["review".into()],
             error: None,
             cancelled: false,
+            notices: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["type"], "workflow_run_finished");
@@ -4987,6 +4996,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: Some("no inference source for agent node `worker`".into()),
             cancelled: false,
+            notices: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["error"], "no inference source for agent node `worker`");
@@ -5098,6 +5108,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: false,
+            notices: Vec::new(),
         }))
         .expect("projected");
         assert_eq!(with_id["runId"], "run-9");
@@ -5110,6 +5121,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: false,
+            notices: Vec::new(),
         }))
         .expect("projected");
         assert!(legacy.get("runId").is_none(), "{legacy}");
