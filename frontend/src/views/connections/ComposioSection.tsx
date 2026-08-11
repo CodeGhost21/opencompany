@@ -368,7 +368,7 @@ export function ComposioSection({ client, company, canManage }: Props) {
                   <ShieldCheck className="size-3" /> Linked via cluster identity — nothing stored
                 </span>
               ) : companyKey ? (
-                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <ShieldCheck className="size-3" /> Linked via this company&apos;s own credential
                 </span>
               ) : byoToken ? (

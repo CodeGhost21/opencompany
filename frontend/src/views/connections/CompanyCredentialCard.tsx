@@ -171,7 +171,7 @@ export function CompanyCredentialCard({ client, company, canManage, onChanged }:
           <CardContent className="space-y-4 py-4">
             <div className="flex flex-wrap items-center gap-2">
               {configured ? (
-                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <ShieldCheck className="size-3" /> Set — providers connect as this company
                 </span>
               ) : instanceFallback ? (
