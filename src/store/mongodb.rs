@@ -2049,7 +2049,8 @@ const BLOB_BUCKET: &str = "workspace_blobs";
 ///
 /// An hour is far longer than that window and deliberately so. The cost of
 /// being generous is bounded and dull — a genuinely abandoned blob occupies
-/// disk until the next boot an hour later — while the cost of being tight is
+/// disk until the first boot after it becomes old enough, which may be much
+/// later on a long-lived deployment — while the cost of being tight is
 /// destroying a tenant's upload. The asymmetry is the whole argument, so do not
 /// tune this down without one.
 const ORPHAN_BLOB_MIN_AGE_MS: i64 = 60 * 60 * 1000;
