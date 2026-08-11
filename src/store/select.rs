@@ -34,6 +34,7 @@ use crate::ports::tasks::TaskStore;
 use crate::ports::types::CompanyId;
 use crate::ports::usage::UsageMeter;
 use crate::ports::users::UserStore;
+use crate::ports::workflow_revisions::WorkflowRevisionStore;
 use crate::ports::workspace::WorkspaceStore;
 
 /// Which storage backend hosts the durable ports.
@@ -149,6 +150,8 @@ pub struct StorageHandles {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class task-run records and their step traces (#242).
     pub runs: Arc<dyn RunStore>,
+    /// Per-workflow edit history for rollback (#274).
+    pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
     pub schedule_fires: Arc<dyn ScheduleFireStore>,
     pub usage: Arc<dyn UsageMeter>,
@@ -405,6 +408,7 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         facts: store.clone(),
         artifacts: store.clone(),
         runs: store.clone(),
+        workflow_revisions: store.clone(),
         schedule_fires: store.clone(),
         usage: store.clone(),
         skills: store.clone(),
@@ -443,6 +447,7 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         facts: store.clone(),
         artifacts: store.clone(),
         runs: store.clone(),
+        workflow_revisions: store.clone(),
         schedule_fires: store.clone(),
         usage: store.clone(),
         skills: store.clone(),

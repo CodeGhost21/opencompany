@@ -29,7 +29,7 @@ use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
     EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore,
     SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore,
-    WorkspaceStore,
+    WorkflowRevisionStore, WorkspaceStore,
 };
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
@@ -127,6 +127,8 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// Per-workflow edit history, for rollback of an edited workflow (#274).
+    pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
     /// Durable cross-replica scheduler fire claims (#241).
     pub schedule_fires: Arc<dyn ScheduleFireStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
@@ -819,6 +821,12 @@ impl CompanyRuntime {
     /// with its status, step trace and cost.
     pub fn runs(&self) -> &Arc<dyn RunStore> {
         &self.ops.runs
+    }
+
+    /// This company's per-workflow edit history (#274), the snapshot ring a
+    /// workflow rollback reads and writes.
+    pub fn workflow_revisions(&self) -> &Arc<dyn WorkflowRevisionStore> {
+        &self.ops.workflow_revisions
     }
 
     /// This company's durable scheduler fire claims (#241): one row per
