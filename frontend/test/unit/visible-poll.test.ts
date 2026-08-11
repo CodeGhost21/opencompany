@@ -92,17 +92,41 @@ describe("startVisiblePolling", () => {
     dispose();
   });
 
-  it("does not double-arm across repeated visible transitions", () => {
+  it("ignores redundant visible → visible events entirely", () => {
     const load = vi.fn();
     const dispose = startVisiblePolling(load, 1000);
 
-    // A visible → visible event, which some browsers do emit. The guard is the
-    // only thing standing between this and a timer nobody holds a handle to.
-    setVisibility("visible");
-    setVisibility("visible");
     load.mockClear();
 
+    // A visible → visible event, which some browsers do emit. Nothing about the
+    // tab changed, so nothing is owed: not a refresh (the callers that read two
+    // things would pay twice per stray event, which is the waste #581 exists to
+    // remove) and not a second timer (nobody would hold a handle to it).
+    setVisibility("visible");
+    setVisibility("visible");
+    expect(load).toHaveBeenCalledTimes(0);
+
+    // Cadence unchanged — a leaked second timer would show as four here.
     vi.advanceTimersByTime(2000);
+    expect(load).toHaveBeenCalledTimes(2);
+
+    dispose();
+  });
+
+  it("loads once per genuine hidden → visible edge", () => {
+    const load = vi.fn();
+    const dispose = startVisiblePolling(load, 1000);
+
+    load.mockClear();
+
+    // Two real round trips through the background. Each one, and only each one,
+    // is worth exactly one catch-up read.
+    setVisibility("hidden");
+    setVisibility("visible");
+    expect(load).toHaveBeenCalledTimes(1);
+
+    setVisibility("hidden");
+    setVisibility("visible");
     expect(load).toHaveBeenCalledTimes(2);
 
     dispose();
