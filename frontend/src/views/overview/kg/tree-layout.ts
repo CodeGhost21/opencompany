@@ -117,6 +117,13 @@ export type RestLayoutInput = {
     workerIds: string[];
     toolIds: string[];
   }[];
+  /**
+   * Workers the company declares no desk for (issue #486): they belong to no
+   * pillar, so they get a sector of their own on the worker ring rather than a
+   * position inside somebody else's wedge. Empty (or omitted) costs nothing —
+   * no sector is reserved and the wheel is exactly as it was.
+   */
+  unplacedIds?: string[];
   /** radius per depth: [self, team, task, worker, tool]. Omit to derive from width/height. */
   ringR?: number[];
   cx: number;
@@ -163,13 +170,18 @@ export function radialRestLayout(input: RestLayoutInput): RestLayoutResult {
   // while a sparse one stays tight. Centers sit at each span's midpoint, rotated
   // so the first pillar stays at `startAngle` — for a balanced graph (equal
   // weights) this reproduces the old evenly-spaced sunburst exactly.
-  const n = Math.max(1, pillars.length);
+  // The unplaced ride a sector of their own, sized like any other and placed
+  // last so the pillars keep the angles they would have had without them.
+  const unplaced = input.unplacedIds ?? [];
+  const sectors = pillars.length + (unplaced.length > 0 ? 1 : 0);
+  const n = Math.max(1, sectors);
   const weights = pillars.map((p) =>
     Math.max(
       1,
       (p.flowIds?.length ?? 0) + p.taskIds.length + (p.stepIds?.length ?? 0) + p.workerIds.length + p.toolIds.length,
     ),
   );
+  if (unplaced.length > 0) weights.push(Math.max(1, unplaced.length));
   const total = weights.reduce((s, w) => s + w, 0) || 1;
   const spans = weights.map((w) => (w / total) * Math.PI * 2);
   const centersRaw: number[] = [];
@@ -180,24 +192,35 @@ export function radialRestLayout(input: RestLayoutInput): RestLayoutResult {
   }
   const offset = startAngle - (centersRaw[0] ?? 0);
 
+  /** Spread `ids` across a sector's arc at radius `r`, symmetric about its centre. */
+  const ring = (ids: string[], r: number, center: number, half: number) => {
+    const k = ids.length;
+    ids.forEach((id, j) => {
+      const t = k <= 1 ? 0 : (j / (k - 1)) * 2 - 1; // -1 … 1, symmetric about the pillar
+      positions.set(id, polar(r, center + t * half));
+    });
+  };
+
   pillars.forEach((p, i) => {
     const center = centersRaw[i] + offset;
     positions.set(p.teamId, polar(ringR[1], center));
     const half = (spans[i] / 2) * SECTOR_FILL;
-    const ring = (ids: string[], r: number) => {
-      const k = ids.length;
-      ids.forEach((id, j) => {
-        const t = k <= 1 ? 0 : (j / (k - 1)) * 2 - 1; // -1 … 1, symmetric about the pillar
-        positions.set(id, polar(r, center + t * half));
-      });
-    };
     // Flows and stages share their ring with tasks and workers rather than
     // getting rings of their own: five rings is already the whole radius, and
     // interleaving them keeps each pillar's wedge readable.
-    ring([...(p.flowIds ?? []), ...p.taskIds], ringR[2]);
-    ring([...(p.stepIds ?? []), ...p.workerIds], ringR[3]);
-    ring(p.toolIds, ringR[4]);
+    ring([...(p.flowIds ?? []), ...p.taskIds], ringR[2], center, half);
+    ring([...(p.stepIds ?? []), ...p.workerIds], ringR[3], center, half);
+    ring(p.toolIds, ringR[4], center, half);
   });
+
+  // No `positions.set` at ring 1 for the unplaced sector: there is no pillar
+  // there and drawing one would be the invented department this replaced. The
+  // sector is empty all the way in, which is what "on no desk" looks like.
+  if (unplaced.length > 0) {
+    const i = pillars.length;
+    const center = centersRaw[i] + offset;
+    ring(unplaced, ringR[3], center, (spans[i] / 2) * SECTOR_FILL);
+  }
 
   return { positions };
 }

@@ -31,8 +31,13 @@ use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
     EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore,
     SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore,
-    WorkspaceStore,
+    WorkflowRevisionStore, WorkspaceStore,
 };
+// Separate line (#241) so this addition is a pure append, not a reflow of the
+// grouped import that sibling store-seam branches (#274, #596) also edit.
+use crate::ports::ScheduleFireStore;
+// Separate line (#596) for the same reason.
+use crate::ports::WorkflowRunOutputStore;
 
 /// The board column a task must enter to be dispatched to its assignee. Read
 /// from the task port (#205) so this edge and the write boundary that validates
@@ -126,6 +131,12 @@ pub struct OpsStores {
     pub artifacts: Arc<dyn ArtifactStore>,
     /// First-class records of each task attempt: status, trace, cost (#242).
     pub runs: Arc<dyn RunStore>,
+    /// Per-workflow edit history, for rollback of an edited workflow (#274).
+    pub workflow_revisions: Arc<dyn WorkflowRevisionStore>,
+    /// Durable cross-replica scheduler fire claims (#241).
+    pub schedule_fires: Arc<dyn ScheduleFireStore>,
+    /// Durable, console-facing per-node run output snapshots (#596).
+    pub workflow_run_outputs: Arc<dyn WorkflowRunOutputStore>,
     /// The usage meter (written by the WS4 cost hook, read by WS5).
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
@@ -167,6 +178,12 @@ pub struct CompanyRuntime {
     /// Per-company secrets, read by the feedback scrubber (and webhook HMAC
     /// verification, later).
     pub(crate) secrets: Arc<dyn SecretStore>,
+    /// Install-wide default MCP servers (issue #527), already normalized by
+    /// `company::mcp::normalize_default_servers` at the config boundary. Lives
+    /// beside `secrets` because every reader needs both: the pair is what
+    /// `company::mcp::resolve_effective` takes. Empty for an install that
+    /// configures no defaults, which is the common case.
+    pub(crate) default_mcp_servers: Vec<crate::company::McpServer>,
     /// Per-teammate email (inbound + outbound), backing the inbox surface.
     pub(crate) inbox: Arc<dyn InboxStore>,
     /// The company's own outbound-mail handle (sender + SMTP credentials),
@@ -279,6 +296,12 @@ pub struct CompanyRuntime {
     /// it at the next start.
     #[cfg(feature = "openhuman")]
     pub(crate) planner: Option<Arc<crate::harness::planning::TaskPlanner>>,
+    /// Issue #580: the company's workflow builder, attached the same way as the
+    /// planner. `None` leaves the `workflow`-deliverable dispatch branch inert —
+    /// a card entering In Progress dispatches as a one-off exactly as before #580,
+    /// and the boot reaper settles any run left mid-build.
+    #[cfg(feature = "openhuman")]
+    pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
     /// MCP installs and live connections for this runtime. The wrapper owns a
     /// company-home-scoped OpenHuman config while the live registry remains
     /// shared in-process with harness agents.
@@ -312,6 +335,10 @@ impl CompanyRuntime {
     ) -> Self {
         let approvals: Arc<dyn ApprovalGate> = approval_gate.clone();
         Self {
+            // Install-wide, not per-company, so it is set by the builder from
+            // resolved config (`set_default_mcp_servers`) rather than taken as a
+            // 19th positional argument here.
+            default_mcp_servers: Vec::new(),
             id,
             brain,
             store,
@@ -343,6 +370,8 @@ impl CompanyRuntime {
             harness: None,
             #[cfg(feature = "openhuman")]
             planner: None,
+            #[cfg(feature = "openhuman")]
+            builder: None,
             #[cfg(feature = "mcp")]
             mcp: None,
         }
@@ -403,6 +432,22 @@ impl CompanyRuntime {
         self.planner.as_ref()
     }
 
+    /// Issue #580: attach the company's workflow builder after construction
+    /// (called by the [`RuntimeBuilder`](crate::runtime::RuntimeBuilder)),
+    /// mirroring [`set_planner`](Self::set_planner).
+    #[cfg(feature = "openhuman")]
+    pub fn set_builder(&mut self, builder: Arc<crate::harness::workflow_build::WorkflowBuilder>) {
+        self.builder = Some(builder);
+    }
+
+    /// The company's workflow builder, if one is wired. `None` leaves the
+    /// `workflow`-deliverable dispatch branch inert — the card dispatches as a
+    /// one-off.
+    #[cfg(feature = "openhuman")]
+    pub fn builder(&self) -> Option<&Arc<crate::harness::workflow_build::WorkflowBuilder>> {
+        self.builder.as_ref()
+    }
+
     /// Attaches the embedded MCP runtime used by REST and harness agents.
     #[cfg(feature = "mcp")]
     pub fn set_mcp(&mut self, mcp: Arc<crate::harness::mcp::McpRuntime>) {
@@ -448,6 +493,18 @@ impl CompanyRuntime {
     }
 
     /// This company's secret store (SMTP creds, OAuth tokens, domain config).
+    /// Sets the install-wide default MCP servers (issue #527). Called by
+    /// [`RuntimeBuilder`](crate::runtime::RuntimeBuilder) from resolved config.
+    pub fn set_default_mcp_servers(&mut self, servers: Vec<crate::company::McpServer>) {
+        self.default_mcp_servers = servers;
+    }
+
+    /// The install-wide default MCP servers (issue #527), for passing to
+    /// [`company::mcp::resolve_effective`](crate::company::mcp::resolve_effective).
+    pub fn default_mcp_servers(&self) -> &[crate::company::McpServer] {
+        &self.default_mcp_servers
+    }
+
     pub fn secrets(&self) -> &Arc<dyn SecretStore> {
         &self.secrets
     }
@@ -585,6 +642,27 @@ impl CompanyRuntime {
     ///
     /// [`TaskDispatched`]: crate::ports::types::CompanyEvent::TaskDispatched
     async fn dispatch_task(self: &Arc<Self>, task: &TaskRecord) {
+        // Issue #580: a `workflow`-deliverable card does not dispatch to its
+        // assignee — building the workflow IS its In-Progress work. It routes
+        // through the builder pass, which mints the same attempt row (so #339's
+        // link stays honest and the spend is attributed) and settles the card to
+        // In Review with a proposal, or back to To-do with the reason. Without a
+        // wired builder the branch is inert and the card falls through to an
+        // ordinary dispatch, exactly as a `once` card does.
+        #[cfg(feature = "openhuman")]
+        if task.deliverable == crate::ports::tasks::TaskDeliverable::Workflow
+            && self.harness.is_some()
+            && self.builder.is_some()
+        {
+            let task_id = task.id.clone();
+            let run_id = self.open_run(task).await;
+            let runtime = Arc::clone(self);
+            tokio::spawn(async move {
+                crate::harness::workflow_build::run_workflow_build_pass(runtime, task_id, run_id)
+                    .await
+            });
+            return;
+        }
         #[cfg(feature = "openhuman")]
         if self.harness.is_some() {
             let task_id = task.id.clone();
@@ -771,6 +849,26 @@ impl CompanyRuntime {
     /// with its status, step trace and cost.
     pub fn runs(&self) -> &Arc<dyn RunStore> {
         &self.ops.runs
+    }
+
+    /// This company's per-workflow edit history (#274), the snapshot ring a
+    /// workflow rollback reads and writes.
+    pub fn workflow_revisions(&self) -> &Arc<dyn WorkflowRevisionStore> {
+        &self.ops.workflow_revisions
+    }
+
+    /// This company's durable scheduler fire claims (#241): one row per
+    /// `(schedule, minute)` the schedulers use to dedup fires across replicas and
+    /// restarts.
+    pub fn schedule_fires(&self) -> &Arc<dyn ScheduleFireStore> {
+        &self.ops.schedule_fires
+    }
+
+    /// This company's durable per-node run output snapshots (#596): one record
+    /// per settled run, read by the console run inspector to show what each node
+    /// produced on any past run.
+    pub fn workflow_run_outputs(&self) -> &Arc<dyn WorkflowRunOutputStore> {
+        &self.ops.workflow_run_outputs
     }
 
     /// This company's usage meter (written by the cost hook, read by WS5).
@@ -2059,6 +2157,8 @@ mod tests {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
 
         let first = runtime.open_run(&card).await.expect("an attempt is minted");
@@ -2147,6 +2247,8 @@ mod tests {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
 
         // Positive control: on a live runtime the cycle runs, so the row is

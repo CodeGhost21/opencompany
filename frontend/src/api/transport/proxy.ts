@@ -18,6 +18,7 @@
 // against a real host that what comes back here is byte-identical to what a
 // browser's `fetch` would have seen.
 
+import { connectionReady } from "./desktop";
 import type {
   StreamHandlers,
   Transport,
@@ -65,6 +66,11 @@ export class ProxyTransport implements Transport {
   constructor(private readonly connectionId: string) {}
 
   async request(req: TransportRequest): Promise<TransportResponse> {
+    // The core resolves `connectionId` against its own registry, so a request
+    // that overtakes `oc_connect` fails with `no such connection` — a race the
+    // console loses on a fast first probe, and one whose symptom looks like an
+    // unreachable host rather than an ordering bug.
+    await connectionReady(this.connectionId);
     const reply = await bridge().invoke<ProxyReply>("oc_request", {
       connectionId: this.connectionId,
       request: {
@@ -97,11 +103,14 @@ export class ProxyTransport implements Transport {
       if (live) handlers.onMessage(data);
     };
 
-    void invoke("oc_subscribe", {
-      connectionId: this.connectionId,
-      path: pathOf(url),
-      channel,
-    })
+    void connectionReady(this.connectionId)
+      .then(() =>
+        invoke("oc_subscribe", {
+          connectionId: this.connectionId,
+          path: pathOf(url),
+          channel,
+        }),
+      )
       .then(() => handlers.onOpen?.())
       .catch(() => {
         // The stream could not be opened. Reported as terminal rather than

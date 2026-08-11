@@ -268,6 +268,7 @@ fn build_brain(
         skills: None,
         skills_source_dir: None,
         skills_registry: Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -276,6 +277,8 @@ fn build_brain(
         mcp_failures: McpFailureQueue::default(),
         pending_publishes: Default::default(),
         workflow_refs: Default::default(),
+        run_outputs: Default::default(),
+        run_output_store: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),
@@ -309,6 +312,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         parent_task_id: None,
         output: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
     }
 }
 

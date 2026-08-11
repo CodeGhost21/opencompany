@@ -141,11 +141,73 @@ pub trait WorkspaceStore: Send + Sync {
     async fn rename_move(&self, /* id, new_name, new_parent */) -> Result<WorkspaceNode>;
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
     async fn is_empty(&self, company: &CompanyId) -> Result<bool>;
+
+    // Bytes (#553) — additive; the text path above is untouched.
+    async fn create_binary(&self, company: &CompanyId, node: &WorkspaceNode,
+                           bytes: &[u8]) -> Result<()>;
+    async fn write_binary(&self, company: &CompanyId, id: &str, bytes: &[u8],
+                          mime: Option<&str>, author: WorkspaceOrigin)
+        -> Result<WorkspaceNode>;
+    async fn read_bytes(&self, company: &CompanyId, id: &str)
+        -> Result<Option<(WorkspaceNode, BlobStream)>>;
 }
 ```
 
 Nodes are folders or files (`NodeKind`); `[[wikilink]]` backlinks are derived
 at read time by the GraphQL layer.
+
+**Bytes (#553).** A node holds prose or it holds a payload, never both. A
+binary node is a `File` whose `mime`, `size` and `sha256` are all `Some`;
+`mime` alone is the discriminator every surface keys off. `size` and `sha256`
+are computed **by the store** from the bytes it persists (`blob_metadata`) and
+are never accepted from a caller — a digest a caller supplies is an unverified
+claim, which is the one thing a digest must not be.
+
+The text path stays `String`, deliberately: ~17 call sites reference this port
+and none of them (the backlink scan, the seeder, the GraphQL projection, the
+agent tools) can do anything with a PNG. So a text `read` of a binary node
+yields an **empty body**, the same answer a folder gives, and a text `write` to
+one is refused rather than allowed to leave the recorded digest describing
+bytes that are gone.
+
+Writes buffer and reads stream. The asymmetry is what makes the quota
+enforceable: `QuotaEnforcedWorkspace` (`src/runtime/workspace_quota.rs`) wraps
+the store at the single assembly site, inside the announcer, and sees the full
+size **before** anything is written — so a refused write leaves no partial
+blob, no node and no orphan. It meters payloads only (prose is uncounted; the
+threat model is media) against a per-file cap (`[workspace] max_blob_mb`,
+default 256 MiB) and a per-company total (`[workspace] tree_quota_gb`,
+unlimited by default), answering 413.
+
+Backends: sqlite keeps the blob in the node's own row, so it cannot orphan one.
+`FsOps` writes the file then the index — the benign order the text path already
+uses. MongoDB needs **GridFS** (a payload cannot ride in a 16 MB BSON document)
+and writes blob-first/document-second, deleting in the mirror order, so a crash
+strands only a blob nothing references; `MongoStore::from_database` sweeps those
+at boot. Tenancy in the shared bucket is a filter on `metadata.company_id` **and**
+`metadata.node_id` for every read, delete and sweep.
+
+**Search (for #607).** No workspace search exists yet; when one is built, a
+binary node is **matchable by name and never content-scanned**. Its bytes are
+not text, so scanning them would produce mojibake matches, waste I/O
+proportional to the payload, and — on a streaming backend — pull a whole video
+through memory to find nothing.
+
+The port already makes the safe behaviour the default rather than a rule to
+remember: a text `read` of a binary node returns an **empty body** on all three
+backends, so a content scan built over `read`/`tree` finds nothing for one
+automatically. It does not need to know binaries exist, and it cannot
+accidentally index them. A scan that wants to *say* something about a payload
+should use `mime`/`size`/`sha256` off the node, which the tree read already
+carries — the same fields `workspace_list` renders. `read_bytes` is for serving
+a download and should not appear in a search path at all.
+
+`assert_workspace_binary_store` pins all of it across all three backends,
+including a 17 MiB case that proves the BSON cap is not in play. Over HTTP:
+`GET …/workspace/blob/{id}` streams the payload (`ETag` = sha256) and
+`POST …/workspace/upload` takes multipart; a text-typed upload whose bytes
+decode as UTF-8 is stored as a note instead, so an uploaded `.md` keeps its
+editor and backlinks.
 
 **Authorship (#326).** Every `WorkspaceNode` carries `created_by` and
 `updated_by`, both a `WorkspaceOrigin` ∈ `seed | operator | agent{id}`. `write`

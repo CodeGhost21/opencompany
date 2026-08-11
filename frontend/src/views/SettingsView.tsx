@@ -23,6 +23,7 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import { DevicePairing } from "@/components/device-pairing";
 import { DomainSettings } from "@/components/domain-settings";
 import { StatusPill } from "@/components/status-pill";
 import { ThemeToggle } from "@/components/theme-toggle";
@@ -47,6 +48,10 @@ export function SettingsView({ client, company, feed, onFlag }: Props) {
   return (
     <div className="flex-1 overflow-y-auto">
       <div className="mx-auto w-full max-w-3xl space-y-6 px-4 py-6">
+        {/* Pairing this machine. Renders nothing in a browser, where the
+            session cookie already works. */}
+        <DevicePairing />
+
         {/* Connection */}
         <Card>
           <CardHeader>

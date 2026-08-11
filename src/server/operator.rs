@@ -950,6 +950,23 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             o["scheduled"] = json!(scheduled);
             o
         }
+        // Issue #382: the live per-node START bracket, the counterpart of the
+        // finish arm below. Without an explicit arm here it would fall to the
+        // `_ => return None` wildcard and be silently dropped, and the canvas
+        // would be back to deriving "currently executing" from graph topology —
+        // the exact guess #382 replaces. Structural by construction: the event
+        // carries only ids, so nothing to scrub.
+        CompanyEvent::WorkflowNodeStarted {
+            workflow_id,
+            run_id,
+            node_id,
+        } => {
+            let mut o = envelope("workflow_node_started");
+            o["workflowId"] = json!(workflow_id);
+            o["runId"] = json!(run_id);
+            o["nodeId"] = json!(node_id);
+            o
+        }
         CompanyEvent::WorkflowNodeFinished {
             workflow_id,
             run_id,
@@ -1049,6 +1066,13 @@ struct ChatMessage {
     /// rather than a silently-dropped thread.
     #[serde(default)]
     parent: Option<String>,
+    /// Whether an actionable request in this message opens a one-off card or a
+    /// workflow card (issue #580). The operator chooses explicitly (decision
+    /// D2a); absent means `once`, so an ordinary chat request is unchanged. Only
+    /// consulted when the message actually carries a task intent — a greeting or
+    /// a question opens no card regardless.
+    #[serde(default)]
+    deliverable: Option<crate::ports::tasks::TaskDeliverable>,
 }
 
 /// A chat or approval-resolution response: the company's channel replies.
@@ -1145,6 +1169,14 @@ async fn run_chat(
             // (issue #339). The first successful settle stamps it.
             output: None,
             plan: None,
+            // Issue #580: carry the operator's explicit once-vs-workflow choice
+            // from the chat payload onto the card. Absent means `once`, so a
+            // plain "do X" chat request opens a one-off card exactly as before;
+            // "build me a workflow for X" (deliverable: "workflow") routes the
+            // card through the builder pass when it reaches In Progress. Nothing
+            // here infers the choice from the text (decision D2a).
+            deliverable: message.deliverable.unwrap_or_default(),
+            workflow_proposal: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
@@ -2248,6 +2280,7 @@ mod test {
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2256,6 +2289,8 @@ mod test {
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3675,6 +3710,12 @@ mod test {
     /// makes approving it mint a single-use grant rather than execute it
     /// (issue #243) — which is the whole reason a lost continuation hurts: the
     /// grant is spent on a turn that never happens.
+    ///
+    /// The payload names an action the vendored catalogue tags `Write`, so
+    /// `consequence_of` classifies it as a send on its merits. Until issue #470
+    /// it named the slug under `tool_slug`, a key neither the tool nor the
+    /// classifier reads — so it was a call with no action at all, and it
+    /// reached the per-call verdict through the unknown-slug fallback instead.
     fn gated_tool_call() -> crate::ports::types::Effect {
         crate::ports::types::Effect {
             kind: "composio_execute".into(),
@@ -3682,7 +3723,7 @@ mod test {
             amount_usd: None,
             established_thread: false,
             first_time_counterparty: false,
-            payload: serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" }),
+            payload: crate::policy::test_support::composio_send_args(),
             agent: Some("ceo".into()),
             run_id: None,
         }
@@ -3690,11 +3731,11 @@ mod test {
 
     /// A tool call an operator MAY grant a standing permission for (issue
     /// #431), which `gated_tool_call` deliberately is not: its Composio payload
-    /// names no action slug, so `consequence_of` cannot classify it as a read
-    /// and it stays a per-call decision. `file_write` is declared grantable in
-    /// `src/policy/consequence.rs` and carries an agent, so it satisfies both
-    /// halves of `check_broadly_grantable` — it mutates, but only the agent's
-    /// own sandboxed workspace.
+    /// names an action the catalogue tags `Write`, so `consequence_of` reads it
+    /// as a send and it stays a per-call decision. `file_write` is declared
+    /// grantable in `src/policy/consequence.rs` and carries an agent, so it
+    /// satisfies both halves of `check_broadly_grantable` — it mutates, but
+    /// only the agent's own sandboxed workspace.
     fn grantable_tool_call() -> crate::ports::types::Effect {
         crate::ports::types::Effect {
             kind: "file_write".into(),
@@ -4887,6 +4928,41 @@ mod test {
         );
     }
 
+    /// Issue #382: the per-node START bracket reaches the console too. Without
+    /// its own arm it would fall to `project_event`'s `_ => return None` wildcard
+    /// and be silently dropped — the exact trap this file has been bitten by
+    /// three times — and the canvas would be back to guessing which node runs.
+    /// It carries the ids and NOTHING else: no status or duration (the node has
+    /// not run) and no input, so the frame is structural by construction.
+    #[test]
+    fn projects_the_per_node_started_bracket() {
+        let node = super::project_event(&stored(CompanyEvent::WorkflowNodeStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            node_id: "ceo".into(),
+        }))
+        .expect("workflow_node_started reaches the console");
+        assert_eq!(node["type"], "workflow_node_started");
+        assert_eq!(node["workflowId"], "digest");
+        assert_eq!(node["runId"], "run-1");
+        assert_eq!(node["nodeId"], "ceo");
+
+        // Structural-only: ids plus the envelope, and no status/duration/payload
+        // slot the finish frame has. Regresses only by widening the event.
+        let mut keys: Vec<&str> = node
+            .as_object()
+            .expect("object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            ["atMillis", "nodeId", "runId", "seq", "type", "workflowId"],
+            "the started frame carries only structural ids: {node}"
+        );
+    }
+
     /// Issue #371 also starts projecting the run id on the settle-frame — the
     /// key that lets the console clear the right canvas when two runs overlap.
     /// Still omitted for a pre-#371 row, so no permanently-null key appears.
@@ -5296,9 +5372,16 @@ mod test {
             for event in &req.events {
                 match event {
                     CompanyEvent::OperatorMessage { .. } => {
+                        // Deliberately uncatalogued slugs (issue #470): this
+                        // brain exists to park a *number* of distinct calls and
+                        // is indifferent to how any of them classify. They
+                        // still land under the real action key, so each reaches
+                        // the catalogue lookup and misses it, rather than
+                        // carrying no action for the classifier to find.
                         for i in 0..self.parks {
                             let mut effect = gated_tool_call();
-                            effect.payload = serde_json::json!({ "tool_slug": format!("T{i}") });
+                            effect.payload =
+                                crate::policy::test_support::composio_unclassified_args_numbered(i);
                             host.park_effect(effect).await?;
                         }
                     }

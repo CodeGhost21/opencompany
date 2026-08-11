@@ -278,6 +278,7 @@ async fn harness(
         // this fixture installs no skills at all, so an empty library is the
         // whole truth here and leaves the search path under test untouched.
         skills_registry: std::sync::Arc::from([]),
+        default_mcp_servers: Vec::new(),
         mcp_servers: Vec::new(),
         facts: None,
         events: None,
@@ -286,6 +287,8 @@ async fn harness(
         mcp_failures: McpFailureQueue::default(),
         pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
         workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+        run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+        run_output_store: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

@@ -1491,7 +1491,7 @@ impl HarnessBrain {
                     let mut found = on_card.remove(index);
                     prior_node = found.workspace_node_id().map(str::to_string);
                     version = found.push_version(
-                        &pending.body,
+                        pending.payload.artifact_body(),
                         ArtifactAuthor::Agent,
                         author,
                         at,
@@ -1511,7 +1511,7 @@ impl HarnessBrain {
                         &card.id,
                         &pending.title,
                         pending.kind,
-                        &pending.body,
+                        pending.payload.artifact_body(),
                         author,
                         at,
                     )
@@ -1571,7 +1571,14 @@ impl HarnessBrain {
                     agent_id: author,
                     task_id: &card.id,
                     source: &pending.source,
-                    body: &pending.body,
+                    payload: match &pending.payload {
+                        crate::harness::publish::PublishPayload::Text(text) => {
+                            artifact_mirror::MirrorPayload::Text(text)
+                        }
+                        crate::harness::publish::PublishPayload::Bytes { bytes, mime } => {
+                            artifact_mirror::MirrorPayload::Bytes { bytes, mime }
+                        }
+                    },
                     existing_node_id: prior_node.as_deref(),
                 };
                 match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
@@ -1785,6 +1792,8 @@ impl HarnessBrain {
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
         // card that exists. If the artifact writes then fail, the failure
@@ -1956,12 +1965,26 @@ impl HarnessBrain {
     /// already-computed operator reply along with it. That is precisely the
     /// silent-disappearance failure this issue exists to fix, so each failure is
     /// logged at `error` and the drain continues.
-    async fn park_approval_requests(&self, host: &dyn CycleHost) -> Result<()> {
-        for request in self
-            .deps
-            .approval_requests
-            .drain(crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN)
-        {
+    async fn park_approval_requests(&self, host: &dyn CycleHost) -> Result<Option<String>> {
+        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        let drained = self.deps.approval_requests.drain(cap);
+
+        // Issue #561: the overflow used to end here, silently. The queue entries
+        // are already gone and the turn is over, so a log line is the only trace
+        // — and a log line is not something an operator reads. Kept loud for the
+        // operator's sake *and* returned, so the cycle can say it out loud.
+        if drained.discarded > 0 {
+            log::warn!(
+                "[harness::brain] {} gated tool call(s) past the per-turn cap of {cap} were \
+                 discarded and will not reach the operator",
+                drained.discarded
+            );
+        }
+
+        // No `cap` argument: the drain carries the one it was taken against, so
+        // the sentence cannot name a limit this turn was not held to.
+        let notice = drained.overflow_notice();
+        for request in drained.requests {
             match host.park_effect(request.effect).await {
                 Ok(approval_id) => log::info!(
                     "[harness::brain] parked '{}' for operator approval (id={approval_id}): {}",
@@ -1977,7 +2000,7 @@ impl HarnessBrain {
                 ),
             }
         }
-        Ok(())
+        Ok(notice)
     }
 
     /// Executes one drained delegation from the orchestrator's turn.
@@ -2294,7 +2317,23 @@ impl Brain for HarnessBrain {
         // Issue #172: every approval-gated tool call this cycle's turns hit is
         // parked on the host's gate now, so it shows up on the operator's
         // Approvals page instead of only being narrated away in chat.
-        self.park_approval_requests(host).await?;
+        //
+        // Issue #561: and if the turn gated more calls than one turn may raise,
+        // the operator is told so here rather than discovering it as silence.
+        // Pushed as its own bubble instead of appended to the reply above,
+        // because the reply is the agent's answer and this is the system saying
+        // the agent was cut off — and because a turn whose only outcome was
+        // overflow has no reply to append to.
+        if let Some(notice) = self.park_approval_requests(host).await? {
+            channel_responses.push(OutboundMessage {
+                message_id: None,
+                task_id: None,
+                channel: "operator".to_string(),
+                text: notice,
+                steps: Vec::new(),
+                reply_to: None,
+            });
+        }
 
         // The runtime requires at least one channel response per cycle.
         if channel_responses.is_empty() {
@@ -2464,6 +2503,7 @@ description = "Runs Acme."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2472,6 +2512,8 @@ description = "Runs Acme."
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2620,6 +2662,7 @@ description = "Builds it."
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2628,6 +2671,8 @@ description = "Builds it."
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2727,6 +2772,7 @@ members = ["engineer"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -2735,6 +2781,8 @@ members = ["engineer"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2828,7 +2876,7 @@ members = ["engineer"]
             title: "Launch spec".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         }
     }
 
@@ -3083,7 +3131,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "the spec body".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "the spec body".to_string(),
+                    ),
                 }],
                 Some("run-1"),
             )
@@ -3139,7 +3189,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "what maya produced".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "what maya produced".to_string(),
+                    ),
                 }],
                 None,
             )
@@ -3188,7 +3240,7 @@ members = ["engineer"]
             title: "Launch spec".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         brain
@@ -3259,7 +3311,7 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "body".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("body".to_string()),
                 }],
                 None,
             )
@@ -3309,6 +3361,9 @@ members = ["engineer"]
                 updated_at_millis: now_millis(),
                 created_by: WorkspaceOrigin::Operator,
                 updated_by: WorkspaceOrigin::Operator,
+                mime: None,
+                size: None,
+                sha256: None,
             },
             Some("an operator's note, in the way"),
         )
@@ -3325,7 +3380,9 @@ members = ["engineer"]
                     title: "Launch spec".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "the deliverable".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text(
+                        "the deliverable".to_string(),
+                    ),
                 }],
                 None,
             )
@@ -3356,6 +3413,8 @@ members = ["engineer"]
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         }
     }
 
@@ -3624,7 +3683,7 @@ members = ["engineer"]
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         // Run 1 publishes both files.
@@ -3734,7 +3793,7 @@ members = ["engineer"]
             title: "spec.md".to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: body.to_string(),
+            payload: crate::harness::publish::PublishPayload::Text(body.to_string()),
         };
 
         brain
@@ -3796,7 +3855,7 @@ members = ["engineer"]
                     title: "spec.md".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Spec".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Spec".to_string()),
                 }],
                 None,
             )
@@ -3839,7 +3898,7 @@ members = ["engineer"]
                     title: "Q3 board memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3896,7 +3955,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3927,7 +3986,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
             )
             .await
@@ -3969,7 +4028,7 @@ members = ["engineer"]
             title: source.to_string(),
             kind: crate::ports::artifacts::ArtifactKind::Markdown,
             note: None,
-            body: format!("# {source}"),
+            payload: crate::harness::publish::PublishPayload::Text(format!("# {source}")),
         };
 
         brain
@@ -4026,7 +4085,7 @@ members = ["engineer"]
                     title: "Memo".to_string(),
                     kind: crate::ports::artifacts::ArtifactKind::Markdown,
                     note: None,
-                    body: "# Memo".to_string(),
+                    payload: crate::harness::publish::PublishPayload::Text("# Memo".to_string()),
                 }],
                 None,
             )
@@ -4605,6 +4664,7 @@ members = ["engineer"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -4613,6 +4673,8 @@ members = ["engineer"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5355,6 +5417,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: Some(events.clone()),
@@ -5363,6 +5426,8 @@ members = ["eng1", "eng2"]
             mcp_failures: failures.clone(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5487,6 +5552,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: Some(log.clone()),
@@ -5495,6 +5561,8 @@ members = ["eng1", "eng2"]
             mcp_failures: failures.clone(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5565,6 +5633,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -5573,6 +5642,8 @@ members = ["eng1", "eng2"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: requests,
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5620,7 +5691,7 @@ members = ["eng1", "eng2"]
             None,
         )
         .with_requests(requests.clone());
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL" });
+        let args = crate::policy::test_support::composio_send_args();
         let request = ToolPolicyRequest::new(
             "composio_execute",
             args.clone(),
@@ -5683,6 +5754,99 @@ members = ["eng1", "eng2"]
             .await
             .expect("second drain");
         assert_eq!(host.parked().len(), 1, "parked once, not twice");
+    }
+
+    /// Issue #561: a turn that gates more calls than one turn may raise tells
+    /// the operator so, with the count.
+    ///
+    /// The cap itself is not the bug and is not touched here. The bug is that
+    /// exceeding it was **silent**: the operator saw eight cards and had no way
+    /// to learn that five more gated calls had happened, been refused, and been
+    /// dropped. Eight cards and no notice is indistinguishable from "eight is
+    /// all there was".
+    #[tokio::test]
+    async fn a_turn_that_overflows_the_cap_tells_the_operator_how_many_were_dropped() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
+
+        let cap = crate::harness::policy::MAX_APPROVAL_REQUESTS_PER_TURN;
+        let over = 5;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        for i in 0..(cap + over) {
+            requests.push(ApprovalRequest {
+                tool: "composio_execute".to_string(),
+                reason: "supervised".to_string(),
+                effect: Effect {
+                    kind: "composio_execute".to_string(),
+                    group: EffectGroup::Send,
+                    amount_usd: None,
+                    established_thread: false,
+                    first_time_counterparty: false,
+                    // Distinct payloads, or `push` would dedupe them and the
+                    // queue would never reach the cap in the first place.
+                    payload: crate::policy::test_support::composio_unclassified_args_numbered(i),
+                    agent: None,
+                    run_id: None,
+                },
+            });
+        }
+
+        let host = ParkingHost::default();
+        let notice = brain
+            .park_approval_requests(&host)
+            .await
+            .expect("drain")
+            .expect("an overflowing turn has something to tell the operator");
+
+        assert_eq!(host.parked().len(), cap, "the cap still holds");
+        assert!(
+            notice.contains(&over.to_string()),
+            "the operator is told HOW MANY were dropped, not just that some were: {notice}"
+        );
+        assert!(
+            notice.contains(&cap.to_string()),
+            "…and what the limit was, so the number means something: {notice}"
+        );
+    }
+
+    /// The ordinary turn stays quiet. A notice on every cycle would train the
+    /// operator to scroll past the one that matters.
+    #[tokio::test]
+    async fn a_turn_within_the_cap_raises_no_notice() {
+        use crate::harness::policy::{ApprovalRequest, ApprovalRequestQueue};
+        use crate::ports::types::EffectGroup;
+
+        let dir = tempfile::tempdir().unwrap();
+        let requests = ApprovalRequestQueue::default();
+        let brain = brain_with_approval_queue(dir.path(), requests.clone());
+        requests.push(ApprovalRequest {
+            tool: "composio_execute".to_string(),
+            reason: "supervised".to_string(),
+            effect: Effect {
+                kind: "composio_execute".to_string(),
+                group: EffectGroup::Send,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: crate::policy::test_support::composio_send_args(),
+                agent: None,
+                run_id: None,
+            },
+        });
+
+        let host = ParkingHost::default();
+        assert!(
+            brain
+                .park_approval_requests(&host)
+                .await
+                .expect("drain")
+                .is_none(),
+            "one request, a cap of 8: nothing was dropped and nothing is said"
+        );
+        assert_eq!(host.parked().len(), 1, "and the request itself still parks");
     }
 
     /// A host that fails to park the *first* effect it is handed, then behaves.
@@ -5790,6 +5954,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: Some(events),
@@ -5798,6 +5963,8 @@ members = ["eng1", "eng2"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: requests,
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5856,7 +6023,14 @@ members = ["eng1", "eng2"]
         let log: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
         let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        let args = serde_json::json!({ "tool_slug": "GMAIL_SEND_EMAIL", "to": "a@b.test" });
+        // Issue #470: a real catalogued send, with the action's own parameters
+        // under `arguments` where the tool's schema puts them — so the
+        // re-dispatch path this test covers carries a call the classifier can
+        // actually read.
+        let args = crate::policy::test_support::composio_args_with(
+            crate::policy::test_support::COMPOSIO_SEND_SLUG,
+            serde_json::json!({ "to": "a@b.test" }),
+        );
         requests
             .grants()
             .grant(crate::runtime::grants::GrantedCall {
@@ -6142,6 +6316,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -6150,6 +6325,8 @@ members = ["eng1", "eng2"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: requests,
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -6181,6 +6358,8 @@ members = ["eng1", "eng2"]
             parent_task_id: None,
             output: None,
             plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
         }
     }
 
@@ -6447,6 +6626,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -6455,6 +6635,8 @@ members = ["eng1", "eng2"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -6771,6 +6953,7 @@ members = ["eng1", "eng2"]
             skills: None,
             skills_source_dir: None,
             skills_registry: std::sync::Arc::from([]),
+            default_mcp_servers: Vec::new(),
             mcp_servers: Vec::new(),
             facts: None,
             events: None,
@@ -6780,6 +6963,8 @@ members = ["eng1", "eng2"]
             mcp_failures: crate::harness::mcp_probe::McpFailureQueue::default(),
             pending_publishes: crate::harness::publish::PendingPublishQueue::default(),
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
+            run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
+            run_output_store: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

@@ -41,9 +41,18 @@ pub const INFERENCE_TIERS: &[&str] = &["chat-v1", "reasoning-v1", "agentic-v1", 
 /// Tool providers selectable in `[tools].provider`.
 pub const TOOL_PROVIDERS: &[&str] = &["openhuman", "builtin"];
 
-/// Approval policy modes selectable in `[policy].mode`, mirroring OpenHuman's
-/// security tiers.
-pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "full"];
+/// Approval policy modes selectable in `[policy].mode`, in increasing order of
+/// autonomy.
+///
+/// `readonly` / `supervised` / `full` take their names from OpenHuman's own
+/// security tiers; `auto` (issue #560) is opencompany's, and sits between
+/// "ask before every change" and "ask before almost nothing".
+///
+/// This list is the manifest validator's, so it is the gate that decides whether
+/// a mode is *reachable* at all — `PolicyMode::parse` never sees a string this
+/// rejects. The two are kept in step by `every_policy_mode_parses_to_its_own_
+/// variant` in `harness::policy`.
+pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 
 /// Channels the runtime knows how to enable under `[channels.*]`.
 pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
@@ -565,7 +574,12 @@ fn default_tool_provider() -> String {
 /// `[policy]` — the default `ApprovalGate` configuration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Policy {
-    /// `readonly` | `supervised` (default) | `full`.
+    /// `readonly` | `supervised` (default) | `auto` | `full`.
+    ///
+    /// The default stays `supervised` deliberately: issue #560 argues `auto`
+    /// should become it, but flipping it changes behaviour for every existing
+    /// company with no `[policy]` block on its next load, so that is its own
+    /// decision rather than a rider on adding the tier.
     #[serde(default = "default_policy_mode")]
     pub mode: String,
     /// Effect kinds that always park for approval regardless of amount.

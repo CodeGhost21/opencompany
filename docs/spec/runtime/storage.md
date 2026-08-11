@@ -39,6 +39,12 @@ MongoDB settings:
 - `OPENCOMPANY_TENANT_ID` — tenant identity for **shared-single-DB** mode
   (default unset). See [Shared single database](#shared-single-database-mode).
 
+## The root itself
+
+How the data root is resolved, why only one process may write it, and what
+`instance-id` is: [`data-root.md`](data-root.md). This file describes the layout
+*inside* the root.
+
 ## Workspace layout (`src/store/layout.rs`)
 
 `OPENCOMPANY_DATA_DIR` (default `$HOME/.opencompany`; `/data` in a hosted tenant
@@ -258,21 +264,9 @@ the variable fails loudly rather than half-placing a store.
 
 #### Running two hosts side by side
 
-Because a bundle store is shared by every process that resolves the same root,
-two `serve` processes on different ports with no isolation write to one another's
-companies — teammates and desks created on one appear on the other. Give each its
-own root:
-
-```sh
-OPENCOMPANY_DATA_DIR=/tmp/oc-a opencompany serve \
-  --company companies/e2e_harness --bind 127.0.0.1:8095 &
-OPENCOMPANY_DATA_DIR=/tmp/oc-b opencompany serve \
-  --company companies/e2e_harness --bind 127.0.0.1:8096 &
-```
-
-`--home /tmp/oc-a` places the bundles the same way and takes precedence, but it
-does **not** move the shared workspace — prefer the variable for side-by-side
-hosts.
+A data root has exactly one writer, enforced by an advisory lock — a second
+`serve` over the same root is refused at boot. Give each host its own root; see
+[`data-root.md`](data-root.md) for the recipe and the rules.
 
 The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle:
 
@@ -281,14 +275,46 @@ The `[workspace]` section of `config.toml` (in the data dir) tunes the lifecycle
 clear_tmp_on_startup = true   # default; set false to preserve tmp/ across restarts
 storage_quota_gb = 5          # soft whole-workspace quota; omit or <= 0 = unlimited
 tmp_quota_gb = 1              # soft tmp/ quota; omit or <= 0 = unlimited
+tree_quota_gb = 2             # HARD cap on the note tree's binary payloads (#553)
+max_blob_mb = 64              # HARD cap on ONE binary write (default 64)
 ```
 
-**Quotas are soft/advisory in the binary.** At boot `serve` measures the
-workspace (and `tmp/`) and emits an operator-visible `tracing::warn` when either
-exceeds its configured quota. **Hard enforcement** — blocking writes at the
-limit — is the container/StorageClass layer's job (an EFS access point cap or a
-k8s `ResourceQuota`), which is where the deploy manifests wire it; the binary
-surfaces the condition rather than intercepting every write.
+**The first two quotas are soft/advisory in the binary.** At boot `serve`
+measures the workspace (and `tmp/`) and emits an operator-visible
+`tracing::warn` when either exceeds its configured quota. **Hard enforcement**
+of a whole data directory is the container/StorageClass layer's job (an EFS
+access point cap or a k8s `ResourceQuota`), which is where the deploy manifests
+wire it; the binary surfaces the condition rather than intercepting every write.
+
+**`tree_quota_gb` and `max_blob_mb` are hard, and enforced at the store.** They
+can be, because since #553 the runtime knows the size of every payload it is
+asked to keep: `QuotaEnforcedWorkspace` wraps the workspace store at the single
+assembly site and refuses an over-limit binary write **before** anything is
+stored, so a refusal leaves no partial blob, no node and no orphan. Only
+payloads are counted — prose notes are not, because the threat model is media.
+Refusals answer 413 and name what was attempted alongside what is allowed; a
+write is never truncated to fit, because a truncated binary is a corrupt binary
+carrying a digest computed over bytes nobody has.
+
+`max_blob_mb` is the **per-write** cap and matters most on MongoDB. Before
+GridFS the 16 MB BSON document limit was an accidental brake on how much an
+agent could write; GridFS removes it by chunking, so the cap is what replaces
+it deliberately. It defaults to 64 MiB — an order of magnitude above a
+generated image or document, and above a short generated video, so no
+deliverable this feature exists to make durable is near it. It is also the
+upload route's request body limit, so an over-cap upload is rejected at the
+edge instead of being buffered and then refused.
+
+One decorator covers every writer: the console's REST surface, the agent
+workspace tools and the publish drain all hold the *same* `ops.workspace`
+handle, so there is one check rather than three that could drift.
+
+**There is deliberately no per-company running total by default.**
+`tree_quota_gb` is unset unless an operator sets it, so out of the box the
+exposure is N writes × `max_blob_mb`, bounded per write and not in aggregate.
+That is a considered trade — per-company accounting, eviction and an admin
+policy surface are a larger feature than this one — and it is stated here
+rather than left to be discovered.
 
 Large-file S3 offload remains a follow-up (needs an S3 client + credentials).
 

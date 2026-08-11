@@ -324,6 +324,9 @@ fn workspace_paths_render_and_terminate() {
         updated_at_millis: 0,
         created_by: WorkspaceOrigin::Operator,
         updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
     };
     let paths = workspace_paths(vec![
         node("1", "Standards", None, NodeKind::Folder),
@@ -741,6 +744,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         origin_chat_id: None,
         parent_task_id: None,
         plan: None,
+        deliverable: crate::ports::tasks::TaskDeliverable::Once,
+        workflow_proposal: None,
         // A card entering Planning has never run, so it has produced nothing
         // to link to (issue #339). Load-bearing rather than a default: the
         // re-plan test below starts from a card that HAS an output.

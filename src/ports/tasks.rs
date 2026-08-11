@@ -653,6 +653,102 @@ pub struct TaskOutputWorkflow {
     pub action: TaskOutputAction,
 }
 
+// ---------------------------------------------------------------------------
+// The plan → workflow bridge (issue #580)
+// ---------------------------------------------------------------------------
+
+/// Whether a card's In-Progress work produces a one-off result or a reusable
+/// workflow (issue #580).
+///
+/// # The operator chooses; nothing guesses
+///
+/// This is an **explicit** choice (decision D2a): there is no heuristic that
+/// reads a card and decides it "looks automatable". [`Once`](Self::Once) is the
+/// default and the historical behaviour — entering In Progress dispatches the
+/// card to its assignee exactly as every card did before #580.
+/// [`Workflow`](Self::Workflow) routes the card through the **builder pass**
+/// (`crate::harness::workflow_build`) instead, which proposes a graph that lands
+/// In Review for approval *before* the workflow exists (decision D2b).
+///
+/// Additive on the wire: [`serde(default)`] makes a card written before this
+/// field load as [`Once`](Self::Once), and the field is skipped on serialize
+/// when it is `once` (see [`is_once`](Self::is_once)), so a one-off card stays
+/// byte-identical to a pre-#580 card on all three backends.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TaskDeliverable {
+    /// Do the work once. The card dispatches to its assignee — the behaviour
+    /// every card had before #580.
+    #[default]
+    Once,
+    /// Build a reusable workflow. The card routes through the builder pass,
+    /// whose proposal lands In Review for approval before the graph is created.
+    Workflow,
+}
+
+impl TaskDeliverable {
+    /// The wire word, for a note line a person reads or a log.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Once => "once",
+            Self::Workflow => "workflow",
+        }
+    }
+
+    /// Whether this is the default one-off deliverable — the `skip_serializing_if`
+    /// predicate that keeps a card written before #580 byte-identical on the wire.
+    pub fn is_once(&self) -> bool {
+        matches!(self, Self::Once)
+    }
+}
+
+/// A workflow the builder pass proposed for a `workflow`-deliverable card,
+/// awaiting operator approval (issue #580).
+///
+/// # A proposal is not a saved workflow (review before creation)
+///
+/// The builder pass generates a graph, courtesy-validates that it *could* be
+/// created (shape, byte cap, roster) and stamps it here; the card then lands In
+/// Review. The graph **does not exist** in the workflow list yet — there is no
+/// disabled ghost draft (decision D2b). Only an explicit apply
+/// (`POST …/tasks/{id}/workflow-proposal/apply`) runs
+/// [`create_company_workflow`](crate::company::create_company_workflow), the one
+/// authoring path, under the company write lock — where #276's create-disarm
+/// independently lands any schedule-carrying graph switched off until a person
+/// arms it.
+///
+/// # `ops` is the stored authoring payload, and the host is its authority
+///
+/// [`ops`](Self::ops) holds the `{id, name, description, nodes, edges}` graph the
+/// apply route rebuilds a `RawWorkflow` from — the same shape `POST …/workflows`
+/// accepts. Storing the payload rather than a rendered graph keeps the host in
+/// charge: apply re-derives and re-validates from this, so a proposal cannot
+/// smuggle a graph past `create_company_workflow`'s checks. The builder bounds it
+/// to the same node/edge/byte caps `create_company_workflow` enforces, so a
+/// proposal that could never apply never reaches In Review.
+///
+/// Additive on the wire ([`serde(default)`] + skip-if-none), like
+/// [`TaskRecord::plan`] and [`TaskRecord::output`], so no stored board needs
+/// migrating on any backend.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskWorkflowProposal {
+    /// One line on what the proposed workflow does — what the review panel leads
+    /// with.
+    pub summary: String,
+    /// The `{id, name, description, nodes, edges}` authoring payload the apply
+    /// route rebuilds and re-validates the workflow from. Opaque here on the
+    /// port; the company layer (`crate::company`) owns its shape.
+    pub ops: serde_json::Value,
+    /// Epoch-millis the builder pass produced this proposal.
+    pub generated_at_millis: u64,
+    /// The attempt that built it (issues #339 / #242) — the run whose spend this
+    /// proposal accounts for, and the link stamped onto [`TaskOutput::run_id`]
+    /// when the proposal is applied. Mandatory: a proposal is always the product
+    /// of a metered build attempt, so it always has an attempt to point at.
+    pub run_id: String,
+}
+
 /// One card on the company's task board.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -735,6 +831,24 @@ pub struct TaskRecord {
     /// a structured field rather than an artifact or note prose.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plan: Option<TaskPlan>,
+    /// Whether this card produces a one-off result or a reusable workflow
+    /// (issue #580).
+    ///
+    /// Defaults to [`TaskDeliverable::Once`] — the behaviour every card had
+    /// before #580, and what a card written before this field loads as. Skipped
+    /// on the wire when `once`, so a one-off card stays byte-identical to a
+    /// pre-#580 card. The operator sets it explicitly; nothing infers it.
+    #[serde(default, skip_serializing_if = "TaskDeliverable::is_once")]
+    pub deliverable: TaskDeliverable,
+    /// The workflow the builder pass proposed for this card, awaiting approval
+    /// (issue #580).
+    ///
+    /// `None` until a `workflow`-deliverable card's builder pass succeeds and
+    /// stamps a proposal (the card is then In Review); cleared on reject and once
+    /// applied. Additive on the wire like [`Self::plan`] and [`Self::output`], so
+    /// no stored board needs migrating. See [`TaskWorkflowProposal`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_proposal: Option<TaskWorkflowProposal>,
 }
 
 /// Durable per-company task board. Company A's tasks MUST be invisible to
@@ -1149,6 +1263,8 @@ mod test {
             // #339's baseline fixture stays baseline: it exists to prove the
             // output stamp round-trips against a card carrying nothing else.
             plan: None,
+            deliverable: TaskDeliverable::Once,
+            workflow_proposal: None,
         }
     }
 
@@ -1245,5 +1361,81 @@ mod test {
         let back: TaskOutput = serde_json::from_str(&json).expect("round trip");
         assert_eq!(back.run_id, "run-9");
         assert_eq!(back.attempt, None);
+    }
+
+    // --- The plan → workflow bridge (issue #580) -----------------------------
+
+    /// The deliverable enum's wire words are pinned — `once`/`workflow` are the
+    /// values the REST boundary validates and the operator's toggle sends. A
+    /// rename here is a deliberate edit, not an accident.
+    #[test]
+    fn the_deliverable_wire_words_are_stable() {
+        assert_eq!(TaskDeliverable::default(), TaskDeliverable::Once);
+        assert_eq!(TaskDeliverable::Once.as_str(), "once");
+        assert_eq!(TaskDeliverable::Workflow.as_str(), "workflow");
+        assert!(TaskDeliverable::Once.is_once());
+        assert!(!TaskDeliverable::Workflow.is_once());
+        // Serde uses the same lowercase words the operator's payload carries.
+        assert_eq!(
+            serde_json::to_string(&TaskDeliverable::Workflow).unwrap(),
+            "\"workflow\""
+        );
+        let back: TaskDeliverable = serde_json::from_str("\"once\"").unwrap();
+        assert_eq!(back, TaskDeliverable::Once);
+    }
+
+    /// The whole additive-wire contract for #580: a card written before it loads
+    /// as a one-off with no proposal, a one-off card stays byte-identical to a
+    /// pre-#580 card (no `deliverable` key), and a workflow card with a proposal
+    /// round-trips intact. This is what makes "no migration on any backend" true.
+    #[test]
+    fn the_deliverable_and_proposal_fields_are_additive_on_the_wire() {
+        // A pre-#580 blob: no `deliverable`, no `workflowProposal`.
+        let legacy = r#"{
+            "id": "t-1",
+            "title": "Unbridged work",
+            "column": "todo",
+            "priority": "medium",
+            "assignee": "maya",
+            "updatedAtMillis": 7
+        }"#;
+        let card: TaskRecord = serde_json::from_str(legacy).expect("a pre-#580 card parses");
+        assert_eq!(card.deliverable, TaskDeliverable::Once);
+        assert!(card.workflow_proposal.is_none());
+
+        // A once card grows neither key — byte-identical to the pre-#580 shape.
+        let round_tripped = serde_json::to_string(&card).unwrap();
+        assert!(
+            !round_tripped.contains("deliverable"),
+            "a once card must not grow a deliverable key: {round_tripped}"
+        );
+        assert!(
+            !round_tripped.contains("workflowProposal"),
+            "an unproposed card must not grow a proposal key: {round_tripped}"
+        );
+
+        // A workflow card carrying a proposal round-trips whole.
+        let proposed = TaskRecord {
+            deliverable: TaskDeliverable::Workflow,
+            workflow_proposal: Some(TaskWorkflowProposal {
+                summary: "Email the weekly digest every Monday".to_string(),
+                ops: serde_json::json!({
+                    "id": "weekly-digest",
+                    "name": "Weekly digest",
+                    "nodes": [{ "id": "t", "kind": "trigger" }],
+                    "edges": []
+                }),
+                generated_at_millis: 99,
+                run_id: "run-7".to_string(),
+            }),
+            column: COLUMN_IN_REVIEW.to_string(),
+            ..card
+        };
+        let json = serde_json::to_string(&proposed).unwrap();
+        assert!(json.contains("\"deliverable\":\"workflow\""), "{json}");
+        assert!(json.contains("\"workflowProposal\":"), "{json}");
+        assert!(json.contains("\"runId\":\"run-7\""), "{json}");
+        let back: TaskRecord = serde_json::from_str(&json).expect("round trip");
+        assert_eq!(back, proposed);
     }
 }
