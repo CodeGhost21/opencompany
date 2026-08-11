@@ -19,10 +19,15 @@ import type { OpenCompanyClient } from "./client";
  * Where this company's Composio credential comes from.
  *
  * - `attested` — the instance's own platform identity; nothing is stored here.
- * - `static` — a token this company pasted, or a static instance key.
+ * - `company` — this company's **own** TinyHumans credential, set by its admin
+ *   (issue #586). The backend derives the Composio entity from it, so a company
+ *   with a key set connects providers as itself with no Composio token and no
+ *   per-tenant provider app. Rotating that one key moves every brokered surface
+ *   at once — see `api/credential.ts`.
+ * - `static` — a Composio token this company pasted, or a static instance key.
  * - `none` — no credential can be obtained, so agents get no Composio tools.
  */
-export type ComposioCredentialSource = "attested" | "static" | "none";
+export type ComposioCredentialSource = "attested" | "company" | "static" | "none";
 
 /**
  * One provider in the catalog the host offers, with the backend's own display

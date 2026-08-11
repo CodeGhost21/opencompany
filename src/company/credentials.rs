@@ -120,18 +120,24 @@ pub enum CredentialSource {
     /// The pod presents a platform-minted, audience-bound identity. Nothing is
     /// stored on this instance.
     Attested,
+    /// The **company's own** TinyHumans credential — the one key its admin set
+    /// on this tenant (issue #586). Distinct from [`Self::Static`]: this is the
+    /// company's platform identity, so every surface the backend brokers rides
+    /// it, and rotating it reaches all of them at once.
+    Company,
     /// A static key/token is configured — the docker-development path, or a
-    /// per-company token an operator pasted in.
+    /// per-provider token an operator pasted in as an escape hatch.
     Static,
     /// No credential can be obtained at all.
     None,
 }
 
 impl CredentialSource {
-    /// The stable wire spelling (`attested` / `static` / `none`).
+    /// The stable wire spelling (`attested` / `company` / `static` / `none`).
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Attested => "attested",
+            Self::Company => "company",
             Self::Static => "static",
             Self::None => "none",
         }
@@ -378,9 +384,15 @@ pub enum Credential {
     /// No credential — omit the bearer entirely (e.g. a keyless local Ollama).
     #[default]
     None,
-    /// A value held in memory: a per-company token an operator pasted into the
+    /// A value held in memory: a per-provider token an operator pasted into the
     /// secret store, or a BYOK key. A changed value is a changed identity.
     Value(String),
+    /// The **company's own** TinyHumans credential, read from its secret store
+    /// (issue #586). Behaves like [`Self::Value`] on the request path — it is a
+    /// held string, and a changed value is a changed identity — but reports
+    /// itself as [`CredentialSource::Company`] so the console can say *whose*
+    /// identity a brokered call presents rather than only that one exists.
+    Company(String),
     /// A platform token source. Read per request; the value it yields rotates
     /// while the identity behind it does not.
     Source(std::sync::Arc<TinyhumansTokenSource>),
@@ -394,6 +406,18 @@ impl Credential {
             Self::None
         } else {
             Self::Value(value)
+        }
+    }
+
+    /// The company's own TinyHumans credential, treating blank as "not
+    /// configured". The seam every brokered surface resolves through — see
+    /// [`company_key`](crate::company::company_key).
+    pub fn from_company_key(value: impl Into<String>) -> Self {
+        let value = value.into();
+        if value.trim().is_empty() {
+            Self::None
+        } else {
+            Self::Company(value)
         }
     }
 
@@ -413,6 +437,7 @@ impl Credential {
         match self {
             Self::None => CredentialSource::None,
             Self::Value(_) => CredentialSource::Static,
+            Self::Company(_) => CredentialSource::Company,
             Self::Source(source) => source.credential_source(),
         }
     }
@@ -423,7 +448,7 @@ impl Credential {
     pub async fn current(&self) -> Result<Option<String>> {
         let token = match self {
             Self::None => return Ok(None),
-            Self::Value(value) => value.clone(),
+            Self::Value(value) | Self::Company(value) => value.clone(),
             Self::Source(source) => source.current().await?,
         };
         let token = token.trim().to_string();
@@ -453,6 +478,15 @@ impl Credential {
                 2u8.hash(hasher);
                 source.hash_identity(hasher);
             }
+            // Hashed by **value**, like `Value`: the company key is a static
+            // credential its admin rotates deliberately, not one the cluster
+            // rotates on a timer, so a new value really is a new identity and
+            // the roster must rebuild. That is what makes a console rotation
+            // reach every brokered surface on the next cycle (issue #586).
+            Self::Company(value) => {
+                3u8.hash(hasher);
+                value.hash(hasher);
+            }
         }
     }
 }
@@ -462,6 +496,7 @@ impl std::fmt::Debug for Credential {
         match self {
             Self::None => f.write_str("Credential(<unset>)"),
             Self::Value(_) => f.write_str("Credential(<redacted>)"),
+            Self::Company(_) => f.write_str("Credential(company <redacted>)"),
             Self::Source(source) => write!(f, "Credential({})", source.describe()),
         }
     }

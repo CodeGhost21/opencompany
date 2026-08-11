@@ -9,6 +9,7 @@
 /// Always compiled — the console's workspace and artifact routes reach it in
 /// every build, and only the publish drain's half is behind `openhuman`.
 pub mod artifact_mirror;
+pub mod company_key;
 pub mod composio;
 #[cfg(test)]
 mod content_test;

@@ -723,11 +723,15 @@ export interface InboxMessageDto {
  * - `attested` — this instance carries a platform-minted identity, so
  *   connections are the platform's to run. Nothing to register here, and the
  *   console offers no local Connect.
+ * - `company` — this company's own TinyHumans credential (issue #586). Reported
+ *   by the Composio plane, which brokers through it. The native OAuth catalog
+ *   does **not** route through the company key today, so this value does not
+ *   appear on a native-only provider — see `api/credential.ts`.
  * - `static` — a token this company already stored, or this host's own
  *   registered provider application (the self-hosted hatch). Connect works.
  * - `none` — neither, so no Connect can succeed on this host.
  */
-export type ConnectionCredentialSource = "attested" | "static" | "none";
+export type ConnectionCredentialSource = "attested" | "company" | "static" | "none";
 
 /**
  * One third-party connection's state, from `GET .../connections`.

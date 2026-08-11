@@ -103,7 +103,11 @@ interface Props {
  *    - `attested` (hosted) — the instance already holds a platform identity, so
  *      there is nothing to paste and nothing stored here. A company that wants
  *      to use its OWN Composio account can still override.
- *    - `static` — a token this company pasted, or a static instance key.
+ *    - `company` (issue #586) — this company's own TinyHumans credential, set
+ *      by its admin. Composio is brokered through it, so there is nothing to
+ *      paste here either: the one key already authorizes this. The override
+ *      still exists for a company that wants its own Composio account.
+ *    - `static` — a Composio token this company pasted, or a static instance key.
  *    - `none` — no credential can be obtained, so there is nothing to authorize
  *      against and agents get no Composio tools.
  * 2. **Which providers are connected**, via a per-provider OAuth "Sign in" list
@@ -308,6 +312,10 @@ export function ComposioSection({ client, company, canManage }: Props) {
   if (load === "unavailable") return null;
 
   const attested = status?.credentialSource === "attested";
+  // The company's own key already authorizes Composio (issue #586), so this
+  // reads like `attested` everywhere the question is "is there anything to
+  // paste?" — the difference is whose identity it is, which the copy states.
+  const companyKey = status?.credentialSource === "company";
   const byoToken = status?.credentialSource === "static";
   // No credential of any tier: there is nothing to authorize a provider against.
   const noCredential = status?.credentialSource === "none";
@@ -323,7 +331,10 @@ export function ComposioSection({ client, company, canManage }: Props) {
   // status line above ("token set" / "linked via cluster identity"), which is
   // what tells them why their agents can reach Gmail; what they do not get is a
   // field that invites them to paste a credential the host will refuse.
-  const showTokenCard = canManage && (!attested || showOverride || byoToken);
+  // A company already brokered through its own key is in the same position as an
+  // attested one: the paste card is a deliberate override, not the way in.
+  const credentialed = attested || companyKey;
+  const showTokenCard = canManage && (!credentialed || showOverride || byoToken);
 
   return (
     <section className="space-y-3">
@@ -338,6 +349,8 @@ export function ComposioSection({ client, company, canManage }: Props) {
           ? "Your agents reach Gmail, Slack & GitHub through Composio. Which account they act through belongs to the company, so an admin manages it — this is what is wired today."
           : attested
           ? "Give your agents Gmail, Slack & GitHub via Composio. This company is linked through this instance's own cluster identity — there is no key to copy and nothing stored here. Sign in per provider below."
+          : companyKey
+          ? "Give your agents Gmail, Slack & GitHub via Composio. This company's own TinyHumans credential already authorizes it — there is no separate Composio token to paste and no provider app to register. Sign in per provider below; every agent in the company can then use what you connect."
           : "Give your agents Gmail, Slack & GitHub via Composio. Paste this company's Composio OAuth token — it is the identity the backend bills and isolates, stored securely and never shown again — then sign in per provider below. A change takes effect on the next turn, no restart."}
       </p>
 
@@ -353,6 +366,10 @@ export function ComposioSection({ client, company, canManage }: Props) {
               {attested ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
                   <ShieldCheck className="size-3" /> Linked via cluster identity — nothing stored
+                </span>
+              ) : companyKey ? (
+                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <ShieldCheck className="size-3" /> Linked via this company&apos;s own credential
                 </span>
               ) : byoToken ? (
                 <span className="inline-flex items-center gap-1 text-xs text-status-done-text">
@@ -378,8 +395,10 @@ export function ComposioSection({ client, company, canManage }: Props) {
                 <p className="text-xs font-medium text-muted-foreground">Sign in per provider</p>
                 {noCredential && (
                   <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
-                    No Composio credential is available for this company yet, so there is nothing to
-                    authorize against. Paste a token below first.
+                    No credential is available for this company yet, so there is nothing to
+                    authorize against. Set the company&apos;s TinyHumans credential — one key
+                    authorizes every provider the platform brokers — or paste a Composio token
+                    below to use a Composio account of your own.
                   </p>
                 )}
                 {degraded ? (

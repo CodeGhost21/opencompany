@@ -28,6 +28,7 @@ import { cn } from "@/lib/utils";
 import { armTourResume } from "@/tour/state";
 import { InferenceSection } from "@/views/connections/InferenceSection";
 import { McpServersSection } from "@/views/connections/McpServersSection";
+import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ChannelsSection } from "./connections/ChannelsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
@@ -55,6 +56,9 @@ export function ConnectionsView({ client, company }: Props) {
   const [load, setLoad] = useState<Load>("loading");
   const [states, setStates] = useState<Record<string, ConnectionState>>({});
   const [busy, setBusy] = useState<string | null>(null);
+  // Bumped when the company credential changes, to remount the sections whose
+  // reported tier is downstream of it (issue #586).
+  const [credentialGeneration, setCredentialGeneration] = useState(0);
   // Whether this viewer may change what the company connects through (issue
   // #403). A connection belongs to the company, so changing one is an admin's
   // call; reading the page is everyone's.
@@ -361,7 +365,26 @@ export function ConnectionsView({ client, company }: Props) {
 
         <InferenceSection client={client} company={company} canManage={canManage} />
 
-        <ComposioSection client={client} company={company} canManage={canManage} />
+        {/* The general answer sits above the Composio-specific one: this key
+            authorizes every brokered surface, and the Composio token below is
+            the escape hatch (issue #586). */}
+        <CompanyCredentialCard
+          client={client}
+          company={company}
+          canManage={canManage}
+          onChanged={() => setCredentialGeneration((n) => n + 1)}
+        />
+
+        {/* Remounted on a credential change so its status is re-read: the tier
+            it reports (`company` vs `attested` vs `none`) is downstream of the
+            key that was just set, and a stale badge would tell the operator
+            their change did not land. */}
+        <ComposioSection
+          key={credentialGeneration}
+          client={client}
+          company={company}
+          canManage={canManage}
+        />
 
         <ChannelsSection client={client} company={company} canManage={canManage} />
 

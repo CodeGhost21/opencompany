@@ -1,0 +1,187 @@
+import { useCallback, useEffect, useState } from "react";
+import { KeyRound, Loader2, Save, ShieldCheck, Trash2, Wallet } from "lucide-react";
+import { toast } from "sonner";
+
+import type { OpenCompanyClient } from "@/api/client";
+import {
+  getCompanyCredential,
+  setCompanyCredential,
+  type CompanyCredentialStatus,
+} from "@/api/credential";
+import { Button } from "@/components/ui/button";
+import { Card, CardContent } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Skeleton } from "@/components/ui/skeleton";
+
+interface Props {
+  client: OpenCompanyClient;
+  company: string | null;
+  /**
+   * Whether the signed-in operator may change the company's credential. Admins
+   * only (issue #403's discipline): this key is the identity every one of the
+   * company's agents presents, and it is the company's wallet. A member still
+   * sees the status — that is what tells them why their agents can reach Gmail
+   * — but not a field inviting them to paste a credential the host will refuse.
+   */
+  canManage: boolean;
+  /** Called after a successful write, so sibling sections re-read their status. */
+  onChanged?: () => void;
+}
+
+/**
+ * The company's own TinyHumans credential (issue #586).
+ *
+ * One key, set once by the admin, and every surface the platform brokers rides
+ * it — Composio today, whatever the backend fronts next. This is what replaces
+ * per-tenant provider apps and per-surface tokens: a company with a key set can
+ * connect a provider without registering anything, and a provider connected
+ * that way belongs to the company rather than to the member who connected it.
+ *
+ * Sits **above** the Composio section deliberately. It is the general answer;
+ * the Composio token below it is the escape hatch for a company that insists on
+ * its own Composio account.
+ *
+ * Write-only: the key is sent and never returned, so the field is always empty
+ * on load and "set" is reported by a flag, never by a masked value we would have
+ * had to receive.
+ */
+export function CompanyCredentialCard({ client, company, canManage, onChanged }: Props) {
+  const [load, setLoad] = useState<"loading" | "ready" | "unavailable">("loading");
+  const [status, setStatus] = useState<CompanyCredentialStatus | null>(null);
+  const [key, setKey] = useState("");
+  const [busy, setBusy] = useState<"save" | "clear" | null>(null);
+
+  const refresh = useCallback(async () => {
+    try {
+      setStatus(await getCompanyCredential(client, company));
+      setLoad("ready");
+    } catch {
+      // A host predating this route simply 404s. Render nothing rather than an
+      // error: the console still works, this company just has no such plane.
+      setLoad("unavailable");
+    }
+  }, [client, company]);
+
+  useEffect(() => {
+    setLoad("loading");
+    setKey("");
+    void refresh();
+  }, [refresh]);
+
+  async function write(value: string, mode: "save" | "clear") {
+    setBusy(mode);
+    try {
+      const result = await setCompanyCredential(client, company, value);
+      setStatus(result.status);
+      setKey("");
+      toast.success(mode === "save" ? "Credential saved." : "Credential cleared.", {
+        description: result.note,
+      });
+      onChanged?.();
+    } catch {
+      toast.error(
+        mode === "save" ? "Couldn't save the credential." : "Couldn't clear the credential.",
+      );
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  if (load === "unavailable") return null;
+
+  const configured = status?.configured === true;
+  // No company key, but the instance carries an identity of its own — calls
+  // still work, they are just attributed to the instance rather than to this
+  // company. Worth saying, because "not configured" alone reads as broken.
+  const instanceFallback =
+    !configured && (status?.source === "attested" || status?.source === "static");
+
+  return (
+    <section className="space-y-3">
+      <div className="flex items-center gap-2">
+        <Wallet className="size-4 text-muted-foreground" />
+        <h3 className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          Company credential
+        </h3>
+      </div>
+
+      {load === "loading" ? (
+        <Skeleton className="h-32 rounded-xl" />
+      ) : (
+        <Card>
+          <CardContent className="space-y-4 py-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {configured ? (
+                <span className="inline-flex items-center gap-1 text-xs text-emerald-600 dark:text-emerald-400">
+                  <ShieldCheck className="size-3" /> Set — providers connect as this company
+                </span>
+              ) : instanceFallback ? (
+                <span className="text-xs text-muted-foreground">
+                  Not set — using this instance&apos;s identity
+                </span>
+              ) : (
+                <span className="text-xs text-muted-foreground">Not set</span>
+              )}
+            </div>
+
+            {/* The host words the consequence, so the console cannot drift from
+                what the host actually does. */}
+            {status && (
+              <p className="rounded-md bg-muted/40 p-2 text-xs text-muted-foreground">
+                {status.notice}
+              </p>
+            )}
+
+            {canManage && (
+              <>
+                <div className="space-y-1">
+                  <Label htmlFor="company-credential" className="text-xs">
+                    TinyHumans API key {configured ? "— set (paste a new value to rotate)" : ""}
+                  </Label>
+                  <Input
+                    id="company-credential"
+                    type="password"
+                    autoComplete="off"
+                    placeholder="paste this company's TinyHumans API key"
+                    value={key}
+                    onChange={(e) => setKey(e.target.value)}
+                  />
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <Button
+                    disabled={busy !== null || !key.trim()}
+                    onClick={() => void write(key.trim(), "save")}
+                  >
+                    {busy === "save" ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <Save className="size-4" />
+                    )}
+                    {configured ? "Rotate key" : "Save key"}
+                  </Button>
+                  {configured && (
+                    <Button
+                      variant="outline"
+                      disabled={busy !== null}
+                      onClick={() => void write("", "clear")}
+                    >
+                      {busy === "clear" ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Trash2 className="size-4" />
+                      )}
+                      Clear
+                    </Button>
+                  )}
+                  <KeyRound className="ml-auto size-4 text-muted-foreground" />
+                </div>
+              </>
+            )}
+          </CardContent>
+        </Card>
+      )}
+    </section>
+  );
+}

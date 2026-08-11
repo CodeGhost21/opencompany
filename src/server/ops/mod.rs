@@ -18,6 +18,7 @@
 pub mod artifacts;
 pub mod capabilities;
 pub mod channels;
+pub mod company_key;
 pub mod composio;
 pub mod composio_toolkits;
 pub mod connections_read;
@@ -153,6 +154,7 @@ pub fn router() -> Router<AppState> {
         .merge(capabilities::router())
         .merge(connections_read::router())
         .merge(channels::router())
+        .merge(company_key::router())
         .merge(composio::router())
         .merge(domain::router())
         .merge(finances::router())
