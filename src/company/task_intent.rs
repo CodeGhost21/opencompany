@@ -1,19 +1,50 @@
-//! Detect an **actionable request** in an operator chat message, so the chat
-//! handler can deterministically open a dashboard task card for it.
+//! Triage an operator chat message **before** anything is written to the board:
+//! is this a question to answer, work to track, or neither?
 //!
-//! OpenCompany's chat can already produce task cards — but only when the
-//! orchestrator model chooses to call its `spawn_task` tool, and the
-//! orchestrator brief biases toward just replying, so a "do this" ask often
-//! leaves no visible work item. This module adds the deterministic half: when an
-//! operator message is an actionable request ("build the landing page",
-//! "can you set up the newsletter"), [`detect_task_intent`] returns a cleaned
-//! task title and the handler opens a `todo` card. The model's `spawn_task`
-//! stays available for sub-tasks it wants to open on top.
+//! # Two doors, not one (issue #267)
 //!
-//! Conservative and cheap by design (no model call): it fires on imperative
-//! requests and request-framed action asks, and stays silent on pure questions
-//! ("what's our revenue?"), greetings/acknowledgements ("hi", "thanks"), and
-//! neutral chatter — so the board fills with work, not small talk.
+//! Cards reach the board through two independent paths, and a fix on one leaves
+//! the other open:
+//!
+//! 1. **Deterministic** — the REST chat handler runs [`triage_message`] over the
+//!    operator's words and opens a `todo` card on [`MessageTriage::Track`]. This
+//!    is the path that produced five of the six dead `backlog` cards observed on
+//!    a live company ("Call the composio_authorize tool …", four × "Create a
+//!    workflow …"), because every one of them leads with an action verb.
+//! 2. **The model's own** — the orchestrator calls `spawn_task` /
+//!    `delegate_to_desk` / `assign_task` / `review_task`. That is where the
+//!    sixth card came from ("Tell what is there in the tasks list" — no action
+//!    verb, no request frame, so this module never saw it as work).
+//!
+//! [`triage_message`] is **Layer A**: it lives in the REST chat handler, is
+//! compiled into every build, and fronts both cognition brains. Its answer is
+//! also what the harness delegation seam uses to gate door 2 (Layer B) — an
+//! [`MessageTriage::Answer`] turn does not claim the delegation queue, so the
+//! model's board-writing tools refuse in its own turn.
+//!
+//! # Positive triage, and a deliberate lean toward answering
+//!
+//! The classification is a **three-way** decision rather than a card/no-card
+//! boolean, because "not work" and "a question about state" need different
+//! treatment: only the latter may gate the model's board tools, and gating
+//! small talk would be both pointless and risky.
+//!
+//! Tie-breakers lean toward [`MessageTriage::Answer`] and, when even that is
+//! not clear, toward [`MessageTriage::Chatter`] — which neither cards nor
+//! gates, and is the safe middle state. Straight from the issue: *a missed card
+//! costs one follow-up message, a spurious card pollutes the board
+//! permanently.*
+//!
+//! Conservative and cheap by design (**no model call**): it fires `Track` on
+//! imperative requests and request-framed action asks, `Answer` on
+//! interrogatives and read requests ("what's our revenue?", "show me the
+//! board"), and `Chatter` on greetings, acknowledgements and everything
+//! ambiguous.
+//!
+//! [`detect_task_intent`] remains as the thin `Track`-only wrapper the card
+//! paths call, so the issue-#463 title contract with
+//! `DelegationRunner::chat_handler_card` — which has to derive byte-for-byte
+//! the same title the handler wrote — is untouched.
 
 /// Bare greeting / acknowledgement messages that must never open a card, matched
 /// against the whole message (punctuation stripped). Kept short and exact so a
@@ -63,6 +94,13 @@ const GREETINGS: &[&str] = &[
 
 /// Single-word imperative action verbs. A message whose first word is one of
 /// these is an instruction to act.
+///
+/// `list` used to be here and was removed for issue #267: a bare "list X" is a
+/// **read**, not work — "list the tasks" is answered by one `query_company`
+/// call and must never mint a card. It now leads [`READ_VERBS`] instead. The
+/// removal also narrows [`contains_action`], which is what makes "can you list
+/// the tasks?" an [`MessageTriage::Answer`] rather than a request frame around
+/// an action verb.
 const ACTION_VERBS: &[&str] = &[
     "build",
     "create",
@@ -112,7 +150,6 @@ const ACTION_VERBS: &[&str] = &[
     "upload",
     "summarize",
     "summarise",
-    "list",
     "track",
     "monitor",
     "investigate",
@@ -213,32 +250,124 @@ const LEAD_INS: &[&str] = &[
     "actually ",
 ];
 
+/// Lead words that open a question about the company's state. A message
+/// starting with one of these wants an answer, not a card (issue #267).
+///
+/// Deliberately excludes the auxiliaries that double as imperatives — `do`,
+/// `have`, `can`, `could`, `should`, `will` — because "do the newsletter" and
+/// "have the team look at it" are asks, not questions. The ones they *do* open
+/// as questions ("can you tell me the numbers?", "should we ship?") end in a
+/// `?` and are caught by the trailing-`?` rule below instead.
+const INTERROGATIVE_LEADS: &[&str] = &[
+    "what", "what's", "whats", "who", "who's", "whos", "whose", "when", "where", "why", "which",
+    "how", "how's", "hows", "is", "are", "was", "were", "anyone", "anybody", "anything",
+];
+
+/// Lead verbs that ask to be **told** something rather than to have something
+/// done. "Tell what is there in the tasks list" — the sixth dead card from
+/// issue #267 — opens with one of these.
+const READ_VERBS: &[&str] = &[
+    "tell", "show", "explain", "describe", "list", "recap", "clarify", "compare",
+];
+
+/// Multi-word read requests (checked as a prefix + word boundary).
+const READ_PHRASES: &[&str] = &["give me", "walk me through", "let me know", "remind me"];
+
 /// Max length of a generated task title.
 const TITLE_MAX: usize = 80;
 
-/// Returns a cleaned task title when `text` is an actionable request, else
-/// `None`. See the module docs for the intent.
-pub fn detect_task_intent(text: &str) -> Option<String> {
+/// What an operator chat message is, decided before anything reaches the board
+/// (issue #267).
+///
+/// Three states rather than two: `Chatter` is not "a weaker `Answer`" — it is
+/// the state in which the runtime asserts *nothing*, so it neither opens a card
+/// nor takes the model's board tools away.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MessageTriage {
+    /// A question about state, or a request to be told something. Answer it
+    /// from the read path; **no board write**, by either door.
+    Answer,
+    /// Real work. Opens a `todo` card under the carried title.
+    Track(String),
+    /// Neither — greetings, acknowledgements, and everything too ambiguous to
+    /// call. Cards nothing and gates nothing.
+    Chatter,
+}
+
+impl MessageTriage {
+    /// Whether this is [`MessageTriage::Answer`] — the one class that gates the
+    /// model's board-writing tools (issue #267, Layer B).
+    pub fn is_answer(&self) -> bool {
+        matches!(self, Self::Answer)
+    }
+
+    /// The task title when this is [`MessageTriage::Track`], else `None`.
+    pub fn title(&self) -> Option<&str> {
+        match self {
+            Self::Track(title) => Some(title),
+            _ => None,
+        }
+    }
+}
+
+/// Classifies an operator chat message as [`Answer`](MessageTriage::Answer),
+/// [`Track`](MessageTriage::Track) or [`Chatter`](MessageTriage::Chatter).
+///
+/// # The order is the design
+///
+/// 1. **Empty** → `Chatter`. Nothing was said.
+/// 2. **A bare greeting / acknowledgement** → `Chatter`.
+/// 3. **A request frame around an action verb** → `Track`. Checked *before* any
+///    question test on purpose: "can you build the landing page?" is work
+///    despite the `?`, and reading the `?` first would lose every politely
+///    phrased instruction an operator ever types.
+/// 4. **A question or read request** → `Answer`: an interrogative lead word, a
+///    [`READ_VERBS`] / [`READ_PHRASES`] lead, or a trailing `?` with no action
+///    verb anywhere.
+/// 5. **A leading imperative** → `Track`.
+/// 6. **Anything else** → `Chatter`, the safe middle.
+pub fn triage_message(text: &str) -> MessageTriage {
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return None;
+        return MessageTriage::Chatter;
     }
 
     let lower = trimmed.to_lowercase();
     // Whole-message greeting/ack check (strip trailing punctuation first).
     let bare = lower.trim_end_matches(['.', '!', '?', ' ']).trim();
     if GREETINGS.contains(&bare) {
-        return None;
+        return MessageTriage::Chatter;
     }
 
     // Strip leading filler ("ok now …", "and also …") so the ask underneath is
     // judged on its own.
     let core = strip_lead_ins(&lower);
-    if !is_actionable(core) {
-        return None;
-    }
 
-    Some(to_title(trimmed))
+    // Frame beats interrogative: a polite instruction stays work.
+    if REQUEST_FRAMES.iter().any(|f| core.starts_with(f)) && contains_action(core) {
+        return MessageTriage::Track(to_title(trimmed));
+    }
+    if is_question(core) {
+        return MessageTriage::Answer;
+    }
+    if starts_with_action(core) {
+        return MessageTriage::Track(to_title(trimmed));
+    }
+    MessageTriage::Chatter
+}
+
+/// Returns a cleaned task title when `text` is an actionable request, else
+/// `None` — the [`MessageTriage::Track`]-only view of [`triage_message`].
+///
+/// Kept as its own function because two card paths depend on it agreeing with
+/// itself byte-for-byte: the REST chat handler writes the title, and
+/// `DelegationRunner::chat_handler_card` re-derives it moments later to find
+/// the card that handler wrote (issue #463).
+pub fn detect_task_intent(text: &str) -> Option<String> {
+    match triage_message(text) {
+        MessageTriage::Track(title) => Some(title),
+        MessageTriage::Answer | MessageTriage::Chatter => None,
+    }
 }
 
 /// Remove stacked leading filler words from a lowercased message.
@@ -256,18 +385,25 @@ fn strip_lead_ins(lower: &str) -> &str {
     }
 }
 
-/// Whether the lowercased message is an actionable request.
-fn is_actionable(lower: &str) -> bool {
-    // A leading imperative verb/phrase is unambiguously an instruction.
-    if starts_with_action(lower) {
+/// Whether the lowercased message asks for an answer rather than for work
+/// (issue #267). Only reached once a request-framed instruction has been ruled
+/// out, so a `?` here is a real question mark and not politeness.
+fn is_question(lower: &str) -> bool {
+    if READ_PHRASES.iter().any(|p| starts_with_word(lower, p)) {
         return true;
     }
-    // A request frame counts only when it wraps an actual action verb, so a
-    // framed question ("can you tell me …") does not qualify.
-    if REQUEST_FRAMES.iter().any(|f| lower.starts_with(f)) && contains_action(lower) {
+    let first = lower
+        .split_whitespace()
+        .next()
+        .unwrap_or("")
+        .trim_end_matches([',', ':', ';', '.', '!', '?']);
+    if INTERROGATIVE_LEADS.contains(&first) || READ_VERBS.contains(&first) {
         return true;
     }
-    false
+    // A trailing `?` with no action verb anywhere. The action-verb guard is
+    // what keeps "fix the login bug?" out of here — an operator second-guessing
+    // their own instruction is still an instruction.
+    lower.trim_end().ends_with('?') && !contains_action(lower)
 }
 
 /// The message's first word (or a leading multi-word phrase) is an action verb.
@@ -386,6 +522,138 @@ mod tests {
             "why did signups drop?",
         ] {
             assert!(detect_task_intent(msg).is_none(), "should not fire: {msg}");
+            assert_eq!(
+                triage_message(msg),
+                MessageTriage::Answer,
+                "should be an answer: {msg}"
+            );
+        }
+    }
+
+    /// Issue #267: the six cards found sitting unworked in `backlog` on a live
+    /// company, each pinned to the class it now triages as.
+    ///
+    /// Five of the six lead with an action verb, so they came through the
+    /// deterministic handler path and stay `Track` — they *are* instructions,
+    /// and the fix for the four workflow asks is that the orchestrator now
+    /// authors the graph in-turn rather than parking the card. The sixth has no
+    /// action verb and no request frame, so this module never saw it: it was
+    /// the model's own `spawn_task`, and `Answer` is what takes that tool away.
+    #[test]
+    fn the_six_observed_dead_cards_triage_as_recorded() {
+        let cases: &[(&str, MessageTriage)] = &[
+            (
+                "Tell what is there in the tasks list",
+                MessageTriage::Answer,
+            ),
+            (
+                "Call the composio_authorize tool with toolkit = gmail and reply with the result",
+                MessageTriage::Track(
+                    "Call the composio_authorize tool with toolkit = gmail and reply with the \
+                     result"
+                        .to_string(),
+                ),
+            ),
+            (
+                "Create a workflow to, write a 2-sentence status update",
+                MessageTriage::Track(
+                    "Create a workflow to, write a 2-sentence status update".to_string(),
+                ),
+            ),
+            (
+                "Create a simple workflow, Write a 2-sentence status update",
+                MessageTriage::Track(
+                    "Create a simple workflow, Write a 2-sentence status update".to_string(),
+                ),
+            ),
+            (
+                "Create a workflow named topic-to-visual",
+                MessageTriage::Track("Create a workflow named topic-to-visual".to_string()),
+            ),
+            (
+                "Create a workflow called Daily Standup",
+                MessageTriage::Track("Create a workflow called Daily Standup".to_string()),
+            ),
+        ];
+        for (msg, expected) in cases {
+            assert_eq!(&triage_message(msg), expected, "triage of: {msg}");
+        }
+    }
+
+    /// The class the issue is really about: reads that were becoming cards.
+    #[test]
+    fn read_requests_are_answers() {
+        for msg in [
+            "list the tasks",
+            "show me the board",
+            "what's our revenue?",
+            "Tell what is there in the tasks list",
+            "explain how the newsletter works",
+            "describe the current backlog",
+            "give me the headcount",
+            "walk me through the funnel",
+            "can you list the tasks?",
+            "where do we stand on the launch?",
+        ] {
+            assert_eq!(
+                triage_message(msg),
+                MessageTriage::Answer,
+                "should be an answer: {msg}"
+            );
+            assert!(detect_task_intent(msg).is_none(), "no card for: {msg}");
+        }
+    }
+
+    /// A request frame is read before any question test, so a politely phrased
+    /// instruction stays work even when it ends in `?`.
+    #[test]
+    fn a_request_frame_beats_an_interrogative() {
+        assert_eq!(
+            triage_message("can you build the landing page?"),
+            MessageTriage::Track("Build the landing page".to_string())
+        );
+        assert_eq!(
+            triage_message("could you please fix the checkout bug?"),
+            MessageTriage::Track("Fix the checkout bug".to_string())
+        );
+    }
+
+    /// Neither work nor a question: the safe middle that cards nothing and
+    /// gates nothing.
+    #[test]
+    fn neutral_chatter_is_chatter() {
+        for msg in [
+            "hi",
+            "thanks",
+            "the deck looks good to me",
+            "i'll be offline tomorrow",
+            "nice work on the launch",
+            "…",
+        ] {
+            assert_eq!(
+                triage_message(msg),
+                MessageTriage::Chatter,
+                "should be chatter: {msg}"
+            );
+        }
+    }
+
+    /// The `Track` arm still carries the exact string the REST handler writes,
+    /// which `chat_handler_card` re-derives to find that card (issue #463).
+    #[test]
+    fn track_titles_stay_byte_identical_to_detect_task_intent() {
+        for msg in [
+            "Build the landing page",
+            "please can you fix the login bug!",
+            "go ahead and publish the blog post",
+            "ok now build the dashboard",
+            "Can you build the landing page?",
+        ] {
+            assert_eq!(
+                triage_message(msg).title().map(str::to_string),
+                detect_task_intent(msg),
+                "title contract for: {msg}"
+            );
         }
     }
 
