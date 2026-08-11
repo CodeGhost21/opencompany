@@ -525,6 +525,15 @@ impl WorkflowScheduler {
                 // this key by dropping the first-sight latch below — which a later
                 // tick re-attempts for the missed minute while it is still inside
                 // the catch-up window, without needing a process restart.
+                //
+                // The guard is held across `claim_fire().await` below, so for that
+                // window a cap slot is occupied by a run that may never start — the
+                // case where a peer replica wins the durable claim (`Ok(false)`) and
+                // this replica drops the guard unused. A sibling schedule admitting
+                // in that window can therefore be refused at `begin` for capacity
+                // that is about to be released. That is the conservative direction
+                // (defer, never burn) and it is self-correcting: the refused sibling
+                // drops its own first-sight latch and is made up by catch-up.
                 let (ctx, guard) = match supervisor.begin(&file.id, true) {
                     Ok(admitted) => admitted,
                     Err(_) => {
