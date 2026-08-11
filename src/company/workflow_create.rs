@@ -478,6 +478,43 @@ pub(crate) fn raw_workflow_from_spec(spec: &WorkflowGraphSpec) -> Result<RawWork
     })
 }
 
+/// Runs the full author-time validation on a candidate graph **without
+/// persisting it** — the builder pass's courtesy check (issue #580), so a
+/// proposal that could never be created never reaches In Review.
+///
+/// It runs exactly the checks [`create_company_workflow`] runs before its save —
+/// shape (id/name/size/one-trigger), the render → byte-cap → `parse_workflow`
+/// round trip, and the roster/tool cross-check against the loaded `record` — and
+/// then throws the result away. The one thing it deliberately does **not** check
+/// is id/name uniqueness, because that is a function of the live record at
+/// *apply* time, not build time: a name free when the proposal was built can be
+/// taken by the time it is approved, and that is the roster-drift case apply
+/// surfaces by keeping the card In Review.
+///
+/// Gated with the builder it serves: the only caller is
+/// `crate::harness::workflow_build`, so in the default build (no harness) this
+/// would be dead code.
+#[cfg(feature = "openhuman")]
+pub(crate) fn courtesy_validate_draft(draft: &RawWorkflow, record: &CompanyRecord) -> Result<()> {
+    validate_draft_shape(draft)?;
+    let toml_src = render_workflow(draft)?;
+    if toml_src.len() > MAX_WORKFLOW_TOML_BYTES {
+        return Err(OpenCompanyError::InvalidRequest(format!(
+            "the proposed workflow is {} bytes, over the {MAX_WORKFLOW_TOML_BYTES}-byte limit.",
+            toml_src.len()
+        )));
+    }
+    parse_workflow(&toml_src).map_err(|err| match err {
+        OpenCompanyError::DataInvalid { problems, .. } => {
+            OpenCompanyError::InvalidRequest(problems.join(" "))
+        }
+        OpenCompanyError::DataParse { message, .. } => OpenCompanyError::InvalidRequest(message),
+        other => other,
+    })?;
+    validate_draft_against_record(draft, record)?;
+    Ok(())
+}
+
 /// Journals a best-effort [`WorkflowEnabledChanged`](CompanyEvent::WorkflowEnabledChanged).
 ///
 /// Best-effort in the same sense as every other write-path audit event here: the

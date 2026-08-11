@@ -1266,6 +1266,11 @@ impl RuntimeBuilder {
         // above already use.
         #[cfg(feature = "openhuman")]
         let mut planner: Option<Arc<crate::harness::planning::TaskPlanner>> = None;
+        // Issue #580: the company's workflow builder, built from the SAME deps as
+        // the planner (shared provider + model override) and installed the same
+        // way via `CompanyRuntime::set_builder` below.
+        #[cfg(feature = "openhuman")]
+        let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -1674,6 +1679,13 @@ impl RuntimeBuilder {
                             planner = Some(Arc::new(
                                 crate::harness::planning::TaskPlanner::from_deps(&deps),
                             ));
+                            // Issue #580: built from the same deps, so it shares
+                            // the tenant provider and model override with the
+                            // roster and the planner rather than resolving a
+                            // second credential path.
+                            builder = Some(Arc::new(
+                                crate::harness::workflow_build::WorkflowBuilder::from_deps(&deps),
+                            ));
                             Some(Arc::new(
                                 // Issue #242: the same run store the dispatch
                                 // choke point mints into and the boot reaper
@@ -1912,6 +1924,14 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(planner) = planner {
             runtime.set_planner(planner);
+        }
+        // Issue #580: same rebuild treatment as the planner — rebuilt from the
+        // successor's deps (so a BYOK switch reaches building), with an empty
+        // in-flight set that matters to nothing (a pass interrupted by a rebuild
+        // has no settle to reach the board; the boot reaper settles its run).
+        #[cfg(feature = "openhuman")]
+        if let Some(builder) = builder {
+            runtime.set_builder(builder);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —
