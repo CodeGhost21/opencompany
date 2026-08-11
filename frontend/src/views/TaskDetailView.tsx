@@ -82,6 +82,7 @@ import {
 import type { OpenCompanyClient } from "@/api/client";
 import { hasFocus, type TaskFocus } from "@/lib/task-output";
 import { pendingApprovalWait } from "@/lib/task-approvals";
+import { startVisiblePolling } from "@/lib/visible-poll";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -345,31 +346,10 @@ export function TaskDetailView({
     setLoading(true);
     setDetail(null);
     void load(isActive);
-    let timer: number | undefined;
-    const stop = () => {
-      if (timer !== undefined) {
-        window.clearInterval(timer);
-        timer = undefined;
-      }
-    };
-    const start = () => {
-      if (timer === undefined)
-        timer = window.setInterval(() => void load(isActive), POLL_MS);
-    };
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        stop();
-      } else {
-        void load(isActive);
-        start();
-      }
-    };
-    if (document.visibilityState !== "hidden") start();
-    document.addEventListener("visibilitychange", onVisibility);
+    const dispose = startVisiblePolling(() => void load(isActive), POLL_MS);
     return () => {
       cancelled = true;
-      stop();
-      document.removeEventListener("visibilitychange", onVisibility);
+      dispose();
     };
   }, [load]);
 
