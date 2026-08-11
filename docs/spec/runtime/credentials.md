@@ -50,6 +50,16 @@ account, so its full order is `composio/token` → company key → instance
 identity → none. What no surface may do is resolve a *company* identity some
 other way.
 
+That composed order is itself derived **once**, in
+`company::composio::resolve_credential` — not in the harness. The agent-facing
+`TenantComposio::resolve` builds its config from it, and the console's
+`GET …/composio` reports its `source`, so the tier an operator is shown cannot
+disagree with the identity the agents actually present. It lives in the
+always-compiled `company::` module rather than the feature-gated `harness::`
+one precisely so both callers can share it in every build; a console route that
+restated the precedence instead would keep confidently reporting a tier after
+the resolver stopped honouring it.
+
 ## Rotation
 
 The rotation guarantee — "rotating the company key does not silently leave one

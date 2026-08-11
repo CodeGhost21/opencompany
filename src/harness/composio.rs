@@ -74,16 +74,16 @@
 
 use std::sync::Arc;
 
-use crate::company::company_key;
 use crate::company::credentials::{Credential, TinyhumansTokenSource};
 use crate::ports::SecretStore;
-use crate::ports::types::{CompanyId, SecretValue};
+use crate::ports::types::CompanyId;
 
 // The credential key + backend routing live in the always-compiled
 // `company::composio` module (so the console read/write plane can manage the
 // token in the default build); re-exported here for the harness call sites.
 pub use crate::company::composio::{
     COMPOSIO_BACKEND_URL_ENV, TINYHUMANS_API_URL_ENV, TOKEN_KEY, backend_url_or_default,
+    resolve_credential,
 };
 
 /// A per-tenant Composio configuration: the backend URL, how the outbound bearer
@@ -153,26 +153,14 @@ impl TenantComposio {
         api_url_env: Option<String>,
         token_source: Option<Arc<TinyhumansTokenSource>>,
     ) -> Option<Self> {
-        let byo = match secrets.get(company, TOKEN_KEY).await {
-            Ok(Some(SecretValue(token))) => Credential::from_value(token),
-            _ => Credential::None,
-        };
-        let credential = match byo {
-            // The company's own Composio token always wins.
-            byo @ Credential::Value(_) => byo,
-            // Everything else is the shared seam's answer, so a rotated company
-            // key reaches Composio the same cycle it reaches every other
-            // brokered surface.
-            _ => match company_key::resolve(company, secrets, token_source).await {
-                Credential::None => return None,
-                credential => credential,
-            },
-        };
-        Some(Self::new(
-            backend_url_or_default(backend_url_env, api_url_env),
-            credential,
-            toolkits,
-        ))
+        match crate::company::composio::resolve_credential(company, secrets, token_source).await {
+            Credential::None => None,
+            credential => Some(Self::new(
+                backend_url_or_default(backend_url_env, api_url_env),
+                credential,
+                toolkits,
+            )),
+        }
     }
 
     /// The credential this config presents. Status and fingerprinting only —
@@ -1078,6 +1066,11 @@ mod live {
 mod tests {
     use super::*;
 
+    // Used by the resolver tests below; the module body itself resolves its
+    // credential through `company::composio::resolve_credential`.
+    use crate::company::company_key;
+    use crate::ports::types::SecretValue;
+
     // The three helper tests below follow their subjects behind the `composio`
     // feature: `toolkit_allowed` / `slug_toolkit` do not exist in an
     // `openhuman`-without-`composio` build.
@@ -1143,7 +1136,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_prefers_the_stored_token_then_the_token_source_then_fails_closed() {
         use crate::ports::SecretStore;
-        use crate::ports::types::{CompanyId, SecretValue};
+        use crate::ports::types::CompanyId;
         use crate::store::FsSecretStore;
 
         let dir = tempfile::Builder::new()
@@ -1248,10 +1241,9 @@ mod tests {
     /// per-tenant provider app.
     #[tokio::test]
     async fn the_company_key_credentials_composio_between_a_byo_token_and_the_instance() {
-        use crate::company::company_key;
         use crate::company::credentials::CredentialSource;
         use crate::ports::SecretStore;
-        use crate::ports::types::{CompanyId, SecretValue};
+        use crate::ports::types::CompanyId;
         use crate::store::FsSecretStore;
 
         let dir = tempfile::Builder::new()
@@ -1326,7 +1318,6 @@ mod tests {
     /// credential after a console rotation.
     #[tokio::test]
     async fn rotating_the_company_key_moves_the_composio_fingerprint() {
-        use crate::company::company_key;
         use crate::ports::types::CompanyId;
         use crate::store::FsSecretStore;
 

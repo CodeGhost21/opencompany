@@ -66,9 +66,10 @@ use axum::routing::{get, post, put};
 use serde::{Deserialize, Serialize};
 
 use crate::AppState;
-use crate::company::composio::{
-    CatalogEntry, backend_url_or_default, store_token, token_configured,
-};
+// `token_configured` is gone from this list deliberately: the status route no
+// longer re-derives the credential tier from booleans, it asks the resolver
+// (`resolve_credential`) — see `credential_source_for` below.
+use crate::company::composio::{CatalogEntry, backend_url_or_default, store_token};
 use crate::company::credentials::{CredentialSource, TinyhumansTokenSource};
 use crate::company::runtime::CompanyRuntime;
 use crate::ports::types::CompanyEvent;
@@ -340,26 +341,29 @@ struct ConnectionDto {
 
 /// Which tier a company's Composio credential comes from, mirroring the harness
 /// resolver's precedence: the company's **own Composio** token wins, else its
-/// own TinyHumans key, else this instance's platform identity, else nothing.
+/// Which tier a company's Composio credential comes from.
 ///
-/// `stored` and `company_key` are read by the caller rather than looked up here
-/// so the matrix stays a pure function of the two booleans plus the environment
-/// — testable without a secret store and without mutating the process
-/// environment.
-fn credential_source_for(
-    stored: bool,
-    company_key: bool,
-    env: &dyn crate::app::config::EnvSource,
+/// Asks the resolver itself rather than restating its precedence. The console
+/// must never be able to name a tier the agents are not on, and a second copy of
+/// the rule is a second place to forget to update — which is how a status route
+/// ends up confidently reporting a credential that no longer resolves.
+///
+/// Takes the instance identity already resolved, rather than an `&dyn
+/// EnvSource`: a trait object with no `Send + Sync` bound held across the await
+/// below makes the whole handler future non-`Send`, which axum rejects. Callers
+/// resolve it from whichever environment they mean, so the matrix stays testable
+/// without mutating the process environment.
+async fn credential_source_for(
+    runtime: &CompanyRuntime,
+    token_source: Option<std::sync::Arc<TinyhumansTokenSource>>,
 ) -> CredentialSource {
-    if stored {
-        return CredentialSource::Static;
-    }
-    if company_key {
-        return CredentialSource::Company;
-    }
-    TinyhumansTokenSource::from_env(env)
-        .map(|source| source.credential_source())
-        .unwrap_or(CredentialSource::None)
+    crate::company::composio::resolve_credential(
+        runtime.id(),
+        runtime.secrets().as_ref(),
+        token_source,
+    )
+    .await
+    .source()
 }
 
 /// Resolves the Composio status DTO for a company.
@@ -372,18 +376,6 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
         ),
         None => (false, Vec::new()),
     };
-    // Mirrors the harness resolver: this company's own token wins, else the
-    // instance's platform identity, else nothing.
-    let stored = token_configured(runtime.id(), runtime.secrets().as_ref())
-        .await
-        .map_err(ApiError)?;
-    // The company's own TinyHumans key is the tier between its pasted Composio
-    // token and this instance's identity — the whole point of issue #586 is that
-    // a company with a key set needs no Composio token of its own.
-    let company_key =
-        crate::company::company_key::key_configured(runtime.id(), runtime.secrets().as_ref())
-            .await
-            .map_err(ApiError)?;
     let env = crate::app::config::ProcessEnv;
     let (env_url, api_url) = {
         use crate::app::config::EnvSource;
@@ -392,7 +384,11 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<ComposioStatusDto,
             env.get(crate::company::composio::TINYHUMANS_API_URL_ENV),
         )
     };
-    let credential_source = credential_source_for(stored, company_key, &env);
+    let credential_source = credential_source_for(
+        runtime,
+        TinyhumansTokenSource::from_env(&env).map(std::sync::Arc::new),
+    )
+    .await;
     let (open_mode, effective) = effective_toolkits(runtime, &toolkits).await;
     Ok(ComposioStatusDto {
         in_build: cfg!(feature = "composio"),
@@ -1077,10 +1073,18 @@ mod tests {
 
     /// The hosted shape, driven through the env seam (no process mutation): a
     /// company that pasted nothing reads `attested` from the instance identity,
-    /// its own token still outranks that, and neither yields `none`.
-    #[test]
-    fn credential_source_matrix_follows_the_resolver_precedence() {
+    /// its own TinyHumans key outranks that, its own Composio token outranks
+    /// both, and with none of the three the answer is `none`.
+    ///
+    /// Drives the **real** resolver through a real secret store rather than a
+    /// restatement of its precedence. A pure function that merely mirrored the
+    /// rule would keep passing after the resolver lost a tier — which is exactly
+    /// what the negative control for issue #586 caught.
+    #[tokio::test]
+    async fn credential_source_matrix_follows_the_resolver_precedence() {
         use crate::app::config::MapEnv;
+        use crate::company::company_key;
+        use crate::company::composio::store_token;
 
         let dir = tempfile::Builder::new()
             .prefix("oc-dto-")
@@ -1093,46 +1097,80 @@ mod tests {
             path.display().to_string(),
         )]);
 
+        /// The instance identity a given environment resolves to.
+        fn source_of(
+            env: &dyn crate::app::config::EnvSource,
+        ) -> Option<std::sync::Arc<super::TinyhumansTokenSource>> {
+            super::TinyhumansTokenSource::from_env(env).map(std::sync::Arc::new)
+        }
+
+        let home_dir = home();
+        let state = state_with_manifest_id(home_dir.path(), "matrix", GRANTED).await;
+        let runtime = state
+            .registry()
+            .get(&CompanyId::new("matrix"))
+            .expect("registered");
+        let secrets = runtime.secrets();
+        let id = runtime.id().clone();
+
         // Nothing stored + a projected instance identity → attested.
         assert_eq!(
-            credential_source_for(false, false, &projected),
+            credential_source_for(&runtime, source_of(&projected)).await,
             CredentialSource::Attested
         );
-        // The company's own Composio token outranks everything.
+        // Nothing stored at all → nothing obtainable, so no tools.
         assert_eq!(
-            credential_source_for(true, false, &projected),
-            CredentialSource::Static
+            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            CredentialSource::None
         );
-        assert_eq!(
-            credential_source_for(true, true, &projected),
-            CredentialSource::Static
-        );
-        // The company's own TinyHumans key outranks the instance identity — a
-        // company with a key set connects providers as *itself*, not as the pod
-        // it happens to run in (issue #586).
-        assert_eq!(
-            credential_source_for(false, true, &projected),
-            CredentialSource::Company
-        );
-        // …and is the whole credential when the instance carries no identity,
-        // which is the case this issue exists to fix.
-        assert_eq!(
-            credential_source_for(false, true, &MapEnv::default()),
-            CredentialSource::Company
-        );
-        // A static instance key is the static tier too.
+        // A static instance key is the static tier.
         assert_eq!(
             credential_source_for(
-                false,
-                false,
-                &MapEnv::new([(crate::company::credentials::API_KEY_ENV, "th_static")])
-            ),
+                &runtime,
+                source_of(&MapEnv::new([(
+                    crate::company::credentials::API_KEY_ENV,
+                    "th_static"
+                )]))
+            )
+            .await,
             CredentialSource::Static
         );
-        // Nothing at any tier → nothing obtainable, so no tools.
+
+        // The company's own TinyHumans key outranks the instance identity — a
+        // company with a key set connects providers as *itself*, not as the pod
+        // it happens to run in (issue #586)…
+        company_key::store_key(&id, secrets.as_ref(), "th_company")
+            .await
+            .unwrap();
         assert_eq!(
-            credential_source_for(false, false, &MapEnv::default()),
-            CredentialSource::None
+            credential_source_for(&runtime, source_of(&projected)).await,
+            CredentialSource::Company
+        );
+        // …and is the whole credential when the instance carries none, which is
+        // the case this issue exists to fix.
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            CredentialSource::Company
+        );
+
+        // The company's own Composio token outranks everything.
+        store_token(&id, secrets.as_ref(), "byo-composio")
+            .await
+            .unwrap();
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&projected)).await,
+            CredentialSource::Static
+        );
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            CredentialSource::Static
+        );
+
+        // Clearing it falls back exactly one tier, not all the way to nothing.
+        store_token(&id, secrets.as_ref(), "").await.unwrap();
+        assert_eq!(
+            credential_source_for(&runtime, source_of(&MapEnv::default())).await,
+            CredentialSource::Company
         );
 
         std::fs::remove_dir_all(&dir).ok();
