@@ -35,6 +35,13 @@
 //! offline [`MockProvider`](provider::MockProvider) does not, so test turns stay
 //! inert.
 
+/// A `RunTurn` over an ACP agent (the `acp` feature).
+///
+/// Gated because nothing in a default build can reach it: the endpoint that
+/// would drive it lives behind the same feature, and `/acp` is a reserved
+/// prefix that 404s without it. Compiling it unconditionally meant a surface
+/// that no lane ran and no route served — see issue #475.
+#[cfg(feature = "acp")]
 pub mod acp_run_turn;
 pub mod brain;
 pub mod build;

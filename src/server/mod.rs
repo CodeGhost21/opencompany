@@ -1,5 +1,12 @@
 #[cfg(feature = "tinyplace")]
 pub mod a2a;
+/// The Agent Client Protocol surface (the `acp` feature).
+///
+/// The module's own docs reason about "a build without the feature"; this is
+/// that feature. `routes::RESERVED_PREFIXES` keeps `/acp` 404ing either way, so
+/// a client probing a host without it gets an honest answer rather than the
+/// console shell.
+#[cfg(feature = "acp")]
 pub mod acp;
 pub mod chat_history;
 pub mod cors;

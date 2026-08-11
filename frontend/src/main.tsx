@@ -7,40 +7,17 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { Toaster } from "@/components/ui/sonner";
 import "./index.css";
 
-type DesktopConfig = { api_url: string; company: string; operator_email: string };
-
 /**
- * The browser build has no native bridge and starts normally. In the packaged
- * Tauri build, redeem the loopback-only desktop invite before React mounts so
- * the existing console keeps its normal cookie-authenticated API contract.
+ * The desktop needs no pre-mount step.
+ *
+ * There used to be one here: it invoked a `desktop_config` command, redeemed a
+ * `dev_code` and reloaded the page with `?api=&code=`. That command is not in
+ * this build's `generate_handler!`, so it always threw and the `catch` swallowed
+ * it — and its `fetch` straight out of the webview is what the Rust proxy and
+ * the CSP both exist to avoid. The desktop now boots like any other console and
+ * discovers its hosts through the connection registry (see `App`).
  */
-async function bootstrapDesktop(): Promise<void> {
-  try {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const config = await invoke<DesktopConfig>("desktop_config");
-    const current = new URL(window.location.href);
-    if (current.searchParams.has("code")) return;
-
-    const response = await fetch(`${config.api_url}/api/v1/companies/${config.company}/auth/request`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ email: config.operator_email }),
-    });
-    const result = (await response.json()) as { dev_code?: string };
-    if (!response.ok || !result.dev_code) throw new Error("desktop login code unavailable");
-
-    current.searchParams.set("api", config.api_url);
-    current.searchParams.set("company", config.company);
-    current.searchParams.set("code", result.dev_code);
-    window.location.replace(current.toString());
-  } catch {
-    // `@tauri-apps/api` is absent in an ordinary web deployment; it must retain
-    // the existing same-origin startup behavior.
-  }
-}
-
-async function mount(): Promise<void> {
-  await bootstrapDesktop();
+function mount(): void {
   const root = document.getElementById("root");
   if (!root) throw new Error("missing #root element");
   createRoot(root).render(
@@ -55,4 +32,4 @@ async function mount(): Promise<void> {
   );
 }
 
-void mount();
+mount();
