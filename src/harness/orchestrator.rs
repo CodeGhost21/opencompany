@@ -2312,6 +2312,14 @@ fn page_run_output(full: &str, offset: usize, budget: usize) -> (String, Option<
 /// [`ToolResult`] naming the console fallback or the valid node ids, never a
 /// panic or a bare empty result.
 pub struct ReadRunOutputTool {
+    /// The owning company — used only for `tracing` context, never in the
+    /// lookup (which is by `run_id` alone). That is safe **because the cache is
+    /// per-company by construction**: `HarnessDeps` (and the `RunOutputCache`
+    /// handle it carries) is built once per tenant in `build_agent`
+    /// (`src/runtime/builder.rs`), so a run id from another company can never be
+    /// in this cache to collide with. Kept as a field so this invariant is
+    /// explicit — a later refactor toward a shared cache must re-derive scoping
+    /// from the id rather than assume this one is already isolated.
     company: CompanyId,
     run_outputs: RunOutputCache,
 }
