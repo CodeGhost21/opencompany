@@ -129,7 +129,9 @@ pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
 pub use workflow_spawn::WorkflowSpawn;
 pub use workspace_events::WorkspaceAnnouncer;
-pub use workspace_quota::{DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, WorkspaceQuota};
+pub use workspace_quota::{
+    DEFAULT_MAX_BLOB_BYTES, QuotaEnforcedWorkspace, UPLOAD_BODY_LIMIT_BYTES, WorkspaceQuota,
+};
 
 // The assembly struct lives under `company/` to match the `ports.md` sketch
 // (`src/company/runtime.rs`); re-export it here as the kernel's public surface.

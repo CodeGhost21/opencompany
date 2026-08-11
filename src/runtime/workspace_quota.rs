@@ -90,13 +90,55 @@ use crate::ports::workspace::{BlobStream, WorkspaceNode, WorkspaceOrigin, Worksp
 /// Operators who need more set `[workspace] max_blob_mb`; the constant is only
 /// the default.
 ///
-/// # One number, two enforcement points
+/// # This is the *policy* limit, and not the transport one
 ///
-/// Also the upload route's `DefaultBodyLimit`, so a request too large to accept
-/// is rejected at the edge with the same number and the same 413 the store
-/// would have used. One limit stated twice is a bug waiting to happen — so both
-/// read it from here.
+/// The upload route reads up to [`UPLOAD_BODY_LIMIT_BYTES`], which is
+/// deliberately larger. Until issue #647 the two were the same number, and that
+/// made this constant unreachable through that route: the body limit always
+/// tripped first, a truncated body is a parse failure, and so an oversized
+/// upload answered `400 malformed multipart` — a request the operator had made
+/// perfectly correctly, described as broken. The refusal below, which names the
+/// file, its size and the cap, was written and could never be seen.
+///
+/// The two limits answer different questions — "may this company keep these
+/// bytes?" versus "will this process read this many bytes at all?" — so they
+/// hold different numbers, and the smaller one is the one that speaks.
 pub const DEFAULT_MAX_BLOB_BYTES: u64 = 64 * 1024 * 1024;
+
+/// The most an upload request body may weigh before the route stops reading it:
+/// four times [`DEFAULT_MAX_BLOB_BYTES`], so 256 MiB.
+///
+/// # Why it is not the same number as the cap
+///
+/// A `DefaultBodyLimit` set *at* the per-file cap cannot produce a good error,
+/// because it fires while the multipart body is still being parsed: the reader
+/// sees a stream that stops mid-part, which is indistinguishable from a
+/// malformed one at that layer. Only a limit the store's cap sits comfortably
+/// *inside* lets the whole body arrive, the real size be measured, and the
+/// refusal name it. Headroom is what buys the honest message (issue #647).
+///
+/// # Why 4×
+///
+/// The multiplier is what keeps [`crate::app::WorkspaceConfig`]'s
+/// `[workspace] max_blob_mb` knob real. Routers are built once, before any
+/// company exists, so the route cannot read a company's configured cap — it can
+/// only leave room above the default for one. Anything a company raises the cap
+/// to within 4× of the default is enforced exactly, by the store, with the
+/// store's message. Beyond that the route refuses first — still a 413, still
+/// naming a limit, but this one rather than the company's.
+///
+/// 256 MiB is also the number this route has claimed to allow since #553; the
+/// comment said so while the code did not. This makes the published contract
+/// true rather than quietly lowering it.
+///
+/// # What it costs
+///
+/// The upload path buffers (see the module docs on why refusing beats cleaning
+/// up), so this is also the ceiling on how much one in-flight upload can hold
+/// in memory. 256 MiB per concurrent upload is the deliberate trade for an
+/// error message that tells the truth; it is not a licence to store that much,
+/// which is still [`DEFAULT_MAX_BLOB_BYTES`]' decision.
+pub const UPLOAD_BODY_LIMIT_BYTES: u64 = 4 * DEFAULT_MAX_BLOB_BYTES;
 
 /// The limits a company's workspace is held to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -131,7 +173,12 @@ impl WorkspaceQuota {
 }
 
 /// Renders a byte count the way an operator reads one.
-fn human(bytes: u64) -> String {
+///
+/// Crate-visible so the upload route's own refusal (issue #647) spells a limit
+/// the same way this store's does. Two renderers would eventually disagree
+/// about the same number, and the operator would have no way to tell that the
+/// two messages were describing one thing.
+pub(crate) fn human(bytes: u64) -> String {
     const MIB: f64 = 1024.0 * 1024.0;
     const GIB: f64 = MIB * 1024.0;
     let b = bytes as f64;
