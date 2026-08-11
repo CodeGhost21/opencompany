@@ -356,10 +356,17 @@ description = "Runs Acme."
     /// either would stop runs that have nothing to decide, and for `web_search`
     /// it would be worse than useless: consent for it happens once, at grant
     /// time, via an explicit `search` grant a `*` cannot confer.
+    ///
+    /// `file_read` rather than `read_workspace_state`, which reads like the
+    /// obvious choice and is not one: issue #459 moved it to
+    /// `Reach::Consequence` because it shells out to `git` in a directory the
+    /// agent can write a `.git/config` into. That is a deliberate stopgap with
+    /// its own revert condition (tinyhumansai/openhuman#5494), so the tool to
+    /// change here was the example, not the classification.
     #[tokio::test]
     async fn a_plain_read_and_a_metered_read_do_not_gate() {
         let mut g = graph(vec![
-            tool_node("read", "read_workspace_state"),
+            tool_node("read", "file_read"),
             tool_node("search", "web_search"),
         ]);
         let gated = apply_tool_call_gates(&mut g, &company("supervised", &[]), "wf", "run-1").await;
