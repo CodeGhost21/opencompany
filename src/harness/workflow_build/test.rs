@@ -491,6 +491,46 @@ async fn a_graph_that_would_be_refused_never_reaches_in_review() {
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
 }
 
+/// A graph carrying a node kind outside `BUILDER_NODE_KINDS` — one the prompt
+/// never taught the model to shape and nothing downstream validates (here an
+/// `http_request` with an attacker-influenceable URL) — settles to To-do before
+/// the courtesy pass, with no proposal and the attempt Failed. The host owns the
+/// kind vocabulary, not the model (issue #580).
+#[tokio::test]
+async fn an_out_of_vocabulary_kind_settles_to_todo() {
+    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"call","kind":"http_request","name":"Call",
+                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
+        "edges":[{"from":"start","to":"call"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    runtime
+        .tasks()
+        .upsert(runtime.id(), &card("t-9", None))
+        .await
+        .unwrap();
+    let run_id = open_run(&runtime, "t-9").await;
+
+    run_workflow_build_pass(
+        Arc::clone(&runtime),
+        "t-9".to_string(),
+        Some(run_id.clone()),
+    )
+    .await;
+
+    let after = read(&runtime, "t-9").await;
+    assert_eq!(after.column, COLUMN_TODO);
+    assert!(
+        after.workflow_proposal.is_none(),
+        "an unsupported kind must not reach In Review"
+    );
+    assert!(
+        after.note.unwrap().contains("http_request"),
+        "the offending kind is named on the card"
+    );
+    assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Failed);
+}
+
 /// An operator moving the card out from under the pass wins: the pass discards
 /// its result (no proposal, the card stays where the operator put it) and the
 /// attempt settles Cancelled — the tokens stay metered because they were spent.

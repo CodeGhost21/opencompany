@@ -63,8 +63,8 @@ use tinyagents::harness::model::{ModelRequest, ModelResponse};
 
 use crate::company::runtime::CompanyRuntime;
 use crate::company::{
-    WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowGraphSpec, courtesy_validate_draft,
-    list_workflows_union, raw_workflow_from_spec,
+    WORKFLOW_DESTINATION_KINDS, WorkflowGraphSpec, courtesy_validate_draft, list_workflows_union,
+    raw_workflow_from_spec,
 };
 use crate::harness::HarnessDeps;
 use crate::harness::build::model_for_tier;
@@ -95,6 +95,14 @@ const MAX_OUTPUT_TOKENS: u32 = 4_000;
 /// Caps on the free text the model produces, in codepoints.
 const MAX_SUMMARY_CHARS: usize = 400;
 const MAX_REASON_CHARS: usize = 1_200;
+
+/// The node kinds the builder prompt actually specifies. Deliberately narrower
+/// than [`WORKFLOW_NODE_KINDS`](crate::company::WORKFLOW_NODE_KINDS): the model
+/// is only told how to shape these, so offering it the rest of the engine
+/// vocabulary invites a node nothing downstream validates. Widening this is a
+/// deliberate act that comes with a matching prompt section — the host owns the
+/// kind vocabulary the same way it owns the workflow id (issue #580).
+const BUILDER_NODE_KINDS: &[&str] = &["trigger", "agent", "condition", "output"];
 
 /// Truncate on a **character** boundary, never a byte one.
 fn cap(text: &str, chars: usize) -> String {
@@ -331,6 +339,32 @@ pub async fn run_workflow_build_pass(
         }
     };
     let (summary, spec) = spec;
+
+    // The host owns the node-kind vocabulary too (issue #580). The prompt only
+    // specifies `BUILDER_NODE_KINDS`, so a kind outside that set is a shape the
+    // builder was never taught to author and nothing downstream validates (the
+    // structural kinds have no arm in `validate_draft_against_record`). Refuse
+    // it here, before the courtesy pass, settling to To-do like the other
+    // refusals rather than letting an unvalidated node reach In Review.
+    if let Some(node) = spec
+        .nodes
+        .iter()
+        .find(|n| !BUILDER_NODE_KINDS.contains(&n.kind.as_str()))
+    {
+        let kind = node.kind.clone();
+        settle_to_todo(
+            &runtime,
+            &task_id,
+            token,
+            &run_id,
+            &format!(
+                "the proposed workflow used an unsupported node kind `{kind}`, so nothing was proposed"
+            ),
+            usage,
+        )
+        .await;
+        return;
+    }
 
     // Courtesy validation: rebuild the graph and run the create path's checks
     // (shape, render/parse, roster) WITHOUT persisting. A proposal that could
@@ -816,7 +850,7 @@ fn parse_draft(text: &str) -> Option<BuildDraft> {
 
 /// The builder's standing instructions and the exact schema it must answer in.
 fn system_prompt() -> String {
-    let node_kinds = WORKFLOW_NODE_KINDS.join(", ");
+    let node_kinds = BUILDER_NODE_KINDS.join(", ");
     let destinations = WORKFLOW_DESTINATION_KINDS.join(", ");
     format!(
         "You are the automation desk of a company. You turn ONE board card — and the plan already \
