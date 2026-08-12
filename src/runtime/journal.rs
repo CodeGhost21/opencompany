@@ -1144,19 +1144,52 @@ impl RuntimeJournal {
     /// A no-op (returns `Ok`) if the key is already committed — which is also
     /// what keeps the executed-effect list free of duplicates: the second
     /// commit under a key never reaches the append.
+    ///
+    /// **A failed append releases the key again.** The in-memory set is a mirror
+    /// of what the file holds, and holding a key the append refused makes it lie
+    /// in the one direction that is silent: `execute_effect_once` aborts before
+    /// `perform_effect` on the error, so nothing external fired — but a later
+    /// attempt under the same key would then find the key present, take the
+    /// `Ok(())` early return, and skip the effect *reporting success*. The
+    /// effect would never run and no caller would ever hear that. Releasing the
+    /// key makes the retry a real retry.
+    ///
+    /// This does not weaken at-most-once, because the two are on opposite sides
+    /// of the side effect. The guarantee is about a crash *after* a commit that
+    /// succeeded; this is a commit that failed, before which nothing ran. The
+    /// worst case is the uncertain one — the write reached the file and only the
+    /// flush failed — and it still cannot duplicate: the retry appends a second
+    /// line for the key (replay dedupes, `executed` is a set) and runs the
+    /// effect exactly once, and a crash before the retry replays the first line
+    /// and skips the effect entirely. Every path is one execution or none.
+    ///
+    /// Contrast [`record_grant_consumed`](Self::record_grant_consumed), which
+    /// deliberately does *not* roll back: its tool has already run by the time
+    /// the record is written, so keeping the grant spent in memory is the safe
+    /// direction and restoring it would re-arm a grant that was redeemed.
     pub async fn record_executed(&self, key: &str, effect: ExecutedEffect) -> Result<()> {
         {
             let mut state = self.state.lock().expect("journal state poisoned");
             if !state.executed.insert(key.to_string()) {
                 return Ok(());
             }
-            state.index_executed(effect.clone());
         }
-        self.append(&JournalRecord::EffectExecuted {
-            key: key.to_string(),
-            effect: Some(effect),
-        })
-        .await
+        let appended = self
+            .append(&JournalRecord::EffectExecuted {
+                key: key.to_string(),
+                effect: Some(effect.clone()),
+            })
+            .await;
+        let mut state = self.state.lock().expect("journal state poisoned");
+        match appended {
+            // Indexed only once the commit is on the file, so the retry warnings
+            // built from it describe effects the journal actually committed.
+            Ok(()) => state.index_executed(effect),
+            Err(_) => {
+                state.executed.remove(key);
+            }
+        }
+        appended
     }
 
     /// Records a newly parked approval and which board task it belongs to
@@ -3481,5 +3514,44 @@ mod test {
         let reloaded = RuntimeJournal::new(&path);
         reloaded.load().await.unwrap();
         assert!(reloaded.is_executed("k-1"), "the flushed commit replays");
+    }
+
+    /// **Issue #392**: a commit whose append fails must release its key, so the
+    /// next attempt under that key is a real retry.
+    ///
+    /// Holding the key would make the failure silent in the worst way. The
+    /// append error aborts `execute_effect_once` before `perform_effect`, so
+    /// nothing external ran; a later attempt would then find the key present,
+    /// take the already-committed early return, and report `Ok` for an effect
+    /// that never happened and never will.
+    ///
+    /// The fault is injected by putting a **directory** where the journal file
+    /// belongs: `append`'s `create_dir_all` on the parent still succeeds, and
+    /// the append's own `open` then fails with `EISDIR`. A real failure of the
+    /// real `append_line_durable`, with no production seam added to stage it.
+    #[tokio::test]
+    async fn a_failed_commit_releases_the_key_for_a_retry() {
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+        tokio::fs::create_dir_all(&path).await.unwrap();
+        let journal = RuntimeJournal::new(&path);
+
+        let first = journal.record_executed("k-1", executed(1)).await;
+        assert!(
+            first.is_err(),
+            "the append cannot land on a path occupied by a directory"
+        );
+        assert!(
+            !journal.is_executed("k-1"),
+            "a key whose commit never reached the file must not be held: \
+             the effect did not run, so the key must not claim it did"
+        );
+
+        let retry = journal.record_executed("k-1", executed(1)).await;
+        assert!(
+            retry.is_err(),
+            "the retry must re-attempt the commit and surface the failure again, \
+             never take the already-committed early return and report success"
+        );
     }
 }
