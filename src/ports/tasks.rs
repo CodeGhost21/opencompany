@@ -849,6 +849,51 @@ pub struct TaskRecord {
     /// no stored board needs migrating. See [`TaskWorkflowProposal`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_proposal: Option<TaskWorkflowProposal>,
+    /// The workflow **run** whose agent node opened this card (issue #661 / M5).
+    ///
+    /// A workflow node's turn may reach `spawn_task` like any other turn, but a
+    /// run has no card and no conversation behind it — so the two lineage fields
+    /// above have nothing to say about where the card came from, and before this
+    /// nothing did. This is that provenance: a **reference**, not a parent.
+    ///
+    /// # Why a reference rather than a parent
+    ///
+    /// The alternative was minting a card for the run itself and parenting
+    /// spawned cards to it. A daily schedule would then leave 365 operator-facing
+    /// run-cards a year, most of them empty ceremony, and it would duplicate a
+    /// surface the run already has first-class — the runs history panel and the
+    /// `WorkflowRunStarted`/`WorkflowRunFinished` journal pair. So the card is a
+    /// lineage **root**: [`parent_task_id`](Self::parent_task_id) and
+    /// [`origin_chat_id`](Self::origin_chat_id) are both `None` by construction on
+    /// this path, and machine provenance rides these two fields instead.
+    ///
+    /// # A sub-workflow child stamps its **parent** run's id
+    ///
+    /// `StoreWorkflowResolver` runs a `sub_workflow` child inside the engine under
+    /// the parent's capability bundle — same runner, same run id, and the child
+    /// journals no started/finished pair of its own (which is why issue #617
+    /// exists). The parent's is therefore the only run identity that exists on
+    /// that path, and the only run row a console can navigate to. Pinned by test
+    /// rather than left to be rediscovered.
+    ///
+    /// `None` for every card opened from chat, from a dispatched card, straight
+    /// on the board, and for every card written before this field existed —
+    /// additive on the wire like [`Self::parent_task_id`], so no stored board
+    /// needs migrating.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_run_id: Option<String>,
+    /// The workflow graph whose run opened this card (issue #661 / M5).
+    ///
+    /// Carried beside [`origin_run_id`](Self::origin_run_id) rather than derived
+    /// from it, for the same reason `WorkflowRunFinished` carries both: a run id
+    /// is only resolvable to a workflow by folding the journal, and the journal is
+    /// trimmable while the board is not. A card outliving its run's rows must
+    /// still be able to say *which workflow* opened it.
+    ///
+    /// Always `Some` when [`origin_run_id`](Self::origin_run_id) is, and `None`
+    /// whenever it is — the two are stamped together by the one call site.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_workflow_id: Option<String>,
 }
 
 /// Durable per-company task board. Company A's tasks MUST be invisible to
@@ -1265,6 +1310,8 @@ mod test {
             plan: None,
             deliverable: TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         }
     }
 

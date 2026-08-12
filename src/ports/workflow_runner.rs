@@ -95,6 +95,26 @@ pub struct WorkflowRun {
     /// loads, as empty — and empty is the overwhelmingly common case.
     #[serde(default)]
     pub notices: Vec<String>,
+    /// One row per board write this run's agent nodes performed (issue #661 /
+    /// M5), in the order they were executed.
+    ///
+    /// A workflow node's turn may open a card and set who owns it — that is the
+    /// whole of what a run may do to the board, and it is what makes the shipped
+    /// `→ task cards` seed able to produce one. Every other lifecycle move stays
+    /// the operator's, refused at the tool boundary; see
+    /// [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim).
+    ///
+    /// **A card is real once written, so a row is a receipt rather than an
+    /// intention.** A `spawned` row means the `TaskStore` took the write; a
+    /// `spawnFailed` row means it did not, and the run still succeeded — a board
+    /// write that failed must not discard a completed turn's work, so the
+    /// failure is reported here instead of failing the node.
+    ///
+    /// Empty for every run whose nodes touched no card, which is nearly all of
+    /// them — hence `#[serde(default)]`, which also loads a `WorkflowRun`
+    /// deserialized from a payload written before this field existed.
+    #[serde(default)]
+    pub board: Vec<WorkflowRunBoardRow>,
 }
 
 /// One node's structural outcome inside a run (issue #542).
@@ -113,6 +133,105 @@ pub struct WorkflowRunNodeRow {
     pub status: WorkflowNodeStatus,
     /// Wall-clock duration of the node's execution, in milliseconds.
     pub elapsed_ms: u64,
+}
+
+/// What a workflow run's node did to the task board, as a closed set (issue
+/// #661 / M5).
+///
+/// Four arms rather than a `bool` beside a kind, because the two axes are not
+/// independent in any way a reader benefits from: an operator looking at a run
+/// wants "opened a card" / "could not open a card" / "set an owner" / "could not
+/// set an owner", and those are exactly the four sentences a console renders.
+///
+/// **The failure arms are not run failures.** They record that the store refused
+/// a write the node's turn had already been told would happen — the same class of
+/// honesty [`DeliveryStatus::Failed`] provides for a report that did not send. A
+/// run whose every board write failed still finished its graph and still returns
+/// `Ok`.
+///
+/// Carries no payload by construction, so nothing a model or a transport wrote
+/// can ride an action into a log. The row beside it carries the ids.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum WorkflowBoardAction {
+    /// A card was opened in To-do (`spawn_task`). The row's `taskId` is that
+    /// card's id, so a console can link straight to it.
+    Spawned,
+    /// An existing card's owner was set or cleared (`assign_task`). **No column
+    /// moved** — see [`WorkflowRun::board`].
+    Assigned,
+    /// `spawn_task` did not produce a card: the store refused the write, or this
+    /// runtime has no task board wired at all. No `taskId`, because there is no
+    /// card to point at.
+    SpawnFailed,
+    /// `assign_task` did not change the card's owner: the store refused the
+    /// write, the card is no longer on the board, or the name did not resolve to
+    /// anybody on the roster (issue #205 — an unresolvable owner is deliberately
+    /// not written, leaving the previous one in place).
+    AssignFailed,
+}
+
+impl WorkflowBoardAction {
+    /// Whether this row records a write that did **not** land.
+    ///
+    /// Used to decide whether the row is worth a `tracing::error` beside it: a
+    /// board write the node was told would happen and that did not is the one
+    /// thing on this path an operator cannot infer from the card itself.
+    pub fn failed(&self) -> bool {
+        matches!(self, Self::SpawnFailed | Self::AssignFailed)
+    }
+}
+
+/// One board write a workflow run's agent node performed (issue #661 / M5).
+///
+/// **Structural only**, and deliberately the same discipline
+/// [`WorkflowRunNodeRow`] keeps: the action, the ids involved, and nothing else.
+/// No error string, no note text, no instruction the model wrote — so a row
+/// cannot become a channel for a node's prose into the journal, the run
+/// response, or a host log.
+///
+/// One shape rides all three surfaces — the `WorkflowRunFinished` journal event,
+/// `GET …/workflows/runs`, and the synchronous run response — which is why the
+/// serde renaming is camelCase here rather than at each HTTP DTO: the
+/// [`DeliveryReport`] precedent, for the same reason. A console reads the same
+/// keys wherever it finds a run.
+///
+/// # `title` is the only field that carries authored text, and it is the card's own
+///
+/// A spawned card's title is what the operator will read off their board a
+/// moment later, so it is not new exposure — the board read already serves it
+/// under the same `ScopedCompany` guard. It is present only on the spawn arms,
+/// where the delegation named it; an assign row leaves it absent rather than
+/// re-transcribing a card the console can already resolve by id.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkflowRunBoardRow {
+    /// What was attempted, and whether it landed.
+    pub action: WorkflowBoardAction,
+    /// The card the row is about.
+    ///
+    /// Absent on [`SpawnFailed`](WorkflowBoardAction::SpawnFailed) — no card was
+    /// written, so there is no id, and synthesizing one would name a card that
+    /// is not on the board. Present on every other arm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The title the node asked for, on the two spawn arms.
+    ///
+    /// Absent on the assign arms: `assign_task` names a card by id and never
+    /// carries a title, so anything here would be a second transcription of a
+    /// card the reader can already look up — the drift `plan` avoids by being
+    /// projected verbatim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// The owner the node asked for, as the node wrote it.
+    ///
+    /// `None` when the node named nobody (a `spawn_task` with no assignee, which
+    /// lands unowned in To-do). Deliberately the **requested** name rather than
+    /// the resolved roster id: on an `assignFailed` row the requested name is the
+    /// only thing that explains the failure, and on a successful row the two
+    /// agree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// What became of one attempt to deliver an `output` node's report.

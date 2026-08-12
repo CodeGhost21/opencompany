@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::company::{CompanyManifest, POLICY_MODES, Policy};
 use crate::ports::ids::{agent_slug, generate_id, now_millis};
-use crate::ports::workflow_runner::DeliveryReport;
+use crate::ports::workflow_runner::{DeliveryReport, WorkflowRunBoardRow};
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -1023,6 +1023,28 @@ pub enum CompanyEvent {
         /// did before — which is every run that did not overflow.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         notices: Vec<String>,
+        /// One row per board write this run's agent nodes performed (issue #661
+        /// / M5) — the same rows the synchronous run response hands back.
+        ///
+        /// This is what makes a **scheduled** run's board writes readable at
+        /// all: nobody was watching the response, so without this the only
+        /// evidence a 3am run opened a card is the card itself, with nothing
+        /// saying which run put it there.
+        ///
+        /// Rides the `Ok` arm only, like
+        /// [`cancelled`](Self::WorkflowRunFinished) and
+        /// [`notices`](Self::WorkflowRunFinished): a run that returned nothing
+        /// carries no rows here. **The cards themselves are unaffected** — a
+        /// board write is durable the moment the drain performs it, so a run
+        /// that later failed outright still leaves every card it opened on the
+        /// board. What an `Err` loses is the row *listing* them, not the work.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a line written before
+        /// this field existed replays, and a run that touched no card
+        /// serializes byte-for-byte as it did before — which is nearly all of
+        /// them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        board: Vec<WorkflowRunBoardRow>,
     },
     /// A workflow run began (issue #371) — the opening bracket of a run's
     /// per-node progress trail.
@@ -4990,6 +5012,7 @@ mod test {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -5007,6 +5030,7 @@ mod test {
             error: Some("agent node `worker` had no inference source".to_string()),
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -5036,6 +5060,7 @@ mod test {
                 error: None,
                 cancelled: false,
                 notices: Vec::new(),
+                board: Vec::new(),
             }
         );
         // …and serializing it back emits nothing extra.
@@ -5068,6 +5093,7 @@ mod test {
             error: None,
             cancelled: true,
             notices: Vec::new(),
+            board: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
 
@@ -5181,6 +5207,7 @@ mod test {
                 error: None,
                 cancelled: false,
                 notices: Vec::new(),
+                board: Vec::new(),
             }
         );
     }
