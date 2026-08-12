@@ -159,7 +159,8 @@ addressing forms work: `/api/v1/companies/{id}/…` and `/api/v1/company/…`.
 | `GET …/auth/me` | Who this session belongs to |
 | `POST …/auth/logout` | Revoke this session |
 | `GET …/users` | The roster (admin) |
-| `GET/POST …/users/invites` | List/send invites (admin) |
+| `GET …/users/invites` | List outstanding invites (admin) |
+| `POST …/users/invites` | Invite an address, and mail them (admin). Answers `delivery: "sent" \| "no_transport" \| "failed"` alongside the invite |
 | `DELETE …/users/invites/{id}` | Revoke an invite (admin) |
 | `PATCH …/users/{id}` | Role, status, display name (admin) |
 | `POST …/users/{id}/password` | Set a temporary password (admin) |
@@ -306,6 +307,32 @@ Login mail uses the host-level provider (`OPENCOMPANY_MAIL_*`, see
 the company's. With no transport configured, `auth/request` returns the code in
 a `dev_code` field and logs a warning, so local development works; a host that
 can send mail never echoes it.
+
+**Invite mail** goes out over that same host-level provider, gated on the same
+"is a transport wired" predicate. Not the company's own `__smtp` secret, and
+deliberately: an invite mailed from a host whose platform mail is unwired
+invites someone into a dead flow, because the sign-in link they then ask for
+cannot be sent. One transport, one truthful answer.
+
+An invite mail is a **notification, not a credential**. It names the company,
+the inviter (display name or the email's local part, never the full address,
+per [Chat attribution](#chat-attribution)), and the sign-in URL — no code, no
+token, not even the invite id. The recipient still goes through
+`auth/request` like anyone else, so the roster stays the only gate. That is
+what makes it safe to send to an address a human typed and may have typed
+wrongly.
+
+`POST …/users/invites` **reports delivery** rather than assuming it. Unlike
+`auth/request`, this route is admin-authenticated and the caller supplied the
+address, so there is no enumeration oracle to protect and nothing the response
+could disclose that the caller did not already know. The mail is sent strictly
+*after* the invite record is written — a refusal (already a member, already
+invited) must mail nobody — and a failed send never rolls the grant back, since
+a mail outage should not become a silent refusal to add people. A sent invite
+stamps `notifiedAtMillis` on the record, which the console reads to say whether
+the person was actually told; absent means nobody was, and the operator owes
+them a message. Issue #584: the route previously wrote the record and mailed
+nobody while the console reported unconditional success.
 
 ## Abuse and exposure
 
