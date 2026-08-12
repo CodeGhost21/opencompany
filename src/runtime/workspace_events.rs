@@ -123,6 +123,14 @@ impl WorkspaceAnnouncer {
 
 #[async_trait]
 impl WorkspaceStore for WorkspaceAnnouncer {
+    /// Delegated, not defaulted (issue #665). This wrapper sits *outside* the
+    /// quota decorator, so taking the trait's permissive default here would
+    /// answer "yes" for every upload and hide the only implementation that knows
+    /// the company's cap.
+    async fn admit_upload(&self, company: &CompanyId, name: &str, len: u64) -> Result<()> {
+        self.inner.admit_upload(company, name, len).await
+    }
+
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
         self.inner.tree(company).await
     }

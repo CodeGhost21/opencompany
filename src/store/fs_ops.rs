@@ -14,7 +14,9 @@
 //! - skills → `skills.json` (operator deltas)
 //! - workspace → real folders + Markdown files under `workspace/`, indexed by
 //!   `.workspace-index.json` (ULID → node metadata; physical paths derive from
-//!   the folder/name tree so a rename physically relocates the subtree)
+//!   the folder/name tree so a rename physically relocates the subtree). The
+//!   filesystem store therefore refuses a write whose resolved path another
+//!   node already holds: two ids may never alias one on-disk path (issue #666).
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -1086,6 +1088,7 @@ impl WorkspaceStore for FsOps {
                 }
             }
         }
+        reject_path_collision(&index, &node.id, &node.name, node.parent_id.as_deref())?;
         index.insert(node.id.clone(), node.clone());
         let physical = self.physical_path(company, &index, &node.id)?;
         match node.kind {
@@ -1153,6 +1156,7 @@ impl WorkspaceStore for FsOps {
                 }
             }
         }
+        reject_path_collision(&index, &node.id, &node.name, node.parent_id.as_deref())?;
         index.insert(node.id.clone(), node.clone());
         // The same sanitized derivation the text path uses, so a binary node
         // cannot reach a path a note could not.
@@ -1268,6 +1272,10 @@ impl WorkspaceStore for FsOps {
                 ));
             }
         }
+        let current = index.get(id).expect("node present");
+        let target_name = name.unwrap_or(&current.name);
+        let target_parent = parent.unwrap_or(current.parent_id.as_deref());
+        reject_path_collision(&index, id, target_name, target_parent)?;
         let old_physical = self.physical_path(company, &index, id)?;
         {
             let node = index.get_mut(id).expect("node present");
@@ -1470,6 +1478,96 @@ fn descendants(index: &HashMap<String, WorkspaceNode>, id: &str) -> HashSet<Stri
     out
 }
 
+/// The workspace-relative chain of names a node resolves to, or would.
+///
+/// This is [`FsOps::physical_path`]'s derivation with the constant
+/// `workspace/` prefix left off, and it exists separately because the check
+/// below needs the path of a node that is *not in the index yet*. Two nodes
+/// alias exactly when their chains are equal, so comparing chains and
+/// comparing the paths they build is the same question.
+fn name_chain(
+    index: &HashMap<String, WorkspaceNode>,
+    name: &str,
+    parent: Option<&str>,
+) -> Result<Vec<String>> {
+    let mut names = vec![name.to_string()];
+    let mut cursor = parent.map(str::to_string);
+    let mut guard = 0;
+    while let Some(node_id) = cursor {
+        let node = index.get(&node_id).ok_or_else(|| {
+            OpenCompanyError::Store(format!("dangling workspace parent {node_id}"))
+        })?;
+        names.push(node.name.clone());
+        cursor = node.parent_id.clone();
+        guard += 1;
+        if guard > 10_000 {
+            return Err(OpenCompanyError::Store(
+                "workspace cycle detected".to_string(),
+            ));
+        }
+    }
+    names.reverse();
+    Ok(names)
+}
+
+/// Refuses a name/parent that would resolve to a physical path another node
+/// already holds.
+///
+/// Node ids are the workspace's durable identity, but the filesystem backend
+/// intentionally mirrors the operator-visible folder/name tree on disk. That
+/// representation cannot safely carry two nodes on one path: the second create
+/// would overwrite the first node's bytes while leaving both metadata rows
+/// behind, and a later read would serve one payload under the other row's size
+/// and digest (issue #666).
+///
+/// # Why the whole path, and not the sibling name
+///
+/// Matching on `(parent_id, name)` catches the ordinary case and misses the one
+/// that is already in the field. A tree may hold **duplicate-named folders** —
+/// [`crate::company::workspace_scaffold`] finds them, refuses to resolve them
+/// and deliberately leaves them standing, and an index written before this
+/// check existed can carry them. Two nodes under two roots both named `Desks`
+/// are not siblings by `parent_id`, and their paths are nevertheless the same
+/// string. Comparing the resolved chain closes that, and subsumes the sibling
+/// case: equal parents plus equal names is equal chains.
+///
+/// # Why only the moved node's own path is checked
+///
+/// Renaming a folder moves its whole subtree, but a chain is determined by its
+/// prefix: if a descendant's new chain equalled some other node's chain, their
+/// prefixes would be equal too — which is a collision on the renamed node's own
+/// chain, and is refused here. So a descendant cannot collide unless its
+/// ancestor already does.
+///
+/// A node whose own chain cannot be derived (a dangling parent in a damaged
+/// index) is skipped rather than propagated: it resolves to no path, so it can
+/// alias nothing, and one unreachable row must not make every write fail.
+///
+/// The check runs while the workspace-index lock is held by every caller, so
+/// two concurrent creates cannot both observe an available path. `self_id` is
+/// excluded so a no-op rename remains valid.
+fn reject_path_collision(
+    index: &HashMap<String, WorkspaceNode>,
+    self_id: &str,
+    name: &str,
+    parent: Option<&str>,
+) -> Result<()> {
+    let candidate = name_chain(index, name, parent)?;
+    let taken = index
+        .values()
+        .filter(|node| node.id != self_id)
+        .any(|node| {
+            name_chain(index, &node.name, node.parent_id.as_deref())
+                .is_ok_and(|chain| chain == candidate)
+        });
+    if taken {
+        return Err(OpenCompanyError::Conflict(format!(
+            "workspace already contains `{name}` in that folder"
+        )));
+    }
+    Ok(())
+}
+
 /// Rejects a node name that contains a path separator or a parent-dir hop, so a
 /// workspace write can never escape the `workspace/` root.
 fn reject_unsafe_name(name: &str) -> Result<()> {
@@ -1584,6 +1682,174 @@ mod test {
             .prefix("opencompany-fsops-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    fn workspace_node(id: &str, name: &str, kind: NodeKind, parent: Option<&str>) -> WorkspaceNode {
+        WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Operator,
+            updated_by: WorkspaceOrigin::Operator,
+            mime: None,
+            size: None,
+            sha256: None,
+        }
+    }
+
+    /// A file node carrying the mime a binary write requires; `size` and
+    /// `sha256` are the store's to compute.
+    fn binary_node(id: &str, name: &str, parent: Option<&str>) -> WorkspaceNode {
+        WorkspaceNode {
+            mime: Some("application/pdf".to_string()),
+            ..workspace_node(id, name, NodeKind::File, parent)
+        }
+    }
+
+    async fn collect_stream(stream: crate::ports::workspace::BlobStream) -> Vec<u8> {
+        use futures::StreamExt;
+        let mut stream = stream;
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            out.extend_from_slice(&chunk.expect("chunk"));
+        }
+        out
+    }
+
+    /// Two root folders under one name, written straight to the index.
+    ///
+    /// `create` refuses to *make* this shape now (issue #666), but it is
+    /// reachable in the field: an index written before that refusal existed
+    /// carries it, and `workspace_scaffold` finds such roots, declines to
+    /// resolve them and deliberately leaves them standing. So the state is
+    /// seeded rather than requested.
+    async fn seed_duplicate_roots(ops: &FsOps, company: &CompanyId) {
+        let mut index = HashMap::new();
+        for id in ["root-a", "root-b"] {
+            index.insert(
+                id.to_string(),
+                workspace_node(id, "Desks", NodeKind::Folder, None),
+            );
+        }
+        ops.bundle(company)
+            .ensure_dirs()
+            .await
+            .expect("bundle dirs");
+        ops.save_index(company, &index).await.expect("seed index");
+    }
+
+    /// Issue #666, one level below the sibling case: nodes under two
+    /// same-named folders are not siblings by `parent_id`, and still resolve to
+    /// one path. A check keyed on `(parent_id, name)` admits the second and
+    /// lets it overwrite the first node's bytes.
+    #[tokio::test]
+    async fn equal_names_under_duplicate_roots_cannot_claim_one_path() {
+        let root_dir = tmp_root();
+        let ops = FsOps::new(root_dir.path());
+        let company = CompanyId::new("acme");
+        seed_duplicate_roots(&ops, &company).await;
+
+        ops.create_binary(
+            &company,
+            &binary_node("first", "report.pdf", Some("root-a")),
+            b"the first payload",
+        )
+        .await
+        .expect("the first child of the first root is fine");
+
+        let err = ops
+            .create_binary(
+                &company,
+                &binary_node("second", "report.pdf", Some("root-b")),
+                b"a different payload entirely",
+            )
+            .await
+            .expect_err("the second root's child resolves to the same path");
+        assert!(
+            matches!(err, OpenCompanyError::Conflict(_)),
+            "a path already in use is a conflict, not a store error: {err:?}"
+        );
+
+        let (node, stream) = ops
+            .read_bytes(&company, "first")
+            .await
+            .expect("read")
+            .expect("the first node still exists");
+        assert_eq!(
+            collect_stream(stream).await,
+            b"the first payload",
+            "the refused create must not have overwritten the first payload"
+        );
+        assert_eq!(
+            node.size,
+            Some("the first payload".len() as u64),
+            "nor left the surviving node describing bytes it no longer holds"
+        );
+        assert!(
+            ops.tree(&company)
+                .await
+                .expect("tree")
+                .iter()
+                .all(|n| n.id != "second"),
+            "a refused create must not leave a metadata row behind"
+        );
+    }
+
+    /// The same path, reached by moving rather than creating.
+    #[tokio::test]
+    async fn a_move_cannot_claim_a_path_held_under_a_duplicate_root() {
+        let root_dir = tmp_root();
+        let ops = FsOps::new(root_dir.path());
+        let company = CompanyId::new("acme");
+        seed_duplicate_roots(&ops, &company).await;
+
+        ops.create_binary(
+            &company,
+            &binary_node("first", "report.pdf", Some("root-a")),
+            b"the first payload",
+        )
+        .await
+        .expect("create under the first root");
+        ops.create_binary(
+            &company,
+            &binary_node("mover", "draft.pdf", Some("root-b")),
+            b"a different payload entirely",
+        )
+        .await
+        .expect("a differently-named child of the second root is fine");
+
+        let err = ops
+            .rename_move(&company, "mover", Some("report.pdf"), None)
+            .await
+            .expect_err("renaming it onto the other root's path is refused");
+        assert!(
+            matches!(err, OpenCompanyError::Conflict(_)),
+            "expected a conflict: {err:?}"
+        );
+
+        let (_, stream) = ops
+            .read_bytes(&company, "first")
+            .await
+            .expect("read")
+            .expect("the node whose path was targeted still exists");
+        assert_eq!(
+            collect_stream(stream).await,
+            b"the first payload",
+            "the refused move must not have overwritten it"
+        );
+        let (moved, stream) = ops
+            .read_bytes(&company, "mover")
+            .await
+            .expect("read")
+            .expect("and the mover still exists");
+        assert_eq!(moved.name, "draft.pdf", "under its original name");
+        assert_eq!(
+            collect_stream(stream).await,
+            b"a different payload entirely",
+            "with its own bytes"
+        );
     }
 
     #[tokio::test]

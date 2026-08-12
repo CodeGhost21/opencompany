@@ -728,6 +728,27 @@ async fn upload(
         .to_string();
     let mime = resolve_mime(&name, declared.as_deref());
 
+    // Issue #665: a file uploaded as a file is bounded as a file, whatever its
+    // encoding turns out to be. Asked **here, before the text/binary branch**
+    // below, because that branch decides how the payload is *stored* and must
+    // not also decide whether a limit applies.
+    //
+    // The store is asked rather than a limit applied here: a route cannot know a
+    // company's configured cap — routers are built once, before any company
+    // exists — so a check written inline would silently enforce the global
+    // default against a company that raised or lowered its own.
+    //
+    // This is not the per-writer check `workspace_quota` argues against. That
+    // argument is about writers *forgetting*; the decorator's narrowing rests on
+    // "a note is bounded by what a model will emit into a tool call", which is
+    // true of every writer it covers and false here — this route is where
+    // arbitrary operator-supplied bytes enter the tree.
+    company
+        .runtime
+        .workspace()
+        .admit_upload(company.id(), &name, bytes.len() as u64)
+        .await?;
+
     let mut node = WorkspaceNode {
         id: generate_id(),
         name,

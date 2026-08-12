@@ -1227,6 +1227,62 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+/// Issue #666 applies to every way the filesystem path can change, not only to
+/// creates. A rename that could alias a sibling is refused before either the
+/// index or either file body moves.
+#[tokio::test]
+async fn workspace_rename_cannot_claim_a_siblings_physical_path() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, first) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "first.md", "kind": "file", "content": "first body"})),
+    )
+    .await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let (_, second) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "second.md", "kind": "file", "content": "second body"})),
+    )
+    .await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    let (status, refusal) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/workspace/{second_id}"),
+        Some(json!({"name": "first.md"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["code"], "conflict", "{refusal}");
+
+    for (id, name, content) in [
+        (&first_id, "first.md", "first body"),
+        (&second_id, "second.md", "second body"),
+    ] {
+        let (status, file) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/workspace/file/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{file}");
+        assert_eq!(file["name"], name, "the refused rename changed metadata");
+        assert_eq!(
+            file["content"], content,
+            "the refused rename moved or overwrote a sibling body"
+        );
+    }
+}
+
 /// The read plane the console's Workspace tab runs on (issue #177): the tree
 /// `GET` reflects writes, and the file `GET` carries content plus
 /// server-computed backlinks.
@@ -7282,6 +7338,88 @@ async fn an_uploaded_image_round_trips_through_the_blob_route() {
     assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
 }
 
+/// Issue #666: the filesystem backend derives payload paths from sibling
+/// names, so accepting the same name twice used to leave two ids pointing at
+/// one file. The second upload overwrote the first while the first node kept
+/// its old length and digest.
+///
+/// Refusing the colliding create is the filesystem backend's honest answer: it
+/// preserves the first payload and prevents the blob route from serving bytes
+/// under metadata computed for a different file.
+#[tokio::test]
+async fn a_same_name_upload_is_refused_without_overwriting_the_first_blob() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let first_bytes = vec![0x89, b'P', b'N', b'G', 0xff];
+    let (status, first) =
+        upload_file(&state, "chart.png", Some("image/png"), &first_bytes, None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let first_sha = first["sha256"].as_str().unwrap().to_string();
+
+    let second_bytes = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 0xff];
+    let (status, refusal) =
+        upload_file(&state, "chart.png", Some("image/png"), &second_bytes, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["code"], "conflict", "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("chart.png")),
+        "the operator can identify the occupied name: {refusal}"
+    );
+
+    let response = blob_response(&state, &first_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-length"],
+        first_bytes.len().to_string(),
+        "the surviving node still describes its own payload"
+    );
+    assert_eq!(response.headers()["etag"], format!("\"{first_sha}\""));
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        body.as_ref(),
+        first_bytes.as_slice(),
+        "the refused upload must not overwrite the first file"
+    );
+
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tree.as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["name"] == "chart.png")
+            .count(),
+        1,
+        "a rejected collision must not leave a second metadata row"
+    );
+
+    // The physical paths differ when the parent differs, so this is not a
+    // workspace-wide filename ban.
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Archive", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap();
+    let (status, nested) = upload_file(
+        &state,
+        "chart.png",
+        Some("image/png"),
+        &second_bytes,
+        Some(folder_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{nested}");
+    assert_eq!(nested["parentId"], folder_id);
+}
+
 /// A Markdown upload stays a **note**, not a payload. Storing it as bytes would
 /// silently cost it the editor, the diff-free text read, backlinks and search —
 /// so the decision is asserted rather than left to whichever branch ran.
@@ -7742,6 +7880,96 @@ async fn a_file_over_the_per_file_cap_is_refused_as_too_large_not_as_malformed()
     );
 
     assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// A file part declared as a texty type, so the upload takes the **text**
+/// branch rather than the binary one.
+fn text_file_part_prefix(filename: &str) -> Vec<u8> {
+    format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"{filename}\"\r\nContent-Type: text/csv\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// Issue #665: an over-cap upload is refused even when its bytes are valid
+/// UTF-8.
+///
+/// The store's quota decorator meters **binary payloads only**, and that is a
+/// deliberate narrowing — `src/runtime/workspace_quota.rs` says so, on the
+/// grounds that "a note is bounded by what a model will emit into a tool call".
+/// That premise holds for every writer the decorator covers and is false for
+/// this route, which is where arbitrary operator-supplied bytes enter the tree.
+///
+/// So a 65 MiB `.csv` — valid UTF-8, therefore classified as prose — used to be
+/// stored with **no size check at all**, while the byte-identical payload under
+/// a binary content type was refused. Same request, same size, opposite answer,
+/// decided by whether the bytes happened to decode.
+///
+/// The narrowing itself is untouched: an agent's note is still unmetered, and
+/// `tree_quota_gb` still counts binary payloads alone.
+#[tokio::test]
+async fn an_over_cap_upload_is_refused_even_when_its_bytes_are_valid_utf8() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // NUL bytes: valid UTF-8, so `text_body` decodes them and the upload takes
+    // the text branch. One megabyte over the 64 MiB default cap.
+    let oversize = 65 * 1024 * 1024;
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            text_file_part_prefix("export.csv"),
+            oversize,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(message.contains("export.csv"), "names the file: {message}");
+    assert!(message.contains("65.0 MiB"), "names its size: {message}");
+    assert!(message.contains("64.0 MiB"), "names the limit: {message}");
+    assert!(message.contains("Nothing was stored"), "{message}");
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The other half of #665, and the reason the fix is a cap rather than a
+/// reclassification: an *under*-cap text upload is still stored as prose.
+///
+/// Refusing large text must not turn ordinary text uploads into opaque blobs — a
+/// `.csv` an operator uploads is meant to stay searchable, backlinkable and
+/// editable in the console. If this ever fails, the fix has started deciding
+/// storage representation instead of bounding size.
+#[tokio::test]
+async fn an_under_cap_text_upload_is_still_stored_as_prose() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "notes.csv",
+        Some("text/csv"),
+        b"a,b,c\n1,2,3\n",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["content"], "a,b,c\n1,2,3\n",
+        "a text upload keeps its body: {node}"
+    );
+    assert!(
+        node.get("mime").is_none() || node["mime"].is_null(),
+        "and is a prose note, not a binary payload: {node}"
+    );
 }
 
 /// The route's own backstop is classified too, and it fires while *skipping* a
