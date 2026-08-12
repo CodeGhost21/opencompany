@@ -1148,6 +1148,7 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         created_at_millis: at,
         expires_at_millis: at + 1_000,
         accepted_at_millis: None,
+        notified_at_millis: None,
     };
 
     users

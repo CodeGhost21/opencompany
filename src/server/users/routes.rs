@@ -962,6 +962,10 @@ pub(crate) async fn manifest_admin_invites(
                 created_at_millis: now,
                 expires_at_millis: now + MANIFEST_INVITE_TTL_MILLIS,
                 accepted_at_millis: None,
+                // A bootstrapped admin is eligible because configuration says
+                // so; nothing was ever mailed to them, and no row exists to
+                // stamp if it were.
+                notified_at_millis: None,
             }
         })
         .collect())

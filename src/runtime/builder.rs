@@ -2811,6 +2811,7 @@ mod test {
                     created_at_millis: 1,
                     expires_at_millis: 10,
                     accepted_at_millis: None,
+                    notified_at_millis: None,
                 },
             )
             .await

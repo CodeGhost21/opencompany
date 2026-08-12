@@ -128,6 +128,21 @@ pub struct InviteRecord {
     /// Epoch-millis timestamp of redemption; `None` while still outstanding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_at_millis: Option<u64>,
+    /// Epoch-millis timestamp of when the invite mail was accepted by the
+    /// transport; `None` if no mail was sent.
+    ///
+    /// `None` is the honest answer for three different situations, and the
+    /// console says so rather than implying delivery: the host has no mail
+    /// transport wired, the send was attempted and failed, or the record
+    /// predates invite mail existing at all. Every store persists invites as a
+    /// JSON blob, so `serde(default)` is the whole migration — an older row
+    /// loads as `None`, which is true of it.
+    ///
+    /// It records that the transport *accepted* the message, which is the
+    /// furthest thing this process can honestly claim to know. A bounce after
+    /// that point happens somewhere this code cannot see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notified_at_millis: Option<u64>,
 }
 
 impl InviteRecord {
@@ -221,6 +236,7 @@ mod test {
             created_at_millis: 0,
             expires_at_millis: 100,
             accepted_at_millis: None,
+            notified_at_millis: None,
         };
         assert!(invite.is_redeemable(99));
         // Expiry is exclusive: at the boundary the invite is already dead.
