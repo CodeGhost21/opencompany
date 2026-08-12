@@ -69,11 +69,11 @@ use crate::ports::types::CompanyId;
 /// Durable per-company claims that one schedule fired at one UTC epoch minute.
 ///
 /// Company A's claims MUST be invisible to company B, exactly like every other
-/// per-company port. The three methods are storage verbs only: the schedulers
+/// per-company port. The four methods are storage verbs only: the schedulers
 /// own the claim *policy* (claim before side effect, fail closed on error, one
 /// bounded catch-up), and a backend only ever sees "insert this key if absent",
 /// "what is the max minute for this schedule", "delete minutes below this
-/// cutoff".
+/// cutoff", "delete every minute for one schedule".
 #[async_trait]
 pub trait ScheduleFireStore: Send + Sync {
     /// Atomically records that `schedule_id` fired at epoch `minute` for
@@ -110,4 +110,21 @@ pub trait ScheduleFireStore: Send + Sync {
     /// [`PRUNE_CUTOFF_MINUTES`](crate::runtime::PRUNE_CUTOFF_MINUTES) vs
     /// [`CATCHUP_WINDOW_MINUTES`](crate::runtime::CATCHUP_WINDOW_MINUTES)).
     async fn prune_fires_before(&self, company: &CompanyId, cutoff_minute: u64) -> Result<usize>;
+
+    /// Removes *every* claim row for `(company, schedule_id)`, whatever its
+    /// minute, returning how many rows were removed.
+    ///
+    /// Called when a schedule's identity is retired — a workflow is deleted
+    /// (issue #708) — so a later schedule that mints the *same* `schedule_id`
+    /// (a delete+recreate of a workflow reuses `"workflow-<id>"`, which is
+    /// deliberately restart-stable and NOT re-keyed) starts with an empty
+    /// ledger: no [`latest_fire`](ScheduleFireStore::latest_fire) anchor to
+    /// mis-anchor its catch-up on, and every past minute claimable again so the
+    /// first tick after recreation fires instead of losing to a stale claim.
+    ///
+    /// A `schedule_id` that never fired removes nothing and returns `Ok(0)`;
+    /// the call is idempotent (a second delete of the same id also returns
+    /// `Ok(0)`). Unlike [`claim_fire`](ScheduleFireStore::claim_fire), this is
+    /// not a race arbiter — it is a one-shot purge on the delete path.
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize>;
 }

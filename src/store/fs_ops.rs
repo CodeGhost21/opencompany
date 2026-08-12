@@ -923,6 +923,53 @@ impl crate::ports::schedule_fires::ScheduleFireStore for FsOps {
         .await
         .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
     }
+
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize> {
+        let dir = self
+            .bundle(company)
+            .schedule_fires_dir()
+            .join(hashed_schedule_component(schedule_id));
+        tokio::task::spawn_blocking(move || {
+            let markers = match std::fs::read_dir(&dir) {
+                Ok(entries) => entries,
+                // No directory means the schedule never fired — nothing to
+                // purge, the same NotFound-is-empty rule the other verbs use.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+                Err(e) => return Err(io_err(&dir, e)),
+            };
+            let mut removed = 0usize;
+            for marker in markers {
+                let marker = marker.map_err(|e| io_err(&dir, e))?;
+                // Only our minute markers count as claim rows; a filename that
+                // does not parse is not one of ours, so it is left in place
+                // (and will simply keep the best-effort `remove_dir` below from
+                // succeeding, which is harmless).
+                let Some(_minute) = marker
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u64>().ok())
+                else {
+                    continue;
+                };
+                let path = marker.path();
+                match std::fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    // A racing prune already removed it — not our removal to
+                    // count, but not an error either.
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(io_err(&path, e)),
+                }
+            }
+            // Best-effort: drop the now-empty schedule directory so a purged
+            // schedule leaves no directory behind. Ignored if it is not empty
+            // (a stray non-marker file) or already gone — the rows are what the
+            // count and the contract are about, not the directory.
+            let _ = std::fs::remove_dir(&dir);
+            Ok(removed)
+        })
+        .await
+        .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+    }
 }
 
 // ---------------------------------------------------------------------------

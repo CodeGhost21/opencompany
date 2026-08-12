@@ -652,12 +652,11 @@ impl WorkflowScheduler {
         // out of the registry is never visited again, so its entries would be
         // orphaned forever. Swept here beside the others. (A deleted-but-company-
         // still-present workflow leaves one stale entry, harmless: it is only a
-        // "have I run catch-up for this" bit and a re-created workflow of the same
-        // id is a first sight again only after this sweep — acceptable, since a
-        // re-created workflow's anchor is whatever it last durably fired. That the
-        // anchor survives a delete+recreate is the durable-identity reuse issue
-        // #708 documents on `workflow_schedule_id` — bounded by the catch-up
-        // window, fixed by purging the fire ledger at delete time, not re-keying.)
+        // "have I run catch-up for this" bit, cleared on the next sight. A
+        // re-created workflow of the same id is a genuine first sight against an
+        // EMPTY ledger, because the delete path purges the fire rows under
+        // `workflow_schedule_id` (issue #708) — so there is no inherited anchor
+        // for this re-armed latch to catch up against.)
         self.caught_up
             .retain(|(company, _)| registry.get(company).is_some());
 
@@ -795,23 +794,18 @@ fn lock_in_flight(
 /// # Identity reuse across delete+recreate (issue #708)
 ///
 /// Because this key is the workflow id alone, deleting a workflow and recreating
-/// one with the **same id** makes the new workflow **inherit the old one's fire
-/// ledger** — its durable `claim_fire` / [`latest_fire`] rows survive the delete
-/// (`delete_workflow` in `src/server/ops/workflows.rs` tears down the graph,
-/// revisions, and events, but not the schedule's claim rows). Two effects, each
-/// bounded by [`CATCHUP_WINDOW_MINUTES`]:
+/// one with the **same id** would make the new workflow inherit the old one's
+/// fire ledger — the durable `claim_fire` / [`latest_fire`] rows outlive the
+/// graph. So the delete path purges those rows: `delete_company_workflow`
+/// (`src/company/workflow_create.rs`) calls
+/// [`delete_schedule_fires`](crate::ports::ScheduleFireStore::delete_schedule_fires)
+/// under this exact key after the graph, revisions, and events are gone, so a
+/// recreated same-id workflow starts against an empty ledger — no stale anchor
+/// to mis-anchor a catch-up on, and every past minute claimable again.
 ///
-/// * **one suppressed minute** — if the recreated schedule matches a minute the
-///   old id already claimed, `claim_fire` returns `false` and that single
-///   occurrence is skipped; and
-/// * **one inherited make-up** — the first-sight catch-up reads the stale anchor,
-///   so it may fire (or decline) a make-up on the *deleted* workflow's history.
-///   The `caught_up` sweep note in [`tick`](WorkflowScheduler::tick) already
-///   spells this out: a re-created workflow's anchor is whatever it last durably
-///   fired, so it is a first sight against a non-empty ledger.
-///
-/// The key is **deliberately not re-keyed** to erase that history, for three
-/// reasons — the re-key was considered for #661 and rejected:
+/// The key is **deliberately not re-keyed** to force that separation — the
+/// re-key was considered for #661 and rejected for three reasons, which is why
+/// the fix lives on the delete path, not in this id:
 ///
 /// 1. **Per-deploy catch-up loss** — a new key orphans every deployed tenant's
 ///    existing anchors, so the first boot after the change treats every armed
@@ -823,12 +817,12 @@ fn lock_in_flight(
 /// 3. It is the natural, restart-stable `(company, workflow)` identity that
 ///    survives a restart without depending on a positional index.
 ///
-/// The real fix purges the fire-ledger rows at delete time instead (a new
-/// [`ScheduleFireStore`](crate::ports::ScheduleFireStore) delete method, called
-/// from `delete_company_workflow`), leaving the key as-is. Tracked in issue #708.
+/// Minted here at the one authoritative site and re-exported (`pub(crate)`) so
+/// the delete path forms the same key from the same code, never a duplicated
+/// format string.
 ///
 /// [`latest_fire`]: crate::ports::ScheduleFireStore::latest_fire
-fn workflow_schedule_id(workflow_id: &str) -> String {
+pub(crate) fn workflow_schedule_id(workflow_id: &str) -> String {
     format!("workflow-{workflow_id}")
 }
 
@@ -3505,6 +3499,84 @@ to = "done"
         assert_eq!(started.lock().unwrap()[0].input["catchUp"], true);
     }
 
+    /// #708: a workflow deleted and recreated with the SAME id must not inherit
+    /// the old one's fire ledger. Driven against the real per-company store (not
+    /// a double), in two phases in one test so the stale-fixture guard holds:
+    ///
+    /// * Phase 1 — with the inherited claim still present, minute M is suppressed
+    ///   (`claim_fire` loses to the stale row). This is exactly the bug a
+    ///   delete+recreate exhibited before this fix.
+    /// * Phase 2 — after `delete_schedule_fires` (what `delete_company_workflow`
+    ///   now calls on delete) purges the ledger, the SAME minute is claimable
+    ///   again and the recreated workflow fires.
+    ///
+    /// Phase 1 proves the seeded claim genuinely suppresses, so phase 2's fire
+    /// can only come from the purge actually removing the row — a no-op purge
+    /// leaves phase 2 asserting `0` and fails the test.
+    #[tokio::test]
+    async fn a_recreated_workflow_does_not_inherit_the_deleted_fire_ledger() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("* * * * *"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        let schedule_id = workflow_schedule_id("digest");
+
+        // The OLD workflow already fired minute M; its durable claim survives the
+        // delete because the key is the restart-stable `workflow-<id>`.
+        let m = minute_at(2026, 7, 14, 9, 0);
+        runtime
+            .schedule_fires()
+            .claim_fire(&company, &schedule_id, m)
+            .await
+            .unwrap();
+
+        // A recreated workflow is, to the durable ledger, a fresh scheduler view
+        // over the same store (the in-process minute dedup is empty on the new
+        // sighting — most starkly across a restart). So each phase uses its own
+        // scheduler instance, exactly like `two_schedulers_over_one_store_fire_once`,
+        // isolating the DURABLE ledger as the only variable between them.
+        let clock = || Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+
+        // Phase 1 — WITHOUT the purge: the inherited claim suppresses minute M.
+        // This is exactly the #708 bug a delete+recreate exhibited.
+        let mut before = WorkflowScheduler::new(registry.clone(), clock());
+        assert_eq!(
+            before.tick().await,
+            0,
+            "an inherited claim suppresses the recreated workflow's fire (the #708 bug)"
+        );
+        assert!(started.lock().unwrap().is_empty());
+
+        // Phase 2 — WITH the purge (what `delete_company_workflow` now does): the
+        // ledger is cleared, so the SAME minute is claimable again and the
+        // recreated workflow fires. A no-op purge would leave this asserting 0.
+        let removed = runtime
+            .schedule_fires()
+            .delete_schedule_fires(&company, &schedule_id)
+            .await
+            .unwrap();
+        assert_eq!(removed, 1, "the purge removes exactly the inherited claim");
+
+        let mut after = WorkflowScheduler::new(registry.clone(), clock());
+        assert_eq!(
+            after.tick().await,
+            1,
+            "after the purge the recreated workflow fires the same minute"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+
+        drain(&after).await;
+    }
+
     // --- issue #661 (F2): a transient failure DEFERS the first-sight catch-up,
     // it does not forfeit it ----------------------------------------------------
 
@@ -3581,6 +3653,14 @@ to = "done"
         }
         async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> crate::Result<usize> {
             Ok(0)
+        }
+        async fn delete_schedule_fires(&self, c: &CompanyId, s: &str) -> crate::Result<usize> {
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .remove(&(c.as_ref().to_string(), s.to_string()))
+                .map_or(0, |set| set.len()))
         }
     }
 

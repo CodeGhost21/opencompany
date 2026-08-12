@@ -158,7 +158,6 @@ use crate::company::{
     required_config_problems,
 };
 use crate::error::{OpenCompanyError, Result};
-use crate::ports::CompanyStore;
 use crate::ports::events::EventLog;
 use crate::ports::now_millis;
 use crate::ports::store::company_write_lock;
@@ -166,6 +165,8 @@ use crate::ports::types::{
     CompanyEvent, CompanyId, CompanyRecord, OverlayWorkflow, WorkflowEnabledReason,
 };
 use crate::ports::workflow_revisions::{WorkflowRevisionRecord, WorkflowRevisionStore};
+use crate::ports::{CompanyStore, ScheduleFireStore};
+use crate::runtime::workflow_schedule_id;
 use crate::server::ops::language;
 
 /// Max nodes a freshly authored graph may declare. A larger graph is refused
@@ -1346,13 +1347,28 @@ pub(crate) async fn set_company_workflow_enabled(
 /// version token, so "delete the thing I was looking at" can't remove something
 /// that changed underneath the operator.
 ///
+/// After the committed save, three best-effort cascades tear down what the
+/// workflow leaves behind: its durable scheduler fire ledger (issue #708), its
+/// revision history (issue #274), and an audit-journal entry. The fire-ledger
+/// purge runs **first** and **only after** the save has committed and the write
+/// lock is dropped: purging before a successful save could strip a still-live
+/// workflow's claim rows on a save failure (a #241-class cross-replica
+/// double-fire); purging after means a delete+recreate of the same id — which
+/// reuses the restart-stable `workflow-<id>` schedule key — starts against an
+/// empty ledger, with no inherited anchor and every past minute claimable
+/// again. A purge failure is logged, never rolled back: the workflow is already
+/// gone, and the worst case is one bounded, logged reinstatement of the old
+/// pre-fix behaviour — the same contract as the revision cascade below.
+///
 /// Returns the removed workflow's display name for the audit journal (falling
 /// back to the id when the stored body no longer parses).
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn delete_company_workflow(
     company: &CompanyId,
     source_dir: Option<&Path>,
     store: &Arc<dyn CompanyStore>,
     revisions: &Arc<dyn WorkflowRevisionStore>,
+    schedule_fires: Option<&Arc<dyn ScheduleFireStore>>,
     events: Option<&Arc<dyn EventLog>>,
     wid: &str,
     expected_version: Option<&str>,
@@ -1391,6 +1407,35 @@ pub(crate) async fn delete_company_workflow(
     store.save(&record).await?;
 
     drop(_lock);
+
+    // Issue #708: purge the schedule's durable fire ledger, minting the key at
+    // the ONE authoritative site (`workflow_schedule_id`) so this key can never
+    // drift from the scheduler's. This runs AFTER the committed save on purpose
+    // (see the doc): purging before a save that then fails would strip a
+    // still-live workflow's claim rows and risk a #241-class double-fire.
+    // Best-effort, exactly like the revision cascade below: the workflow is
+    // already gone, so a failure is logged rather than rolled back — a leftover
+    // ledger merely re-instates the bounded pre-fix behaviour once, on a
+    // recreate of the same id.
+    //
+    // `schedule_fires` is `Option` for the same reason `events` is: not every
+    // caller wires it. The HTTP delete path passes the runtime store (`Some`) —
+    // that is the path a scheduled workflow can be deleted from, so it is the
+    // only one that can orphan a ledger. The agent `delete_workflow` tool passes
+    // `None`, and correctly: it refuses to delete a scheduled workflow at all
+    // (`refuse_scheduled`), so no fire ledger can exist for it to leave behind.
+    if let Some(fires) = schedule_fires {
+        let schedule_id = workflow_schedule_id(wid);
+        if let Err(err) = fires.delete_schedule_fires(company, &schedule_id).await {
+            tracing::warn!(
+                company = %company,
+                workflow = %wid,
+                schedule = %schedule_id,
+                error = %err,
+                "workflow deleted but its schedule fire ledger could not be purged"
+            );
+        }
+    }
 
     // Issue #274: cascade the workflow's revision history away with it, so a
     // removed workflow leaves no orphaned snapshots behind. Best-effort in the
@@ -1637,6 +1682,88 @@ mod tests {
     /// hold their own `Arc<MemRevisions>` so they can read it back.
     fn revs() -> Arc<dyn WorkflowRevisionStore> {
         Arc::new(MemRevisions::default())
+    }
+
+    /// An in-memory [`ScheduleFireStore`] so the delete-time fire-ledger purge
+    /// (issue #708) can be asserted without a real backend. Only the verbs the
+    /// delete path exercises need real behaviour; `claim_fire` seeds a ledger
+    /// and `delete_schedule_fires` purges one schedule's rows.
+    #[derive(Default)]
+    struct MemFires {
+        /// `(company, schedule_id) -> claimed minutes`.
+        rows: StdMutex<std::collections::HashMap<(String, String), std::collections::HashSet<u64>>>,
+        /// Arm the next `delete_schedule_fires` call to error, to prove the
+        /// delete succeeds even when the purge cascade fails.
+        fail_delete: std::sync::atomic::AtomicBool,
+    }
+
+    impl MemFires {
+        fn seed(&self, company: &CompanyId, schedule_id: &str, minute: u64) {
+            self.rows
+                .lock()
+                .unwrap()
+                .entry((company.as_ref().to_string(), schedule_id.to_string()))
+                .or_default()
+                .insert(minute);
+        }
+        fn minutes(&self, company: &CompanyId, schedule_id: &str) -> Vec<u64> {
+            let rows = self.rows.lock().unwrap();
+            let mut ms: Vec<u64> = rows
+                .get(&(company.as_ref().to_string(), schedule_id.to_string()))
+                .map(|set| set.iter().copied().collect())
+                .unwrap_or_default();
+            ms.sort_unstable();
+            ms
+        }
+        fn arm_delete_failure(&self) {
+            self.fail_delete
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl ScheduleFireStore for MemFires {
+        async fn claim_fire(&self, c: &CompanyId, s: &str, m: u64) -> Result<bool> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .entry((c.as_ref().to_string(), s.to_string()))
+                .or_default()
+                .insert(m))
+        }
+        async fn latest_fire(&self, c: &CompanyId, s: &str) -> Result<Option<u64>> {
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .get(&(c.as_ref().to_string(), s.to_string()))
+                .and_then(|set| set.iter().max().copied()))
+        }
+        async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
+            Ok(0)
+        }
+        async fn delete_schedule_fires(&self, c: &CompanyId, s: &str) -> Result<usize> {
+            if self
+                .fail_delete
+                .swap(false, std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(OpenCompanyError::Store("flaky fire-ledger purge".into()));
+            }
+            Ok(self
+                .rows
+                .lock()
+                .unwrap()
+                .remove(&(c.as_ref().to_string(), s.to_string()))
+                .map_or(0, |set| set.len()))
+        }
+    }
+
+    /// A throwaway fire store for delete tests that do not assert on the purge —
+    /// the common case. Tests that DO assert the purge hold their own
+    /// `Arc<MemFires>` so they can read it back.
+    fn fires() -> Arc<dyn ScheduleFireStore> {
+        Arc::new(MemFires::default())
     }
 
     // --- fixtures ------------------------------------------------------------
@@ -2561,6 +2688,7 @@ to = "done"
             None,
             &store,
             &revs(),
+            Some(&fires()),
             Some(&log_dyn),
             "greeter",
             Some(&version),
@@ -2598,6 +2726,79 @@ to = "done"
         }
     }
 
+    /// #708: a committed delete purges the schedule's durable fire ledger under
+    /// the exact `workflow-<id>` key, so a recreated same-id workflow inherits
+    /// no anchor and no stale claim.
+    #[tokio::test]
+    async fn deleting_a_workflow_purges_its_schedule_fire_ledger() {
+        let company = CompanyId::new("acme");
+        let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
+
+        // A ledger for greeter's schedule, plus a sibling schedule's row to
+        // prove the purge is scoped to exactly the deleted workflow's key.
+        let fires = Arc::new(MemFires::default());
+        let greeter_key = workflow_schedule_id("greeter");
+        fires.seed(&company, &greeter_key, 100);
+        fires.seed(&company, &greeter_key, 101);
+        fires.seed(&company, &workflow_schedule_id("other"), 100);
+        let fires_dyn: Arc<dyn ScheduleFireStore> = fires.clone();
+
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires_dyn),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect("deletes");
+
+        assert!(
+            fires.minutes(&company, &greeter_key).is_empty(),
+            "the deleted workflow's whole fire ledger is purged"
+        );
+        assert_eq!(
+            fires.minutes(&company, &workflow_schedule_id("other")),
+            vec![100],
+            "a sibling workflow's schedule ledger is untouched"
+        );
+    }
+
+    /// #708: the purge is best-effort. A purge failure is logged, never rolled
+    /// back — the workflow is already gone, so the delete still succeeds.
+    #[tokio::test]
+    async fn a_failing_fire_ledger_purge_still_deletes_the_workflow() {
+        let company = CompanyId::new("acme");
+        let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
+
+        let fires = Arc::new(MemFires::default());
+        fires.seed(&company, &workflow_schedule_id("greeter"), 100);
+        fires.arm_delete_failure();
+        let fires_dyn: Arc<dyn ScheduleFireStore> = fires.clone();
+
+        let name = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires_dyn),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect("delete succeeds even when the purge cascade errors");
+        assert_eq!(name, "Greeter");
+
+        // The graph is gone despite the purge error.
+        let record = store.load(&company).await.unwrap().unwrap();
+        assert!(record.overlay_workflows.is_empty(), "body must be gone");
+        assert!(record.manifest.workflows.enabled.is_empty());
+    }
+
     /// The delete is durable across the #208 boot rebuild *because* the overlay
     /// body is gone: `merge_enabled_workflows` re-derives `enabled` from seed
     /// ids ∪ surviving overlay ids, so there is nothing left to resurrect. This
@@ -2606,9 +2807,18 @@ to = "done"
     async fn a_deleted_workflow_has_nothing_left_for_the_boot_merge_to_re_enable() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        delete_company_workflow(&company, None, &store, &revs(), None, "greeter", None)
-            .await
-            .expect("deletes");
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect("deletes");
 
         let record = store.load(&company).await.unwrap().unwrap();
         let surviving: Vec<&str> = record
@@ -2634,11 +2844,20 @@ to = "done"
             .await
             .expect("someone edits first");
 
+        // A held fire store, seeded under the workflow's schedule key, proves the
+        // refused delete purges NOTHING — the purge runs only after a committed
+        // save, so a version-refused delete (which never saves) leaves the live
+        // workflow's ledger intact (#708).
+        let fires = Arc::new(MemFires::default());
+        fires.seed(&company, &workflow_schedule_id("greeter"), 42);
+        let fires_dyn: Arc<dyn ScheduleFireStore> = fires.clone();
+
         let err = delete_company_workflow(
             &company,
             None,
             &store,
             &revs(),
+            Some(&fires_dyn),
             None,
             "greeter",
             Some(&stale),
@@ -2649,6 +2868,11 @@ to = "done"
 
         let record = store.load(&company).await.unwrap().unwrap();
         assert_eq!(record.overlay_workflows.len(), 1, "nothing was removed");
+        assert_eq!(
+            fires.minutes(&company, &workflow_schedule_id("greeter")),
+            vec![42],
+            "a version-refused delete never reaches the purge — the ledger is intact"
+        );
     }
 
     /// Deleting a source-defined workflow is refused: `merge_enabled_workflows`
@@ -2672,6 +2896,7 @@ to = "done"
             Some(dir.path()),
             &store,
             &revs(),
+            Some(&fires()),
             None,
             "seeded",
             None,
@@ -2688,9 +2913,18 @@ to = "done"
     async fn deleting_an_unknown_workflow_is_not_found() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        let err = delete_company_workflow(&company, None, &store, &revs(), None, "ghost", None)
-            .await
-            .expect_err("unknown id");
+        let err = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "ghost",
+            None,
+        )
+        .await
+        .expect_err("unknown id");
         assert!(
             matches!(err, OpenCompanyError::CompanyNotFound(_)),
             "{err:?}"
@@ -2701,10 +2935,18 @@ to = "done"
     async fn deleting_a_traversal_id_is_invalid() {
         let company = CompanyId::new("acme");
         let (store, _) = with_one_workflow(&company, "greeter", "Greeter").await;
-        let err =
-            delete_company_workflow(&company, None, &store, &revs(), None, "../secrets", None)
-                .await
-                .expect_err("traversal id");
+        let err = delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "../secrets",
+            None,
+        )
+        .await
+        .expect_err("traversal id");
         assert!(
             matches!(err, OpenCompanyError::InvalidRequest(_)),
             "{err:?}"
@@ -2726,9 +2968,18 @@ to = "done"
                 .expect("seed");
         }
 
-        delete_company_workflow(&company, None, &store, &revs(), None, "b", None)
-            .await
-            .expect("deletes the middle one");
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "b",
+            None,
+        )
+        .await
+        .expect("deletes the middle one");
 
         let record = store.load(&company).await.unwrap().unwrap();
         let ids: Vec<&str> = record
@@ -2753,9 +3004,18 @@ to = "done"
         rec.manifest.workflows.enabled.push("greeter".to_string());
         let store = store_of(MemStore::failing(rec));
 
-        delete_company_workflow(&company, None, &store, &revs(), None, "greeter", None)
-            .await
-            .expect_err("save fails");
+        delete_company_workflow(
+            &company,
+            None,
+            &store,
+            &revs(),
+            Some(&fires()),
+            None,
+            "greeter",
+            None,
+        )
+        .await
+        .expect_err("save fails");
 
         let record = store.load(&company).await.unwrap().unwrap();
         assert_eq!(record.overlay_workflows.len(), 1, "nothing was removed");

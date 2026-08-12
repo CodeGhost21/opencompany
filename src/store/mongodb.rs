@@ -2077,6 +2077,21 @@ impl crate::ports::schedule_fires::ScheduleFireStore for MongoStore {
             .map_err(mongo_err)?;
         Ok(result.deleted_count as usize)
     }
+
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize> {
+        // Every row for one schedule, whatever its minute — the delete-time
+        // purge (#708). A never-fired id matches nothing, so `deleted_count`
+        // is 0.
+        let result = self
+            .collection("schedule_fires")
+            .delete_many(doc! {
+                "company_id": company.as_ref(),
+                "schedule_id": schedule_id,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(result.deleted_count as usize)
+    }
 }
 
 // ---------------------------------------------------------------------------
