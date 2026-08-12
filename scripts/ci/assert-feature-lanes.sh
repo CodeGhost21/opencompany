@@ -221,8 +221,15 @@ while IFS='|' read -r feature status features detail; do
           echo "::error title=No default test lane::\`${feature}\` is covered by the default feature set, but ${WORKFLOW} has no bare \`cargo test --locked\` line to run it." >&2
           failed=1
         fi
-      elif ! grep -q -- "cargo test .*--features ${features}" "${WORKFLOW}"; then
-        echo "::error title=Feature has no lane::\`${feature}\` is classified ${status} on \`--features ${features}\`, but no \`cargo test\` line in ${WORKFLOW} enables that feature set. Add the lane, or reclassify the row." >&2
+      # A lane is either a direct `cargo test … --features X` line or a
+      # `run-scoped-suite.sh <label> X <filter>` invocation, which is the same
+      # cargo call with the non-zero-count assertion wrapped around it. Both
+      # forms are accepted deliberately: the wrapper is the preferred shape for
+      # new lanes, and the pre-existing direct invocations are not worth churning
+      # to satisfy a grep.
+      elif ! grep -q -- "cargo test .*--features ${features}" "${WORKFLOW}" \
+        && ! grep -qE "run-scoped-suite\.sh .*[[:space:]]${features}[[:space:]]" "${WORKFLOW}"; then
+        echo "::error title=Feature has no lane::\`${feature}\` is classified ${status} on \`--features ${features}\`, but no \`cargo test\` line and no \`run-scoped-suite.sh\` invocation in ${WORKFLOW} enables that feature set. Add the lane, or reclassify the row." >&2
         failed=1
       fi
 
