@@ -54,6 +54,12 @@ pub(crate) mod workspace_links;
 // `workspace_read` can open. Always compiled: search reaches the default-build
 // REST and GraphQL surfaces, the tools do not.
 pub(crate) mod workspace_paths;
+// Issue #759: the operator-triggered merge of the duplicate sibling folders a
+// publish race already left behind, and the report of what it refused to
+// decide. Always compiled and openhuman-free, for the same reason the #700 sweep
+// beside it is: its only caller is the console's REST route, and it touches
+// nothing but the `WorkspaceStore` port.
+pub mod workspace_repair;
 // Issue #607: text search over the shared tree, behind the agent
 // `workspace_search` tool, the REST `GET …/workspace/search` route and the
 // GraphQL `Company.workspaceSearch` resolver. Always compiled and openhuman-free
