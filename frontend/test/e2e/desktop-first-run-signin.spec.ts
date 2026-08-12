@@ -34,7 +34,11 @@ async function asDesktop(
   config: { embedded: string; operatorEmail: string; discoveryDelayMs: number },
 ) {
   await page.addInitScript(
-    (cfg: { embedded: string; operatorEmail: string; discoveryDelayMs: number }) => {
+    (cfg: {
+      embedded: string;
+      operatorEmail: string;
+      discoveryDelayMs: number;
+    }) => {
       // The row a previous launch left behind, at the address this launch will
       // also serve. Restored synchronously, which is the point.
       window.localStorage.setItem(
@@ -52,59 +56,72 @@ async function asDesktop(
       );
 
       const hosts = new Map<string, string>();
+      // `withGlobalTauri` assigns the whole `@tauri-apps/api` bundle, and
+      // `invoke`/`Channel` live under `core` — the v2 shape `tauriCore()` reads.
+      // A shim that puts them at the top level is the v1 shape, which the bridge
+      // rejects, leaving every proxied request `no such connection`.
       (window as unknown as { __TAURI__: unknown }).__TAURI__ = {
-        Channel: class {
-          onmessage: ((message: string) => void) | null = null;
-        },
-        async invoke(command: string, args: Record<string, unknown>): Promise<unknown> {
-          switch (command) {
-            case "oc_connect":
-              hosts.set(args.connectionId as string, args.baseUrl as string);
-              return undefined;
-            case "oc_disconnect":
-              hosts.delete(args.connectionId as string);
-              return undefined;
-            case "oc_embedded":
-              await new Promise((resolve) => setTimeout(resolve, cfg.discoveryDelayMs));
-              return {
-                baseUrl: cfg.embedded,
-                dataDir: "/tmp/e2e-desktop",
-                instanceId: "e2e-embedded-instance",
-                operatorEmail: cfg.operatorEmail,
-              };
-            case "oc_request": {
-              const base = hosts.get(args.connectionId as string);
-              if (base === undefined) {
-                throw new Error(`no such connection: ${args.connectionId as string}`);
+        core: {
+          Channel: class {
+            onmessage: ((message: string) => void) | null = null;
+          },
+          async invoke(
+            command: string,
+            args: Record<string, unknown>,
+          ): Promise<unknown> {
+            switch (command) {
+              case "oc_connect":
+                hosts.set(args.connectionId as string, args.baseUrl as string);
+                return undefined;
+              case "oc_disconnect":
+                hosts.delete(args.connectionId as string);
+                return undefined;
+              case "oc_embedded":
+                await new Promise((resolve) =>
+                  setTimeout(resolve, cfg.discoveryDelayMs),
+                );
+                return {
+                  baseUrl: cfg.embedded,
+                  dataDir: "/tmp/e2e-desktop",
+                  instanceId: "e2e-embedded-instance",
+                  operatorEmail: cfg.operatorEmail,
+                };
+              case "oc_request": {
+                const base = hosts.get(args.connectionId as string);
+                if (base === undefined) {
+                  throw new Error(
+                    `no such connection: ${args.connectionId as string}`,
+                  );
+                }
+                const req = args.request as {
+                  method: string;
+                  path: string;
+                  headers: Record<string, string>;
+                  body?: string;
+                };
+                const response = await fetch(base + req.path, {
+                  method: req.method,
+                  headers: req.headers,
+                  body: req.body ?? undefined,
+                  credentials: "include",
+                });
+                const text = await response.text();
+                const headers: Record<string, string> = {};
+                response.headers.forEach((value, name) => {
+                  headers[name.toLowerCase()] = value;
+                });
+                return {
+                  status: response.status,
+                  statusText: response.statusText,
+                  url: response.url,
+                  text,
+                  headers,
+                };
               }
-              const req = args.request as {
-                method: string;
-                path: string;
-                headers: Record<string, string>;
-                body?: string;
-              };
-              const response = await fetch(base + req.path, {
-                method: req.method,
-                headers: req.headers,
-                body: req.body ?? undefined,
-                credentials: "include",
-              });
-              const text = await response.text();
-              const headers: Record<string, string> = {};
-              response.headers.forEach((value, name) => {
-                headers[name.toLowerCase()] = value;
-              });
-              return {
-                status: response.status,
-                statusText: response.statusText,
-                url: response.url,
-                text,
-                headers,
-              };
+              default:
+                return null;
             }
-            default:
-              return null;
-          }
+          },
         },
       };
     },
@@ -129,7 +146,9 @@ test("a signed-out desktop offers the operator its own host admits", async ({
   const email = page.getByLabel("Email");
   await expect(email).toBeVisible({ timeout: 30_000 });
   // THE assertion: the address arrives after the form did, and lands in it.
-  await expect(email).toHaveValue("operator@opencompany.local", { timeout: 30_000 });
+  await expect(email).toHaveValue("operator@opencompany.local", {
+    timeout: 30_000,
+  });
   await expect(page.getByTestId("suggested-email-hint")).toBeVisible();
 
   // A suggestion, not a lock. Somebody signing in as a teammate they invited to
