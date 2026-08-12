@@ -74,11 +74,25 @@ impl MemSecrets {
     }
 }
 
+/// One `create_pull_request` call, recorded so a test can assert what was sent.
+#[derive(Clone, Debug)]
+struct CreatedPr {
+    head: String,
+    base: String,
+    title: String,
+    body: String,
+}
+
 /// A forge that answers from a script, and records the token it was handed.
 struct FakeHost {
     meta: RepoMeta,
     seen_tokens: StdMutex<Vec<String>>,
     fail: bool,
+    /// When set, `create_pull_request` errors — for the honest-degradation test
+    /// where a push succeeds but the PR does not open (issue #736).
+    fail_pr: bool,
+    /// Every `create_pull_request` call, in order.
+    created_prs: StdMutex<Vec<CreatedPr>>,
 }
 
 impl FakeHost {
@@ -93,6 +107,8 @@ impl FakeHost {
             },
             seen_tokens: StdMutex::new(Vec::new()),
             fail: false,
+            fail_pr: false,
+            created_prs: StdMutex::new(Vec::new()),
         }
     }
 
@@ -107,6 +123,12 @@ impl FakeHost {
     /// push-capable.
     fn pushable(mut self) -> Self {
         self.meta.can_push = true;
+        self
+    }
+
+    /// A forge that accepts a push but refuses to open the pull request.
+    fn failing_pr(mut self) -> Self {
+        self.fail_pr = true;
         self
     }
 }
@@ -135,6 +157,33 @@ impl RepoHost for FakeHost {
             head_sha: "cafe".into(),
             base_ref: "main".into(),
             diff: "--- a\n+++ b\n".into(),
+        })
+    }
+
+    async fn create_pull_request(
+        &self,
+        _coords: &RepoCoordinates,
+        token: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PullRequestRef> {
+        self.seen_tokens.lock().unwrap().push(token.to_string());
+        if self.fail_pr {
+            return Err(OpenCompanyError::Store(
+                "the forge refused the pull request".into(),
+            ));
+        }
+        self.created_prs.lock().unwrap().push(CreatedPr {
+            head: head.to_string(),
+            base: base.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+        });
+        Ok(PullRequestRef {
+            number: 42,
+            html_url: "https://github.com/acme/fixture/pull/42".into(),
         })
     }
 }
@@ -1081,6 +1130,360 @@ async fn a_known_capability_is_not_re_probed_on_every_fetch() {
         1,
         "a known capability must not be re-probed on a subsequent fetch"
     );
+}
+
+// -- publish (issue #735) ----------------------------------------------------
+
+/// Clones `mirror` into `dest` and commits one file, returning the new HEAD SHA.
+/// Stands in for an agent's task-scoped checkout with committed work — the thing
+/// `stage_publish` fetches from.
+fn checkout_with_commit(
+    scratch: &Scratch,
+    mirror: &Path,
+    dest: &Path,
+    file: &str,
+    body: &str,
+) -> String {
+    git_at(
+        &scratch.0,
+        &[
+            "clone",
+            "--quiet",
+            mirror.to_str().unwrap(),
+            dest.to_str().unwrap(),
+        ],
+    );
+    for (k, v) in [
+        ("user.email", "agent@acme.test"),
+        ("user.name", "Agent Seat"),
+        ("commit.gpgsign", "false"),
+    ] {
+        git_at(dest, &["config", k, v]);
+    }
+    std::fs::write(dest.join(file), body).unwrap();
+    git_at(dest, &["add", file]);
+    git_at(dest, &["commit", "--quiet", "-m", "agent work"]);
+    git_at(dest, &["rev-parse", "HEAD"])
+}
+
+/// The happy path end to end: the agent's committed HEAD is staged onto the
+/// host-owned `oc/<company>/<task>` ref in the mirror, then pushed to the remote
+/// as exactly that branch and commit.
+#[tokio::test]
+async fn a_publish_stages_the_agents_commit_and_pushes_the_namespaced_branch() {
+    let scratch = Scratch::new("publish");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    let mirror = mgr.mirror_path("fixture");
+    let checkout = scratch.join("checkout");
+    let head = checkout_with_commit(&scratch, &mirror, &checkout, "FIX.md", "the fix\n");
+
+    // Stage: the agent's HEAD lands on the host-owned branch, host-side, and the
+    // exact staged commit is returned so the approval can be bound to it.
+    let (branch, staged_head) = mgr
+        .stage_publish("fixture", &checkout, "task-1")
+        .await
+        .unwrap();
+    assert_eq!(branch, "oc/acme/task-1", "the branch is host-namespaced");
+    assert_eq!(staged_head, head, "stage_publish returns the staged commit");
+    let staged = git_at(&mirror, &["rev-parse", "refs/heads/oc/acme/task-1"]);
+    assert_eq!(staged, head, "the mirror ref points at the agent's commit");
+
+    // Push: the remote receives exactly that branch and commit.
+    mgr.push_published("fixture", &branch, &staged_head)
+        .await
+        .unwrap();
+    let bare = scratch.join("origin.git");
+    let pushed = git_at(&bare, &["rev-parse", "refs/heads/oc/acme/task-1"]);
+    assert_eq!(pushed, head, "the remote branch is the agent's commit");
+}
+
+/// The task id is the one part of the branch that comes from outside the
+/// manager, so an unsafe one is refused before any git runs — no `/` (it may not
+/// add path segments), no `..`, no leading `-`, no odd characters.
+#[tokio::test]
+async fn a_publish_task_id_that_is_not_a_safe_segment_is_refused() {
+    let scratch = Scratch::new("bad-task");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+
+    // The task is validated before the checkout is even looked at, so the path
+    // does not need to exist for this to refuse.
+    let checkout = scratch.join("unused");
+    for bad in ["../evil", "a/b", "-rf", "", "with space", "has..dots"] {
+        let err = mgr
+            .stage_publish("fixture", &checkout, bad)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "task {bad:?} should be refused: {err:?}"
+        );
+    }
+}
+
+/// The push refuses any branch that is not a publish branch this company owns —
+/// the default branch, another company's namespace, the bare prefix, or a
+/// traversal — enforced in `RepoManager`, not by the tool description.
+#[tokio::test]
+async fn a_push_to_anything_but_this_companys_namespace_is_refused() {
+    let scratch = Scratch::new("bad-push");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    for bad in [
+        "main",            // the default branch
+        "oc/other/task-1", // a foreign company's namespace
+        "oc/acme/",        // the bare prefix, no task
+        "oc/acme/../main", // a traversal out of the namespace
+        "refs/heads/main", // a fully-qualified default ref
+    ] {
+        // A valid-shaped commit id, so it is the branch that is refused — the
+        // branch is re-validated before the head is even looked at.
+        let err = mgr
+            .push_published("fixture", bad, &"a".repeat(40))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, OpenCompanyError::InvalidRequest(_)),
+            "branch {bad:?} should be refused: {err:?}"
+        );
+    }
+}
+
+/// The push is never a force push: a branch that already exists on the remote
+/// and would not fast-forward is refused by the remote, leaving the earlier
+/// commit in place, rather than being overwritten.
+#[tokio::test]
+async fn a_non_fast_forward_publish_is_refused_never_forced() {
+    let scratch = Scratch::new("no-force");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+    let mirror = mgr.mirror_path("fixture");
+    let bare = scratch.join("origin.git");
+
+    // First publish: commit A lands on the remote branch.
+    let c1 = scratch.join("checkout1");
+    let head_a = checkout_with_commit(&scratch, &mirror, &c1, "A.md", "A\n");
+    mgr.stage_publish("fixture", &c1, "task-1").await.unwrap();
+    mgr.push_published("fixture", "oc/acme/task-1", &head_a)
+        .await
+        .unwrap();
+
+    // A divergent commit B (a sibling of A, not its descendant) staged onto the
+    // same branch and pushed. Since the push never forces, the remote refuses
+    // the non-fast-forward.
+    let c2 = scratch.join("checkout2");
+    let head_b = checkout_with_commit(&scratch, &mirror, &c2, "B.md", "B\n");
+    mgr.stage_publish("fixture", &c2, "task-1").await.unwrap();
+    let err = mgr
+        .push_published("fixture", "oc/acme/task-1", &head_b)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OpenCompanyError::Store(_)),
+        "a non-fast-forward publish must be refused, not forced: {err:?}"
+    );
+
+    // And the remote still holds A — nothing was clobbered.
+    let remote = git_at(&bare, &["rev-parse", "refs/heads/oc/acme/task-1"]);
+    assert_eq!(
+        remote, head_a,
+        "the remote branch must still point at the first commit"
+    );
+}
+
+/// An approval is bound to the exact commit it was staged for (issue #735). A
+/// second publish on the same task force-updates the mirror's branch ref, but
+/// approving the first still publishes the first commit — the later re-stage
+/// cannot ride in on the earlier approval.
+#[tokio::test]
+async fn a_publish_pushes_the_approved_commit_even_after_a_restage() {
+    let scratch = Scratch::new("bound-commit");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+    let mirror = mgr.mirror_path("fixture");
+    let bare = scratch.join("origin.git");
+
+    // First publish stages commit A and records its head.
+    let c1 = scratch.join("checkout1");
+    checkout_with_commit(&scratch, &mirror, &c1, "A.md", "A\n");
+    let (_branch, head_a) = mgr.stage_publish("fixture", &c1, "task-1").await.unwrap();
+
+    // Before it is approved, a second publish on the SAME task stages commit B,
+    // force-updating the mirror's branch ref to B.
+    let c2 = scratch.join("checkout2");
+    let head_b = checkout_with_commit(&scratch, &mirror, &c2, "B.md", "B\n");
+    mgr.stage_publish("fixture", &c2, "task-1").await.unwrap();
+    assert_ne!(head_a, head_b);
+    assert_eq!(
+        git_at(&mirror, &["rev-parse", "refs/heads/oc/acme/task-1"]),
+        head_b,
+        "the mirror ref now points at the re-staged commit B"
+    );
+
+    // Approving the FIRST publish pushes A — the commit that approval was bound
+    // to — not whatever the branch ref points at now.
+    mgr.push_published("fixture", "oc/acme/task-1", &head_a)
+        .await
+        .unwrap();
+    let remote = git_at(&bare, &["rev-parse", "refs/heads/oc/acme/task-1"]);
+    assert_eq!(
+        remote, head_a,
+        "the approved commit reached the remote, not the re-staged one"
+    );
+}
+
+// -- pull-request creation (issue #736) --------------------------------------
+
+/// A manager with a push-capable binding: `bind_local` records no capability, so
+/// a `pushable` host + a fetch heals it to `Some(true)`, the state
+/// `open_pull_request` requires.
+async fn pushable_bound(scratch: &Scratch, host: Arc<FakeHost>) -> RepoManager {
+    let url = fixture_remote(scratch);
+    let (mgr, secrets) = manager(scratch);
+    let mgr = mgr.with_host(host);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+    // Heals can_push from None to Some(true) via the pushable host.
+    mgr.fetch("fixture", &[]).await.unwrap();
+    mgr
+}
+
+/// A PR is opened from the published branch into the repository's **default**
+/// branch, carrying the title and body the caller built.
+#[tokio::test]
+async fn open_pull_request_targets_the_default_branch_with_the_given_body() {
+    let scratch = Scratch::new("open-pr");
+    let host = Arc::new(FakeHost::new(1).pushable());
+    let mgr = pushable_bound(&scratch, host.clone()).await;
+
+    let pr = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "the fix", "body with #card-1")
+        .await
+        .unwrap();
+    assert_eq!(pr.number, 42);
+
+    let created = host.created_prs.lock().unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].head, "oc/acme/card-1");
+    assert_eq!(
+        created[0].base, "main",
+        "the base is the repository's default branch"
+    );
+    assert_eq!(created[0].title, "the fix");
+    assert!(created[0].body.contains("#card-1"));
+}
+
+/// With no forge client wired, opening a PR is honestly unavailable rather than a
+/// silent success — the shape `pull_request` already uses.
+#[tokio::test]
+async fn open_pull_request_without_a_forge_client_says_so() {
+    let scratch = Scratch::new("open-pr-unwired");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    let err = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "t", "b")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OpenCompanyError::Unimplemented(_)), "{err:?}");
+}
+
+/// A read-only binding is refused — PR creation rides the same push-capable
+/// credential the publish did.
+#[tokio::test]
+async fn open_pull_request_refuses_a_read_only_binding() {
+    let scratch = Scratch::new("open-pr-readonly");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+    // A read-only host: bind_local leaves can_push None, and nothing heals it.
+    let mgr = mgr.with_host(Arc::new(FakeHost::new(1)));
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    let err = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "t", "b")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OpenCompanyError::InvalidRequest(_)),
+        "a read-only binding must be refused: {err:?}"
+    );
+}
+
+/// When the forge accepts the push but refuses the PR, `open_pull_request`
+/// returns the error — the caller (`perform_effect`) is what keeps that from
+/// failing the whole publish, reporting it on the task instead.
+#[tokio::test]
+async fn open_pull_request_surfaces_a_forge_refusal() {
+    let scratch = Scratch::new("open-pr-fail");
+    let host = Arc::new(FakeHost::new(1).pushable().failing_pr());
+    let mgr = pushable_bound(&scratch, host).await;
+    let err = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "t", "b")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OpenCompanyError::Store(_)), "{err:?}");
 }
 
 // -- index -------------------------------------------------------------------

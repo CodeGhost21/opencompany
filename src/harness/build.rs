@@ -518,6 +518,8 @@ pub fn build_agent(
                         bindings: deps.repo_bindings.clone().into(),
                         workspace: workspace.clone(),
                         ledger: deps.checkouts.clone(),
+                        agent: manifest_agent.id.clone(),
+                        approvals: deps.approval_requests.clone(),
                     },
                 ));
             }
@@ -536,33 +538,58 @@ pub fn build_agent(
         }
     }
 
-    // Repository WRITE tier (issue #734). A distinct, tighter grant than the read
-    // `repo` above: `grants_repo_write_explicit` matches ONLY the exact
+    // Repository WRITE tier (issues #734, #735). A distinct, tighter grant than
+    // the read `repo` above: `grants_repo_write_explicit` matches ONLY the exact
     // `repo.write`, so a bare `repo` (which every read-tier company writes) and
     // the catch-all `*` confer nothing here — a company that asked for agents
     // reading code does not silently get agents pushing it.
     //
-    // #734 only *learns and records* whether a bound credential can push (probed
-    // at bind, re-probed on fetch, stored on `RepoBinding::can_push`); the
-    // `repo_publish` tool that consumes it lands in #735, so this wires NO tool
-    // yet. What it does now is the fail-closed half of #247's requirement: when
-    // `repo.write` is granted but no bound repository has a push-capable
-    // credential, say so and wire nothing, rather than leaving the operator to
-    // discover at publish time that the credential they bound was read-only.
-    // `None` (unknown — unprobed or pre-field) reads as cannot-push here, so only
-    // a proven `Some(true)` clears the warning.
+    // FOUR gates, all fail-closed, and the fourth is the one #734 added: an
+    // explicit `repo.write` grant, a wired manager, at least one binding, AND a
+    // bound credential that can actually push (`can_push == Some(true)`; `None` —
+    // unprobed or pre-field — reads as cannot-push). Missing any one wires
+    // `repo_publish` NOT AT ALL and says which, rather than offering a publish
+    // that would fail at push time on a read-only credential.
+    //
+    // Like the read tier, NOT feature-gated: the mirror and git runner are always
+    // compiled, and `repo_publish`'s push waits on an operator approval the
+    // runtime performs, so there is no forge client to gate the tool behind.
     if crate::company::grants_repo_write_explicit(grants) {
-        let has_push_capable = deps
+        let push_capable = deps
             .repo_bindings
             .iter()
             .any(|binding| binding.can_push == Some(true));
-        if !has_push_capable {
-            tracing::warn!(
+        match (&deps.repos, deps.repo_bindings.is_empty(), push_capable) {
+            (Some(repos), false, true) => {
+                tools.push(crate::harness::repo::repo_publish_tool(
+                    crate::harness::repo::RepoToolContext {
+                        repos: repos.clone(),
+                        bindings: deps.repo_bindings.clone().into(),
+                        workspace: workspace.clone(),
+                        ledger: deps.checkouts.clone(),
+                        agent: manifest_agent.id.clone(),
+                        approvals: deps.approval_requests.clone(),
+                    },
+                ));
+            }
+            (None, _, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but no repository cache is configured \
+                 on this host; repo_publish NOT wired (fail-closed)"
+            ),
+            (Some(_), true, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but this company has bound no \
+                 repositories; repo_publish NOT wired (fail-closed)"
+            ),
+            (Some(_), false, false) => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
                 "[build] agent explicitly grants `repo.write` but no bound repository has a \
-                 push-capable credential; write tools NOT wired (fail-closed)"
-            );
+                 push-capable credential; repo_publish NOT wired (fail-closed)"
+            ),
         }
     }
 
@@ -1678,7 +1705,23 @@ mod tests {
     /// `deps.repo_bindings` — so the difference between the two is exactly
     /// "the operator bound something", which is two of the four gate states.
     fn built_tool_names_with_repos(grants: &[&str], bindings: usize) -> Vec<String> {
-        built_tool_names_with_repos_on(grants, bindings, crate::store::StorageKind::Mongodb)
+        built_tool_names_with_repos_cap(grants, bindings, false)
+    }
+
+    /// [`built_tool_names_with_repos`], with control over whether the bound
+    /// credentials read as push-capable (issue #735) — the fourth gate the write
+    /// tier adds. `false` matches every read-tier caller (`can_push: None`).
+    fn built_tool_names_with_repos_cap(
+        grants: &[&str],
+        bindings: usize,
+        push_capable: bool,
+    ) -> Vec<String> {
+        built_tool_names_with_repos_on_cap(
+            grants,
+            bindings,
+            push_capable,
+            crate::store::StorageKind::Mongodb,
+        )
     }
 
     /// [`built_tool_names_with_repos`], with the secret backend spelled out —
@@ -1689,6 +1732,20 @@ mod tests {
     fn built_tool_names_with_repos_on(
         grants: &[&str],
         bindings: usize,
+        storage_kind: crate::store::StorageKind,
+    ) -> Vec<String> {
+        built_tool_names_with_repos_on_cap(grants, bindings, false, storage_kind)
+    }
+
+    /// Both gates at once. #735 added the push-capability of the bound
+    /// credential and #752 added the secret backend holding it, independently
+    /// and to the same helper; a caller that fixes one still has to be able to
+    /// vary the other, so the two thin wrappers above each pin their own
+    /// default and this carries the full shape.
+    fn built_tool_names_with_repos_on_cap(
+        grants: &[&str],
+        bindings: usize,
+        push_capable: bool,
         storage_kind: crate::store::StorageKind,
     ) -> Vec<String> {
         use crate::runtime::repo_manager::types::RepoBinding;
@@ -1713,7 +1770,7 @@ mod tests {
                 last_fetched_millis: None,
                 size_bytes: 0,
                 bound_at_millis: 1,
-                can_push: None,
+                can_push: if push_capable { Some(true) } else { None },
             })
             .collect();
         let manifest_agent = ManifestAgent {
@@ -1868,7 +1925,43 @@ mod tests {
         let write_granted = built_tool_names_with_repos(&["repo.write"], 1);
         assert_eq!(
             write_granted, baseline,
-            "repo.write must wire only the read pair — no write tool exists until #735"
+            "repo.write with a non-push-capable credential wires only the read pair"
+        );
+    }
+
+    /// The write tier's fourth gate (issue #735): `repo_publish` is wired only
+    /// with `repo.write` **and** a push-capable credential, and never by the read
+    /// `repo` grant. The non-push-capable half is
+    /// `repo_write_grant_wires_no_tool_beyond_the_read_pair` above.
+    #[test]
+    fn repo_write_with_a_push_capable_credential_wires_repo_publish() {
+        let publish = "repo_publish".to_string();
+
+        // repo.write + a push-capable credential → repo_publish joins the belt,
+        // and the read pair is still there (write implies read).
+        let pushable = built_tool_names_with_repos_cap(&["repo.write"], 1, true);
+        assert!(
+            pushable.contains(&publish),
+            "a push-capable `repo.write` must wire repo_publish: {pushable:?}"
+        );
+        assert!(
+            pushable.contains(&"repo_checkout".to_string())
+                && pushable.contains(&"repo_pr".to_string()),
+            "the read pair must still be wired: {pushable:?}"
+        );
+
+        // repo.write but a read-only credential → fail-closed, no publish.
+        let read_only = built_tool_names_with_repos_cap(&["repo.write"], 1, false);
+        assert!(
+            !read_only.contains(&publish),
+            "a read-only credential must not wire repo_publish: {read_only:?}"
+        );
+
+        // A bare `repo` never confers it, push-capable credential or not.
+        let bare = built_tool_names_with_repos_cap(&["repo"], 1, true);
+        assert!(
+            !bare.contains(&publish),
+            "bare `repo` (the read tier) must never wire repo_publish: {bare:?}"
         );
     }
 

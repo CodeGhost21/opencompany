@@ -78,6 +78,8 @@ use serde_json::{Value, json};
 
 use crate::Result;
 use crate::error::OpenCompanyError;
+use crate::harness::policy::ApprovalRequest;
+use crate::ports::types::{Effect, EffectGroup};
 use crate::runtime::RepoManager;
 use crate::runtime::repo_manager::types::{RepoBinding, parse_repo_url};
 use crate::runtime::repo_manager::{dir_bytes, git, human_bytes, validate_ref};
@@ -87,6 +89,10 @@ pub const REPO_CHECKOUT_TOOL: &str = "repo_checkout";
 
 /// Tool name: read a pull request's metadata and unified diff.
 pub const REPO_PR_TOOL: &str = "repo_pr";
+
+/// Tool name: publish the branch the agent committed, host-side, for operator
+/// approval (issue #735).
+pub const REPO_PUBLISH_TOOL: &str = "repo_publish";
 
 /// The workspace subdirectory every checkout and diff spill lands in.
 ///
@@ -132,9 +138,28 @@ const HOST_TRUNCATION_MARKER: &str = "[truncated:";
 #[derive(Clone, Debug, Default)]
 pub struct CheckoutLedger {
     inner: Arc<Mutex<Vec<PathBuf>>>,
+    /// The task the current turn runs under (issue #735) — what names the
+    /// `oc/<company>/<task>` branch `repo_publish` pushes to. Held on the cell
+    /// the repository tools already share and the turn's entry point already
+    /// claims, rather than as a second `HarnessDeps` field: the task and the
+    /// checkouts have the exact same per-turn lifetime. `None` on a turn with no
+    /// card, where `repo_publish` refuses (issue #735 ships task turns only).
+    task: Arc<Mutex<Option<String>>>,
 }
 
 impl CheckoutLedger {
+    /// Stamps the task the current turn runs under (issue #735). Called by the
+    /// turn's entry point alongside the janitor claim; the janitor's path purge
+    /// does not touch it.
+    pub fn set_task(&self, task: Option<String>) {
+        *self.task.lock().expect("checkout ledger task") = task;
+    }
+
+    /// The task the current turn runs under, if any (issue #735).
+    pub fn task(&self) -> Option<String> {
+        self.task.lock().expect("checkout ledger task").clone()
+    }
+
     /// Records a path this turn created.
     pub fn record(&self, path: PathBuf) {
         let mut guard = self.inner.lock().expect("checkout ledger");
@@ -389,6 +414,33 @@ fn file_url(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
+/// Sets a fresh checkout's commit identity to the agent's seat (issue #735).
+///
+/// git makes commits with the repository's own `user.name`/`user.email`, so
+/// setting them here — before the agent can commit through `git_operations` —
+/// is what attributes the branch it may later publish to the agent rather than
+/// to a shared machine identity. The address is synthetic and non-routable; it
+/// exists to identify, not to receive mail. Best-effort: a config that will not
+/// set is logged, and a checkout that is only ever read is unaffected either way.
+async fn attribute_checkout(dest: &Path, agent: &str) {
+    for (key, value) in [
+        ("user.name", agent.to_string()),
+        ("user.email", format!("{agent}@agents.opencompany.local")),
+    ] {
+        match git::run(dest, &["config", key, &value], None, None).await {
+            Ok(out) if out.ok => {}
+            Ok(out) => tracing::debug!(
+                agent,
+                "[repo] could not set {key} on the checkout: {}",
+                first_line(&out.stderr)
+            ),
+            Err(err) => {
+                tracing::debug!(agent, "[repo] could not set {key} on the checkout: {err}")
+            }
+        }
+    }
+}
+
 /// Removes a directory if it exists. Absent is success.
 async fn remove_dir(path: &Path) -> Result<()> {
     match tokio::fs::remove_dir_all(path).await {
@@ -428,6 +480,14 @@ pub struct RepoToolContext {
     pub workspace: PathBuf,
     /// Where this turn's created paths are recorded for deletion.
     pub ledger: CheckoutLedger,
+    /// This agent's seat (issue #735). Attributes the commits `repo_publish`
+    /// pushes and labels the approval the operator sees.
+    pub agent: String,
+    /// Where `repo_publish` records the operator approval its push waits on
+    /// (issue #735) — the shared queue the policy and the brain already drain,
+    /// handed to the tool the same way `ledger` is. The per-turn task id that
+    /// names the publish branch rides on [`CheckoutLedger::task`], not here.
+    pub approvals: crate::harness::policy::ApprovalRequestQueue,
 }
 
 impl RepoToolContext {
@@ -632,6 +692,11 @@ impl Tool for RepoCheckoutTool {
             Ok(head) => head,
             Err(err) => return Ok(ToolResult::error(err.to_string())),
         };
+        // Attribute any commits the agent makes here to its seat (issue #735),
+        // set before it can commit via `git_operations`, so a branch it later
+        // publishes carries "which agent wrote this" in `git log` on the remote.
+        // Best-effort: a checkout that is only read is unaffected.
+        attribute_checkout(&dest, &self.context.agent).await;
 
         let relative = format!("{CHECKOUT_SUBDIR}/{}", binding.key);
         let at = match pull_request {
@@ -820,6 +885,196 @@ impl Tool for RepoPullRequestTool {
             human_bytes(view.diff.len() as u64)
         )))
     }
+}
+
+// ---------------------------------------------------------------------------
+// repo_publish (issue #735)
+// ---------------------------------------------------------------------------
+
+/// Publish the branch the agent committed in its checkout, host-side and gated
+/// by operator approval.
+///
+/// The two-step shape is the whole design (see [`RepoManager::stage_publish`]).
+/// `execute` runs the **reversible** half immediately — it fetches the agent's
+/// committed `HEAD` out of the task-scoped checkout and into the mirror on a
+/// host-owned `oc/<company>/<task>` ref — so the work is durable the instant the
+/// tool returns, before the checkout is cleaned up at turn end. The
+/// **irreversible** half — the push to the real remote — is not done here. It is
+/// recorded as a native [`Effect`] (`agent: None`) that the runtime performs
+/// **only after the operator approves**, exactly as `email.send` does. A denied
+/// or expired approval never runs it, so the remote is untouched.
+///
+/// The agent never pushes and never holds a credentialed remote: both git write
+/// directions are host-side in [`RepoManager`], and the branch name is generated
+/// there, never taken from the agent.
+struct RepoPublishTool {
+    context: RepoToolContext,
+}
+
+#[async_trait]
+impl Tool for RepoPublishTool {
+    fn name(&self) -> &str {
+        REPO_PUBLISH_TOOL
+    }
+
+    fn description(&self) -> &str {
+        "Publish the commits you made in a checked-out repository as a branch on the company's \
+         remote, for the operator to review. USE FOR handing over a change you have committed in a \
+         `repo_checkout` working tree — a fix, a patch, a generated file — once it is ready. The \
+         push is host-side and needs the operator's approval: this tool stages your commits and \
+         asks; nothing reaches the remote until the operator approves, and you will be told it is \
+         pending, not done. NOT a way to push to `main` or any branch you name — the branch is \
+         chosen for you (`oc/<company>/<task>`) and only that branch is ever written. Commit your \
+         work first with `git_operations`; an empty or unchanged checkout has nothing to publish."
+    }
+
+    fn parameters_schema(&self) -> Value {
+        json!({
+            "type": "object",
+            "properties": {
+                "repo": {
+                    "type": "string",
+                    "description": "Which bound repository you checked out and committed to, as \
+                                    `owner/name`, its https URL, or the key from the repositories list."
+                },
+                "message": {
+                    "type": "string",
+                    "description": "A short summary of what this publish contains, for the operator \
+                                    reviewing it before it is pushed."
+                }
+            },
+            "required": ["repo", "message"],
+            "additionalProperties": false
+        })
+    }
+
+    fn permission_level(&self) -> PermissionLevel {
+        // Advisory, like every tool in this crate — the real gate is the native
+        // approval this records (the push waits for it) plus the
+        // `crate::policy::consequence` declaration that keeps a `readonly` desk
+        // from reaching this at all. `Write` is the honest claim: approved, it
+        // moves the agent's commits onto a real remote.
+        PermissionLevel::Write
+    }
+
+    async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        let raw = args.get("repo").and_then(Value::as_str).unwrap_or_default();
+        let binding = match self.context.resolve(raw) {
+            Ok(binding) => binding.clone(),
+            Err(message) => return Ok(ToolResult::error(message)),
+        };
+        // The tool is wired when ANY bound credential can push, but the agent may
+        // name a repository whose OWN credential is read-only. Refuse that here —
+        // before staging and before an operator is asked to approve — rather than
+        // letting it surface only when the host tries the push (issue #735).
+        // `None` (unprobed) reads as cannot-push, like everywhere else.
+        if binding.can_push != Some(true) {
+            return Ok(ToolResult::error(format!(
+                "The credential bound for {}/{} is read-only, so it cannot publish. Ask an \
+                 operator to bind a push-capable credential for this repository.",
+                binding.owner, binding.repo
+            )));
+        }
+        let message = args
+            .get("message")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .unwrap_or_default();
+        if message.is_empty() {
+            return Ok(ToolResult::error(
+                "`message` is required: say what this publish contains so the operator can review \
+                 it before it is pushed."
+                    .to_string(),
+            ));
+        }
+
+        // A publish belongs to a task (this tier ships task turns only). A turn
+        // with no card leaves the task unstamped, and there is no branch to name.
+        let Some(task) = self.context.ledger.task() else {
+            return Ok(ToolResult::error(
+                "Publishing is only available while you are working a task, not in a plain \
+                 conversation. There is nothing to do here — say so rather than retrying."
+                    .to_string(),
+            ));
+        };
+
+        // The task-scoped checkout the agent committed in. Resolved host-side
+        // from the workspace and the binding key — never a path the agent typed.
+        let checkout = self.context.checkout_root().join(&binding.key);
+
+        // Stage the committed work into the mirror now, while the checkout still
+        // exists. This is the reversible half; it makes the work durable so the
+        // approved push below does not depend on a checkout that is deleted at
+        // turn end.
+        let (branch, head) = match self
+            .context
+            .repos
+            .stage_publish(&binding.key, &checkout, &task)
+            .await
+        {
+            Ok(staged) => staged,
+            Err(err) => {
+                return Ok(ToolResult::error(format!(
+                    "Could not stage your work to publish: {err}"
+                )));
+            }
+        };
+
+        // Record the irreversible push as a native effect the runtime performs
+        // on approval. `agent: None` is load-bearing: it is what makes the
+        // runtime push it itself on approval rather than re-dispatching this
+        // turn (which would have lost the checkout). The payload is what the
+        // operator's approval card shows and what `perform_effect` reads.
+        let effect = Effect {
+            kind: crate::runtime::cycle::REPO_PUBLISH_EFFECT.to_string(),
+            group: EffectGroup::Publish,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: json!({
+                "repo": binding.key,
+                "owner": binding.owner,
+                "name": binding.repo,
+                "branch": branch,
+                // The exact commit this approval is bound to. `perform_effect`
+                // pushes THIS commit, so a later re-stage of the same task cannot
+                // change what an approved publish sends.
+                "head": head,
+                // The task/card this publish belongs to (issue #736). Carried so
+                // the runtime can link the opened PR back to it, and post a note
+                // on it if the push lands but the PR does not open.
+                "task": task,
+                "agent": self.context.agent,
+                "message": message,
+            }),
+            agent: None,
+            run_id: None,
+        };
+        self.context.approvals.push(ApprovalRequest {
+            tool: REPO_PUBLISH_TOOL.to_string(),
+            reason: format!(
+                "publish {}/{} to {branch} for review",
+                binding.owner, binding.repo
+            ),
+            effect,
+        });
+
+        Ok(ToolResult::success(format!(
+            "Staged your commits as `{branch}` and asked the operator to approve publishing them \
+             to {}/{}. Nothing has been pushed yet — the push happens only once the operator \
+             approves, so tell them it is pending review, not delivered.",
+            binding.owner, binding.repo
+        )))
+    }
+}
+
+/// Builds the `repo_publish` tool (issue #735). Kept separate from
+/// [`repo_tools`] because it is wired behind a strictly tighter gate — the
+/// `repo.write` grant and a push-capable credential — decided in
+/// [`build_agent`](crate::harness::build::build_agent), where the read tools are
+/// wired on the plain `repo` grant.
+pub fn repo_publish_tool(context: RepoToolContext) -> Box<dyn Tool> {
+    Box::new(RepoPublishTool { context })
 }
 
 #[cfg(test)]

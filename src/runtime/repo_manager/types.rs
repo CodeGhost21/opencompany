@@ -382,6 +382,17 @@ pub struct PullRequestView {
     pub diff: String,
 }
 
+/// A newly opened pull request, as the create call answers (issue #736): the
+/// two facts an operator needs — which PR, and where to open it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PullRequestRef {
+    /// The pull request number.
+    pub number: u64,
+    /// Its browser URL.
+    pub html_url: String,
+}
+
 /// The forge REST seam.
 ///
 /// Dependency-inverted for the same reason as the DNS resolver and the mail
@@ -403,6 +414,19 @@ pub trait RepoHost: Send + Sync {
         number: u64,
         token: &str,
     ) -> Result<PullRequestView>;
+
+    /// Opens a pull request from `head` into `base`, host-side, and returns the
+    /// created PR's number and browser URL (issue #736). The one *write* verb on
+    /// this seam — every other reaches the forge read-only.
+    async fn create_pull_request(
+        &self,
+        coords: &RepoCoordinates,
+        token: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PullRequestRef>;
 }
 
 #[cfg(test)]

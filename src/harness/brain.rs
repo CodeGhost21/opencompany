@@ -392,6 +392,9 @@ impl HarnessBrain {
         // over an empty ledger is a no-op, which is what every turn that touches
         // no repository does.
         let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
+        // Issue #735: a re-dispatched grant is not a task card, so clear any task
+        // a prior turn stamped — `repo_publish` requires a task and refuses here.
+        self.deps.checkouts.set_task(None);
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
@@ -633,6 +636,10 @@ impl HarnessBrain {
         // guard's `Drop` is what deletes the tree on every exit — success,
         // error, cancel, redirect exhaustion and panic-unwind alike.
         let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
+        // Issue #735: this is a dispatched card, so `repo_publish` names its
+        // branch `oc/<company>/<card>`. Stamped on the same per-turn cell the
+        // janitor above claims.
+        self.deps.checkouts.set_task(Some(card.id.clone()));
         // Issue #339, same argument for staged workflow references: an operator
         // chat turn earlier in this cycle may have run a workflow through the
         // orchestrator's tool, and that run belongs to the conversation, not to
@@ -2458,6 +2465,10 @@ impl HarnessBrain {
                     // so it can clone a repository, and the guard's `Drop`
                     // removes it when this turn ends.
                     let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
+                    // Issue #735: a conversation is not a task card, so clear any
+                    // task a prior turn stamped — `repo_publish` requires a task
+                    // and refuses on a chat turn (task turns only, this tier).
+                    self.deps.checkouts.set_task(None);
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
