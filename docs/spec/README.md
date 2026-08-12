@@ -76,6 +76,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [company-brain/README.md](company-brain/README.md) | What the company brain is; the cycle |
 | [company-brain/charter.md](company-brain/charter.md) | The company constitution |
 | [company-brain/approvals.md](company-brain/approvals.md) | Checkpoints and the approval model |
+| [company-brain/grants.md](company-brain/grants.md) | Grants and the tool gate: single-use, standing, tiers, precedence |
 | [company-brain/per-call-judgement.md](company-brain/per-call-judgement.md) | Which calls warrant a human, per call (step 7 of the gate) |
 | [company-brain/memory.md](company-brain/memory.md) | Long-term memory and retention |
 | [runtime/README.md](runtime/README.md) | Kernel architecture and crate layout |

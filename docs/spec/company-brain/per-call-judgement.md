@@ -3,8 +3,9 @@
 How the approval gate decides which calls warrant a human *on their own merits*,
 in the gap the static configuration leaves (issue #338, spine epic #183 §4).
 
-Read [approvals.md](approvals.md) first: this is **step 7** of the precedence
-chain documented there, and the placement is most of the argument.
+Read [approvals.md](approvals.md) first: this is **step 7** of the
+[precedence chain at the tool gate](grants.md#precedence-at-the-tool-gate), and
+the placement is most of the argument.
 
 Steps 1–6 are all decided before the run starts, by an operator writing a
 manifest. Nothing in them looks at what the run is about to do. That is a bad
