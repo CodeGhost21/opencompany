@@ -49,7 +49,7 @@ pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_pr
 pub use facts::{FactKind, FactRecord, FactStore};
 pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
-pub use journal::JournalStore;
+pub use journal::{Durability, JournalStore};
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;
 pub use run_output::{

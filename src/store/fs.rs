@@ -1362,17 +1362,45 @@ impl InboxStore for FsInboxStore {
 /// per-path locking. This type is the port surface around behaviour that already
 /// existed, not new behaviour.
 pub struct FsJournalStore {
-    home: PathBuf,
+    root: JournalRoot,
+}
+
+/// How an [`FsJournalStore`] resolves a company's journal file.
+enum JournalRoot {
+    /// A company-scoped store over an OpenCompany home:
+    /// `<home>/companies/<slug>/journal.jsonl`. The production shape, and the
+    /// only one that upholds the port's per-company isolation contract.
+    Home(PathBuf),
+    /// One fixed file, whatever company is asked for.
+    ///
+    /// Backs [`RuntimeJournal::new`](crate::runtime::journal::RuntimeJournal::new),
+    /// the path-taking convenience constructor the test suite builds journals
+    /// with. Single-company by construction — the caller named the file — so the
+    /// id it is handed is not consulted, and the conformance suite's isolation
+    /// assertions run against [`Home`](JournalRoot::Home) instead.
+    File(PathBuf),
 }
 
 impl FsJournalStore {
     /// A store over every company bundle under the OpenCompany home `home`.
     pub fn new(home: impl Into<PathBuf>) -> Self {
-        Self { home: home.into() }
+        Self {
+            root: JournalRoot::Home(home.into()),
+        }
+    }
+
+    /// A store pinned to one journal file — see [`JournalRoot::File`].
+    pub(crate) fn at_file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            root: JournalRoot::File(path.into()),
+        }
     }
 
     fn path(&self, id: &CompanyId) -> PathBuf {
-        Bundle::new(&self.home, id).journal_jsonl()
+        match &self.root {
+            JournalRoot::Home(home) => Bundle::new(home, id).journal_jsonl(),
+            JournalRoot::File(path) => path.clone(),
+        }
     }
 }
 
@@ -1387,16 +1415,39 @@ impl crate::ports::journal::JournalStore for FsJournalStore {
     /// is what two independently-constructed stores over one file actually
     /// share, and there is no file both registries would have contended for —
     /// `journal.jsonl` is written here and nowhere else.
-    async fn append_journal(&self, id: &CompanyId, line: &str) -> Result<()> {
+    ///
+    /// **Both branches of issue #392 live here now**, moved from
+    /// `RuntimeJournal::append` when the sink became a port (#726), and the
+    /// directory half is the one that is easy to lose in the move:
+    /// [`Durability::Host`] creates the parent chain through
+    /// [`create_dir_all_durable`], which flushes each created directory's own
+    /// parent. Plain `create_dir_all` here would leave a flushed record under
+    /// directory entries that were never written down — lost with them on
+    /// exactly the crash the flush was bought for, with the record's own
+    /// `sync_data` still passing its test.
+    async fn append_journal(
+        &self,
+        id: &CompanyId,
+        line: &str,
+        durability: crate::ports::journal::Durability,
+    ) -> Result<()> {
+        use crate::ports::journal::Durability;
+
         let path = self.path(id);
         let lock = path_lock(&path);
         let _guard = lock.lock().await;
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| io_err(parent, e))?;
+            match durability {
+                Durability::Host => create_dir_all_durable(parent).await?,
+                Durability::Process => tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| io_err(parent, e))?,
+            }
         }
-        append_line(&path, line).await
+        match durability {
+            Durability::Host => append_line_durable(&path, line).await,
+            Durability::Process => append_line(&path, line).await,
+        }
     }
 
     async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {

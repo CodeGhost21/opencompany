@@ -58,17 +58,48 @@ use async_trait::async_trait;
 use crate::Result;
 use crate::ports::types::CompanyId;
 
+/// The failure a journal record is written to outlast (issue #392).
+///
+/// The journal's own per-record decision — which record kind needs which level,
+/// and why — lives on `JournalRecord::durability` in
+/// [`crate::runtime::journal`]. This is only the vocabulary the decision is
+/// expressed in, and it lives here because the sink is what has to honour it.
+///
+/// A backend MUST NOT flatten the two into one level. Flattening upward taxes
+/// the journal's highest-volume records with a flush they do not need;
+/// flattening downward silently drops the guarantee that keeps an already-fired
+/// effect from firing again after a power loss, which is the one thing the split
+/// was bought for.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Durability {
+    /// Durable against the process dying, not against the machine dying: in the
+    /// kernel's page cache (or the server's memory) when the append returns.
+    Process,
+    /// On stable storage when the append returns, at the cost of one flush.
+    Host,
+}
+
 /// The durable byte sink under one company's runtime journal.
 #[async_trait]
 pub trait JournalStore: Send + Sync {
-    /// Appends one opaque record line, which MUST be durable before this
+    /// Appends one opaque record line, durable to `durability` before this
     /// returns.
     ///
     /// The at-most-once guarantee is that an effect's key reaches durable
     /// storage *before* the side effect runs, so a backend that acknowledges a
-    /// buffered or unjournaled write breaks the contract this port carries. The
-    /// fs backend performs a single `O_APPEND` `write_all` and waits on the
-    /// syscall; the mongodb backend inserts with `j:true` write concern.
+    /// write it has not yet made durable to the requested level breaks the
+    /// contract this port carries. What each shipped backend does:
+    ///
+    /// | | [`Durability::Process`] | [`Durability::Host`] |
+    /// |---|---|---|
+    /// | fs | one `O_APPEND` `write_all`, awaited | the same, plus `sync_data`, and the parent chain created with each new directory's parent flushed |
+    /// | sqlite | commit under `synchronous=NORMAL` (WAL) | commit under `synchronous=FULL` |
+    /// | mongodb | acknowledged insert | insert with `j:true` write concern |
+    ///
+    /// The fs backend's directory handling is not incidental: a record flushed
+    /// under ancestors that were never written down is lost with them, so a
+    /// [`Durability::Host`] append into a fresh data directory must flush the
+    /// chain it creates (issue #392).
     ///
     /// `line` never contains a newline — the caller serialises one JSON record
     /// per call — and a backend must preserve it byte-for-byte.
@@ -77,7 +108,12 @@ pub trait JournalStore: Send + Sync {
     /// effect, so the effect does not run. The residual ambiguity (a timeout on
     /// a write the server did commit) leaves a committed key with no effect,
     /// which is the at-most-once contract's documented safe direction.
-    async fn append_journal(&self, id: &CompanyId, line: &str) -> Result<()>;
+    async fn append_journal(
+        &self,
+        id: &CompanyId,
+        line: &str,
+        durability: Durability,
+    ) -> Result<()>;
 
     /// Every line ever appended for `id`, in append order.
     ///
@@ -115,4 +151,78 @@ pub trait JournalStore: Send + Sync {
     /// An empty `lines` is a legitimate call, not a no-op to optimise away: it
     /// is how a company with no prior filesystem journal closes its gate.
     async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()>;
+}
+
+/// An in-memory [`JournalStore`], for tests that need a durable sink which is
+/// **not** the filesystem.
+///
+/// It stands in for a database backend in the one place that matters: a test can
+/// delete a company's bundle directory — the simulated container replacement
+/// this port exists to survive — and this store still holds every record. Doing
+/// that against the real sqlite or mongodb backend would tie the proof to a
+/// cargo feature (and, for mongodb, to a live server), so the invariant would go
+/// unasserted in the default build.
+///
+/// Deliberately holds the same *strings* the real backends hold, so a record
+/// crossing it is exercised through the identical serialise/parse path.
+#[cfg(test)]
+#[derive(Default)]
+pub struct MemoryJournalStore {
+    inner: std::sync::Mutex<MemoryJournalState>,
+}
+
+#[cfg(test)]
+#[derive(Default)]
+struct MemoryJournalState {
+    lines: std::collections::HashMap<CompanyId, Vec<String>>,
+    imported: std::collections::HashSet<CompanyId>,
+}
+
+#[cfg(test)]
+impl MemoryJournalStore {
+    fn lock(&self) -> std::sync::MutexGuard<'_, MemoryJournalState> {
+        self.inner.lock().expect("memory journal poisoned")
+    }
+
+    /// Drops the import receipt for `id`, so the next boot imports again.
+    ///
+    /// The shape of a crash *between* the copy and the receipt: a partial
+    /// journal sitting behind an open gate. Tests use it to prove the retry
+    /// wipes rather than appends.
+    pub fn forget_receipt(&self, id: &CompanyId) {
+        self.lock().imported.remove(id);
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl JournalStore for MemoryJournalStore {
+    async fn append_journal(
+        &self,
+        id: &CompanyId,
+        line: &str,
+        _durability: Durability,
+    ) -> Result<()> {
+        self.lock()
+            .lines
+            .entry(id.clone())
+            .or_default()
+            .push(line.to_string());
+        Ok(())
+    }
+
+    async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+        Ok(self.lock().lines.get(id).cloned().unwrap_or_default())
+    }
+
+    async fn journal_imported(&self, id: &CompanyId) -> Result<bool> {
+        Ok(self.lock().imported.contains(id))
+    }
+
+    async fn complete_import(&self, id: &CompanyId, lines: Vec<String>) -> Result<()> {
+        let mut state = self.lock();
+        state.lines.insert(id.clone(), lines);
+        state.imported.insert(id.clone());
+        Ok(())
+    }
 }
