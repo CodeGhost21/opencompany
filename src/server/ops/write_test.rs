@@ -8131,3 +8131,257 @@ async fn a_company_that_raised_its_blob_cap_can_use_it() {
     assert_eq!(node["size"], size as u64);
     assert!(tree_names(&state).await.contains(&"raised.bin".to_string()));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #705 — an irreversible effect's amount is admin-only
+// ---------------------------------------------------------------------------
+
+/// Reads a task's detail as a specific principal.
+///
+/// The harness signs every other request in as an admin, which is exactly why
+/// this exists: a redaction verified only as an admin passes identically
+/// against no redaction at all.
+async fn detail_as(state: &AppState, id: &str, cookie: String) -> Value {
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/tasks/{id}"))
+        .header("cookie", cookie)
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    serde_json::from_slice(&bytes).unwrap()
+}
+
+/// Issue #705: any Member could read the dollar value of every irreversible
+/// effect on a card.
+///
+/// #618 restricted the money on an approval — the effect nobody has signed off
+/// yet. The *executed* effect carries the same number through a different DTO
+/// on a different route, and that route had no role check at all.
+///
+/// **Asserted on the serialized JSON, not on the struct.** `amount_usd` carries
+/// `skip_serializing_if`, so the wire shape is the only thing that settles
+/// whether the field shipped; a struct-level assertion can pass while the bytes
+/// still carry the amount.
+#[tokio::test]
+async fn a_member_does_not_see_an_irreversible_effects_amount() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Pay the Q3 retainer"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    // Two effects: one carrying money, one not. The second is the control that
+    // keeps "withheld" and "there was never an amount" distinguishable.
+    runtime
+        .journal
+        .record_executed(
+            "exec-705-paid",
+            crate::runtime::journal::ExecutedEffect {
+                kind: "payment.send".to_string(),
+                amount_usd: Some(2400.0),
+                task_id: Some(id.clone()),
+                at_millis: 1_000,
+                irreversible: true,
+            },
+        )
+        .await
+        .unwrap();
+    runtime
+        .journal
+        .record_executed(
+            "exec-705-free",
+            crate::runtime::journal::ExecutedEffect {
+                kind: "email.send".to_string(),
+                amount_usd: None,
+                task_id: Some(id.clone()),
+                at_millis: 2_000,
+                irreversible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The admin signs these off, so the admin sees what they cost.
+    let as_admin = detail_as(
+        &state,
+        &id,
+        crate::server::test_support::fixed_cookie("acme"),
+    )
+    .await;
+    let admin_effects = as_admin["irreversibleEffects"].as_array().unwrap();
+    assert_eq!(admin_effects.len(), 2, "{as_admin}");
+    let admin_paid = admin_effects
+        .iter()
+        .find(|e| e["kind"] == "payment.send")
+        .unwrap();
+    assert_eq!(admin_paid["amountUsd"].as_f64(), Some(2400.0), "{as_admin}");
+    assert!(
+        admin_paid.get("amountHidden").is_none(),
+        "an admin is not told anything was withheld: {as_admin}"
+    );
+
+    let as_member = detail_as(
+        &state,
+        &id,
+        crate::server::test_support::member_cookie("acme"),
+    )
+    .await;
+    let member_effects = as_member["irreversibleEffects"].as_array().unwrap();
+    assert_eq!(
+        member_effects.len(),
+        2,
+        "the rows survive — a member must still see what a retry would re-do: {as_member}"
+    );
+    let member_paid = member_effects
+        .iter()
+        .find(|e| e["kind"] == "payment.send")
+        .unwrap();
+
+    // The leak, closed. Absent from the wire, not null: `skip_serializing_if`.
+    assert!(
+        member_paid.get("amountUsd").is_none(),
+        "the amount must not reach a member: {as_member}"
+    );
+    // Hidden is not absent — the console has to be able to say why.
+    assert_eq!(
+        member_paid["amountHidden"], true,
+        "a withheld amount must be distinguishable from an effect that cost \
+         nothing: {as_member}"
+    );
+    // Everything that makes the retry warning legible survives.
+    assert_eq!(member_paid["kind"], "payment.send");
+    assert_eq!(member_paid["atMillis"].as_u64(), Some(1_000));
+
+    // The control: an effect that never carried money is not reported as
+    // redacted, or "nothing to show" and "not shown to you" collapse.
+    let member_free = member_effects
+        .iter()
+        .find(|e| e["kind"] == "email.send")
+        .unwrap();
+    assert!(member_free.get("amountUsd").is_none(), "{as_member}");
+    assert!(
+        member_free.get("amountHidden").is_none(),
+        "an effect with no amount was not redacted: {as_member}"
+    );
+}
+
+/// The export path is covered by construction, because it is handed the same
+/// value.
+///
+/// `assemble_detail` is deliberately shared between the JSON route and the
+/// export document (issue #352 calls that sharing "the export's redaction
+/// guarantee"). This drives that shared function directly with a
+/// member-scoped principal, so the guarantee is asserted at the seam both
+/// readers pass through rather than only at the JSON one.
+///
+/// **Why not assert on the exported HTML alone.** The export template does not
+/// currently render effect amounts at all, so an HTML-only assertion would pass
+/// whether or not the redaction exists — coverage that cannot fail. The HTML
+/// check below is kept as a secondary guard against a future template that does
+/// render them; the assertion that actually holds the line is the one on the
+/// shared projection.
+#[tokio::test]
+async fn the_export_document_is_built_from_the_redacted_detail() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    crate::server::test_support::seed_fixed_member(&state, "acme").await;
+
+    let (status, task) = send(
+        &state,
+        "POST",
+        "/api/v1/company/tasks",
+        Some(json!({"title": "Pay the Q3 retainer"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{task}");
+    let id = task["id"].as_str().unwrap().to_string();
+
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+    runtime
+        .journal
+        .record_executed(
+            "exec-705-export",
+            crate::runtime::journal::ExecutedEffect {
+                kind: "payment.send".to_string(),
+                amount_usd: Some(2400.0),
+                task_id: Some(id.clone()),
+                at_millis: 1_000,
+                irreversible: true,
+            },
+        )
+        .await
+        .unwrap();
+
+    // The seam both readers share, driven as a member. `assemble_detail` is
+    // exactly what `export_task` calls.
+    let as_member = super::tasks::assemble_detail(
+        &super::ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: false,
+        },
+        &id,
+    )
+    .await
+    .expect("detail assembles");
+    // Serialized, not read off the struct: `skip_serializing_if` means the wire
+    // shape is what settles whether the amount shipped.
+    let wire = serde_json::to_value(&as_member.irreversible_effects).unwrap();
+    let paid = &wire.as_array().unwrap()[0];
+    assert!(
+        paid.get("amountUsd").is_none(),
+        "the shared projection the export renders must already be redacted: {wire}"
+    );
+    assert_eq!(paid["amountHidden"], true, "{wire}");
+
+    // …and the same principal reading it as an admin still gets the number, so
+    // the assertion above is redaction rather than the field being gone.
+    let as_admin = super::tasks::assemble_detail(
+        &super::ScopedCompany {
+            runtime: runtime.clone(),
+            actor: None,
+            may_read_contents: true,
+        },
+        &id,
+    )
+    .await
+    .expect("detail assembles");
+    let admin_wire = serde_json::to_value(&as_admin.irreversible_effects).unwrap();
+    assert_eq!(
+        admin_wire.as_array().unwrap()[0]["amountUsd"].as_f64(),
+        Some(2400.0),
+        "{admin_wire}"
+    );
+
+    // Secondary guard: the rendered document must not carry it either. This
+    // passes today regardless (the template renders no effects) and exists so a
+    // future template that does render them cannot reintroduce the leak.
+    let request = Request::builder()
+        .method("GET")
+        .uri(format!("/api/v1/company/tasks/{id}/export"))
+        .header("cookie", crate::server::test_support::member_cookie("acme"))
+        .body(Body::empty())
+        .unwrap();
+    let response = router(state.clone()).oneshot(request).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let html = String::from_utf8(bytes.to_vec()).expect("the export is utf-8");
+    assert!(
+        !html.contains("2400"),
+        "the exported document must not carry an amount this reader may not read"
+    );
+}

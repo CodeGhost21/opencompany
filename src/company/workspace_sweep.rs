@@ -306,40 +306,6 @@ mod tests {
         }
     }
 
-    /// Hand-seeds a workspace index holding two `Agents` roots — the shape no
-    /// live `create` can make.
-    ///
-    /// [`FsOps`](crate::store::FsOps) refuses a second node at the same
-    /// rendered path (`reject_path_collision`), so the only way a real store
-    /// can carry two `Agents` roots is legacy or damaged data. That is exactly
-    /// the state the sweep must refuse to sweep beneath, so the test writes the
-    /// `.workspace-index.json` directly rather than through `create` — the
-    /// hand-built-input pattern the module docs promise for shapes no backend
-    /// would let a test create.
-    async fn seed_ambiguous_agents(dir: &tempfile::TempDir, company: &CompanyId) {
-        use crate::store::Bundle;
-        use std::collections::HashMap;
-
-        let index: HashMap<String, WorkspaceNode> = [
-            ("dup-a", folder("dup-a", AGENTS_ROOT, None)),
-            ("dup-b", folder("dup-b", AGENTS_ROOT, None)),
-            ("stray", folder("stray", "ceo", Some("dup-a"))),
-        ]
-        .into_iter()
-        .map(|(key, node)| (key.to_string(), node))
-        .collect();
-
-        let path = Bundle::new(dir.path(), company).workspace_index_json();
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .expect("workspace dir");
-        }
-        tokio::fs::write(path, serde_json::to_vec(&index).expect("index json"))
-            .await
-            .expect("workspace index");
-    }
-
     // -- over a real store --------------------------------------------------
 
     /// The whole point, in one tree: the folder that was minted for a teammate
@@ -575,22 +541,24 @@ mod tests {
     /// "under `Agents/`" undecidable, so the sweep refuses instead of picking
     /// one and deleting beneath it.
     ///
-    /// The two `Agents` roots are seeded straight into the index rather than
-    /// built with `create`: the store's `reject_path_collision` now stops a
-    /// second node at the same rendered path, so this ambiguity can only arrive
-    /// as legacy or damaged data — see [`seed_ambiguous_agents`].
-    #[tokio::test]
-    async fn an_ambiguous_root_is_refused_and_removes_nothing() {
-        let (dir, ws) = store().await;
-        let company = CompanyId::new("odd");
-        seed_ambiguous_agents(&dir, &company).await;
+    /// Hand-built rather than driven through `FsOps` on purpose: the backend now
+    /// rejects a second `Agents` root at creation (`reject_path_collision`, see
+    /// issue #665), so the ambiguous shape is no longer reachable through it —
+    /// the same reason the #671 shape below is fed straight to the predicate.
+    #[test]
+    fn an_ambiguous_root_is_refused_and_removes_nothing() {
+        let nodes = vec![
+            folder("dup-a", AGENTS_ROOT, None),
+            folder("dup-b", AGENTS_ROOT, None),
+            // A real member beneath the (ambiguous) root: there is content a
+            // naive pick would have deleted, and the refusal exists to protect
+            // exactly that.
+            file("stray", "stray.md", Some("dup-a")),
+        ];
 
-        let err = sweep_empty_agent_folders(ws.as_ref(), &company, false)
-            .await
+        let err = empty_agent_folder_candidates(&nodes)
             .expect_err("an ambiguous root must not be swept beneath");
-
         assert!(err.to_string().contains(AGENTS_ROOT), "{err}");
-        assert_eq!(names(&ws, &company).await, vec!["Agents", "Agents", "ceo"]);
     }
 
     /// A *file* named `Agents` is the other unresolvable shape, and the refusal

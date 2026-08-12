@@ -335,6 +335,41 @@ with actor and timestamps, but each admitted call writes no journal record.
 Defensible because a standing grant only ever admits tools declared grantable
 and never a priced call; a per-use record is additive later.
 
+### Which tier a new company gets
+
+Issue #605. A **new** company is given `auto`; an **existing** one is never
+re-tiered. Two knobs, and that distinction is the decision:
+
+- `default_policy_mode()` — what a manifest with no stated `mode` *parses* to.
+  Stays **`supervised`**.
+- `PROVISIONED_POLICY_MODE` — what provisioning *writes into* a new company's
+  manifest when its author stated none. **`auto`**.
+
+Every shipped preset declares `mode` outright, so both paths that read one
+(`serve --company <dir>`, the desktop app) arrive carrying a tier.
+`POST /api/v1/companies` is the only creation path with no template behind it,
+and is where the write happens.
+
+**Why not simply move the parse default.** That value answers for every manifest
+ever parsed, including the re-parse of a company that has run for months, so
+moving it re-tiers existing companies rather than creating them differently.
+Two things then go wrong:
+
+1. Every company with no `[policy]` block silently widens on its next load.
+   Nobody edited anything and nothing is written down.
+2. Less obvious and worse: the persisted record stores the *defaulted* value, so
+   a silent `company.toml` that parsed to `supervised` last boot parses to `auto`
+   this boot — and `carry_policy_override`, which is `previous_seed ==
+   next_seed` over the whole block, reads that as version control speaking and
+   **discards the operator's console `[policy]` override**, including one that
+   had *tightened* the tier.
+
+Writing the tier at provisioning avoids both, and makes it legible: a
+provisioned tenant has no `company.toml`, so the record is the only place its
+tier appears. `a_provisioned_company_with_no_stated_tier_is_recorded_on_auto`
+and `a_provisioned_company_keeps_whatever_tier_it_states` pin both halves, the
+second walking `POLICY_MODES` so a fifth tier cannot escape the guarantee.
+
 ### What an `always_approve` entry names (issue #684)
 
 One namespace, not two. An entry is an **effect kind**, and a **tool name is an

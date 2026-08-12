@@ -120,11 +120,21 @@ anyhow = { version = "1", optional = true }
 log = { version = "0.4", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 # Console MCP OAuth (issue #90): base64url for PKCE (S256 challenge + verifier
-# entropy) and URL building for the `/authorize` redirect. Both are already in
-# the tree via `openhuman_core` + `reqwest`, so pinning them as direct deps adds
-# no new Cargo.lock entries; they link only under the `mcp` feature.
+# entropy) and URL building for the `/authorize` redirect. Already in the tree
+# via `openhuman_core` + `reqwest`, so pinning it as a direct dep adds no new
+# Cargo.lock entry; it links only under the `mcp` feature.
 base64 = { version = "0.22", optional = true }
-url = { version = "2", optional = true }
+# NOT optional, deliberately (issue #673). `src/policy/consequence.rs` derives a
+# standing grant's host scope with this parser, and it must be *the same* parser
+# `reqwest` uses to perform the fetch — a grant key computed by a second,
+# hand-rolled reader is a bypass waiting to be found, which is precisely how the
+# `https://evil.com\@docs.rs/` confusion arose in review of that issue.
+#
+# Feature-gating it would put the security boundary behind `#[cfg]` and, worse,
+# make its regression tests vacuous in the default lane — a suite that cannot
+# run the hostile-input table is not protecting anything. Already in the tree
+# via `reqwest`, so this adds no new Cargo.lock entry either way.
+url = "2"
 
 # Issue #29 (epic #26): the tinyflows workflow engine, embedded directly. It is
 # host-agnostic and Config-free — `Capabilities` is a plain struct of trait
@@ -269,7 +279,7 @@ openhuman = ["tiny", "dep:openhuman_core", "dep:reqwest", "dep:anyhow", "dep:log
 # MCP server management and agent tools share OpenHuman's in-process registry.
 # Enabling it necessarily enables the embedded harness and OpenHuman MCP
 # domain, while the default build remains unchanged.
-mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64", "dep:url"]
+mcp = ["openhuman", "openhuman_core/mcp", "dep:uuid", "dep:base64"]
 # Image/video generation tools (issue #109, epic #26 Cell B). Bridges
 # OpenHuman's `media_generation` tools (`media_generate_image`,
 # `media_generate_video`, `media_list_models`) into a company agent's toolbelt
@@ -427,3 +437,18 @@ tempfile = "3"
 # real child process. Dev-only: under resolver v2 this feature is not unified
 # into normal builds, so the shipped binary is unchanged.
 tokio = { version = "1", features = ["test-util"] }
+
+# Issue #392: measures what a per-append flush costs, so the per-record-kind
+# durability policy rests on a number rather than an intuition. Default features
+# off — the plotting and rayon extras would be dead weight in every test lane's
+# dependency graph, and this bench reports numbers rather than charts.
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
+
+# Opt-in only (`cargo bench --bench journal_append`). Not wired into CI: it is a
+# measurement of the host's storage, and a shared runner's numbers would mean
+# nothing to gate on.
+[[bench]]
+name = "journal_append"
+harness = false

@@ -1611,25 +1611,20 @@ mod tests {
         use crate::ports::approvals::ApprovalGate;
         use crate::ports::types::PolicyDecision;
 
-        // A leading segment, an exact dotted kind, a bare tool name, a
-        // near-miss that must NOT be gated, and a case variant.
+        // A leading segment, an exact dotted kind, a bare tool name, an
+        // unrelated declared tool that must NOT be gated, and a case variant.
         //
-        // Every name here is one the tier itself has no opinion about under
-        // `full`, so the only thing that can make the two paths disagree is the
-        // fence. A priced name like `web_search` would drag the harness's
+        // Every name here is one both paths leave to the fence: the tier has no
+        // opinion about it under `full`, **and** it is a declared, non-priced
+        // tool, so the per-call judgement (issue #338) is silent on it too — the
+        // thing that used to make a not-gated name diverge after `full` decided
+        // to allow was that undeclared tools stop under the judgement. The
+        // near-miss the segment boundary exists to exclude (`payment` vs
+        // `payroll.export`) stopped fitting here once the judge began stopping
+        // undeclared tools; that boundary is pinned in `always_approve::test`
+        // instead. A priced name like `web_search` would drag the harness's
         // metered-read and budget arms into a comparison that is not about
-        // `always_approve`, so it is deliberately absent.
-        //
-        // The near-miss is `query_payment`, not `payroll.export`: the harness
-        // also fail-closes on undeclared effectful tools (issue #338), so an
-        // ungated but spend-classified name like `payroll.export` would be
-        // parked by the harness's per-call judgement while the gate's
-        // authored-node path (issue #674) waves it through. That divergence is
-        // real and deliberate, and dragging it into an always-approve
-        // agreement test would compare two different questions. `query_payment`
-        // is a payment-*read* — the read prefix keeps the per-call judgement
-        // silent — so the fence is the only thing that can move it, which is
-        // precisely what this test measures.
+        // `always_approve`, so it is deliberately absent here.
         let fence = &["payment", "filing.submit", "publish_artifact"];
         let names = [
             "payment.send",
@@ -1637,7 +1632,7 @@ mod tests {
             "filing.submit",
             "publish_artifact",
             "PUBLISH_ARTIFACT",
-            "query_payment",
+            "workspace_read",
         ];
 
         // `full` on both sides, so the tier decides nothing and any parking
@@ -1691,9 +1686,53 @@ mod tests {
         ));
         assert_eq!(
             harness
-                .check(&request("query_payment", serde_json::json!({})))
+                .check(&request("workspace_read", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow
+        );
+
+        // The fence near-miss, pinned where the answer is stable.
+        //
+        // `payroll.export` is what the shared matcher tests call the near-miss:
+        // sharing `payment`'s first four letters is not the same capability, so
+        // the operator list names it nowhere and must not gate it. All three
+        // statements are asserted because the two paths legitimately differ on
+        // the last of them:
+        //
+        // * the *matcher* — the part both paths actually share — does not gate
+        //   it;
+        // * the gate, effect-level and mode-driven, hands `full` the Allow this
+        //   fence implies;
+        // * the harness instead parks it, because #338's per-call judgement
+        //   fail-closes an undeclared non-read call — a layer the effect gate
+        //   does not have, and the reason the near-miss cannot live inside the
+        //   agreement loop above.
+        let fence_list: Vec<String> = fence.iter().map(|s| s.to_string()).collect();
+        assert!(
+            !crate::policy::always_approve::matches(&fence_list, "payroll.export"),
+            "the operator list must not gate the leading-segment near-miss"
+        );
+        assert!(matches!(
+            harness
+                .check(&request("payroll.export", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        let near_miss_effect = Effect {
+            kind: "payroll.export".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        assert_eq!(
+            gate.evaluate(&CompanyId::new("acme"), &near_miss_effect)
+                .await
+                .unwrap(),
+            PolicyDecision::Allow
         );
     }
 
@@ -4274,6 +4313,117 @@ mod tests {
             ),
             "a send on the same tool name parks despite the grant"
         );
+    }
+
+    /// **Issue #673's acceptance, through the real gate, in both tiers.**
+    ///
+    /// Worth stating why this can go through `check()` when #457's Composio twin
+    /// below cannot: a catalogue read stopped parking at the tier in #559, so
+    /// the scope was never reached there. An outward fetch still parks under
+    /// `supervised` *and* under `auto` — that is the whole purpose of
+    /// [`Standing::ScopedGrantable`](crate::policy::Standing::ScopedGrantable) —
+    /// so the grant is genuinely the thing deciding, and the assertion is not
+    /// being satisfied by a tier that waved the call through upstream.
+    ///
+    /// `auto` is in the loop deliberately. The naive fix for #673 declared
+    /// `web_fetch` `Grantable`, which made `parks_under_auto` false and let every
+    /// agent fetch any address unattended for as long as the company sat in
+    /// `auto` — no card, so the host scope was never consulted at all. Running
+    /// both tiers here is what would catch a future edit that re-fuses the two.
+    #[tokio::test]
+    async fn a_fetch_grant_scoped_to_one_host_admits_it_and_re_parks_another() {
+        for tier in ["supervised", "auto"] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let p = policy(tier, &[], None)
+                .with_requests(queue)
+                .with_agent("ops");
+            grants.grant_standing(scoped_standing(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                "https://docs.rs",
+                far_future(),
+            ));
+
+            // A second fetch of the granted host, at a different path. This is
+            // inside the sentence the operator consented to.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::Allow
+                ),
+                "a second fetch of the granted host must run unattended under `{tier}`"
+            );
+
+            // A different host. Same agent, same tool, same grant, still live —
+            // the scope is the one thing that says no.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://crates.io/crates/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "'fetch from docs.rs' is not consent to fetch anywhere else — `{tier}`"
+            );
+
+            // A subdomain of the granted host is a different host.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://evil.docs.rs/x" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "a subdomain was never on the card — `{tier}`"
+            );
+
+            // A call whose URL cannot be read is not grantable at all, so the
+            // grant cannot admit it however well it matches on (agent, tool).
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "not-a-url" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "an unreadable URL has no scope for a scoped grant to admit — `{tier}`"
+            );
+        }
+    }
+
+    /// Without a grant an outward fetch still parks in both parking tiers — the
+    /// status quo #673 must not have widened.
+    ///
+    /// This is the assertion that fails if `web_fetch` is ever declared
+    /// `Grantable` outright: under `auto` it would be allowed here with no
+    /// operator in the loop.
+    #[tokio::test]
+    async fn an_ungranted_fetch_still_parks_under_supervised_and_auto() {
+        for tier in ["supervised", "auto"] {
+            let p = policy(tier, &[], None);
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "an outward fetch with no grant must park under `{tier}`"
+            );
+        }
     }
 
     /// Issue #457's scope check, pinned **directly** rather than through

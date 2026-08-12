@@ -254,7 +254,85 @@ pub async fn materialize(
                 sha256,
             })
         }
-        None => create_payload(workspace, company, Some(parent), filename, target).await,
+        // Nothing at this path — *as of the read above*. Issue #697: that read
+        // is not a claim, so two first publishes of one deliverable both land
+        // here and, before this, both created. Two nodes, one name.
+        //
+        // The state does not decay. `resolve_file` answers a duplicated name
+        // with `Conflict`, so a race that lasted microseconds refuses every
+        // future publish to that deliverable, for every agent, until somebody
+        // edits the tree by hand.
+        None => create_first(workspace, company, &parent, filename, target).await,
+    }
+}
+
+/// Publishes a deliverable to a path that nothing occupies yet, and loses
+/// rather than duplicates if that stops being true (issue #697).
+///
+/// # Why this is not just `create_payload`
+///
+/// It was, and that is the defect. `resolve_file` returning `None` is a
+/// statement about the instant it read the tree; a plain create acts on it
+/// later, and two publishers that both read "free" both created. The window is
+/// small and the damage is permanent, which is the worst combination — nothing
+/// cleans up after it and every later publish is refused.
+///
+/// # The shape is `replace_payload`'s, deliberately
+///
+/// Stage under a name no publish can produce and [`resolve_file`] will never
+/// match, then ask the store to install it conditionally. The only difference
+/// is what the caller expects to find: a republish names the node it supersedes,
+/// a first publish asserts the name is still free. One primitive answers both
+/// (see [`WorkspaceStore::swap_files`]), which is what keeps the loser-cleanup
+/// rule — consume the staged node, payload included — in one place rather than
+/// two that drift.
+///
+/// Staging costs the same quota it costs a republish: the payload is charged
+/// while it is staged, so a company at its ceiling can be refused here. That is
+/// the trade #662 already argued, and a refusal leaves nothing behind.
+async fn create_first(
+    workspace: &dyn WorkspaceStore,
+    company: &CompanyId,
+    parent: &str,
+    filename: &str,
+    target: PublishTarget<'_>,
+) -> Result<Mirrored> {
+    let staged_name = format!("{filename}.publishing-{}", crate::ports::generate_id());
+    let staged = create_payload(
+        workspace,
+        company,
+        Some(parent.to_string()),
+        &staged_name,
+        target,
+    )
+    .await?;
+
+    match workspace
+        .swap_files(company, None, &staged.node_id, filename)
+        .await
+    {
+        Ok(Some(node)) => Ok(Mirrored {
+            node_id: node.id,
+            sha256: node.sha256,
+        }),
+        Ok(None) => Err(OpenCompanyError::Conflict(format!(
+            "the deliverable at `{filename}` was created by another publish while this one was \
+             being prepared; nothing was overwritten — publish again to revise it"
+        ))),
+        Err(err) => {
+            // The same reasoning as the republish path: an indeterminate store
+            // error may or may not have committed, so the staging id is logged
+            // for recovery rather than deleted.
+            tracing::error!(
+                company = %company,
+                staged = %staged.node_id,
+                name = %staged_name,
+                error = %err,
+                "[publish] the store could not decide the staged first publish; its id is logged \
+                 for recovery rather than deleted after an indeterminate write"
+            );
+            Err(err)
+        }
     }
 }
 
@@ -361,7 +439,11 @@ async fn replace_payload(
     .await?;
 
     match workspace
-        .swap_files(company, superseded, &staged.node_id, filename)
+        // `Some`, emphatically: this is a republish, and it must lose if the
+        // node it expected to supersede is no longer the one at the path.
+        // `None` here would mean "install only if the name is free", which for
+        // a path that is by definition occupied would refuse every republish.
+        .swap_files(company, Some(superseded), &staged.node_id, filename)
         .await
     {
         Ok(Some(node)) => Ok(Mirrored {
@@ -751,7 +833,7 @@ mod test {
         async fn swap_files(
             &self,
             company: &CompanyId,
-            expected_id: &str,
+            expected_id: Option<&str>,
             replacement_id: &str,
             name: &str,
         ) -> Result<Option<WorkspaceNode>> {
@@ -1083,7 +1165,7 @@ mod test {
         async fn swap_files(
             &self,
             company: &CompanyId,
-            expected_id: &str,
+            expected_id: Option<&str>,
             replacement_id: &str,
             name: &str,
         ) -> Result<Option<WorkspaceNode>> {
@@ -1163,6 +1245,91 @@ mod test {
         assert!(
             !nodes.iter().any(|n| n.name.contains(".publishing-")),
             "the losing compare-and-swap must consume its staged node: {nodes:?}"
+        );
+    }
+
+    /// Issue #697, the sibling race: two **first** publishes of a path that
+    /// does not exist yet.
+    ///
+    /// Both resolve the path to `None` — correctly, at the instant they look —
+    /// and before the fix both then created, leaving two nodes under one name.
+    /// That state does not decay: `resolve_file` answers a duplicated name with
+    /// `Conflict`, so a race lasting microseconds refuses every later publish to
+    /// that deliverable, for every agent, permanently.
+    ///
+    /// Reuses `PausedSwap` unchanged, which is the point of routing creates
+    /// through the same primitive: both publishers are held at the store's
+    /// compare-and-swap boundary and released together, so the interleaving is
+    /// forced rather than hoped for. A test that merely ran two publishes
+    /// concurrently would pass on a machine that happened to serialize them.
+    #[tokio::test]
+    async fn two_first_publishes_of_one_path_have_one_winner_and_no_duplicate() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        // A different deliverable is published first, purely to mint the agent
+        // and task folders the racers will share. Without it each publisher
+        // walks `ensure_agent_folder` / `resolve_folder` itself and mints its
+        // OWN parent, so the two `report.md` nodes land under different folders
+        // and never contend for one path — the test would pass while asserting
+        // nothing about the race it names. (That folder walk is racy in its own
+        // right; it is a separate defect from this one and is not what this
+        // test pins.)
+        materialize(ws, &co, target("seed.md", "# Seed"))
+            .await
+            .expect("seeding the shared folders");
+
+        // The path under test must still not exist: this is the create arm.
+        let before = ws.tree(&co).await.unwrap();
+        assert!(
+            !before.iter().any(|n| n.name == "report.md"),
+            "the race is about a path that does not exist yet: {before:?}"
+        );
+
+        let racing = PausedSwap(ops.clone(), Arc::new(tokio::sync::Barrier::new(2)));
+        let left = materialize(&racing, &co, target("report.md", "# From the left"));
+        let right = materialize(&racing, &co, target("report.md", "# From the right"));
+        let (left, right) = tokio::join!(left, right);
+        let outcomes = [left, right];
+
+        assert_eq!(
+            outcomes.iter().filter(|result| result.is_ok()).count(),
+            1,
+            "exactly one first publish may create the path: {outcomes:?}"
+        );
+        let loser = outcomes
+            .iter()
+            .find_map(|result| result.as_ref().err())
+            .expect("one publisher loses");
+        assert!(
+            loser.to_string().contains("another publish"),
+            "the refusal must say what happened: {loser}"
+        );
+
+        let nodes = ws.tree(&co).await.unwrap();
+        let named: Vec<&WorkspaceNode> = nodes.iter().filter(|n| n.name == "report.md").collect();
+        assert_eq!(
+            named.len(),
+            1,
+            "one name, one node — a duplicate here is permanent: {named:?}"
+        );
+        assert!(
+            !nodes.iter().any(|n| n.name.contains(".publishing-")),
+            "the loser must consume its staged node: {nodes:?}"
+        );
+
+        // The path stays publishable. This is the assertion that speaks to why
+        // the issue ranks the defect as it does: a duplicate would make every
+        // future publish refuse, so proving the winner can still be revised is
+        // proving the damage did not happen.
+        materialize(ws, &co, target("report.md", "# A later revision"))
+            .await
+            .expect("the surviving path must still accept a publish");
+        let after = ws.tree(&co).await.unwrap();
+        assert_eq!(
+            after.iter().filter(|n| n.name == "report.md").count(),
+            1,
+            "and revising it must not fork the path either: {after:?}"
         );
     }
 

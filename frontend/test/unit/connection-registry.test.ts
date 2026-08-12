@@ -7,10 +7,12 @@ import {
   adoptEmbeddedHost,
   getConnection,
   listConnections,
+  probe,
   removeConnection,
   resetConnections,
   restoreConnections,
 } from "@/connections/registry";
+import type { Transport } from "@/api/transport";
 import { findProfile, readProfiles } from "@/connections/profileStore";
 import { scopedKey } from "@/connections/types";
 
@@ -481,5 +483,114 @@ describe("a same-origin profile", () => {
 
     expect(restoreConnections()).toEqual([id]);
     expect(getConnection(id)?.label).toBe("This host");
+  });
+});
+
+/**
+ * A credential is not sent to a host anyone on the path can read.
+ *
+ * Issue #731. The core is what enforces this — `may_carry_a_credential` in
+ * `src-tauri/src/proxy/mod.rs`, which a console-side check cannot be a
+ * substitute for, since anything invoking `oc_connect` directly bypasses this
+ * module entirely. What is under test here is the *other* half: that the
+ * console asks the question before it contacts anything, so the row names the
+ * reason instead of reporting a network fault. The core's refusal arrives as an
+ * IPC rejection that `client.ts` has already flattened into "cannot reach the
+ * company host at …", which is indistinguishable from a host being switched off.
+ */
+describe("a credentialed host on plain http", () => {
+  /** Records whether anything was sent, and answers nothing useful if it was. */
+  class SilentTransport implements Transport {
+    calls = 0;
+    async request(): Promise<never> {
+      this.calls += 1;
+      throw new Error("the host answered nothing");
+    }
+    subscribe(): () => void {
+      throw new Error("no streaming");
+    }
+  }
+
+  const desktop = (present: boolean) => {
+    if (present) (window as unknown as { __TAURI__: unknown }).__TAURI__ = {};
+    else delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+  };
+
+  afterEach(() => desktop(false));
+
+  it("is refused before a request is made, by name", async () => {
+    desktop(true);
+    const transport = new SilentTransport();
+    const id = addConnection({
+      baseUrl: "http://192.168.1.20:8080",
+      credential: { kind: "device", ref: "dev-1" },
+      transport,
+    });
+
+    await probe(id);
+
+    const connection = getConnection(id);
+    expect(connection?.status).toBe("down");
+    // The words matter as much as the status: "could not be reached" about a
+    // host that is answering fine sends an operator to debug their network.
+    expect(connection?.error).toContain("not encrypted");
+    // Refused *before* contact, not labelled after it. A credential that
+    // travelled once has already been read.
+    expect(transport.calls).toBe(0);
+  });
+
+  it("does not refuse the same host when nothing is attached", async () => {
+    // The narrow rule, and its whole point: an unencrypted home-lab or staging
+    // box stays readable. Nothing is exposed that a passer-by could not have
+    // asked the host for themselves.
+    desktop(true);
+    const transport = new SilentTransport();
+    const id = addConnection({ baseUrl: "http://192.168.1.20:8080", transport });
+
+    await probe(id);
+
+    // Down because the stub answers nothing, which is the point: it was asked.
+    expect(transport.calls).toBeGreaterThan(0);
+    expect(getConnection(id)?.error).not.toContain("not encrypted");
+  });
+
+  it("permits loopback and https, which is where a credential belongs", async () => {
+    desktop(true);
+    for (const baseUrl of [
+      // The embedded host, on a port that changes every launch and so can
+      // never carry a certificate.
+      "http://127.0.0.1:65364",
+      "http://localhost:8080",
+      "https://acme.example.com",
+    ]) {
+      const transport = new SilentTransport();
+      const id = addConnection({
+        baseUrl,
+        credential: { kind: "device", ref: "dev-1" },
+        transport,
+      });
+      await probe(id);
+      expect(transport.calls, `${baseUrl} must be contacted`).toBeGreaterThan(0);
+      expect(getConnection(id)?.error).not.toContain("not encrypted");
+    }
+  });
+
+  it("leaves the web build alone, where the credential is the browser's", async () => {
+    // A cookie is the browser's to send, with `Secure` and the origin's own
+    // rules doing this job. Narrowing here would refuse the plain-http
+    // deployments `opencompany serve` exists for, on the transport where the
+    // console is not the thing holding the secret.
+    desktop(false);
+    const transport = new SilentTransport();
+    const id = addConnection({
+      baseUrl: "http://192.168.1.20:8080",
+      credential: { kind: "platform", token: "a-bearer" },
+      transport,
+    });
+
+    await probe(id);
+
+    expect(transport.calls).toBeGreaterThan(0);
+    expect(getConnection(id)?.error).not.toContain("not encrypted");
   });
 });

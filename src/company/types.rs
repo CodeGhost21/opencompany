@@ -54,6 +54,21 @@ pub const TOOL_PROVIDERS: &[&str] = &["openhuman", "builtin"];
 /// variant` in `harness::policy`.
 pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 
+/// The tier a **newly provisioned** company is given when its manifest does not
+/// name one (issue #605).
+///
+/// Deliberately *not* the same knob as [`default_policy_mode`]. That one answers
+/// for every manifest ever parsed, including the re-parse of a company that has
+/// been running for months, so moving it changes companies rather than creating
+/// them. This one is applied once, at provisioning, and written into the stored
+/// manifest as an ordinary explicit `mode` — after which nothing distinguishes
+/// the company from one whose author typed the line themselves.
+///
+/// See `docs/spec/company-brain/approvals.md` for why `auto` is the defensible
+/// default for a new company and why that argument does not extend to
+/// retroactively re-tiering existing ones.
+pub const PROVISIONED_POLICY_MODE: &str = "auto";
+
 /// Channels the runtime knows how to enable under `[channels.*]`.
 pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
 
@@ -307,6 +322,27 @@ pub struct Agent {
     /// Tool grant globs, intersected with `[tools].allow`.
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Desks this agent may hand work on to (issue #176).
+    ///
+    /// Empty (the default) means **no delegation tools at all** — the behaviour
+    /// every manifest had before this field existed, and the reason adding it is
+    /// a no-op for an existing company. A non-empty list wires exactly
+    /// `spawn_task` + `delegate_to_desk` onto this agent (never the
+    /// orchestrator's roster/workflow/lifecycle authority) and narrows
+    /// `delegate_to_desk` to the desks named here. `"*"` is a wildcard for
+    /// "every desk the company has".
+    ///
+    /// Entries are **desk** ids or names, not teammate ids: desks are
+    /// OpenCompany's delegation address space, and `delegate_to_desk` already
+    /// resolves its target that way. Deliberately a field of its own rather than
+    /// more [`tools`](Self::tools) grant globs — that vocabulary feeds the
+    /// capability-namespace math, and a desk id is not a namespace.
+    ///
+    /// This is simultaneously the per-member enable switch and the capability
+    /// budget: what a member may reach is stated once, in the manifest, rather
+    /// than inferred from who happens to lead which desk.
+    #[serde(default)]
+    pub delegates_to: Vec<String>,
     /// Per-agent daily spend cap in USD.
     #[serde(default)]
     pub budget_usd_daily: Option<f64>,
@@ -607,6 +643,24 @@ pub struct Tools {
     /// whereas an agent handed an empty result invents citations.
     #[serde(default)]
     pub search_daily_calls: Option<u32>,
+    /// How many levels deep one operator message's delegation chain may run
+    /// (issue #176), counted in **hand-offs**: the orchestrator handing work to
+    /// a desk lead is level 1, that lead handing a slice to a second desk is
+    /// level 2.
+    ///
+    /// Absent (the default) uses [`DEFAULT_MAX_DELEGATION_DEPTH`]. `1` is the
+    /// "recursion off" setting — it reproduces the pre-#176 depth cap exactly,
+    /// where a dispatched desk agent could not re-delegate at all — and is the
+    /// config gate a company reaches for when a chain is costing more than it
+    /// returns. Valid values are `1..=4`; the ceiling is deliberately low
+    /// because each level multiplies the turns one message can buy.
+    ///
+    /// Enforced **dynamically**, at the tool boundary, rather than by which
+    /// tools were wired: belts are cached per roster and rebuilt rarely, so a
+    /// member's tools are static while its depth is a property of the chain it
+    /// is running inside.
+    #[serde(default)]
+    pub max_delegation_depth: Option<u8>,
 }
 
 /// Daily `web_search` call ceiling applied when `[tools].search_daily_calls` is
@@ -617,6 +671,29 @@ pub struct Tools {
 /// roughly $2/day/company while leaving a genuine multi-topic research session
 /// (a handful of searches per question) comfortably inside it.
 pub const DEFAULT_SEARCH_DAILY_CALLS: u32 = 200;
+
+/// Delegation chain depth applied when `[tools].max_delegation_depth` is absent
+/// (issue #176).
+///
+/// Two levels: the orchestrator hands work to a desk lead, and that lead may
+/// hand one slice on to a second desk. That is the shape the issue asks for —
+/// a lead that can bring in a specialist without going back through the CEO —
+/// and it stops there because a third level buys little and costs a full extra
+/// turn per branch on top of an already-multiplied fan-out.
+///
+/// The default is only reachable by a member the manifest opted in with
+/// [`Agent::delegates_to`](crate::company::Agent::delegates_to); a company that
+/// names nobody behaves exactly as it did before this existed, whatever this
+/// number says.
+pub const DEFAULT_MAX_DELEGATION_DEPTH: u8 = 2;
+
+/// The inclusive bounds `[tools].max_delegation_depth` is validated against.
+///
+/// `1` disables recursion (the pre-#176 behaviour). `4` is the ceiling: a chain
+/// deeper than that is indistinguishable from a runaway, and the per-turn
+/// fan-out cap applies *per level*, so depth 5 admits `3^5` hand-offs from one
+/// message.
+pub const MAX_DELEGATION_DEPTH_BOUNDS: std::ops::RangeInclusive<u8> = 1..=4;
 
 /// `[tools.composio]` — the per-tenant Composio toolkit allowlist (issue #110).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -646,6 +723,7 @@ impl Default for Tools {
             web_allowed_domains: Vec::new(),
             composio: ComposioTools::default(),
             search_daily_calls: None,
+            max_delegation_depth: None,
         }
     }
 }
@@ -663,10 +741,26 @@ fn default_tool_provider() -> String {
 pub struct Policy {
     /// `readonly` | `supervised` (default) | `auto` | `full`.
     ///
-    /// The default stays `supervised` deliberately: issue #560 argues `auto`
-    /// should become it, but flipping it changes behaviour for every existing
-    /// company with no `[policy]` block on its next load, so that is its own
-    /// decision rather than a rider on adding the tier.
+    /// **The default stays `supervised`, and issue #605 is the decision to keep
+    /// it there rather than an unfinished flip.** #560 argued `auto` should
+    /// become the shipped default, and #605 agrees on the destination — new
+    /// companies do get `auto`. What it declines is delivering that by moving
+    /// *this* value, because this value answers for every manifest ever parsed,
+    /// not only for new ones. See [`PROVISIONED_POLICY_MODE`].
+    ///
+    /// Two things go wrong if it moves. The obvious one is that every company
+    /// with no `[policy]` block silently widens on its next load. The other is
+    /// not obvious and is worse: the persisted record stores this *defaulted*
+    /// value, so a silent `company.toml` that parsed to `supervised` last boot
+    /// parses to `auto` this boot, and `carry_policy_override` in
+    /// [`crate::runtime::builder`] — which is `previous_seed == next_seed` over
+    /// the whole block — reads that as version control having spoken and
+    /// **discards the operator's console `[policy]` override**, including one
+    /// that had tightened the tier. Nobody edited anything.
+    ///
+    /// So the tier a new company gets is written into its manifest at
+    /// provisioning, explicitly, where an operator can read it. Existing
+    /// companies are not re-tiered by a constant changing under them.
     #[serde(default = "default_policy_mode")]
     pub mode: String,
     /// Effect kinds that always park for approval regardless of amount, and

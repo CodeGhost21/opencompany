@@ -134,19 +134,64 @@ impl Reach {
 /// is two decisions in one edit, and the second one is easy to make by
 /// accident. `the_auto_tier_line_is_pinned_tool_by_tool` in this module's tests
 /// walks the whole table and fails loudly if a tool crosses that line.
+///
+/// # Which is why the two questions are now separable (issue #673)
+///
+/// [`ScopedGrantable`](Self::ScopedGrantable) answers the first question `yes`
+/// and the second `no`: an operator may delegate it to one teammate until a
+/// deadline, and it still parks under `auto`. That variant exists because an
+/// outward fetch needs the delegation half and must not have the unattended
+/// half — see its own documentation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Standing {
     /// An operator may grant this to a teammate until a deadline — **and**,
     /// since issue #560, may run unattended under the `auto` tier. See the note
     /// on [`Standing`] before loosening a tool to this.
     Grantable,
+    /// An operator may grant this to a teammate until a deadline, but it still
+    /// parks under `auto` (issue #673).
+    ///
+    /// The variant exists because the two questions [`Standing`] answers pull
+    /// apart for an outward fetch. "May maya fetch `https://docs.rs` for the
+    /// next few days?" is a sentence an operator can consent to. "May every
+    /// agent fetch any address, unattended, for as long as the company sits in
+    /// `auto`?" is not — and marking the tool [`Grantable`](Self::Grantable) to
+    /// obtain the first would have silently bought the second, because
+    /// [`Consequence::parks_under_auto`] reads exactly that field.
+    ///
+    /// A tool declared this way is only ever grantable **with a scope**: its
+    /// declaration is argument-classified, so a call whose scope cannot be
+    /// derived falls back to [`PerCall`](Self::PerCall) rather than minting an
+    /// unscoped grant. That matters because
+    /// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
+    /// treats an unscoped grant as admitting *everything* — correct for a
+    /// journal line predating the field, catastrophic for a fetch grant that
+    /// failed to name a host.
+    ScopedGrantable,
     /// Every call is its own decision.
     PerCall,
 }
 
 impl Standing {
-    /// May this be granted standing?
+    /// May this be granted standing to one teammate until a deadline?
+    ///
+    /// True for both grantable variants. This is the mint-and-spend question —
+    /// the one the field is named for — and it is deliberately **not** the
+    /// question the `auto` tier asks; see
+    /// [`runs_unattended_under_auto`](Self::runs_unattended_under_auto).
     pub fn is_grantable(self) -> bool {
+        matches!(self, Self::Grantable | Self::ScopedGrantable)
+    }
+
+    /// May this run unattended, for every agent, while the company sits in
+    /// `auto` (issue #560)?
+    ///
+    /// Split out from [`is_grantable`](Self::is_grantable) by issue #673. The
+    /// two used to be the same predicate, which meant reaching for a standing
+    /// grant on any tool also stopped it parking under `auto`. They are
+    /// different sentences an operator consents to, and only
+    /// [`Grantable`](Self::Grantable) means both.
+    pub fn runs_unattended_under_auto(self) -> bool {
         matches!(self, Self::Grantable)
     }
 }
@@ -221,8 +266,15 @@ impl Consequence {
     /// its standing. This predicate returns `false` — runs unattended — in both
     /// worlds, because the `Grantable` half already decides it. The two changes
     /// can land in either order and neither can silently invert the other.
+    /// # Reads the narrower of the two questions since issue #673
+    ///
+    /// This used to read `is_grantable()`, which fused "may be delegated to one
+    /// teammate" with "runs unattended for everyone under `auto`". An outward
+    /// fetch needs the first and must not have the second, so the predicate it
+    /// reads is now [`Standing::runs_unattended_under_auto`] and
+    /// [`Standing::ScopedGrantable`] sits on the parking side of this line.
     pub fn parks_under_auto(self) -> bool {
-        self.reach.parks_under_supervision() && !self.standing.is_grantable()
+        self.reach.parks_under_supervision() && !self.standing.runs_unattended_under_auto()
     }
 }
 
@@ -248,6 +300,19 @@ pub const COMPOSIO_EXECUTE: &str = "composio_execute";
 /// key of their own, the two drifted apart, and every one of those tests
 /// silently stopped reaching the catalogue lookup it claimed to cover.
 pub(crate) const COMPOSIO_ACTION_KEY: &str = "tool";
+
+/// The outward-fetch tool a standing grant may be scoped to a host on (#673).
+///
+/// Only this one of the three web tools. `http_request` and `curl` can mutate,
+/// so a host-scoped grant on them would consent to *writing* to that host —
+/// a different act from the read this issue is about, and one nobody asked for.
+pub const WEB_FETCH: &str = "web_fetch";
+
+/// The argument key [`WEB_FETCH`] carries its absolute URL under.
+///
+/// A required parameter of the vendored tool's schema, so a call that omits it
+/// could not have run anyway; a call this cannot read simply stays `PerCall`.
+pub(crate) const WEB_FETCH_URL_KEY: &str = "url";
 
 /// Every tool this crate can wire onto an agent, and what it can reach.
 ///
@@ -354,7 +419,11 @@ const DECLARED: &[Declared] = &[
     ),
     d("http_request", EffectGroup::Other, Reach::Consequence),
     d("curl", EffectGroup::Other, Reach::Consequence),
-    d("web_fetch", EffectGroup::Other, Reach::Consequence),
+    // `web_fetch` keeps its row so `declared_tools` still walks it, but its
+    // standing is decided from the call's URL — see `web_fetch_consequence`
+    // (issue #673). This row's `PerCall` is the answer for a call whose URL
+    // cannot be read, which is exactly what that function falls back to.
+    d(WEB_FETCH, EffectGroup::Other, Reach::Consequence),
     // ---- The company workspace: the shared note tree ------------------------
     // Reads are free (issue #237). `workspace_write` overwrites guidance the
     // operator wrote, which is why `is_external_effect` has always refused to
@@ -557,6 +626,12 @@ pub fn consequence_of(tool: &str, args: &serde_json::Value) -> Consequence {
     let name = tool.to_ascii_lowercase();
     if name == COMPOSIO_EXECUTE {
         return composio_execute_consequence(args);
+    }
+    // Issue #673: the second argument-classified tool. Its declaration below
+    // stays as the shape every reader of `DECLARED` expects — this only decides
+    // whether the operator gets a host to consent to.
+    if name == WEB_FETCH {
+        return web_fetch_consequence(args);
     }
     match DECLARED.iter().find(|d| d.tool == name) {
         Some(found) => Consequence {
@@ -791,7 +866,106 @@ pub(crate) fn composio_action_slug(args: &serde_json::Value) -> Result<&str, Act
 ///
 /// [`Standing::Grantable`]: crate::policy::consequence::Standing::Grantable
 /// [`StandingGrant::admits_scope`]: crate::runtime::grants::StandingGrant::admits_scope
+/// The `scheme://host[:port]` a [`WEB_FETCH`] call addresses, or `None` when the
+/// argument cannot be read as an absolute `http(s)` URL (issue #673).
+///
+/// This is the grant scope *and* the grantability test — see
+/// [`web_fetch_consequence`]. `None` is therefore never a widening: it drops the
+/// call back to [`Standing::PerCall`], which parks.
+///
+/// # Parsed by `url`, which is the parser that performs the fetch
+///
+/// The key is derived with [`url::Url`] rather than by reading the string here.
+/// That is a security property, not a convenience: `reqwest` — and therefore the
+/// vendored `web_fetch` — resolves the host with this same crate, so deriving the
+/// grant key any other way means two parsers deciding what "the host" is, and
+/// **every disagreement between them is a bypass**.
+///
+/// This is not hypothetical. The hand-rolled reader this replaced split the
+/// authority on `/`, `?` and `#` only. Per WHATWG, `\` is also a path separator
+/// in an http(s) URL, so `https://evil.com\@docs.rs/` is fetched from
+/// `evil.com` — while that reader saw the authority as `evil.com\@docs.rs`,
+/// took everything after the last `@`, and minted a grant for **`docs.rs`**. An
+/// operator approving "fetch from docs.rs" would have authorised `evil.com`.
+/// Tab, newline and carriage return are stripped by the URL parser before
+/// parsing and were a second family of the same bug.
+///
+/// # What is in the key, and why
+///
+/// **The scheme**, so a grant approved for `https://docs.rs` cannot be spent on
+/// `http://docs.rs`. The operator consented to a fetch that could not be read or
+/// rewritten in transit, and silently honouring the cleartext twin would hand
+/// back the guarantee they were shown.
+///
+/// **The port only when it is not the scheme's default**, which is
+/// [`Url::port`]'s own normalization — so `https://docs.rs:443` and
+/// `https://docs.rs` are one scope, as they are one service. A non-default port
+/// stays in the key because `example.com:8443` is a different service.
+///
+/// **The host as `url` normalizes it** — lowercased, IDNA-encoded, IPv6 in
+/// brackets. Matching is exact: no suffix, so a grant for `docs.rs` cannot admit
+/// `evil-docs.rs`, and no subdomain, so it cannot admit `evil.docs.rs`. Both are
+/// hosts the operator never read on the card.
+///
+/// Credentials are discarded, because [`Url::host_str`] returns the host and
+/// never the userinfo — `https://docs.rs@evil.example/` is `evil.example`. A
+/// URL that does not parse, names no host, or carries a non-http(s) scheme
+/// resolves to `None`, which parks.
+fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
+    let raw = args.get(WEB_FETCH_URL_KEY)?.as_str()?;
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let scheme = parsed.scheme();
+    if scheme != "http" && scheme != "https" {
+        return None;
+    }
+    let host = parsed.host_str()?;
+    if host.is_empty() {
+        return None;
+    }
+    Some(match parsed.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
+}
+
+/// The consequence of one [`WEB_FETCH`] call (issue #673).
+///
+/// Argument-classified, exactly as `composio_execute` is and for the same
+/// reason: what an operator can consent to is a property of *this call's*
+/// arguments, not of the tool's name. "Fetch from `docs.rs` for the next few
+/// days" is a sentence; "make any HTTP request" is not.
+///
+/// The classification is [`Standing::ScopedGrantable`] **only when a host can be
+/// read**, and [`Standing::PerCall`] otherwise. That coupling is load-bearing
+/// rather than tidy: a grant is minted with the scope
+/// [`standing_scope_of`] returns, and
+/// [`StandingGrant::admits_scope`](crate::runtime::grants::StandingGrant::admits_scope)
+/// treats an unscoped grant as admitting **everything**. Were an unreadable URL
+/// still grantable, approving one card would mint a grant admitting every host
+/// on earth. Tying the two answers to one function makes that unrepresentable.
+///
+/// [`Reach`] is untouched: a fetch still reaches outside the company, so it
+/// still parks under `supervised`, and — via [`Standing::ScopedGrantable`] —
+/// still parks under `auto`. What changes is only that the operator now has
+/// something bounded to say yes to.
+fn web_fetch_consequence(args: &serde_json::Value) -> Consequence {
+    Consequence {
+        group: EffectGroup::Other,
+        reach: Reach::Consequence,
+        standing: match web_fetch_scope_of(args) {
+            Some(_) => Standing::ScopedGrantable,
+            None => Standing::PerCall,
+        },
+    }
+}
+
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
+    // Issue #673: the same one-function rule the Composio arm follows, for the
+    // same reason — the mint side and the live call must read the host with the
+    // identical code, or a grant could be minted that never matches its own tool.
+    if tool.eq_ignore_ascii_case(WEB_FETCH) {
+        return web_fetch_scope_of(args);
+    }
     if !tool.eq_ignore_ascii_case(COMPOSIO_EXECUTE) {
         return None;
     }
@@ -916,6 +1090,267 @@ mod tests {
         consequence_of(tool, &json!({}))
     }
 
+    // -----------------------------------------------------------------------
+    // Issue #673: a host-scoped fetch grant, and the `auto` line it must not
+    // cross
+    // -----------------------------------------------------------------------
+
+    /// A `web_fetch` call carrying a real URL, as the policy layer sees it.
+    fn fetching(url: &str) -> serde_json::Value {
+        json!({ WEB_FETCH_URL_KEY: url })
+    }
+
+    /// **The entire reason [`Standing::ScopedGrantable`] exists, as a rule.**
+    ///
+    /// The naive fix for #673 — declaring `web_fetch` [`Standing::Grantable`] to
+    /// obtain a scoped grant — was tried and rejected: because
+    /// [`Consequence::parks_under_auto`] read `is_grantable`, it also stopped the
+    /// tool parking under `auto`, for every agent, with no card and therefore no
+    /// scope ever consulted. `the_auto_tier_line_is_pinned_tool_by_tool` catches
+    /// that, and this states the invariant that must hold for the *repair* not to
+    /// re-open the same hole from the other side.
+    ///
+    /// Exhaustive over [`Reach`] rather than sampled, because the variant is
+    /// argument-classified and so appears nowhere in [`DECLARED`] for a table
+    /// walk to find.
+    #[test]
+    fn a_scoped_grantable_call_is_delegable_but_never_unattended_under_auto() {
+        assert!(
+            Standing::ScopedGrantable.is_grantable(),
+            "the point of the variant is that an operator CAN delegate it"
+        );
+        assert!(
+            !Standing::ScopedGrantable.runs_unattended_under_auto(),
+            "and that it still parks under auto — collapsing these two answers \
+             back together is exactly the bug issue #673 fixed"
+        );
+
+        for reach in [
+            Reach::Nothing,
+            Reach::Money,
+            Reach::ExternalRead,
+            Reach::Consequence,
+        ] {
+            let verdict = Consequence {
+                group: EffectGroup::Other,
+                reach,
+                standing: Standing::ScopedGrantable,
+            };
+            assert_eq!(
+                verdict.parks_under_auto(),
+                reach.parks_under_supervision(),
+                "a scoped-grantable tool must park under `auto` wherever it parks \
+                 under `supervised` — {reach:?} disagreed"
+            );
+        }
+    }
+
+    /// The same rule walked over the declaration table, so a tool that becomes
+    /// scoped-grantable later is covered without editing this test.
+    ///
+    /// The `seen` counter is the point: every tool here is probed with arguments
+    /// rich enough to reach the argument-classified branches, and a walk that
+    /// found no scoped-grantable verdict at all would pass while asserting
+    /// nothing.
+    #[test]
+    fn every_scoped_grantable_tool_in_the_table_parks_under_auto() {
+        let probe = json!({
+            WEB_FETCH_URL_KEY: "https://docs.rs/serde",
+            COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+        });
+        let mut seen = 0;
+        for tool in declared_tools() {
+            let verdict = consequence_of(tool, &probe);
+            if verdict.standing == Standing::ScopedGrantable {
+                seen += 1;
+                assert!(
+                    verdict.parks_under_auto(),
+                    "`{tool}` is scoped-grantable and must still park under auto"
+                );
+            }
+        }
+        assert!(
+            seen > 0,
+            "the walk reached no scoped-grantable tool, so it proved nothing"
+        );
+    }
+
+    /// A fetch of a named host is grantable and scoped to that host; the same
+    /// call with an unreadable URL is neither.
+    ///
+    /// The second half is not tidiness. A grant is minted with whatever
+    /// `standing_scope_of` returned, and an unscoped grant admits *everything*
+    /// (`StandingGrant::admits_scope`), so a URL-less call that stayed grantable
+    /// would let one approval mint a grant over every host on earth. The two
+    /// answers come from one function precisely so that cannot be represented.
+    #[test]
+    fn a_fetch_is_grantable_only_when_its_host_can_be_read() {
+        let verdict = consequence_of(WEB_FETCH, &fetching("https://docs.rs/serde/latest"));
+        assert_eq!(verdict.standing, Standing::ScopedGrantable);
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde/latest")),
+            Some("https://docs.rs".to_string())
+        );
+
+        for unreadable in [
+            json!({}),                         // no url at all
+            fetching("not-a-url"),             // no scheme
+            fetching("file:///etc/passwd"),    // not http(s)
+            fetching("ftp://example.com/x"),   // not http(s)
+            fetching("https://"),              // no host
+            fetching("https://:8080/"),        // a port naming no host
+            fetching("https://exa mple.com/"), // outside the host alphabet
+        ] {
+            let verdict = consequence_of(WEB_FETCH, &unreadable);
+            assert_eq!(
+                verdict.standing,
+                Standing::PerCall,
+                "an unreadable URL must not be grantable: {unreadable}"
+            );
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &unreadable),
+                None,
+                "{unreadable}"
+            );
+        }
+    }
+
+    /// **The userinfo trap.** `https://docs.rs@evil.example/` fetches
+    /// `evil.example` — everything before the last `@` is credentials. A reader
+    /// that took the authority left-to-right would hand this call the `docs.rs`
+    /// scope and let any URL claim any grant, so it is asserted rather than
+    /// trusted to the shape of the code.
+    #[test]
+    fn credentials_in_a_url_cannot_claim_another_hosts_scope() {
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://docs.rs@evil.example/x")),
+            Some("https://evil.example".to_string())
+        );
+        // Two `@` — the host is still what follows the LAST one.
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://a@b@evil.example/x")),
+            Some("https://evil.example".to_string())
+        );
+        // A backslash is a path separator per WHATWG, so it terminates the
+        // authority exactly as `/` does. Without this split the URL would read
+        // `docs.rs` as the host and let `evil.example` satisfy a grant minted
+        // for `docs.rs` — the userinfo trap re-opened through a delimiter this
+        // split never handled.
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://evil.example\\@docs.rs/x")),
+            Some("https://evil.example".to_string())
+        );
+    }
+
+    /// The host key is exact. Neither a suffix nor a subdomain of a granted host
+    /// resolves to that host's scope, because both are hosts the operator never
+    /// read on the card.
+    #[test]
+    fn the_host_key_admits_neither_a_suffix_nor_a_subdomain() {
+        let granted = standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/")).unwrap();
+        for impostor in [
+            "https://evil-docs.rs/", // suffix match would admit this
+            "https://evil.docs.rs/", // subdomain match would admit this
+            "https://docs.rs.evil/", // prefix match would admit this
+            "http://docs.rs/",       // the cleartext twin
+            "https://docs.rs:8443/", // a different service on the same host
+        ] {
+            assert_ne!(
+                standing_scope_of(WEB_FETCH, &fetching(impostor)),
+                Some(granted.clone()),
+                "`{impostor}` must not resolve to the scope granted for docs.rs"
+            );
+        }
+    }
+
+    /// A host is case-insensitive and `:443` is what `https` means, so these
+    /// spellings must produce one scope — otherwise a grant an operator approved
+    /// stops matching the very next call and the feature reads as broken.
+    #[test]
+    fn one_host_in_two_spellings_is_one_scope() {
+        // The concrete scope is asserted first, not just the spellings against
+        // each other: a regression that returned `None` for every spelling would
+        // otherwise satisfy this test vacuously.
+        let canonical = standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde"));
+        assert_eq!(canonical.as_deref(), Some("https://docs.rs"));
+        for spelling in [
+            "HTTPS://Docs.RS/Serde",
+            "https://docs.rs:443/serde",
+            "https://user:pw@docs.rs/serde",
+        ] {
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &fetching(spelling)),
+                canonical,
+                "`{spelling}` names the same service and must share its scope"
+            );
+        }
+    }
+
+    /// **The bypass class this key must never re-open.**
+    ///
+    /// Found in review of this change. The key was originally derived by reading
+    /// the URL string here — splitting the authority on `/`, `?` and `#`, then
+    /// taking whatever followed the last `@`. But `\` is *also* a path separator
+    /// in an http(s) URL, so `https://evil.com\@docs.rs/` is fetched from
+    /// `evil.com` while that reader minted a grant for `docs.rs`: an operator
+    /// approving "fetch from docs.rs" would have authorised `evil.com`. Tab,
+    /// newline and CR are stripped before parsing and were a second family of
+    /// the same bug.
+    ///
+    /// The repair was to stop hand-parsing and derive the key from [`url::Url`],
+    /// the parser `reqwest` uses to perform the fetch — so there is no second
+    /// reader left to disagree with. This test is what keeps that true: it
+    /// consults `url` **independently** for the host each URL really resolves to,
+    /// and asserts the scope names that host. It is therefore not a tautology
+    /// restating the implementation — it is a cross-check that fails the moment
+    /// anyone reintroduces a bespoke reader, however carefully written.
+    ///
+    /// Both directions are in the table on purpose. A key naming a host the fetch
+    /// will *not* reach lets a grant be spent elsewhere; a key naming a host the
+    /// operator did not see on the card is the same confusion pointed the other
+    /// way. Neither is acceptable.
+    #[test]
+    fn the_scope_names_the_host_the_fetching_client_will_actually_use() {
+        for (raw, really_fetches) in [
+            // The reported case: `\` terminates the authority, so everything
+            // after it — including the `@` — is path.
+            (r"https://evil.com\@docs.rs/", "evil.com"),
+            // The same trick pointed the other way.
+            (r"https://docs.rs\@evil.com/", "docs.rs"),
+            // Mixed separators, both orders.
+            (r"https://docs.rs\/@evil.com/", "docs.rs"),
+            (r"https://docs.rs/\@evil.com", "docs.rs"),
+            // Stripped-whitespace family: removed before parsing, so the `@`
+            // that survives is a real userinfo delimiter.
+            ("https://docs.rs\t@evil.com/", "evil.com"),
+            ("https://docs.rs\n@evil.com/", "evil.com"),
+            ("https://evil.com@\tdocs.rs/", "docs.rs"),
+            // Stripping plus a backslash, together.
+            ("https://\revil.com\\@docs.rs/", "evil.com"),
+            // The plain userinfo case that was already defended.
+            ("https://docs.rs@evil.example/x", "evil.example"),
+        ] {
+            // The fetching client's own answer, consulted here rather than
+            // assumed — if a `url` upgrade ever changes it, this fails loudly
+            // instead of the fixture quietly going stale.
+            let client_host = url::Url::parse(raw)
+                .unwrap_or_else(|e| panic!("fixture must parse: {raw:?}: {e}"))
+                .host_str()
+                .unwrap_or_else(|| panic!("fixture must name a host: {raw:?}"))
+                .to_string();
+            assert_eq!(
+                client_host, really_fetches,
+                "fixture drift: {raw:?} no longer resolves where this table says"
+            );
+
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &fetching(raw)).as_deref(),
+                Some(format!("https://{really_fetches}").as_str()),
+                "the grant scope for {raw:?} must name the host the fetch reaches"
+            );
+        }
+    }
+
     /// The `auto` line, named tool by tool and taken from the whole table
     /// rather than a sample (issue #560).
     ///
@@ -943,19 +1378,43 @@ mod tests {
             "memory_store",
         ];
 
-        let mut moved: Vec<&str> = declared_tools()
-            .filter(|tool| {
-                let verdict = c(tool);
-                verdict.reach.parks_under_supervision() && !verdict.parks_under_auto()
-            })
-            .collect();
-        moved.sort_unstable();
+        let crossers = |args: &serde_json::Value| {
+            let mut moved: Vec<&str> = declared_tools()
+                .filter(|tool| {
+                    let verdict = consequence_of(tool, args);
+                    verdict.reach.parks_under_supervision() && !verdict.parks_under_auto()
+                })
+                .collect();
+            moved.sort_unstable();
+            moved
+        };
+
         assert_eq!(
-            moved, MOVED_BY_AUTO,
+            crossers(&json!({})),
+            MOVED_BY_AUTO,
             "a tool crossed the `auto` line. If that is intended, say so here — \
              `Standing::Grantable` now also means 'runs unattended for every agent \
              while the company sits in auto', which is wider than the standing \
              grant the field is named for"
+        );
+
+        // The same walk with arguments (issue #673). Two tools are classified
+        // from their arguments rather than their name, so the empty-args walk
+        // above cannot see the verdict they actually produce in service — a
+        // `web_fetch` reading a real URL is the grantable shape, and the bare
+        // name is not. Without this the line would be pinned only for the tools
+        // whose classification the walk happens to be able to reach, and a
+        // `web_fetch` loosened to `Standing::Grantable` would cross this line
+        // unobserved.
+        assert_eq!(
+            crossers(&json!({
+                WEB_FETCH_URL_KEY: "https://docs.rs/serde",
+                COMPOSIO_ACTION_KEY: "GITHUB_GET_A_REPOSITORY",
+            })),
+            MOVED_BY_AUTO,
+            "a tool crossed the `auto` line once its arguments were read. An \
+             outward fetch must be delegable to one teammate (`ScopedGrantable`) \
+             WITHOUT running unattended for everyone under `auto` — see issue #673"
         );
 
         // The other direction, spelled out: the tools an operator would be
