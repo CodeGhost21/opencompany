@@ -1041,6 +1041,9 @@ mod test {
         async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
             Err(OpenCompanyError::Store("claim store is down".into()))
         }
+        async fn delete_schedule_fires(&self, _c: &CompanyId, _s: &str) -> Result<usize> {
+            Err(OpenCompanyError::Store("claim store is down".into()))
+        }
     }
 
     #[test]
@@ -1307,6 +1310,14 @@ mod test {
         }
         async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> Result<usize> {
             Ok(0)
+        }
+        async fn delete_schedule_fires(&self, c: &CompanyId, s: &str) -> Result<usize> {
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .remove(&(c.as_ref().to_string(), s.to_string()))
+                .map_or(0, |set| set.len()))
         }
     }
 

@@ -806,6 +806,7 @@ async fn delete_workflow(
         company.runtime.source_dir(),
         company.runtime.store(),
         company.runtime.workflow_revisions(),
+        Some(company.runtime.schedule_fires()),
         Some(company.runtime.events()),
         &wid,
         query.expected_version.as_deref(),
