@@ -294,6 +294,12 @@ pub struct RuntimeBuilder {
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
     /// naming a quota is still not a way to write an unbounded file.
     workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Issue #752: which storage backend is serving this host's secrets. Only
+    /// the repository-credential gates read it, and the default is the refusing
+    /// side (`fs`) — a runtime built without naming a backend is assumed to keep
+    /// secrets as plaintext on disk, because that is what
+    /// [`with_stores`](Self::with_stores) not being called actually means.
+    storage_kind: crate::store::StorageKind,
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
@@ -390,6 +396,7 @@ impl RuntimeBuilder {
             tasks: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
             runs: None,
@@ -573,6 +580,18 @@ impl RuntimeBuilder {
     /// tree). See [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace).
     pub fn with_workspace_quota(mut self, quota: crate::runtime::WorkspaceQuota) -> Self {
         self.workspace_quota = quota;
+        self
+    }
+
+    /// Records which storage backend serves this host's secrets (issue #752).
+    ///
+    /// Separate from [`with_stores`](Self::with_stores) because the two answer
+    /// different questions: `with_stores` hands over port *implementations*,
+    /// while this is the deployment's own name for the backend — the string an
+    /// operator set in `OPENCOMPANY_STORAGE` and the one the refusal quotes back
+    /// at them. Defaults to `fs`, the refusing side.
+    pub fn with_storage_kind(mut self, kind: crate::store::StorageKind) -> Self {
+        self.storage_kind = kind;
         self
     }
 
@@ -1569,7 +1588,11 @@ impl RuntimeBuilder {
                 Bundle::new(home.clone(), &id).repos_dir(),
                 secrets.clone(),
             )
-            .with_quota(self.workspace_quota.tree_quota_bytes);
+            .with_quota(self.workspace_quota.tree_quota_bytes)
+            // Issue #752: the manager refuses a bind when a credential would
+            // land as plaintext on this container's disk, so it has to be told
+            // which backend is actually serving secrets.
+            .with_storage_kind(self.storage_kind);
             // The forge REST client (pull-request metadata + diff). Without the
             // feature there is no HTTP client to give it, and the PR route says
             // so rather than answering with an empty diff. Shadowed rather than
