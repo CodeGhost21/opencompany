@@ -19,6 +19,7 @@
 import { Plus, Building2 } from "lucide-react";
 import { useState } from "react";
 
+import { isDesktopRuntime } from "@/api/transport";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -64,12 +65,26 @@ export const CONNECTION_RAIL_WIDTH = "3.5rem";
  * One host is the ordinary web deployment, and a rail listing exactly one
  * thing is furniture. It appears when there is a choice to make.
  *
+ * **The desktop always draws it**, whatever the count. The old rule made an
+ * exception only for zero, on the reasoning that a browser always has its
+ * bootstrap connection so a real zero could only happen in the desktop — and
+ * that a desktop holding nothing needs the "+" the rail carries. Issue #613
+ * moved where that bites: the desktop no longer writes a same-origin bootstrap
+ * row, so a desktop whose embedded host *did* start now holds exactly **one**
+ * connection, which is its ordinary state rather than a rare one. Under the
+ * old rule that state drew no rail, and the "+" is the only way to reach a
+ * second host — so the working case became the one with no way out of it,
+ * which is the dead end the zero exception existed to prevent.
+ *
+ * A browser is unaffected: `isDesktopRuntime()` is false there, so one host
+ * still draws nothing.
+ *
  * Exported so the shell can offset the sidebar by the same condition that
  * draws the rail — two copies of this rule is how the sidebar ends up clipped
  * under it again.
  */
 export function connectionRailVisible(count: number): boolean {
-  return count >= 2;
+  return count >= 2 || isDesktopRuntime();
 }
 
 export function ConnectionRail({ connections, selected, onSelect, onAdd }: Props) {
