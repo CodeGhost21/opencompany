@@ -405,25 +405,38 @@ impl RepoManager {
             )
             .await?;
 
-        // The advertised size, when a forge client is wired. Advisory: a
-        // packfile or LFS bomb need not match what the API reports, which is
-        // why the post-fetch cap in `install` exists regardless.
-        if let (Some(host), Some(quota)) = (self.host.as_ref(), self.quota_bytes) {
+        // One authenticated probe of the credential, when a forge client is
+        // wired. It answers two questions from the single GET the client already
+        // exposes: the repository's advertised size, and — issue #734 — whether
+        // this credential can push, which the write tier fails closed on.
+        //
+        // Deliberately gated on the host alone, not on `(host, quota)` as the
+        // size check was: the push capability must be learned and recorded even
+        // when no quota is configured, so a granted `repo.write` has something to
+        // fail closed on. The size check stays gated on a configured quota. The
+        // advertised size is advisory — a packfile or LFS bomb need not match
+        // what the API reports, which is why the post-fetch cap in `install`
+        // exists regardless.
+        let mut can_push: Option<bool> = None;
+        if let Some(host) = self.host.as_ref() {
             match host.repo_meta(coords, token).await {
                 Ok(meta) => {
-                    let advertised = meta.size_kb.saturating_mul(1024);
-                    let used = dir_bytes(&self.root).await?;
-                    if used.saturating_add(advertised) > quota {
-                        self.roll_back(&key).await;
-                        return Err(OpenCompanyError::WorkspaceQuota(format!(
-                            "{} advertises {} and the repository cache is capped at {} \
-                             ({} already used) — raise [workspace].tree_quota_gb or revoke a \
-                             binding first",
-                            coords.canonical_url(),
-                            human_bytes(advertised),
-                            human_bytes(quota),
-                            human_bytes(used),
-                        )));
+                    can_push = Some(meta.can_push);
+                    if let Some(quota) = self.quota_bytes {
+                        let advertised = meta.size_kb.saturating_mul(1024);
+                        let used = dir_bytes(&self.root).await?;
+                        if used.saturating_add(advertised) > quota {
+                            self.roll_back(&key).await;
+                            return Err(OpenCompanyError::WorkspaceQuota(format!(
+                                "{} advertises {} and the repository cache is capped at {} \
+                                 ({} already used) — raise [workspace].tree_quota_gb or revoke a \
+                                 binding first",
+                                coords.canonical_url(),
+                                human_bytes(advertised),
+                                human_bytes(quota),
+                                human_bytes(used),
+                            )));
+                        }
                     }
                 }
                 Err(err) => {
@@ -441,6 +454,7 @@ impl RepoManager {
                 &coords.repo,
                 Some(token),
                 branches,
+                can_push,
             )
             .await
         {
@@ -460,6 +474,13 @@ impl RepoManager {
     /// fetch URL as a parameter rather than deriving it, so the mirror layer
     /// can be exercised against a local `file://` fixture with no network and
     /// no credential at all.
+    ///
+    /// The parameters are the already-validated parts of a bind — url, key,
+    /// coordinates, credential, branches, and the probed push capability
+    /// (#734) — passed positionally rather than bundled into a struct that
+    /// would exist only to satisfy the lint, since every one is a distinct
+    /// value the caller has in hand.
+    #[allow(clippy::too_many_arguments)]
     async fn install(
         &self,
         url: &str,
@@ -468,6 +489,7 @@ impl RepoManager {
         repo: &str,
         token: Option<&str>,
         branches: Vec<String>,
+        can_push: Option<bool>,
     ) -> Result<RepoBinding> {
         let mirror = self.mirror_path(key);
         // A directory left by an interrupted earlier attempt would otherwise be
@@ -495,6 +517,7 @@ impl RepoManager {
             last_fetched_millis: None,
             size_bytes: 0,
             bound_at_millis: now,
+            can_push,
         };
         self.fetch_into(&mirror, &binding, token, &[]).await?;
         binding.size_bytes = dir_bytes(&mirror).await?;
@@ -649,6 +672,36 @@ impl RepoManager {
         self.fetch_into(&mirror, &binding, token.as_deref(), pull_requests)
             .await?;
 
+        // Re-probe push capability (issue #734) **only when it is unknown**: a
+        // binding stored before the field existed — or bound with no forge
+        // client — carries `None` and heals here rather than needing an operator
+        // to revoke and rebind. Once a definite answer is recorded it is left
+        // alone: `fetch` runs on the agent checkout path (`harness::repo` calls
+        // it before every `repo_checkout`), so re-probing an already-known
+        // capability would add a GitHub round trip to every checkout for no gain,
+        // and burn the credential's rate limit. Bind time is the authority for a
+        // binding's capability; a later re-scope of the credential is picked up
+        // by re-binding, not by taxing every checkout.
+        //
+        // Best effort: a transient probe failure (or no wired host/credential)
+        // leaves the value unknown — still fail-closed — and the next checkout
+        // retries. Done before the index lock so no network call is made while
+        // holding it.
+        let reprobed_push = if binding.can_push.is_some() {
+            None
+        } else {
+            match (self.host.as_ref(), token.as_deref()) {
+                (Some(host), Some(tok)) => {
+                    let coords = RepoCoordinates {
+                        owner: binding.owner.clone(),
+                        repo: binding.repo.clone(),
+                    };
+                    host.repo_meta(&coords, tok).await.ok().map(|m| m.can_push)
+                }
+                _ => None,
+            }
+        };
+
         let _guard = self.index_lock.lock().await;
         let mut index = self.read_index().await?;
         let size = dir_bytes(&mirror).await?;
@@ -660,6 +713,9 @@ impl RepoManager {
         };
         entry.size_bytes = size;
         entry.last_fetched_millis = Some(fetched);
+        if let Some(push) = reprobed_push {
+            entry.can_push = Some(push);
+        }
         let updated = entry.clone();
         self.write_index(&index).await?;
         // After the index is current, so an operator reading the console sees
@@ -791,6 +847,9 @@ impl RepoManager {
             key,
             None,
             normalize_branches(&branches)?,
+            // No credential, so nothing to probe: the push capability stays
+            // unknown, which reads as cannot-push.
+            None,
         )
         .await
     }

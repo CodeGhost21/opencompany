@@ -497,6 +497,7 @@ mod test {
                 last_fetched_millis: Some(1),
                 size_bytes: 42,
                 bound_at_millis: 1,
+                can_push: None,
             }],
             pull_requests_available: false,
             granted_agents: vec!["ceo".to_string()],

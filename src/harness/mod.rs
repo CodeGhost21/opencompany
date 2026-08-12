@@ -3791,6 +3791,7 @@ description = "Builds the product."
             last_fetched_millis: None,
             size_bytes: 0,
             bound_at_millis: 1,
+            can_push: None,
         };
 
         pool.ensure(&rec, &deps).await.expect("first ensure");
@@ -3886,6 +3887,7 @@ description = "Builds the product."
                 last_fetched_millis: None,
                 size_bytes: 0,
                 bound_at_millis: 1,
+                can_push: None,
             }]
         }))
         .unwrap();
@@ -5250,6 +5252,7 @@ budget_usd_daily = 0.0
                 last_fetched_millis: None,
                 size_bytes: 0,
                 bound_at_millis: 1,
+                can_push: None,
             }];
             // A registered MCP server is what puts `mcp_list_servers`,
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three

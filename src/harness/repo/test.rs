@@ -90,6 +90,7 @@ impl RepoHost for ScriptedHost {
         Ok(RepoMeta {
             default_branch: "main".into(),
             size_kb: 1,
+            can_push: false,
         })
     }
 

@@ -526,6 +526,36 @@ pub fn build_agent(
         }
     }
 
+    // Repository WRITE tier (issue #734). A distinct, tighter grant than the read
+    // `repo` above: `grants_repo_write_explicit` matches ONLY the exact
+    // `repo.write`, so a bare `repo` (which every read-tier company writes) and
+    // the catch-all `*` confer nothing here — a company that asked for agents
+    // reading code does not silently get agents pushing it.
+    //
+    // #734 only *learns and records* whether a bound credential can push (probed
+    // at bind, re-probed on fetch, stored on `RepoBinding::can_push`); the
+    // `repo_publish` tool that consumes it lands in #735, so this wires NO tool
+    // yet. What it does now is the fail-closed half of #247's requirement: when
+    // `repo.write` is granted but no bound repository has a push-capable
+    // credential, say so and wire nothing, rather than leaving the operator to
+    // discover at publish time that the credential they bound was read-only.
+    // `None` (unknown — unprobed or pre-field) reads as cannot-push here, so only
+    // a proven `Some(true)` clears the warning.
+    if crate::company::grants_repo_write_explicit(grants) {
+        let has_push_capable = deps
+            .repo_bindings
+            .iter()
+            .any(|binding| binding.can_push == Some(true));
+        if !has_push_capable {
+            tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but no bound repository has a \
+                 push-capable credential; write tools NOT wired (fail-closed)"
+            );
+        }
+    }
+
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
     // answer in the company's own `Standards/` / `Playbooks/` instead of
@@ -1643,6 +1673,7 @@ mod tests {
                 last_fetched_millis: None,
                 size_bytes: 0,
                 bound_at_millis: 1,
+                can_push: None,
             })
             .collect();
         let manifest_agent = ManifestAgent {
@@ -1776,6 +1807,29 @@ mod tests {
         baseline.push("repo_pr".to_string());
         baseline.sort();
         assert_eq!(granted, baseline, "the `repo` grant widened the belt");
+    }
+
+    /// The repository *write* tier (issue #734) wires NO tool of its own yet —
+    /// `repo_publish` lands in #735. Granting `repo.write` confers the read pair
+    /// (write implies read, since `repo.write` matches the read predicate's
+    /// `repo.` prefix) and nothing more, whatever the bound credential's push
+    /// capability. This pins "#734 wires nothing": if a later change wires a
+    /// write tool without the push-capability gate, the exact-set assertion here
+    /// breaks rather than shipping an ungated push surface. The bindings the
+    /// helper builds carry `can_push: None`, so the write tier fails closed
+    /// (warns) — and still adds no tool.
+    #[test]
+    fn repo_write_grant_wires_no_tool_beyond_the_read_pair() {
+        let mut baseline = built_tool_names(&[], false);
+        baseline.push("repo_checkout".to_string());
+        baseline.push("repo_pr".to_string());
+        baseline.sort();
+
+        let write_granted = built_tool_names_with_repos(&["repo.write"], 1);
+        assert_eq!(
+            write_granted, baseline,
+            "repo.write must wire only the read pair — no write tool exists until #735"
+        );
     }
 
     /// Granting `search` must not quietly hand over anything *else*: the
