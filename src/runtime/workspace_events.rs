@@ -442,6 +442,41 @@ mod test {
         );
     }
 
+    /// Issue #759: a folder claim announces `opened` when it **mints** the
+    /// folder and says nothing when it adopts one.
+    ///
+    /// Both halves are load-bearing. Without the first, a published deliverable
+    /// would appear in a tab that never learned its folder existed. Without the
+    /// second, every publish into an established folder — which is nearly every
+    /// publish a company ever makes — would put an `opened` frame on the feed
+    /// for a node that has been sitting there for weeks.
+    #[tokio::test]
+    async fn a_folder_claim_announces_only_when_it_mints_the_folder() {
+        let (_dir, store, log, co) = wired();
+
+        let claim = store
+            .adopt_or_create_folder(&co, None, "Agents", WorkspaceOrigin::Seed)
+            .await
+            .unwrap();
+        assert!(claim.was_created());
+        assert_eq!(
+            changes(&log),
+            vec![(claim.node().id.clone(), "opened".to_string())]
+        );
+        log.appended.lock().unwrap().clear();
+
+        let adopted = store
+            .adopt_or_create_folder(&co, None, "Agents", WorkspaceOrigin::Seed)
+            .await
+            .unwrap();
+        assert!(!adopted.was_created());
+        assert_eq!(adopted.node().id, claim.node().id);
+        assert!(
+            changes(&log).is_empty(),
+            "adopting a folder that was already standing changed nothing"
+        );
+    }
+
     /// An overwrite announces an update — the frame an agent's `workspace_write`
     /// and the console's `PUT` both need, and the one the Workspace tab had no
     /// way to learn about at all.
