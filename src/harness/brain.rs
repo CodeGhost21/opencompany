@@ -5062,6 +5062,20 @@ members = ["engineer"]
             err.to_string().contains("company.toml"),
             "the failure names what could not be read: {err}"
         );
+
+        // And through `run_cycle`, which is the level that actually protects
+        // the promise. Asserting only on `refresh_record` would leave the call
+        // site free to become `let _ = self.refresh_record().await;` — the
+        // refresh would still run, the error would be dropped, the turn would
+        // report success while routing on the record it already held, and every
+        // other test here would stay green. That is issue #707 returning by a
+        // different door, so the propagation is pinned where it is relied on.
+        let cycle = brain.run_cycle(request(Vec::new()), &NoopHost).await;
+        assert!(
+            cycle.is_err(),
+            "a cycle must fail when the record cannot be read, rather than \
+             quietly routing on a stale one"
+        );
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is
