@@ -150,6 +150,115 @@ pub(crate) struct DelegationOutcome {
     /// `None` for every other delegation kind, and for a `spawn_task` that
     /// found no task store to write to.
     pub(crate) spawned_task: Option<String>,
+    /// Whether an `assign_task` actually wrote an owner onto a card (issue #661
+    /// / M5).
+    ///
+    /// `spawn_task` reports its result through
+    /// [`spawned_task`](Self::spawned_task); `assign_task` had nothing to report
+    /// through, because its arm returns an empty outcome on **three** distinct
+    /// paths — the write landed, the card is no longer on the board, or the name
+    /// did not resolve to anybody on the roster (issue #205 deliberately leaves
+    /// the previous owner in place then). Those are not the same fact, and a
+    /// board row that called all three `assigned` would be exactly the confident
+    /// falsehood the drain commitment exists to prevent.
+    ///
+    /// `false` for every other delegation kind, so the chat and task paths — which
+    /// never read it — are unaffected.
+    pub(crate) assigned: bool,
+}
+
+/// Which workflow run a board write belongs to (issue #661 / M5).
+///
+/// Stamped onto every card a run's node opens
+/// ([`TaskRecord::origin_run_id`](crate::ports::TaskRecord::origin_run_id) /
+/// [`origin_workflow_id`](crate::ports::TaskRecord::origin_workflow_id)) and used
+/// as the voice a run's note is recorded under, so a card the board shows says
+/// *which machine act* put it there instead of borrowing the CEO's name.
+///
+/// Both ids together rather than the run alone: see `origin_workflow_id` for why
+/// a run id on its own is not resolvable to a workflow once the journal is
+/// trimmed.
+///
+/// # A sub-workflow child carries its parent's ids
+///
+/// `StoreWorkflowResolver` runs a `sub_workflow` child inside the engine under the
+/// parent's capability bundle — one runner, one run id, one collector — so a child
+/// node's card is stamped with the parent's run. That is the only run identity that
+/// exists on that path, and the only run row a console can navigate to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct WorkflowRunRef {
+    /// The run whose node performed the write.
+    pub(crate) run_id: String,
+    /// The workflow graph that run is of.
+    pub(crate) workflow_id: String,
+}
+
+/// The [`RunTurn`] a workflow-run drain is wired with: one that cannot run a turn.
+///
+/// A board drain never needs one. The only delegation that runs a turn is
+/// [`Delegation::DelegateToDesk`], and a run holds a
+/// [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim) claim, under
+/// which a hand-off is refused at the tool boundary and can never be staged — so
+/// nothing this drain executes reaches these methods.
+///
+/// **It errors rather than returning an empty turn**, and that is the point of
+/// having it at all. A silent empty `TurnOutcome` would make a future path that
+/// somehow staged a hand-off look like a desk that answered with nothing; an
+/// `Err` is loud, lands in the log, and cannot be mistaken for an answer. Defense
+/// in depth behind a guarantee that already holds one layer up.
+struct NoTurn;
+
+/// The single promoted instance [`DelegationRunner::for_workflow_run`] borrows.
+///
+/// A `const` so the borrow is `'static` and coerces to the runner's `&'a dyn
+/// RunTurn` for any caller lifetime — the runner holds a reference, and a
+/// temporary built inside the constructor would not outlive it.
+const NO_TURN: NoTurn = NoTurn;
+
+#[async_trait]
+impl RunTurn for NoTurn {
+    async fn run(
+        &self,
+        _company: &CompanyId,
+        _agent_id: &str,
+        _message: &str,
+        _chat_id: Option<&str>,
+    ) -> Result<TurnOutcome> {
+        Err(no_turn_error())
+    }
+
+    async fn run_steered(
+        &self,
+        _company: &CompanyId,
+        _agent_id: &str,
+        _message: &str,
+        _control: &SteerControl,
+        _chat_id: Option<&str>,
+        _run_sink: Option<Arc<RunTraceSink>>,
+    ) -> Result<TurnOutcome> {
+        Err(no_turn_error())
+    }
+
+    async fn run_steered_background(
+        &self,
+        _company: &CompanyId,
+        _agent_id: &str,
+        _message: &str,
+        _control: &SteerControl,
+        _run_sink: Option<Arc<RunTraceSink>>,
+    ) -> Result<TurnOutcome> {
+        Err(no_turn_error())
+    }
+}
+
+/// The one error [`NoTurn`] returns, in one place so the three arms cannot drift.
+fn no_turn_error() -> crate::error::OpenCompanyError {
+    crate::error::OpenCompanyError::Harness(
+        "a workflow run's board drain cannot run a turn: a hand-off is refused at the tool \
+         boundary under a board claim, so reaching here means a delegation was staged that this \
+         path may not execute"
+            .to_string(),
+    )
 }
 
 /// A synchronous desk-lead answer captured for the orchestrator to relay: which
@@ -308,6 +417,13 @@ pub(crate) struct DelegationRunner<'a> {
     /// tests stay untouched; `None` reads as "nothing parked", which is the
     /// pre-#465 behaviour and correct for any runner that cannot park.
     approvals: Option<&'a ApprovalRequestQueue>,
+    /// The workflow run this drain belongs to, when it is one (issue #661 / M5).
+    ///
+    /// `None` for every pre-existing constructor and therefore for every chat and
+    /// task path — which is what makes this field a pure addition: the two arms
+    /// that read it fall back to exactly the behaviour they had (no origin stamp,
+    /// the orchestrator's voice on a note).
+    workflow_run: Option<WorkflowRunRef>,
 }
 
 impl<'a> DelegationRunner<'a> {
@@ -333,6 +449,51 @@ impl<'a> DelegationRunner<'a> {
             task: None,
             run_sink: None,
             approvals: None,
+            workflow_run: None,
+        }
+    }
+
+    /// Wires a runner for one **workflow run's** board drain (issue #661 / M5).
+    ///
+    /// A separate constructor rather than a builder method on
+    /// [`new`](Self::new), because the two differ in what they can do rather than
+    /// only in what they know: this one has no way to run a turn (see
+    /// [`NoTurn`]), and it stamps run provenance onto everything it opens. The
+    /// only thing it is ever asked to execute is
+    /// [`execute_board_writes`](Self::execute_board_writes).
+    ///
+    /// `steer` is threaded because the shared runner needs one and there is no
+    /// honest way to pass nothing — **it is never touched on this path**: the only
+    /// registration site is the [`Delegation::DelegateToDesk`] arm, which a board
+    /// claim makes unstageable. Passing the company's own registry rather than a
+    /// fresh one keeps it that way by accident-proofing: were the arm ever
+    /// reachable, the run would appear in the operator's in-flight list rather
+    /// than in a registry nobody can see.
+    ///
+    /// No approval queue is wired: `with_approvals` exists so a *settle* can tell
+    /// whether the turn it is recording parked (issue #465), and this runner
+    /// settles nothing — a run's gated calls are parked by
+    /// `HarnessAgentRunner::park_gated_calls` on the run's own approval scope.
+    pub(crate) fn for_workflow_run(
+        record: &'a CompanyRecord,
+        tasks: Option<&'a Arc<dyn TaskStore>>,
+        steer: &'a InflightRegistry,
+        company: &'a CompanyId,
+        queue: &'a DelegationQueue,
+        run: WorkflowRunRef,
+    ) -> Self {
+        Self {
+            run_turn: &NO_TURN,
+            record,
+            tasks,
+            steer,
+            company,
+            queue,
+            max_delegations: orchestrator::MAX_DELEGATIONS_PER_TURN,
+            task: None,
+            run_sink: None,
+            approvals: None,
+            workflow_run: Some(run),
         }
     }
 
@@ -351,6 +512,136 @@ impl<'a> DelegationRunner<'a> {
     /// wired. Differenced across a turn to attribute parks to *that* turn.
     fn approvals_queued(&self) -> usize {
         self.approvals.map_or(0, ApprovalRequestQueue::queued)
+    }
+
+    /// Executes a workflow run's drained board writes, reporting one row each
+    /// (issue #661 / M5).
+    ///
+    /// # Infallible on purpose — the signature *is* the guarantee
+    ///
+    /// A board write must never fail the node that made it. The turn already
+    /// happened, the graph is mid-walk, and discarding a completed node's work
+    /// over a `TaskStore` hiccup would be the worst available trade. So this
+    /// returns `Vec<WorkflowRunBoardRow>` and not a `Result`: there is no `?` for
+    /// a future edit to add, and the requirement holds by construction rather than
+    /// by every caller remembering it. Same stance
+    /// [`park_gated_calls`](crate::workflows::caps::HarnessAgentRunner) takes one
+    /// queue over, for the same reason.
+    ///
+    /// A failed write is loud in two places instead: a `*Failed` row an operator
+    /// reads on the run, and a `tracing::error` for whoever is watching the host.
+    ///
+    /// # What it may be handed
+    ///
+    /// Only [`Delegation::SpawnTask`] and [`Delegation::AssignTask`] — everything
+    /// else is refused at the tool boundary under
+    /// [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim). A third
+    /// kind arriving here is a wiring defect, so it is logged at `error` and
+    /// contributes no row: fabricating one would put a write on the run's record
+    /// that this path did not perform.
+    pub(crate) async fn execute_board_writes(
+        &self,
+        delegations: Vec<Delegation>,
+    ) -> Vec<crate::ports::WorkflowRunBoardRow> {
+        use crate::ports::{WorkflowBoardAction, WorkflowRunBoardRow};
+
+        let mut rows = Vec::with_capacity(delegations.len());
+        for delegation in delegations {
+            // Read the row's structural fields off the delegation BEFORE it is
+            // consumed by the drain. Nothing here is the model's prose beyond the
+            // card's own title and the owner it named — see `WorkflowRunBoardRow`.
+            let (spawn, task_id, title, assignee) = match &delegation {
+                Delegation::SpawnTask {
+                    title, assignee, ..
+                } => (true, None, Some(title.clone()), assignee.clone()),
+                Delegation::AssignTask {
+                    task_id, assignee, ..
+                } => (false, Some(task_id.clone()), None, Some(assignee.clone())),
+                other => {
+                    // `kind_label`, never `{other:?}`: a `Delegation`'s Debug
+                    // carries the model's own instruction and note text, and this
+                    // line goes to host stdout — which on a hosted deployment is
+                    // the platform rather than the operator. Same split
+                    // `DeliveryReason` draws against `DeliveryReport::detail`.
+                    tracing::error!(
+                        company = %self.company,
+                        run_id = %self.run_id_label(),
+                        kind = kind_label(other),
+                        "[delegation] a workflow run's board drain was handed a delegation it may \
+                         not perform; the tool boundary should have refused it before it was \
+                         staged"
+                    );
+                    continue;
+                }
+            };
+            // The SAME arm the chat path runs — which is what makes the
+            // no-column-move invariant inherited rather than re-promised here.
+            let outcome = self
+                .run_delegation(delegation, None, MessageContext::default())
+                .await;
+            let row = match (spawn, outcome) {
+                // A card id comes back only after the store took the write
+                // (issue #246), so `Some` here means the card is genuinely on
+                // the board.
+                (true, Ok(outcome)) => match outcome.spawned_task {
+                    Some(id) => WorkflowRunBoardRow {
+                        action: WorkflowBoardAction::Spawned,
+                        task_id: Some(id),
+                        title,
+                        assignee,
+                    },
+                    // `Ok` with no id: this runtime wired no task board. Not an
+                    // error the node should fail on, and not a card either.
+                    None => WorkflowRunBoardRow {
+                        action: WorkflowBoardAction::SpawnFailed,
+                        task_id: None,
+                        title,
+                        assignee,
+                    },
+                },
+                (false, Ok(outcome)) => WorkflowRunBoardRow {
+                    action: if outcome.assigned {
+                        WorkflowBoardAction::Assigned
+                    } else {
+                        WorkflowBoardAction::AssignFailed
+                    },
+                    task_id,
+                    title,
+                    assignee,
+                },
+                (spawn, Err(err)) => {
+                    tracing::error!(
+                        company = %self.company,
+                        run_id = %self.run_id_label(),
+                        spawn,
+                        %err,
+                        "[delegation] a workflow run's board write failed; the run is unaffected \
+                         and the failure is reported on its board rows"
+                    );
+                    WorkflowRunBoardRow {
+                        action: if spawn {
+                            WorkflowBoardAction::SpawnFailed
+                        } else {
+                            WorkflowBoardAction::AssignFailed
+                        },
+                        task_id,
+                        title,
+                        assignee,
+                    }
+                }
+            };
+            if row.action.failed() {
+                tracing::error!(
+                    company = %self.company,
+                    run_id = %self.run_id_label(),
+                    action = ?row.action,
+                    "[delegation] a workflow node was told its board write would happen and it \
+                     did not"
+                );
+            }
+            rows.push(row);
+        }
+        rows
     }
 
     /// Scopes this runner to a dispatched card, so anything the turn spawns
@@ -942,6 +1233,8 @@ impl<'a> DelegationRunner<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         tasks.upsert(self.company, &card).await?;
         tracing::debug!(
@@ -1242,6 +1535,13 @@ impl<'a> DelegationRunner<'a> {
                     // Issue #151 §3.2: remember which conversation asked for this,
                     // so the completion can answer there instead of only landing in
                     // the note.
+                    // Issue #661 (M5): `None` on the workflow path, and that is
+                    // the lineage-root decision rather than a gap. A run has no
+                    // conversation behind it, so there is nowhere for a
+                    // completion to post back to — and stamping the chat that
+                    // *scheduled* the workflow hours earlier would make the card
+                    // answer into a conversation the operator has left. The run
+                    // reference below is the provenance instead.
                     origin_chat_id: chat_id.map(str::to_string),
                     // Lineage (#185): the dispatched card whose turn queued this
                     // one, when the drain is running inside a task
@@ -1257,6 +1557,20 @@ impl<'a> DelegationRunner<'a> {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    // Issue #661 (M5): machine provenance for a card a workflow
+                    // node opened — a reference to the run, never a parent. Both
+                    // ids or neither; `None` on every chat and task path, which is
+                    // every caller that did not go through `for_workflow_run`.
+                    //
+                    // A `sub_workflow` child's node stamps the PARENT run's ids:
+                    // the resolver runs the child inside the engine under the
+                    // parent's bundle, so there is exactly one run id in
+                    // existence and it is the only one a console can navigate to.
+                    origin_run_id: self.workflow_run.as_ref().map(|run| run.run_id.clone()),
+                    origin_workflow_id: self
+                        .workflow_run
+                        .as_ref()
+                        .map(|run| run.workflow_id.clone()),
                 };
                 tasks.upsert(self.company, &card).await?;
                 // Issue #246: report the card so the caller can surface it. The
@@ -1467,6 +1781,8 @@ impl<'a> DelegationRunner<'a> {
                 // along and get folded onto the relayed operator bubble.
                 Ok(DelegationOutcome {
                     bubble: None,
+                    // Not a board write; see `DelegationOutcome::assigned`.
+                    assigned: false,
                     desk_reply: Some(DeskReply {
                         member,
                         reply,
@@ -1528,6 +1844,10 @@ impl<'a> DelegationRunner<'a> {
                 // the board neither shows a phantom owner nor loses the fact
                 // that an assignment was attempted.
                 let resolved = assignee::resolve(self.record, &assignee);
+                // Issue #661 (M5): whether an owner was actually written, which
+                // is the one thing the three `Ok` paths out of this arm disagree
+                // about — see `DelegationOutcome::assigned`.
+                let mut assigned = false;
                 let entry = match resolved.canonical() {
                     // A blank or whitespace-only `assignee` resolves to
                     // `Unassigned`, whose canonical form is `""`. Clearing the
@@ -1538,6 +1858,11 @@ impl<'a> DelegationRunner<'a> {
                     // effect instead, so the timeline says what happened.
                     Some("") => {
                         card.assignee = String::new();
+                        // Clearing an owner IS an ownership write, so it counts as
+                        // `assigned` for the run's board row — the row records
+                        // that the run set who owns the card, and "nobody" is an
+                        // answer to that.
+                        assigned = true;
                         match note {
                             Some(note) => format!("cleared the assignee — {note}"),
                             None => "cleared the assignee".to_string(),
@@ -1545,6 +1870,7 @@ impl<'a> DelegationRunner<'a> {
                     }
                     Some(canonical) => {
                         card.assignee = canonical.to_string();
+                        assigned = true;
                         match note {
                             Some(note) => format!("assigned to {assignee} — {note}"),
                             None => format!("assigned to {assignee}"),
@@ -1559,16 +1885,29 @@ impl<'a> DelegationRunner<'a> {
                 };
                 card.note = Some(append_note(
                     card.note.as_deref(),
-                    &self.orchestrator_id(),
+                    // Issue #661 (M5): `workflow:<id>` when a run drove this,
+                    // the orchestrator otherwise. See `note_author`.
+                    &self.note_author(),
                     &entry,
                 ));
                 // The column is untouched on purpose: dispatch fires from
                 // `CompanyRuntime::upsert_task`, which this port cannot reach.
                 // Assignment records ownership; the board's
                 // `column → in_progress` PATCH still starts the work.
+                //
+                // Issue #661 (M5) inherits that invariant rather than restating
+                // it: a workflow run's board drain executes THIS arm, so a run
+                // cannot move a card between columns even though it may set the
+                // card's owner. That is what bounds run → card → dispatch → run
+                // cycles — every dispatch still needs an operator drag. The bound
+                // holds one level deeper too: the write goes through the
+                // `TaskStore` port, which cannot trigger dispatch at all.
                 card.updated_at_millis = now_millis();
                 tasks.upsert(self.company, &card).await?;
-                Ok(DelegationOutcome::default())
+                Ok(DelegationOutcome {
+                    assigned,
+                    ..DelegationOutcome::default()
+                })
             }
             Delegation::ReviewTask {
                 task_id,
@@ -1632,6 +1971,44 @@ impl<'a> DelegationRunner<'a> {
     /// which `orchestrator_id` already tolerates.
     fn orchestrator_id(&self) -> String {
         orchestrator::orchestrator_id(&self.record.manifest.agents).unwrap_or_default()
+    }
+
+    /// The voice a note this drain appends is recorded under.
+    ///
+    /// The orchestrator on every chat and task path, unchanged. On a **workflow
+    /// run** it is `workflow:<workflow_id>` instead (issue #661 / M5), because
+    /// attributing the note to the CEO would say a person's agent decided
+    /// something an authored graph did — and an operator reading the card's
+    /// timeline has no other way to tell the two apart. The `workflow:` prefix is
+    /// the same label `SearchMetering` already attributes a run's search spend
+    /// under, so one convention names a run across the surfaces.
+    fn note_author(&self) -> String {
+        match &self.workflow_run {
+            Some(run) => format!("workflow:{}", run.workflow_id),
+            None => self.orchestrator_id(),
+        }
+    }
+
+    /// This drain's run id for a log field, or `""` off the workflow path.
+    fn run_id_label(&self) -> &str {
+        self.workflow_run
+            .as_ref()
+            .map_or("", |run| run.run_id.as_str())
+    }
+}
+
+/// A [`Delegation`]'s kind as a fixed label, safe to log.
+///
+/// Every arm is a literal and the type carries no `String` payload out through
+/// here, so — unlike `{delegation:?}` — nothing a model wrote can ride this into
+/// a host log. The [`DeliveryReason`](crate::ports::DeliveryReason) split, one
+/// seam over.
+fn kind_label(delegation: &Delegation) -> &'static str {
+    match delegation {
+        Delegation::SpawnTask { .. } => "spawn_task",
+        Delegation::DelegateToDesk { .. } => "delegate_to_desk",
+        Delegation::AssignTask { .. } => "assign_task",
+        Delegation::ReviewTask { .. } => "review_task",
     }
 }
 
@@ -2495,6 +2872,8 @@ members = ["designer"]
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         fx.tasks
             .upsert(&fx.record.id, &card)
@@ -2932,6 +3311,8 @@ members = ["designer"]
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -3796,6 +4177,8 @@ members = ["designer"]
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         fx.tasks.upsert(&fx.record.id, &card).await.expect("seed");
 
