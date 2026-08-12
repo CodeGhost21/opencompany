@@ -437,22 +437,36 @@ missing:
 Both are otherwise silent: the tools simply are not wired, and the only symptom
 is an agent that says it cannot see the code.
 
-## Not in this tier
+## Beyond this tier — the write tier
 
-**No push path exists anywhere.** The write tier — PR creation, agent-attributed
-commits, namespaced branches, operator approval — is a separate follow-up, and
-the confinement above is arranged so that adding it is an explicit new capability
-rather than a hole that was already open.
+The read tier above ships no push path of its own. The **write tier** is a
+separate, explicitly-added capability layered on top, arranged so that adding it
+is a new opt-in rather than a hole that was already open here. It is built in
+three parts:
 
-Its groundwork (issue #734) has landed without opening that path: a `repo.write`
-grant now exists — distinct from and tighter than `repo`, so a bare `repo` (the
-read tier every company sets) never confers it and the catch-all `*` never
-confers it — and each binding records whether its bound credential can push, read
-from the forge's `permissions.push` at bind time and healed on the next fetch
-when it is still unknown. Granting `repo.write` over a read-only credential is
-fail-closed: it warns and wires nothing. No tool consumes either yet; they are
-what the push follow-up will gate on.
+- **A `repo.write` grant + credential push-capability** (issue #734). The grant
+  is distinct from and tighter than `repo`: a bare `repo` (the read tier every
+  company sets) never confers it, and the catch-all `*` never confers it. Each
+  binding also records whether its bound credential can push, read from the
+  forge's `permissions.push` at bind time and healed on the next fetch while it
+  is still unknown. Granting `repo.write` over a read-only credential is
+  fail-closed — it warns and wires nothing.
+- **`repo_publish`** (issue #735). The agent commits locally in its checkout,
+  then publishes host-side. The host *fetches* the checkout's committed HEAD into
+  the mirror on a host-owned `oc/<company>/<task>` branch — a fetch never invokes
+  `receive-pack`, so the read tier's `pre-receive` refusal and its no-push
+  contract test stay untouched — and, only after the operator approves, pushes
+  that exact commit to the remote. The agent still holds no credentialed remote
+  and never pushes; every structural refusal (host-generated namespaced branch,
+  never a force push, never the default branch, never a ref outside `oc/`) lives
+  in `RepoManager` where no prompt can reach it.
+- **Pull-request creation** (issue #736). After the push, the host opens a pull
+  request into the repository's default branch, best-effort: a PR that fails to
+  open leaves the branch on the remote and reports that honestly on the task,
+  rather than failing the publish.
 
-Also absent: a distinct uid or read-only bind mount for the agent shell (the real
-filesystem boundary, named under ["The honest limit"](#the-honest-limit)), and
-forges other than GitHub.
+Still absent: **signed** commits carrying a per-agent identity key (issue #738,
+deferred — plain author/committer attribution ships with the write tier, but
+signing waits for a consumer that verifies a signature); a distinct uid or
+read-only bind mount for the agent shell (the real filesystem boundary, named
+under ["The honest limit"](#the-honest-limit)); and forges other than GitHub.
