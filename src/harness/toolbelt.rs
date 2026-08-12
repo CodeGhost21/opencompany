@@ -305,10 +305,12 @@ impl std::fmt::Debug for ShellAudit {
 /// sink back in the workspace:
 ///
 /// * The workspace is also the `workspace_only` [`SecurityPolicy`] root the
-///   file tools enforce, so a sink inside it is a **policy-permitted** target
-///   for `file_write` / `edit_file` / a `../` traversal. Outside it, those
-///   writes are refused by the one fail-closed write boundary this repo has
-///   (issue #775).
+///   file tools enforce, so a sink inside it is a **policy-permitted** target:
+///   the plain relative `file_write("audit.log")` — no traversal, no absolute
+///   path, no `shell` — is exactly what the policy allows, and it used to land
+///   on the audit trail. Outside the workspace that same call reaches nothing
+///   that matters (issue #775). Absolute paths and `../` are refused either
+///   way, by `workspace_only`'s own rules; they are not what moved.
 /// * The vendored registry caches one logger per *directory*, first config
 ///   wins, so a directory shared between agents would hand the second agent the
 ///   first agent's file.
