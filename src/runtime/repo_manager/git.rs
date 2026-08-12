@@ -545,7 +545,12 @@ mod test {
         std::fs::write(
             &fake_git,
             format!(
-                "#!/bin/sh\ncase \" $* \" in\n  *\" __deadline__ \"*) sleep 60;;\nesac\nexec {real_git} \"$@\"\n"
+                // `exec sleep`, not `sleep`: `kill_on_drop` stops the direct
+                // child and nothing below it, so a plain `sleep` outlives the
+                // shell that spawned it and keeps running for its full minute
+                // after the deadline arm has fired. Replacing the shell makes
+                // the blocking process the one Tokio holds.
+                "#!/bin/sh\ncase \" $* \" in\n  *\" __deadline__ \"*) exec sleep 60;;\nesac\nexec {real_git} \"$@\"\n"
             ),
         )
         .unwrap();
