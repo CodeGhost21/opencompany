@@ -561,7 +561,9 @@ mod test {
         // because `hardening_flags()` prepends its own `-c` arguments ahead of
         // it in the argv.
         let original_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{original_path}", bin.display()));
+        // SAFETY: a single-threaded test lifetime; we restore the variable on
+        // every exit path below. Edition-2024 marks this unsafe.
+        unsafe { std::env::set_var("PATH", format!("{}:{original_path}", bin.display())) };
 
         // A 500ms deadline against a 60s sleep is a ~120x margin, not a race.
         let err = run_bounded(
