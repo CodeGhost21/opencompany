@@ -30,7 +30,7 @@ use crate::harness::lifecycle::{self, TaskRunEnd};
 use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
-use crate::ports::tasks::COLUMN_TODO;
+use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO};
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
@@ -1361,16 +1361,26 @@ impl<'a> DelegationRunner<'a> {
             .await
     }
 
-    /// The To-do card the REST chat handler opened for this message, when it
-    /// opened one and it is still on the board (issue #463).
+    /// The card the REST chat handler opened for this message, when it opened
+    /// one and it is still on the board (issue #463).
     ///
     /// Only ever called once [`detect_task_intent`] has already fired, so the
     /// title it derives is byte-for-byte the one the handler wrote — the handler
     /// runs the same detector over the same words moments earlier. The match is
     /// deliberately narrow, and every clause is a property of a card **that
-    /// handler** writes: To-do, no assignee, no origin chat. `list` is
-    /// newest-first, so the first match is the one just written rather than a
+    /// handler** writes: its landing column, no assignee, no origin chat. `list`
+    /// is newest-first, so the first match is the one just written rather than a
     /// months-old card that happens to share a title.
+    ///
+    /// **Two landing columns, not one** (issue #576). The handler opens a
+    /// person's card directly in Planning and a machine's in To-do, so pinning
+    /// this clause to To-do stopped recognising the commonest card of the two —
+    /// and the cost is invisible from here: `spawned_task` falls back, the
+    /// operator bubble reports no card, and the chip tying the reply to the
+    /// board silently disappears while the card itself is created correctly.
+    /// Both columns are named explicitly rather than dropping the clause,
+    /// because the clause is what keeps this from adopting a card the operator
+    /// dragged somewhere; a card resting anywhere else was moved by somebody.
     ///
     /// `None` when no store is wired, or when nothing matches — which is the
     /// honest answer for a handler write that failed (it is best-effort there)
@@ -1391,7 +1401,7 @@ impl<'a> DelegationRunner<'a> {
             .into_iter()
             .find(|card| {
                 card.title == title
-                    && card.column == COLUMN_TODO
+                    && (card.column == COLUMN_TODO || card.column == COLUMN_PLANNING)
                     && card.assignee.is_empty()
                     && card.origin_chat_id.is_none()
             })
@@ -3338,6 +3348,110 @@ members = ["designer"]
         // …and the turn ADOPTS it, which is what lets a publish later in the
         // same message file onto it instead of minting a rival beside it.
         assert_eq!(turn.spawned_task.as_deref(), Some("handler-card"));
+    }
+
+    /// The same adoption when the handler's card landed in **Planning**
+    /// (issue #576).
+    ///
+    /// A person's prompt-box card is created directly in Planning now, and the
+    /// matcher used to require To-do — so the commonest card of the two stopped
+    /// being recognised. Nothing failed loudly: the card was still created and
+    /// still planned, `spawned_task` simply fell back to `None`, the operator
+    /// bubble reported no card, and the chip tying the reply to the board
+    /// vanished. Caught end to end by `chat-to-card.spec.ts` under the live
+    /// brain; pinned here because that lane runs only in CI and this is where
+    /// the rule lives.
+    #[tokio::test]
+    async fn a_handler_card_in_planning_is_adopted_like_one_in_todo() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        // Exactly what the REST handler writes for a signed-in person.
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "handler-card".to_string(),
+                    title,
+                    note: None,
+                    column: COLUMN_PLANNING.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: now_millis(),
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .expect("seed the handler's card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card: {cards:?}");
+        assert_eq!(
+            turn.spawned_task.as_deref(),
+            Some("handler-card"),
+            "a Planning card is the handler's card too — the reply must link to it"
+        );
+    }
+
+    /// …and the clause still refuses a card resting anywhere else, because a
+    /// card in any other column was moved there by somebody and is no longer
+    /// the untouched write this seam is allowed to adopt.
+    #[tokio::test]
+    async fn a_handler_card_the_operator_moved_on_is_not_adopted() {
+        let imperative = "draft the launch plan for next quarter";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        fx.tasks
+            .upsert(
+                &fx.record.id,
+                &TaskRecord {
+                    id: "moved-on".to_string(),
+                    title,
+                    note: None,
+                    column: COLUMN_IN_PROGRESS.to_string(),
+                    priority: "medium".to_string(),
+                    assignee: String::new(),
+                    updated_at_millis: now_millis(),
+                    origin_chat_id: None,
+                    parent_task_id: None,
+                    output: None,
+                    plan: None,
+                    deliverable: crate::ports::tasks::TaskDeliverable::Once,
+                    workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
+                },
+            )
+            .await
+            .expect("seed the moved card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("on it")]);
+        let turn = fx
+            .runner(&turns)
+            .handle_operator_message("chief", imperative, None)
+            .await
+            .expect("operator message handled");
+
+        assert_eq!(
+            turn.spawned_task, None,
+            "a card somebody moved is not the handler's untouched write"
+        );
     }
 
     /// The stand-down is keyed on the **detector**, not on finding the card:
