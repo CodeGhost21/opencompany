@@ -873,6 +873,23 @@ pub(crate) fn composio_action_slug(args: &serde_json::Value) -> Result<&str, Act
 /// [`web_fetch_consequence`]. `None` is therefore never a widening: it drops the
 /// call back to [`Standing::PerCall`], which parks.
 ///
+/// # Parsed by `url`, which is the parser that performs the fetch
+///
+/// The key is derived with [`url::Url`] rather than by reading the string here.
+/// That is a security property, not a convenience: `reqwest` — and therefore the
+/// vendored `web_fetch` — resolves the host with this same crate, so deriving the
+/// grant key any other way means two parsers deciding what "the host" is, and
+/// **every disagreement between them is a bypass**.
+///
+/// This is not hypothetical. The hand-rolled reader this replaced split the
+/// authority on `/`, `?` and `#` only. Per WHATWG, `\` is also a path separator
+/// in an http(s) URL, so `https://evil.com\@docs.rs/` is fetched from
+/// `evil.com` — while that reader saw the authority as `evil.com\@docs.rs`,
+/// took everything after the last `@`, and minted a grant for **`docs.rs`**. An
+/// operator approving "fetch from docs.rs" would have authorised `evil.com`.
+/// Tab, newline and carriage return are stripped by the URL parser before
+/// parsing and were a second family of the same bug.
+///
 /// # What is in the key, and why
 ///
 /// **The scheme**, so a grant approved for `https://docs.rs` cannot be spent on
@@ -880,63 +897,35 @@ pub(crate) fn composio_action_slug(args: &serde_json::Value) -> Result<&str, Act
 /// rewritten in transit, and silently honouring the cleartext twin would hand
 /// back the guarantee they were shown.
 ///
-/// **The port when present**, because `example.com:8443` is a different service
-/// from `example.com`. Two spellings of one host — `docs.rs` and `docs.rs:443` —
-/// therefore produce two scopes and the second parks. That is the safe
-/// direction: the failure mode is an extra card, not a grant reaching further
-/// than its sentence.
+/// **The port only when it is not the scheme's default**, which is
+/// [`Url::port`]'s own normalization — so `https://docs.rs:443` and
+/// `https://docs.rs` are one scope, as they are one service. A non-default port
+/// stays in the key because `example.com:8443` is a different service.
 ///
-/// **The host exactly, lowercased. No suffix matching**, which is the single
-/// most important thing here: a grant for `docs.rs` that admitted anything
-/// *ending* in `docs.rs` would admit `evil-docs.rs`, and one that admitted
-/// subdomains would admit `evil.docs.rs`. Both are hosts the operator never saw.
+/// **The host as `url` normalizes it** — lowercased, IDNA-encoded, IPv6 in
+/// brackets. Matching is exact: no suffix, so a grant for `docs.rs` cannot admit
+/// `evil-docs.rs`, and no subdomain, so it cannot admit `evil.docs.rs`. Both are
+/// hosts the operator never read on the card.
 ///
-/// # The userinfo trap
-///
-/// `https://docs.rs@evil.example/path` has the host `evil.example`, not
-/// `docs.rs` — the part before `@` is credentials. Reading the authority
-/// left-to-right gets this exactly backwards and would let any URL claim any
-/// scope, so the split is from the **right** and everything before the last `@`
-/// is discarded.
-///
-/// Anything else unusual resolves to `None` rather than to a guess: an
-/// unrecognised scheme, an empty host, or a character outside the host alphabet.
+/// Credentials are discarded, because [`Url::host_str`] returns the host and
+/// never the userinfo — `https://docs.rs@evil.example/` is `evil.example`. A
+/// URL that does not parse, names no host, or carries a non-http(s) scheme
+/// resolves to `None`, which parks.
 fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
-    let raw = args.get(WEB_FETCH_URL_KEY)?.as_str()?.trim();
-    let (scheme, rest) = raw.split_once("://")?;
-    let scheme = scheme.to_ascii_lowercase();
+    let raw = args.get(WEB_FETCH_URL_KEY)?.as_str()?;
+    let parsed = url::Url::parse(raw.trim()).ok()?;
+    let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
         return None;
     }
-    // The authority ends at the first delimiter that starts the path, query or
-    // fragment. `\` is included because WHATWG — followed by the `url`/`reqwest`
-    // clients the harness actually uses — treats it as a path separator in
-    // `http(s)` URLs, so `https://evil.example\@docs.rs/` has host `evil.example`
-    // and must not read `docs.rs`. `split` always yields at least one element,
-    // so this cannot fail.
-    let authority = rest.split(['/', '?', '#', '\\']).next()?;
-    // Credentials sit before the LAST `@`; the host is whatever follows it.
-    let host_port = match authority.rsplit_once('@') {
-        Some((_, after)) => after,
-        None => authority,
-    };
-    if host_port.is_empty() {
+    let host = parsed.host_str()?;
+    if host.is_empty() {
         return None;
     }
-    // A deliberately narrow alphabet: letters, digits, and the punctuation that
-    // appears in a host, a port, or a bracketed IPv6 literal. Anything else is a
-    // URL this function will not pretend to understand.
-    if !host_port
-        .chars()
-        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | ':' | '[' | ']'))
-    {
-        return None;
-    }
-    // A bare `:8080`, or a `:` with nothing before it, names no host.
-    if host_port.starts_with(':') {
-        return None;
-    }
-    Some(format!("{scheme}://{}", host_port.to_ascii_lowercase()))
+    Some(match parsed.port() {
+        Some(port) => format!("{scheme}://{host}:{port}"),
+        None => format!("{scheme}://{host}"),
+    })
 }
 
 /// The consequence of one [`WEB_FETCH`] call (issue #673).
@@ -1274,23 +1263,92 @@ mod tests {
         }
     }
 
-    /// A host is case-insensitive, so two spellings of one host must produce one
-    /// scope — otherwise a grant an operator approved stops matching the very
-    /// next call and the feature reads as broken.
+    /// A host is case-insensitive and `:443` is what `https` means, so these
+    /// spellings must produce one scope — otherwise a grant an operator approved
+    /// stops matching the very next call and the feature reads as broken.
     #[test]
     fn one_host_in_two_spellings_is_one_scope() {
-        let expected = Some("https://docs.rs".to_string());
-        // Assert each spelling against the concrete scope rather than only
-        // against each other, so a regression to `None` for both cannot pass
-        // the test vacuously.
-        assert_eq!(
-            standing_scope_of(WEB_FETCH, &fetching("HTTPS://Docs.RS/Serde")),
-            expected,
-        );
-        assert_eq!(
-            standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde")),
-            expected,
-        );
+        // The concrete scope is asserted first, not just the spellings against
+        // each other: a regression that returned `None` for every spelling would
+        // otherwise satisfy this test vacuously.
+        let canonical = standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde"));
+        assert_eq!(canonical.as_deref(), Some("https://docs.rs"));
+        for spelling in [
+            "HTTPS://Docs.RS/Serde",
+            "https://docs.rs:443/serde",
+            "https://user:pw@docs.rs/serde",
+        ] {
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &fetching(spelling)),
+                canonical,
+                "`{spelling}` names the same service and must share its scope"
+            );
+        }
+    }
+
+    /// **The bypass class this key must never re-open.**
+    ///
+    /// Found in review of this change. The key was originally derived by reading
+    /// the URL string here — splitting the authority on `/`, `?` and `#`, then
+    /// taking whatever followed the last `@`. But `\` is *also* a path separator
+    /// in an http(s) URL, so `https://evil.com\@docs.rs/` is fetched from
+    /// `evil.com` while that reader minted a grant for `docs.rs`: an operator
+    /// approving "fetch from docs.rs" would have authorised `evil.com`. Tab,
+    /// newline and CR are stripped before parsing and were a second family of
+    /// the same bug.
+    ///
+    /// The repair was to stop hand-parsing and derive the key from [`url::Url`],
+    /// the parser `reqwest` uses to perform the fetch — so there is no second
+    /// reader left to disagree with. This test is what keeps that true: it
+    /// consults `url` **independently** for the host each URL really resolves to,
+    /// and asserts the scope names that host. It is therefore not a tautology
+    /// restating the implementation — it is a cross-check that fails the moment
+    /// anyone reintroduces a bespoke reader, however carefully written.
+    ///
+    /// Both directions are in the table on purpose. A key naming a host the fetch
+    /// will *not* reach lets a grant be spent elsewhere; a key naming a host the
+    /// operator did not see on the card is the same confusion pointed the other
+    /// way. Neither is acceptable.
+    #[test]
+    fn the_scope_names_the_host_the_fetching_client_will_actually_use() {
+        for (raw, really_fetches) in [
+            // The reported case: `\` terminates the authority, so everything
+            // after it — including the `@` — is path.
+            (r"https://evil.com\@docs.rs/", "evil.com"),
+            // The same trick pointed the other way.
+            (r"https://docs.rs\@evil.com/", "docs.rs"),
+            // Mixed separators, both orders.
+            (r"https://docs.rs\/@evil.com/", "docs.rs"),
+            (r"https://docs.rs/\@evil.com", "docs.rs"),
+            // Stripped-whitespace family: removed before parsing, so the `@`
+            // that survives is a real userinfo delimiter.
+            ("https://docs.rs\t@evil.com/", "evil.com"),
+            ("https://docs.rs\n@evil.com/", "evil.com"),
+            ("https://evil.com@\tdocs.rs/", "docs.rs"),
+            // Stripping plus a backslash, together.
+            ("https://\revil.com\\@docs.rs/", "evil.com"),
+            // The plain userinfo case that was already defended.
+            ("https://docs.rs@evil.example/x", "evil.example"),
+        ] {
+            // The fetching client's own answer, consulted here rather than
+            // assumed — if a `url` upgrade ever changes it, this fails loudly
+            // instead of the fixture quietly going stale.
+            let client_host = url::Url::parse(raw)
+                .unwrap_or_else(|e| panic!("fixture must parse: {raw:?}: {e}"))
+                .host_str()
+                .unwrap_or_else(|| panic!("fixture must name a host: {raw:?}"))
+                .to_string();
+            assert_eq!(
+                client_host, really_fetches,
+                "fixture drift: {raw:?} no longer resolves where this table says"
+            );
+
+            assert_eq!(
+                standing_scope_of(WEB_FETCH, &fetching(raw)).as_deref(),
+                Some(format!("https://{really_fetches}").as_str()),
+                "the grant scope for {raw:?} must name the host the fetch reaches"
+            );
+        }
     }
 
     /// The `auto` line, named tool by tool and taken from the whole table
