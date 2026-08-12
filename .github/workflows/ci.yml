@@ -781,6 +781,16 @@ jobs:
       # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
+      # The 500-line Markdown cap, asserted rather than trusted (issue #695).
+      #
+      # `CLAUDE.md` has stated the rule since the beginning and nothing measured
+      # it, so three files drifted past — one to 699 lines — a paragraph at a
+      # time. Same family as the check above: a policy grep, no toolchain
+      # needed, and a separate step so a failure is named as a policy failure
+      # rather than a build one. It rides the Console job because that job is
+      # Node-only and cheap; the rule itself is repository-wide.
+      - run: ./scripts/ci/assert-md-line-cap.sh
+
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
 
