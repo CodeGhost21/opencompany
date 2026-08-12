@@ -1527,7 +1527,35 @@ fn sanitize_work_segment(thread: &str) -> Option<String> {
     // Bound the body well under `validate_task_segment`'s 128-char cap; the
     // characters are all ASCII, so a byte take is a char take.
     let body: String = cleaned.chars().take(100).collect();
-    Some(format!("dm-{body}"))
+    // Injective, not just safe. Folding every disallowed character to `-` — which
+    // is itself a keep-character — and trimming/truncating are all lossy, so two
+    // distinct threads can reduce to one body: `coder/main` and `coder-main` both
+    // become `coder-main`. Since this value keys checkout retention and the
+    // `oc/<company>/<unit>` publish branch, a collision would let one thread
+    // reclaim another's tree or publish over its branch. When anything was lost,
+    // append a short stable digest of the *raw* thread so distinct threads keep
+    // distinct keys; a thread that was already a safe segment is unchanged, so
+    // its key stays readable.
+    if body == thread {
+        Some(format!("dm-{body}"))
+    } else {
+        Some(format!("dm-{body}-{}", short_thread_digest(thread)))
+    }
+}
+
+/// A short, build-stable digest of a raw thread id (64-bit FNV-1a), used to keep
+/// two threads that sanitise to the same body from sharing a work key.
+///
+/// A `std` `DefaultHasher` is deliberately not used: its output is not
+/// guaranteed stable across toolchain versions, and this digest names a durable
+/// branch and checkout key that must hash the same on every build.
+fn short_thread_digest(thread: &str) -> String {
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in thread.bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
 }
 
 /// The board task a cycle is working, read off its own trigger events
@@ -2375,19 +2403,34 @@ mod test {
     /// broken ref.
     #[test]
     fn sanitize_work_segment_makes_a_safe_branch_segment() {
+        // An already-safe thread is unchanged and keeps a readable key.
         assert_eq!(sanitize_work_segment("coder"), Some("dm-coder".into()));
-        // Colons, slashes and spaces fold to '-'.
-        assert_eq!(
-            sanitize_work_segment("dm:coder/main x"),
-            Some("dm-dm-coder-main-x".into())
-        );
-        // Leading/trailing separators are trimmed before the prefix.
-        assert_eq!(sanitize_work_segment("--weird--"), Some("dm-weird".into()));
         // Dots and underscores are already valid and survive.
         assert_eq!(sanitize_work_segment("a_b.c"), Some("dm-a_b.c".into()));
         // Nothing usable.
         assert_eq!(sanitize_work_segment(""), None);
         assert_eq!(sanitize_work_segment("///"), None);
+
+        // When folding/trimming loses information, the readable body is kept and
+        // a digest of the raw thread is appended so distinct threads never share
+        // a work key. Colons, slashes and spaces fold to '-'; leading/trailing
+        // separators are trimmed before the prefix.
+        let folded = sanitize_work_segment("dm:coder/main x").unwrap();
+        assert!(folded.starts_with("dm-dm-coder-main-x-"), "{folded}");
+        let trimmed = sanitize_work_segment("--weird--").unwrap();
+        assert!(trimmed.starts_with("dm-weird-"), "{trimmed}");
+
+        // The collision the digest closes: two threads that fold to the same body
+        // get distinct keys — and the digest is deterministic across calls.
+        assert_ne!(
+            sanitize_work_segment("coder/main"),
+            sanitize_work_segment("coder-main"),
+            "distinct threads must not share a work key"
+        );
+        assert_eq!(
+            sanitize_work_segment("coder/main"),
+            sanitize_work_segment("coder/main")
+        );
     }
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;

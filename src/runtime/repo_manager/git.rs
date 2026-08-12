@@ -163,26 +163,51 @@ impl AskpassDir {
     /// the script is a program this host is about to execute, and re-writing it
     /// means nothing that happened between two fetches can have edited it.
     pub(crate) fn create(base: &Path) -> Result<Self> {
-        use std::sync::atomic::{AtomicU64, Ordering};
-        static SEQ: AtomicU64 = AtomicU64::new(0);
-
         let io_err = |p: &Path, e: std::io::Error| {
             OpenCompanyError::Store(format!(
                 "preparing git credential helper {}: {e}",
                 p.display()
             ))
         };
-        let path = base.join(format!(
-            ".askpass-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        std::fs::create_dir_all(&path).map_err(|e| io_err(&path, e))?;
-        set_mode(&path, 0o700)?;
-        let script = path.join("askpass.sh");
-        std::fs::write(&script, ASKPASS_SCRIPT).map_err(|e| io_err(&script, e))?;
-        set_mode(&script, 0o700)?;
-        Ok(Self { path })
+        // `base` is a shared directory (the company's repo cache), so the name
+        // under it must be unpredictable AND created exclusively. The old
+        // `.askpass-<pid>-<seq>` under `create_dir_all` was neither: a local
+        // attacker who guessed it could pre-create the directory — or a symlink
+        // wearing its name — and have this process write the token into
+        // something it does not own. The name is now 16 bytes from the OS
+        // CSPRNG, and `create_private_dir` (a non-recursive create) fails if the
+        // name already exists, so the directory returned is one nothing else
+        // could have prepared. It is created 0700 in one step, never briefly
+        // wider.
+        std::fs::create_dir_all(base).map_err(|e| io_err(base, e))?;
+        let mut last = None;
+        for _ in 0..8 {
+            let mut bytes = [0u8; 16];
+            getrandom::fill(&mut bytes).map_err(|e| {
+                OpenCompanyError::Store(format!("the OS CSPRNG is unavailable: {e}"))
+            })?;
+            let name: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+            let path = base.join(format!(".askpass-{name}"));
+            match create_private_dir(&path) {
+                Ok(()) => {
+                    let script = path.join("askpass.sh");
+                    // `create_new`, so a pre-planted script or symlink at the
+                    // name is refused rather than executed.
+                    write_exclusive(&script, ASKPASS_SCRIPT.as_bytes(), 0o700)
+                        .map_err(|e| io_err(&script, e))?;
+                    return Ok(Self { path });
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(io_err(&path, e)),
+            }
+        }
+        Err(io_err(
+            base,
+            last.unwrap_or_else(|| std::io::Error::other("exhausted askpass name attempts")),
+        ))
     }
 
     /// The helper script's path, for `GIT_ASKPASS`.
@@ -190,27 +215,28 @@ impl AskpassDir {
         self.path.join("askpass.sh")
     }
 
-    /// Writes the token the helper answers with into a 0600 file in this
+    /// Writes the token the helper answers with into a fresh 0600 file in this
     /// directory — the child's `$HOME`, where the script reads `$HOME/token`
     /// (issue #796).
     ///
     /// Called once, before the child is spawned, so the helper can be re-invoked
     /// within a single git call (a push asks for the password twice) and answer
-    /// every time. Overwrites any prior file; the whole directory is removed on
-    /// drop.
+    /// every time. The file is created **exclusively** at 0600: the directory is
+    /// freshly this process's own so no `token` exists yet, and `create_new`
+    /// guarantees the write neither follows a pre-planted symlink (which would
+    /// route the secret to an attacker's target) nor adopts a wider existing
+    /// file. The whole directory is removed on drop.
     fn write_token(&self, token: &str) -> Result<()> {
         let path = self.path.join("token");
         let mut line = String::with_capacity(token.len() + 1);
         line.push_str(token);
         line.push('\n');
-        std::fs::write(&path, line).map_err(|e| {
+        write_exclusive(&path, line.as_bytes(), 0o600).map_err(|e| {
             OpenCompanyError::Store(format!(
                 "writing the git credential {}: {e}",
                 path.display()
             ))
-        })?;
-        set_mode(&path, 0o600)?;
-        Ok(())
+        })
     }
 }
 
@@ -222,18 +248,42 @@ impl Drop for AskpassDir {
     }
 }
 
-/// Restricts a path to the owning user. A no-op off unix, where this surface
-/// does not run.
-fn set_mode(path: &Path, mode: u32) -> Result<()> {
+/// Creates `path` as a private directory, failing if anything is already there.
+///
+/// A non-recursive create (not `create_dir_all`): it fails rather than adopting
+/// a pre-existing directory — or a symlink wearing the name — under a shared
+/// parent, which is the exclusivity the token's safety rests on. On unix the
+/// 0700 mode is applied at creation, so the directory is never briefly wider.
+fn create_private_dir(path: &Path) -> std::io::Result<()> {
+    let mut builder = std::fs::DirBuilder::new();
     #[cfg(unix)]
     {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
-            .map_err(|e| OpenCompanyError::Store(format!("restricting {}: {e}", path.display())))?;
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(path)
+}
+
+/// Writes `bytes` to a newly created `path` at `mode`, failing if anything is
+/// already there.
+///
+/// `create_new` opens with `O_EXCL | O_CREAT`, which never follows a symlink at
+/// the final component and never adopts an existing file — so a pre-planted
+/// `token` symlink cannot route the secret elsewhere and a pre-created file
+/// cannot leave it wider than intended. On unix the mode is set at open time, so
+/// the file is 0600 from the instant it exists rather than briefly wider.
+fn write_exclusive(path: &Path, bytes: &[u8], mode: u32) -> std::io::Result<()> {
+    use std::io::Write as _;
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(mode);
     }
     #[cfg(not(unix))]
-    let _ = (path, mode);
-    Ok(())
+    let _ = mode;
+    opts.open(path)?.write_all(bytes)
 }
 
 /// The hardening flags every invocation carries, in front of the subcommand.
@@ -546,6 +596,82 @@ mod test {
         assert!(!out.stderr.contains("SENTINEL"), "{}", out.stderr);
 
         drop(dir);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// The directory name is unpredictable (not the pid) and the two files land
+    /// exclusively at their locked-down modes — the shape that denies a local
+    /// attacker a name to pre-plant (issue #815).
+    #[cfg(unix)]
+    #[test]
+    fn the_askpass_files_are_created_exclusively_and_locked_down() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let base = std::env::temp_dir().join(format!("oc-askpass-excl-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = AskpassDir::create(&base).unwrap();
+        dir.write_token("SENTINEL").unwrap();
+
+        let name = dir.path.file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with(".askpass-"), "{name}");
+        assert!(
+            !name.contains(&std::process::id().to_string()),
+            "the dir name still encodes the pid, so it is predictable: {name}"
+        );
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&dir.path), 0o700, "the dir is not owner-only");
+        assert_eq!(mode(&dir.script()), 0o700);
+        let token = dir.path.join("token");
+        assert_eq!(mode(&token), 0o600, "the token file is not 0600");
+        assert_eq!(std::fs::read_to_string(&token).unwrap(), "SENTINEL\n");
+
+        drop(dir);
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// A `token` symlink pre-planted at the name is refused rather than followed,
+    /// so the secret never reaches an attacker's target (issue #815).
+    #[cfg(unix)]
+    #[test]
+    fn write_exclusive_refuses_a_pre_planted_symlink_and_spares_its_target() {
+        let base = std::env::temp_dir().join(format!("oc-askpass-symlink-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let target = base.join("attacker-target");
+        std::fs::write(&target, "original").unwrap();
+        let link = base.join("token");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let err = write_exclusive(&link, b"SENTINEL\n", 0o600).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(
+            std::fs::read_to_string(&target).unwrap(),
+            "original",
+            "the secret was written through the symlink"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Both exclusive-creation primitives fail on a name that already exists,
+    /// rather than adopting or overwriting it (issue #815).
+    #[cfg(unix)]
+    #[test]
+    fn exclusive_creation_refuses_what_already_exists() {
+        let base = std::env::temp_dir().join(format!("oc-askpass-exists-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+
+        let file = base.join("f");
+        write_exclusive(&file, b"first", 0o600).unwrap();
+        let err = write_exclusive(&file, b"second", 0o600).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "first");
+
+        let sub = base.join("d");
+        create_private_dir(&sub).unwrap();
+        let err = create_private_dir(&sub).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+
         std::fs::remove_dir_all(&base).ok();
     }
 
