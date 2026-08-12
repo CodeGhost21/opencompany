@@ -14,6 +14,7 @@
 //! POST   …/workspace                  create a folder/file (JSON body)
 //! POST   …/workspace/upload           upload a file of any kind (multipart)
 //! POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays
+//! POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree
 //! PUT    …/workspace/file/{nodeId}    overwrite file content
 //! PATCH  …/workspace/{nodeId}         rename / move
 //! DELETE …/workspace/{nodeId}         delete a node (folders recursive)
@@ -64,6 +65,9 @@ use serde::{Deserialize, Serialize};
 use crate::AppState;
 use crate::company::artifact_mirror::{MirrorOutcome, mirror_node_edit};
 use crate::company::workspace_links::file_with_backlinks;
+use crate::company::workspace_repair::{
+    MergedFolder, RepairPlan, Residual, merge_duplicate_folders as merge_workspace_duplicates,
+};
 use crate::company::workspace_search::{
     DEFAULT_SEARCH_LIMIT, MAX_SEARCH_RESULTS, search_workspace,
 };
@@ -96,6 +100,12 @@ pub fn router() -> Router<AppState> {
         .merge(scoped(
             "/workspace/sweep-empty-agent-folders",
             post(sweep_empty_agent_folders),
+        ))
+        // And another (issue #759) — the repair for a tree a publish race has
+        // already left ambiguous.
+        .merge(scoped(
+            "/workspace/merge-duplicate-folders",
+            post(merge_duplicate_folders),
         ))
         .merge(scoped("/workspace/blob/{node_id}", get(read_blob)))
         .merge(
@@ -255,12 +265,17 @@ struct SearchQuery {
     limit: Option<usize>,
 }
 
-/// Whether the sweep is a preview or the real thing (issue #700).
+/// Whether a maintenance pass is a preview or the real thing (issues #700,
+/// #759).
+///
+/// Shared by both passes rather than duplicated: they make the same promise to
+/// the console — preview, name everything, then confirm — and a second copy of
+/// this would be a second chance for one of them to default the other way.
 #[derive(Debug, Deserialize)]
-struct SweepQuery {
-    /// `true` names what *would* go and removes nothing. Absent means a real
+struct PreviewQuery {
+    /// `true` names what *would* happen and changes nothing. Absent means a real
     /// run: this is a `POST`, and a caller that asked for one without saying
-    /// "preview" asked for the deletion.
+    /// "preview" asked for the change.
     #[serde(default)]
     dry_run: bool,
 }
@@ -281,6 +296,46 @@ struct SweepResult {
     /// What was actually deleted, on a real run.
     #[serde(skip_serializing_if = "Option::is_none")]
     removed: Option<Vec<SweptFolder>>,
+}
+
+/// What the duplicate-folder repair did, or would do (issue #759).
+///
+/// The same "exactly one list, and which one says what happened" discipline the
+/// sweep above uses: a preview answers `wouldMerge`, a real run answers
+/// `merged`, so a console reading the field it asked for cannot mistake one for
+/// the other.
+///
+/// `residuals` is present either way, and always — including as an empty list.
+/// It is the half of the answer that says whether the tree is *actually* fixed:
+/// a repair that merged three folders and quietly left two rival documents on
+/// one path has not finished, and the operator is the only one who can.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepairResult {
+    /// The folds, on a dry run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    would_merge: Option<Vec<MergedFolder>>,
+    /// What was actually folded away, on a real run.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    merged: Option<Vec<MergedFolder>>,
+    /// What the repair refused to decide, and why.
+    residuals: Vec<Residual>,
+}
+
+impl RepairResult {
+    fn new(plan: RepairPlan, dry_run: bool) -> Self {
+        let RepairPlan { folders, residuals } = plan;
+        let (would_merge, merged) = if dry_run {
+            (Some(folders), None)
+        } else {
+            (None, Some(folders))
+        };
+        Self {
+            would_merge,
+            merged,
+            residuals,
+        }
+    }
 }
 
 /// The create-node body.
@@ -1013,7 +1068,7 @@ async fn delete_node(
 /// guard, because this removes only nodes that provably hold nothing.
 async fn sweep_empty_agent_folders(
     company: ScopedCompany,
-    Query(query): Query<SweepQuery>,
+    Query(query): Query<PreviewQuery>,
 ) -> Result<Json<SweepResult>, ApiError> {
     let folders = sweep_workspace_agent_folders(
         company.runtime.workspace().as_ref(),
@@ -1033,6 +1088,47 @@ async fn sweep_empty_agent_folders(
             removed: Some(folders),
         }
     }))
+}
+
+/// `POST …/workspace/merge-duplicate-folders` — fold the duplicate sibling
+/// folders a publish race already left behind (issue #759).
+///
+/// The recovery half of #759. Stopping new races leaves every tree an old race
+/// already broke exactly as broken as it was: two sibling folders share a name,
+/// and from then on every publish beneath that path is refused as ambiguous, for
+/// every agent, until somebody edits the tree by hand. On a hosted tenant
+/// "somebody" has a console and no shell, which is why this is a route.
+///
+/// Operator-triggered, never automatic — the #570 / #645 / #700 doctrine, and
+/// with more reason here: this pass *moves* nodes rather than removing provably
+/// empty ones. `?dry_run=true` answers the same plan without touching anything,
+/// so the console can name every folder that gives way and every child that
+/// relocates before the operator agrees to it.
+///
+/// The answer always carries `residuals` — what the repair refused to decide,
+/// which is a file collision, because two files at one path are two documents
+/// and picking one silently discards somebody's work. Merging what can be merged
+/// and *saying* what cannot is the honest boundary; a route that answered only
+/// with successes would report a half-fixed tree as fixed.
+///
+/// Every move and delete runs through `runtime.workspace()`, the announcer-
+/// wrapped handle the per-node routes use, so an open console sees the tree
+/// change rather than discovering it on the next refetch (issue #327).
+///
+/// Same authorization as the per-node rename/delete it is built out of:
+/// addressing the company is the guard.
+async fn merge_duplicate_folders(
+    company: ScopedCompany,
+    Query(query): Query<PreviewQuery>,
+) -> Result<Json<RepairResult>, ApiError> {
+    let plan = merge_workspace_duplicates(
+        company.runtime.workspace().as_ref(),
+        company.id(),
+        query.dry_run,
+    )
+    .await?;
+
+    Ok(Json(RepairResult::new(plan, query.dry_run)))
 }
 
 #[cfg(test)]
