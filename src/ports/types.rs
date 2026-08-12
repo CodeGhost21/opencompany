@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::company::{CompanyManifest, POLICY_MODES, Policy};
 use crate::ports::ids::{agent_slug, generate_id, now_millis};
-use crate::ports::workflow_runner::DeliveryReport;
+use crate::ports::workflow_runner::{DeliveryReport, WorkflowRunBoardRow};
 
 // ---------------------------------------------------------------------------
 // Identifiers
@@ -1023,6 +1023,28 @@ pub enum CompanyEvent {
         /// did before — which is every run that did not overflow.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         notices: Vec<String>,
+        /// One row per board write this run's agent nodes performed (issue #661
+        /// / M5) — the same rows the synchronous run response hands back.
+        ///
+        /// This is what makes a **scheduled** run's board writes readable at
+        /// all: nobody was watching the response, so without this the only
+        /// evidence a 3am run opened a card is the card itself, with nothing
+        /// saying which run put it there.
+        ///
+        /// Rides the `Ok` arm only, like
+        /// [`cancelled`](Self::WorkflowRunFinished) and
+        /// [`notices`](Self::WorkflowRunFinished): a run that returned nothing
+        /// carries no rows here. **The cards themselves are unaffected** — a
+        /// board write is durable the moment the drain performs it, so a run
+        /// that later failed outright still leaves every card it opened on the
+        /// board. What an `Err` loses is the row *listing* them, not the work.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a line written before
+        /// this field existed replays, and a run that touched no card
+        /// serializes byte-for-byte as it did before — which is nearly all of
+        /// them.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        board: Vec<WorkflowRunBoardRow>,
     },
     /// A workflow run began (issue #371) — the opening bracket of a run's
     /// per-node progress trail.
@@ -4990,6 +5012,7 @@ mod test {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -5007,6 +5030,7 @@ mod test {
             error: Some("agent node `worker` had no inference source".to_string()),
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -5036,6 +5060,7 @@ mod test {
                 error: None,
                 cancelled: false,
                 notices: Vec::new(),
+                board: Vec::new(),
             }
         );
         // …and serializing it back emits nothing extra.
@@ -5048,6 +5073,71 @@ mod test {
         // replay-safe: absent decodes as `false`, and a non-cancelled run's line
         // is byte-identical to what it was before the field existed.
         assert!(!out.contains("cancelled"), "{out}");
+    }
+
+    /// Issue #661 (M5): a run's board rows round-trip, and a line written before
+    /// they existed still replays.
+    ///
+    /// Three claims, and the last two are what make this additive rather than a
+    /// migration: the rows survive the round trip in camelCase; a run that touched
+    /// no card serializes with **no `board` key at all**, so every already-written
+    /// journal line stays byte-identical; and a pre-#661 line decodes as empty
+    /// rather than failing to decode.
+    #[test]
+    fn workflow_run_finished_round_trips_board_rows() {
+        use crate::ports::workflow_runner::WorkflowBoardAction;
+
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: vec![WorkflowRunBoardRow {
+                action: WorkflowBoardAction::Spawned,
+                task_id: Some("card-1".to_string()),
+                title: Some("Reply to the auditor".to_string()),
+                assignee: None,
+            }],
+        };
+        assert_eq!(round_trip(&event), event);
+        let out = serde_json::to_string(&event).expect("serialize");
+        assert!(out.contains("\"action\":\"spawned\""), "{out}");
+        assert!(out.contains("\"taskId\":\"card-1\""), "{out}");
+        // Absent rather than null on the arm that has nothing to say.
+        assert!(!out.contains("assignee"), "{out}");
+
+        // A run that touched no card is byte-unchanged from pre-#661.
+        let untouched = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+        };
+        let out = serde_json::to_string(&untouched).expect("serialize");
+        assert!(!out.contains("board"), "{out}");
+
+        // And a line written before the field existed replays as empty.
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunFinished",
+            "workflow_id": "digest",
+            "scheduled": true,
+            "run_id": "run-1"
+        });
+        let loaded: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#661 journal line replays");
+        let CompanyEvent::WorkflowRunFinished { board, .. } = loaded else {
+            panic!("expected a WorkflowRunFinished");
+        };
+        assert!(board.is_empty());
     }
 
     /// Issue #383: a cancelled run round-trips, and is distinguishable from a
@@ -5068,6 +5158,7 @@ mod test {
             error: None,
             cancelled: true,
             notices: Vec::new(),
+            board: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
 
@@ -5181,6 +5272,7 @@ mod test {
                 error: None,
                 cancelled: false,
                 notices: Vec::new(),
+                board: Vec::new(),
             }
         );
     }

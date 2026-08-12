@@ -1115,6 +1115,17 @@ struct RunWorkflowResponse {
     /// check, and its absence a loud signal that the run was REAL.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     dry_run: bool,
+    /// The board writes this run's agent nodes performed (issue #661 / M5).
+    ///
+    /// The same rows `GET …/workflows/runs` returns and the same rows the
+    /// `WorkflowRunFinished` event carries — one shape across all three, so the
+    /// console reads a run's board effects identically whether it awaited the run
+    /// or found it in the history.
+    ///
+    /// Omitted when empty, so an existing caller's body is byte-unchanged for every
+    /// run that touched no card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    board: Vec<crate::ports::WorkflowRunBoardRow>,
 }
 
 /// The `detach: true` response (issue #383): the run's id, handed back before
@@ -1309,6 +1320,10 @@ async fn run_workflow(
             // discriminator a console pointed at an old host would never see.
             nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
             dry_run,
+            // Issue #661 (M5): carried on the synchronous path too, so a console
+            // that pressed Run learns what the run did to the board without a
+            // second read of the history.
+            board: run.board,
         })),
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
@@ -1730,6 +1745,18 @@ struct WorkflowRunOutcome {
     /// Omitted when empty, like `nodes` — which is nearly every run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notices: Vec<String>,
+    /// The board writes this run's agent nodes performed (issue #661 / M5) — one
+    /// row per card opened or re-owned.
+    ///
+    /// The port row is projected **verbatim** rather than reshaped: it is already
+    /// camelCase and already structural (see
+    /// [`WorkflowRunBoardRow`](crate::ports::WorkflowRunBoardRow)), so a second
+    /// transcription here would only be a place for the journal's shape and the
+    /// console's to drift apart. Same choice `deliveries` makes one field up.
+    ///
+    /// Omitted when empty, like `notices` — which is nearly every run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    board: Vec<crate::ports::WorkflowRunBoardRow>,
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -1849,6 +1876,10 @@ async fn list_runs(
                     // wound down yet.
                     cancelled: false,
                     notices: Vec::new(),
+                    // Only a finish carries these, so a run in flight lists none —
+                    // even one whose nodes have already opened cards. The rows
+                    // arrive with the settle below.
+                    board: Vec::new(),
                 });
             }
             CompanyEvent::WorkflowNodeFinished {
@@ -1881,6 +1912,7 @@ async fn list_runs(
                 error,
                 cancelled,
                 notices,
+                board,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -1899,6 +1931,7 @@ async fn list_runs(
                     entry.running = false;
                     entry.cancelled = cancelled;
                     entry.notices = notices;
+                    entry.board = board;
                     continue;
                 }
                 // …else stand alone. Two ways to get here, both legitimate: a
@@ -1920,6 +1953,7 @@ async fn list_runs(
                     running: false,
                     cancelled,
                     notices,
+                    board,
                 });
             }
             _ => {}
@@ -2446,6 +2480,56 @@ mod tests {
         }
     }
 
+    /// Issue #661 (M5): the synchronous run response carries the run's board
+    /// rows, in the same camelCase shape the journal event and the history route
+    /// use — so a console that pressed Run learns what the run did to the board
+    /// without a second read.
+    ///
+    /// The omission half matters as much: a run that touched no card must send no
+    /// `board` key, so every existing caller's body is byte-unchanged.
+    #[test]
+    fn the_run_response_carries_board_rows_and_omits_them_when_empty() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-1".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: vec![crate::ports::WorkflowRunBoardRow {
+                action: crate::ports::WorkflowBoardAction::Assigned,
+                task_id: Some("card-1".into()),
+                title: None,
+                assignee: Some("ceo".into()),
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["board"][0]["action"], "assigned");
+        assert_eq!(json["board"][0]["taskId"], "card-1");
+        assert_eq!(json["board"][0]["assignee"], "ceo");
+        assert!(
+            json["board"][0].get("title").is_none(),
+            "an assign row names no title — the console resolves it by id: {json}"
+        );
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-2".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+        })
+        .expect("serialize");
+        assert!(
+            json.get("board").is_none(),
+            "a run that touched no card sends no board key: {json}"
+        );
+    }
+
     /// The run response carries `deliveries` in camelCase — this is the ONLY
     /// place an operator learns a report was not delivered, since a delivery
     /// failure never fails the run.
@@ -2468,6 +2552,7 @@ mod tests {
             cancelled: false,
             nodes: Vec::new(),
             dry_run: false,
+            board: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -2500,6 +2585,7 @@ mod tests {
             cancelled: false,
             nodes: Vec::new(),
             dry_run: false,
+            board: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -2517,6 +2603,7 @@ mod tests {
             cancelled: false,
             nodes: Vec::new(),
             dry_run: false,
+            board: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
@@ -3085,6 +3172,7 @@ mod tests {
                         error: error.map(str::to_string),
                         cancelled: false,
                         notices: Vec::new(),
+                        board: Vec::new(),
                     },
                 )
                 .await
@@ -3319,6 +3407,7 @@ mod tests {
                         error: error.map(str::to_string),
                         cancelled: false,
                         notices: Vec::new(),
+                        board: Vec::new(),
                     },
                 )
                 .await
@@ -4455,6 +4544,7 @@ mod tests {
                             cancelled: true,
                             nodes: Vec::new(),
                             notices: Vec::new(),
+                            board: Vec::new(),
                         });
                     }
                 }
@@ -4466,6 +4556,7 @@ mod tests {
                     cancelled: false,
                     nodes: Vec::new(),
                     notices: Vec::new(),
+                    board: Vec::new(),
                 })
             }
         }
@@ -5094,6 +5185,7 @@ label = "ok"
                         elapsed_ms: 3,
                     }],
                     notices: Vec::new(),
+                    board: Vec::new(),
                 })
             }
         }

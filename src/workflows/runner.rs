@@ -268,6 +268,13 @@ async fn run_workflow_inner(
     // here, by the run, because that is the only scope that outlives the nodes
     // and reaches `WorkflowRun`.
     let notices = super::caps::RunNotices::default();
+    // Issue #661 (M5): where the run's board writes are recorded. Owned here for
+    // the same reason `notices` is — the nodes come and go, and this is the only
+    // scope that outlives them and reaches `WorkflowRun`. Critically it is owned
+    // *outside* the capability bundle, so a hard abort that drops the engine future
+    // (and with it the bundle and its board claim) still leaves every row already
+    // collected readable here: a card is real once written, so it must stay listed.
+    let board = super::caps::RunBoard::default();
     let capabilities = super::caps::build_capabilities(
         pool,
         deps,
@@ -278,6 +285,7 @@ async fn run_workflow_inner(
             run_request,
             dry_run,
             notices: notices.clone(),
+            board: board.clone(),
         },
     )
     .await?;
@@ -513,7 +521,7 @@ async fn run_workflow_inner(
     // journal, not this return.
     let outcome = match outcome_opt {
         Some(outcome) => outcome.map_err(map_engine_error)?,
-        None => return Ok(cancelled_run()),
+        None => return Ok(cancelled_run(notices.take(), board.take())),
     };
 
     // Issue #398: the **clean** node-boundary cancel. The engine observed the
@@ -549,6 +557,14 @@ async fn run_workflow_inner(
             // refused before the stop, and withholding it would leave the
             // operator with fewer cards than were gated and no explanation.
             notices: notices.take(),
+            // Issue #661 (M5): a cancelled run's board writes SURVIVE and stay
+            // listed. A card is a durable write the moment the drain performs it,
+            // so an operator who stopped the run still has the card in front of
+            // them — dropping the row would leave a card on the board that no run
+            // admits to opening. (A run cancelled *mid-turn* staged writes that
+            // were never drained, so it has no card and no row: consistent, and the
+            // same judgement `park_gated_calls` documents for gated calls.)
+            board: board.take(),
         });
     }
 
@@ -566,6 +582,12 @@ async fn run_workflow_inner(
             cancelled: false,
             nodes,
             notices: notices.take(),
+            // Issue #661 (M5): empty by construction, not by this line. A dry run's
+            // bundle wires `DryRunAgent`, so `HarnessAgentRunner` — the only thing
+            // that ever takes a board claim or drains one — is never built. Taken
+            // rather than hard-coded empty so the claim is a *test's* to make (see
+            // `a_dry_run_of_a_spawning_graph_writes_no_card`), following #542.
+            board: board.take(),
         });
     }
 
@@ -673,6 +695,9 @@ async fn run_workflow_inner(
         // every run that did not overflow the approval cap, which is nearly all
         // of them.
         notices: notices.take(),
+        // Issue #661 (M5): every card this run's nodes opened or re-owned. Empty
+        // for every run whose nodes touched no card, which is nearly all of them.
+        board: board.take(),
     })
 }
 
@@ -898,8 +923,8 @@ async fn park_pending_gates(
 /// a real partial outcome and is settled inline in `run_workflow_inner`, carrying
 /// its collected node rows. This is only the dropped-future case.)
 ///
-/// Empty on every field but the flag, and each emptiness is a claim rather than
-/// a shrug:
+/// Empty on every field but the flag and the two the caller threads in, and each
+/// emptiness is a claim rather than a shrug:
 ///
 /// * **no `output`** — the engine future was dropped, so there is no final state
 ///   to report. A partial one would be a new shape nothing downstream parses;
@@ -910,7 +935,22 @@ async fn park_pending_gates(
 ///   journal-backed and independent of the run, so they stay in the queue and
 ///   an operator may still approve or deny them. Listing them here would imply
 ///   this run is still waiting on them, which it is not.
-fn cancelled_run() -> WorkflowRun {
+///
+/// # The two arguments are the exceptions, and they are the point
+///
+/// `notices` and `board` are **threaded in rather than emptied** (issue #661 /
+/// M5). Everything above is empty because it describes the run's *result*, which
+/// a dropped future does not have. These two describe what its nodes already
+/// **did** before it wedged, and both are durable facts by the time this is
+/// reached: a notice records tool calls that were already refused, and a board row
+/// records a card that is already on the operator's board. Emptying them would
+/// leave a card nothing admits to opening — which is why this signature changed
+/// instead of the constructor keeping its convenient `Vec::new()`s. (`notices` was
+/// dropped here before, silently; that is fixed by the same change.)
+fn cancelled_run(
+    notices: Vec<String>,
+    board: Vec<crate::ports::WorkflowRunBoardRow>,
+) -> WorkflowRun {
     WorkflowRun {
         output: Value::Null,
         pending_approvals: Vec::new(),
@@ -921,9 +961,8 @@ fn cancelled_run() -> WorkflowRun {
         // (the drain runs before this returns), so "how far did it get?" is
         // answered by the history, not by this settled body.
         nodes: Vec::new(),
-        // Nothing to say: this constructor is the pre-engine stop path, so no
-        // node ran and no node raised anything.
-        notices: Vec::new(),
+        notices,
+        board,
     }
 }
 
@@ -1301,6 +1340,54 @@ to = "done"
                 .is_some(),
             "a paused-with-pending-approvals run must persist its reached output"
         );
+    }
+
+    /// Issue #661 (M5): the **hard-abort** arm lists the board writes its nodes
+    /// already performed.
+    ///
+    /// A wedged run's future is dropped, so there is no outcome to read and every
+    /// other field of `cancelled_run` is empty as a claim about the run's
+    /// *result*. Its board rows are not a result — they record a card that is
+    /// already on the operator's board by the time this is reached. Emptying them
+    /// would leave a card that no run admits to opening.
+    ///
+    /// Unit-level rather than a wedged end-to-end run on purpose: reaching this
+    /// arm for real means outlasting `CANCEL_HARD_ABORT_GRACE`, and a five-second
+    /// sleep in the suite buys nothing this does not pin — the arm's whole
+    /// behaviour is what it threads through.
+    ///
+    /// `notices` rides along for the same reason, and that half is a fix: this
+    /// constructor used to hard-code `Vec::new()` for it, so a wedged run silently
+    /// dropped notices its completed nodes had raised.
+    #[test]
+    fn a_hard_aborted_run_still_lists_its_board_writes() {
+        let row = crate::ports::WorkflowRunBoardRow {
+            action: crate::ports::WorkflowBoardAction::Spawned,
+            task_id: Some("card-1".to_string()),
+            title: Some("Reply to the auditor".to_string()),
+            assignee: None,
+        };
+        let run = cancelled_run(
+            vec!["something was discarded".to_string()],
+            vec![row.clone()],
+        );
+
+        assert!(run.cancelled);
+        assert_eq!(
+            run.board,
+            vec![row],
+            "the card is durable, so the stopped run must still list it"
+        );
+        assert_eq!(
+            run.notices,
+            vec!["something was discarded".to_string()],
+            "and the notices its nodes raised are not the run's result either"
+        );
+        // Everything that IS the run's result stays empty, unchanged.
+        assert_eq!(run.output, Value::Null);
+        assert!(run.deliveries.is_empty());
+        assert!(run.pending_approvals.is_empty());
+        assert!(run.nodes.is_empty());
     }
 
     /// A dry run writes NOTHING durable — no output snapshot, matching its "the

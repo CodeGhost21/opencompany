@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use crate::ports::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
-use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun};
+use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun, WorkflowRunBoardRow};
 use crate::runtime::workflow_resume::DeliveredReport;
 
 /// The error stamped on a run the host never got to finish (issue #371).
@@ -75,6 +75,61 @@ pub const INTERRUPTED_BY_RESTART: &str = concat!(
 /// in fact the most important thing here — today's `Err` arm on the scheduled
 /// path only warns to host stdout, so **the worst outcome is currently the
 /// quietest**.
+/// The six fields a settled run contributes to its journal row, split out of
+/// [`record_run_finished`] so the Ok/Err fold is one named thing rather than a
+/// six-wide tuple.
+///
+/// Which fields ride which arm is the whole content of this type — see
+/// [`Settled::from`].
+struct Settled {
+    deliveries: Vec<DeliveryReport>,
+    pending_approvals: Vec<String>,
+    error: Option<String>,
+    cancelled: bool,
+    notices: Vec<String>,
+    board: Vec<WorkflowRunBoardRow>,
+}
+
+impl From<Result<&WorkflowRun, &str>> for Settled {
+    /// # Why four of the six ride the `Ok` arm only
+    ///
+    /// Issue #383: `cancelled` does, and that is not an oversight. A run the
+    /// runner never returned from cannot have been *stopped by an operator* — the
+    /// stop signal resolves into an `Ok(cancelled)`, never into an `Err` — so the
+    /// error arm is unambiguously a failure or the boot sweep's synthetic one.
+    ///
+    /// Issue #638: `notices` does, for the same reason — a run that never
+    /// returned produced none, and an `Err` is already fully described by
+    /// `error`.
+    ///
+    /// Issue #661 (M5): `board` does too, and here the limitation is worth
+    /// stating rather than inheriting. A card is durable the moment the drain
+    /// writes it, so a run that opened two cards and then failed at a later node
+    /// leaves **both cards on the board** — but returns no `WorkflowRun`, so this
+    /// event lists neither. The work survives; the listing does not, and the board
+    /// itself is the record in that case. Same trade `notices` already makes.
+    fn from(outcome: Result<&WorkflowRun, &str>) -> Self {
+        match outcome {
+            Ok(run) => Self {
+                deliveries: run.deliveries.clone(),
+                pending_approvals: run.pending_approvals.clone(),
+                error: None,
+                cancelled: run.cancelled,
+                notices: run.notices.clone(),
+                board: run.board.clone(),
+            },
+            Err(err) => Self {
+                deliveries: Vec::new(),
+                pending_approvals: Vec::new(),
+                error: Some(err.to_string()),
+                cancelled: false,
+                notices: Vec::new(),
+                board: Vec::new(),
+            },
+        }
+    }
+}
+
 pub async fn record_run_finished(
     events: &Arc<dyn EventLog>,
     company: &CompanyId,
@@ -83,36 +138,8 @@ pub async fn record_run_finished(
     run_id: &str,
     outcome: Result<&WorkflowRun, &str>,
 ) {
-    // Issue #383: `cancelled` rides the Ok arm only, and that is not an
-    // oversight. A run the runner never returned from cannot have been stopped
-    // by an operator — the stop signal resolves *into* an `Ok(cancelled)`, never
-    // into an `Err` — so the error arm is unambiguously a failure or the boot
-    // sweep's synthetic one.
-    // Issue #638: `notices` rides the Ok arm for the same reason `cancelled`
-    // does — a run that never returned produced no notices, and an `Err` is
-    // already fully described by `error`.
-    let (deliveries, pending_approvals, error, cancelled, notices): (
-        Vec<DeliveryReport>,
-        Vec<String>,
-        Option<String>,
-        bool,
-        Vec<String>,
-    ) = match outcome {
-        Ok(run) => (
-            run.deliveries.clone(),
-            run.pending_approvals.clone(),
-            None,
-            run.cancelled,
-            run.notices.clone(),
-        ),
-        Err(err) => (
-            Vec::new(),
-            Vec::new(),
-            Some(err.to_string()),
-            false,
-            Vec::new(),
-        ),
-    };
+    // Which fields ride which arm, and why, is documented on `Settled::from`.
+    let settled = Settled::from(outcome);
 
     let event = CompanyEvent::WorkflowRunFinished {
         workflow_id: workflow_id.to_string(),
@@ -121,11 +148,12 @@ pub async fn record_run_finished(
         // wire shape is unchanged — it has always carried an optional `run_id` —
         // so a reader predating #371 still decodes every line it could before.
         run_id: Some(run_id.to_string()),
-        deliveries,
-        pending_approvals,
-        error,
-        cancelled,
-        notices,
+        deliveries: settled.deliveries,
+        pending_approvals: settled.pending_approvals,
+        error: settled.error,
+        cancelled: settled.cancelled,
+        notices: settled.notices,
+        board: settled.board,
     };
 
     if let Err(err) = events.append(company, event).await {
@@ -382,6 +410,7 @@ mod test {
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }
     }
 
@@ -747,6 +776,7 @@ mod test {
                     error: None,
                     cancelled: false,
                     notices: Vec::new(),
+                    board: Vec::new(),
                 },
             )
             .await

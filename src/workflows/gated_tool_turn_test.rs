@@ -74,10 +74,19 @@ to = "done"
 "#;
 
 /// What the scripted model does on each successive call.
+///
+/// `pub(super)` alongside [`deps`] and [`record`] so the sibling
+/// [`board_turn_test`](crate::workflows::board_turn_test) drives the same
+/// scripted-model harness rather than duplicating it (issue #661).
 #[derive(Clone, Debug)]
-enum Turn {
+pub(super) enum Turn {
     /// Emit a native tool call the policy will gate.
-    Call { tool: &'static str, args: Value },
+    Call {
+        /// The tool the model asks for.
+        tool: &'static str,
+        /// Its arguments, verbatim.
+        args: Value,
+    },
     /// Finish with plain assistant text.
     Say(&'static str),
 }
@@ -143,7 +152,7 @@ async fn spawn_script_recording(turns: Vec<Turn>) -> (String, Arc<Script>) {
 }
 
 /// Serve the script on loopback and return its base URL.
-async fn spawn_script(turns: Vec<Turn>) -> String {
+pub(super) async fn spawn_script(turns: Vec<Turn>) -> String {
     spawn_script_recording(turns).await.0
 }
 

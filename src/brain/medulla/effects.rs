@@ -674,6 +674,7 @@ mod test {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         };
 
         let wired = wire_event(7, &event);
@@ -713,6 +714,7 @@ mod test {
             error: None,
             cancelled: true,
             notices: Vec::new(),
+            board: Vec::new(),
         };
 
         let wired = wire_event(7, &event);

@@ -3411,6 +3411,8 @@ mod test {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
 
         let first_boot = RuntimeBuilder::new(home.clone(), manifest.clone())

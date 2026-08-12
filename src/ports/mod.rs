@@ -75,8 +75,8 @@ pub use workflow_revisions::{
     MAX_WORKFLOW_REVISIONS, WorkflowRevisionRecord, WorkflowRevisionStore,
 };
 pub use workflow_runner::{
-    DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowRun, WorkflowRunContext,
-    WorkflowRunNodeRow, WorkflowRunner,
+    DeliveryReason, DeliveryReport, DeliveryStatus, RunCancel, WorkflowBoardAction, WorkflowRun,
+    WorkflowRunBoardRow, WorkflowRunContext, WorkflowRunNodeRow, WorkflowRunner,
 };
 pub use workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 

@@ -1232,6 +1232,7 @@ mod test {
                             cancelled: true,
                             nodes: Vec::new(),
                             notices: Vec::new(),
+                            board: Vec::new(),
                         });
                     }
                 }
@@ -1244,6 +1245,7 @@ mod test {
                 cancelled: false,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             })
         }
     }
@@ -2090,6 +2092,7 @@ to = "done"
                 error,
                 cancelled,
                 notices: _,
+                board: _,
             } = event
             else {
                 unreachable!("filtered above")
