@@ -3453,6 +3453,112 @@ mod test {
         );
     }
 
+    /// Issue #759's index, asserted the same way and for the same reason.
+    ///
+    /// The folder guard is a second `unique_partial`, and a partial filter that
+    /// named the wrong field would be the identical silent failure: an index
+    /// built over an empty set, rejecting nothing, while every sequential test
+    /// still passed. Asserting the constructed `IndexModel` catches that with no
+    /// server, so it cannot pass vacuously.
+    ///
+    /// It also pins the field **name**: the folder key must be its own field,
+    /// not `file_path_key`. Sharing one field would make a folder and a file
+    /// contend for a single name — a new tree rule this change explicitly does
+    /// not introduce.
+    #[test]
+    fn the_folder_claim_index_is_partial_unique_on_its_own_field() {
+        let model = unique_partial(
+            doc! {"company_id": 1, "folder_path_key": 1},
+            "folder_path_key",
+        );
+        let filter = model
+            .options
+            .as_ref()
+            .and_then(|options| options.partial_filter_expression.as_ref())
+            .expect("the index is partial");
+
+        assert!(
+            filter.contains_key("folder_path_key"),
+            "the filter must name the field it guards: {filter:?}"
+        );
+        assert!(
+            !filter.contains_key("file_path_key"),
+            "the folder guard must not key on the file field, or a folder and a note would \
+             contend for one name: {filter:?}"
+        );
+        assert_eq!(
+            filter
+                .get_document("folder_path_key")
+                .expect("the condition"),
+            &doc! {"$exists": true},
+        );
+        assert!(
+            model
+                .options
+                .as_ref()
+                .and_then(|options| options.unique)
+                .unwrap_or(false),
+            "a partial filter without uniqueness would guard nothing at all"
+        );
+        // The two keys share an encoding, which is what lets one `path_key`
+        // serve both — pinned so a future edit cannot make them silently differ.
+        assert_eq!(
+            folder_path_key(Some("p"), "task-42"),
+            file_path_key(Some("p"), "task-42")
+        );
+    }
+
+    /// Issue #759, the subtle half: a folder that is **moved** drops its claim.
+    ///
+    /// `rename_move` has to `$unset` `folder_path_key`, and a missing unset is
+    /// invisible until somebody needs the vacated path again. The moved
+    /// document would keep guarding the path it left, so the next publish that
+    /// wanted `Agents/cmo/task-42/` would be refused by an index entry
+    /// describing a folder that is no longer there — the permanent outage this
+    /// primitive exists to prevent, reintroduced by the fix itself.
+    ///
+    /// Asserted by reclaiming the old path and checking a *new* folder was
+    /// minted there, rather than by reading the document: the claim is only
+    /// worth what the next claimer observes.
+    #[tokio::test]
+    async fn a_moved_folder_releases_its_claim_on_the_path_it_left() {
+        use crate::ports::workspace::WorkspaceStore;
+        let Some(s) = store().await else { return };
+        let company = CompanyId::new("mover");
+        let origin = crate::ports::workspace::WorkspaceOrigin::Seed;
+
+        let parent = s
+            .adopt_or_create_folder(&company, None, "Agents", origin.clone())
+            .await
+            .expect("the root")
+            .into_node()
+            .id;
+        let moved = s
+            .adopt_or_create_folder(&company, Some(&parent), "task-42", origin.clone())
+            .await
+            .expect("the folder")
+            .into_node()
+            .id;
+
+        // The operator renames it out of the way.
+        s.rename_move(&company, &moved, Some("task-42-archived"), None)
+            .await
+            .expect("rename to the workspace root");
+
+        // The vacated path must be claimable again, by a genuinely new folder.
+        let reclaimed = s
+            .adopt_or_create_folder(&company, Some(&parent), "task-42", origin)
+            .await
+            .expect("the path the moved folder left must be free");
+        assert!(
+            reclaimed.was_created(),
+            "a stale claim would have made this adopt a folder that is not there"
+        );
+        assert_ne!(reclaimed.node().id, moved);
+
+        drop_db(&s).await;
+    }
+
     /// **Issue #392 through the port**: the host-durable append asks the server
     /// for `j:true`, and the process-durable one does not.
     ///
@@ -4044,6 +4150,16 @@ mod test {
     async fn conformance_workspace_binary_store() {
         let Some(s) = store().await else { return };
         conformance::assert_workspace_binary_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    /// Issue #759. The only lane where the folder-claim primitive's contention
+    /// case runs against the partial unique index that actually decides it —
+    /// this backend has neither a lock nor a transaction to fall back on.
+    #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        let Some(s) = store().await else { return };
+        conformance::assert_workspace_folder_claims(s.clone()).await;
         drop_db(&s).await;
     }
 
