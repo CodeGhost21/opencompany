@@ -124,6 +124,7 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // The `spawn_task` / `delegate_to_desk` names are the brain-agnostic canonical
 // constants (issue #176) — re-exported here so the harness path and the hosted
 // path share one definition and cannot drift.
+use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
 /// The `run_workflow` tool name (issue #67).
@@ -1752,14 +1753,71 @@ pub fn delegation_tools(
 pub struct AddAgentTool {
     company: CompanyId,
     store: Arc<dyn CompanyStore>,
+    /// The id of the agent this tool is wired onto — the minter. Named in the
+    /// mint log so an operator can see who added a teammate, and with what.
+    minter: String,
+    /// The minter's own `tools` line, verbatim. Empty means the minter itself
+    /// holds the company's standard grant, in which case so does the teammate.
+    minter_tools: Vec<String>,
+    /// The minter's **effective** grant — its line already narrowed by the
+    /// company `allow`. The ceiling an explicit `tools` argument is clamped to.
+    minter_grants: Vec<String>,
 }
 
 impl AddAgentTool {
     /// Builds the tool over the company id and its store handle
-    /// ([`HarnessDeps::store`](crate::harness::HarnessDeps::store)).
-    pub fn new(company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
-        Self { company, store }
+    /// ([`HarnessDeps::store`](crate::harness::HarnessDeps::store)), plus the
+    /// minting agent's identity and tool scope (issue #619).
+    ///
+    /// # Why the minter's scope is a constructor argument
+    ///
+    /// #661 gave a minted teammate a `tools` list clamped to the **company**
+    /// grant. That leaves the defect #619 was filed about intact: omitting
+    /// `tools` still yields the company's *whole* grant, so an agent scoped to
+    /// a corner of the company can mint a teammate holding everything the
+    /// company holds — and `add_agent` is [`Reach::Nothing`](crate::policy)
+    /// and sits in `INTRINSIC_TOOLS`, so it is always present and never asks.
+    ///
+    /// The ceiling is therefore the **minter**, not the company: a minted
+    /// teammate is never wider than the agent that minted it.
+    pub fn new(
+        company: CompanyId,
+        store: Arc<dyn CompanyStore>,
+        minter: String,
+        minter_tools: Vec<String>,
+        minter_grants: Vec<String>,
+    ) -> Self {
+        Self {
+            company,
+            store,
+            minter,
+            minter_tools,
+            minter_grants,
+        }
     }
+}
+
+/// An `add_agent` tool wired onto an **unscoped** minter: an agent whose own
+/// `tools` line is empty and which therefore holds the whole company grant.
+///
+/// This is the pre-#619 shape of every minter, so a test written before the
+/// minter ceiling existed still describes the same company through it. A test
+/// that cares about narrowing constructs the tool directly with a scoped
+/// minter instead.
+#[cfg(test)]
+pub(crate) fn unscoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgentTool {
+    AddAgentTool::new(
+        company,
+        store,
+        "ceo".to_string(),
+        // No line of its own — the minter inherits the company grant…
+        Vec::new(),
+        // …which for these fixtures is the catch-all, so the minter ceiling is
+        // wide open and a test about *other* behaviour is not accidentally a
+        // test about the #619 clamp. A test that cares about the clamp uses
+        // `scoped_add_agent`.
+        vec!["*".to_string()],
+    )
 }
 
 #[async_trait]
@@ -1818,12 +1876,11 @@ impl Tool for AddAgentTool {
         // Issue #661 / L5: an optional per-teammate tool grant. The globs are
         // INTERSECTED with the company's `[tools].allow` at roster-build time
         // (`agent_effective_grants`), so this can only narrow the new teammate
-        // below the company grant — never widen or escalate it. Omitted, `null`,
-        // or empty means the standard company-wide grant, exactly like a manifest
-        // agent with no `tools` line. A non-string item is a clean argument
-        // error, the same shape as a missing `name`/`role`.
-        let tools = match args.get("tools") {
-            None | Some(Value::Null) => Vec::new(),
+        // below the company grant — never widen or escalate it. A non-string
+        // item is a clean argument error, the same shape as a missing
+        // `name`/`role`.
+        let requested: Option<Vec<String>> = match args.get("tools") {
+            None | Some(Value::Null) => None,
             Some(Value::Array(items)) => {
                 let mut globs = Vec::with_capacity(items.len());
                 for item in items {
@@ -1835,9 +1892,43 @@ impl Tool for AddAgentTool {
                         globs.push(glob.to_string());
                     }
                 }
-                globs
+                Some(globs)
             }
             Some(_) => return Err(anyhow::anyhow!("`tools` must be an array of strings")),
+        };
+        // Issue #619: the company grant is the wrong ceiling. Clamp to the
+        // MINTER's own scope, resolved before the store is touched so a refused
+        // scope never leaves a half-written roster.
+        let tools = match requested {
+            // Nothing asked for: copy the minter's own line. Copying the *line*
+            // rather than its resolved grant is deliberate — an unscoped minter
+            // mints an unscoped teammate that keeps tracking `[tools].allow`,
+            // instead of freezing today's allow-list into the record as an
+            // explicit scope a later company-wide narrowing would not reach.
+            None => self.minter_tools.clone(),
+            // An explicitly empty list is the same request as none at all —
+            // "give them what you have" — not "grant everything".
+            Some(globs) if globs.is_empty() => self.minter_tools.clone(),
+            Some(globs) => {
+                // Narrow against what the minter actually holds. An empty result
+                // means nothing asked for was within reach, and storing that
+                // would read back as "inherit the whole company grant" — the
+                // exact inversion #619 exists to remove, reached through the
+                // most deliberate narrowing an agent can ask for.
+                let narrowed = agent_effective_grants(&self.minter_grants, &globs);
+                if narrowed.is_empty() {
+                    return Ok(ToolResult::error(format!(
+                        "None of the requested tools ({}) are within your own tool grant ({}), so \"{name}\" was not added. Ask for a subset of what you hold, or omit `tools` to give them the same grant you have.",
+                        globs.join(", "),
+                        if self.minter_grants.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            self.minter_grants.join(", ")
+                        },
+                    )));
+                }
+                narrowed
+            }
         };
 
         // Serialize per-company writes so the orchestrator's add_agent and the
@@ -1882,18 +1973,47 @@ impl Tool for AddAgentTool {
             name: name.clone(),
             role: role.clone(),
             description,
-            tools,
+            tools: tools.clone(),
         };
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
+
+        // Issue #619: the mint is observable — the minter, the teammate, and
+        // the grant it was given. This was the condition attached to sanctioning
+        // the narrowing at all: `add_agent` is `Reach::Nothing` and never asks,
+        // so this log is the only place the decision is visible. A narrowing
+        // that happens silently is the defect being fixed, one layer down.
+        //
+        // An **inherited** grant is the line an operator most needs to see,
+        // because that is the teammate holding everything its minter holds.
+        tracing::info!(
+            company = %self.company,
+            minter = %self.minter,
+            teammate = %id,
+            teammate_name = %name,
+            scope = %if tools.is_empty() {
+                "inherited: the minter's own standard grant".to_string()
+            } else {
+                tools.join(", ")
+            },
+            "[add_agent] minted an overlay teammate"
+        );
 
         // The id is in the result because the orchestrator has to be able to
         // address the teammate it just created — delegating to it, or putting it
         // on a desk, takes the id, not the display name. The console gets the
         // same answer from `TeamMemberDto.id`; before this the agent-facing half
         // had no way to learn it at all.
+        // The scope is in the result for the same reason it is in the log: the
+        // minting agent should see what it handed over, and "the same tools you
+        // hold" is a materially different answer from a named list.
+        let scope = if tools.is_empty() {
+            "They hold the same tools you do.".to_string()
+        } else {
+            format!("Their tools are scoped to: {}.", tools.join(", "))
+        };
         Ok(ToolResult::success(format!(
-            "Added {name} (id `{id}`) as {role} to the team. They'll be reachable as a teammate starting next turn."
+            "Added {name} (id `{id}`) as {role} to the team. {scope} They'll be reachable as a teammate starting next turn."
         )))
     }
 }
@@ -1931,6 +2051,9 @@ pub fn orchestrator_tools(
     store: Arc<dyn CompanyStore>,
     workflow_refs: WorkflowRefQueue,
     run_outputs: RunOutputCache,
+    minter: String,
+    minter_tools: Vec<String>,
+    minter_grants: Vec<String>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
@@ -1967,7 +2090,13 @@ pub fn orchestrator_tools(
         events,
         workflow_refs,
     )));
-    tools.push(Box::new(AddAgentTool::new(company, store)));
+    tools.push(Box::new(AddAgentTool::new(
+        company,
+        store,
+        minter,
+        minter_tools,
+        minter_grants,
+    )));
     tools
 }
 
@@ -4868,7 +4997,7 @@ name = "Morning"
     async fn add_agent_tool_persists_an_overlay_teammate() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({
@@ -4901,6 +5030,129 @@ name = "Morning"
         );
     }
 
+    /// A minter scoped to part of the company grant, for the #619 tests below.
+    /// `minter_tools` is the line it declares; `minter_grants` is that line
+    /// already narrowed by the company `allow` — what `build_agent` hands the
+    /// tool.
+    fn scoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgentTool {
+        AddAgentTool::new(
+            company,
+            store,
+            "ceo".to_string(),
+            vec!["workspace".to_string()],
+            vec!["workspace".to_string()],
+        )
+    }
+
+    /// Issue #619: a teammate minted by a **scoped** agent inherits that
+    /// agent's line, not the company's whole grant.
+    ///
+    /// #661 clamped an explicit `tools` argument to the company grant, which
+    /// leaves this open: omitting `tools` still yields the company's *entire*
+    /// grant, so a narrowly scoped agent could mint a teammate holding
+    /// everything the company holds. `add_agent` is `Reach::Nothing` and never
+    /// asks, so nothing else in the path would catch it.
+    #[tokio::test]
+    async fn a_minted_teammate_is_bounded_by_its_minter_not_the_company() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = scoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Growth Lead" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["workspace".to_string()],
+            "the minted teammate must be bounded by the agent that minted it, \
+             not by the company"
+        );
+    }
+
+    /// An **unscoped** minter still mints an unscoped teammate — the pre-#619
+    /// behaviour, kept deliberately. Copying the minter's *line* rather than
+    /// its resolved grant is what keeps the teammate tracking `[tools].allow`
+    /// instead of freezing today's copy of it into the record.
+    #[tokio::test]
+    async fn an_unscoped_minter_mints_an_unscoped_teammate() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Growth Lead" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert!(
+            record.overlay_agents[0].tools.is_empty(),
+            "an empty line means the company's standard grant (#264), and a \
+             minter holding that grant hands on exactly it"
+        );
+    }
+
+    /// An explicit `tools` request is narrowed against what the **minter**
+    /// holds, so the tool cannot hand out a grant its caller does not have.
+    #[tokio::test]
+    async fn an_explicit_scope_is_narrowed_to_what_the_minter_holds() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = scoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({
+                "name": "Jamie",
+                "role": "Growth Lead",
+                "tools": ["workspace", "composio"]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["workspace".to_string()],
+            "`composio` is outside the minter's own grant and must be dropped"
+        );
+    }
+
+    /// A request that narrows to **nothing** is a refusal, not a stored empty
+    /// list.
+    ///
+    /// This is the sharp edge: an empty `tools` list means "inherit the
+    /// company's standard grant". Storing the empty result of a narrowing
+    /// would turn the most deliberate narrowing an agent can ask for into the
+    /// widest grant in the company — the exact inversion #619 exists to remove.
+    #[tokio::test]
+    async fn a_scope_entirely_outside_the_minters_grant_is_refused() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = scoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({
+                "name": "Jamie",
+                "role": "Growth Lead",
+                "tools": ["composio"]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert!(
+            record.overlay_agents.is_empty(),
+            "and no teammate was written at all, scoped or otherwise"
+        );
+    }
+
     /// Issue #661 / L5: `add_agent` carries a per-teammate tool grant onto the
     /// overlay record, trimming and dropping blank globs. The grant is narrowed
     /// against `[tools].allow` later (at roster build); persistence keeps the
@@ -4909,7 +5161,7 @@ name = "Morning"
     async fn add_agent_tool_persists_a_tool_grant() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({
@@ -4935,7 +5187,7 @@ name = "Morning"
     async fn add_agent_tool_empty_tools_is_the_standard_grant() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({ "name": "Ravi", "role": "Researcher", "tools": [] }))
@@ -4954,7 +5206,7 @@ name = "Morning"
     async fn add_agent_tool_rejects_a_non_string_tool() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         assert!(
             tool.execute(json!({ "name": "Ravi", "role": "Researcher", "tools": [123] }))
@@ -4984,7 +5236,7 @@ name = "Morning"
     async fn add_agent_tool_mints_a_readable_id_and_reports_it() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({ "name": "Dana Designer", "role": "Designer" }))
@@ -5009,7 +5261,7 @@ name = "Morning"
     async fn add_agent_tool_still_refuses_a_duplicate_display_name() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         for _ in 0..1 {
             let first = tool
@@ -5051,7 +5303,7 @@ name = "Morning"
         )
         .expect("valid manifest");
         let store = Arc::new(MemStore::seeded(record));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({ "name": "Backend Engineer", "role": "Platform" }))
@@ -5067,7 +5319,7 @@ name = "Morning"
     async fn add_agent_tool_requires_name_and_role() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         assert!(
             tool.execute(json!({ "role": "Growth Lead" }))
@@ -5090,7 +5342,7 @@ name = "Morning"
     async fn add_agent_tool_reports_company_not_found() {
         let company = CompanyId::new("ghost");
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::default());
-        let tool = AddAgentTool::new(company, store);
+        let tool = unscoped_add_agent(company, store);
 
         let err = tool
             .execute(json!({ "name": "Jamie", "role": "Growth Lead" }))
@@ -5214,6 +5466,9 @@ name = "Morning"
             Arc::new(MemStore::default()),
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            "ceo".to_string(),
+            Vec::new(),
+            vec!["fs:*".to_string()],
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
