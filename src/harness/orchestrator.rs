@@ -52,7 +52,7 @@
 //!
 //! Compiled only under `feature = "openhuman"` (the whole `harness` module is).
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 
@@ -327,6 +327,88 @@ impl Delegation {
     pub fn answers(&self) -> bool {
         matches!(self, Self::DelegateToDesk { .. })
     }
+
+    /// Whether this delegation is one a **workflow run** may perform
+    /// ([`DrainClaim::Board`], issue #661).
+    ///
+    /// [`SpawnTask`](Self::SpawnTask) and [`AssignTask`](Self::AssignTask) are:
+    /// they open a card in To-do and set who owns one, and neither moves a card
+    /// between columns nor needs anywhere to put a reply.
+    ///
+    /// [`ReviewTask`](Self::ReviewTask) and
+    /// [`DelegateToDesk`](Self::DelegateToDesk) are not, for two unrelated
+    /// reasons that [`no_drain`] states separately rather than collapsing:
+    /// `review_task`'s `in_review → done` is the operator's accept lane, and a
+    /// hand-off's only value is a synchronous reply that a run has nowhere to
+    /// land.
+    ///
+    /// This is [`answers`](Self::answers) inverted, and deliberately not
+    /// written as `!self.answers()`: the two partitions agree today only by
+    /// coincidence of there being four variants, and a fifth would have to be
+    /// classified for each question on its own terms.
+    pub fn writes_board_only(&self) -> bool {
+        matches!(self, Self::SpawnTask { .. } | Self::AssignTask { .. })
+    }
+}
+
+/// Which claimant a queued delegation belongs to (issue #661).
+///
+/// The queue handle is one per company and cannot be otherwise — see
+/// [`DelegationQueue`] — so the separation between concurrent claimants lives
+/// here, in the key, rather than in separate queues. Exactly the shape
+/// [`ApprovalScope`](crate::harness::policy::ApprovalScope) took for the same
+/// race one queue over (issue #439), and deliberately so: two identical
+/// solutions to one problem are worth more than two clever ones.
+///
+/// # Not to be confused with the scope *chain*
+///
+/// [`DelegationQueue::scope_chain`] and [`ScopeGuard`] (issue #176) also say
+/// "scope", and mean something else entirely: the stack of desk ids a hand-off
+/// is currently nested through, whose length **is** the delegation depth. That
+/// chain is per-claimant state like everything else here — each scope gets its
+/// own — but a `DelegationScope` is *which claimant*, never *how deep*.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum DelegationScope {
+    /// A delegation staged outside any run-scoped claim.
+    ///
+    /// The default, and every chat and task path lands here: `run_cycle`, the
+    /// operator-message turn and its relay, and a dispatched card all serialise
+    /// under the cycle lock, so one bucket is all they have ever needed and
+    /// their behaviour is unchanged by this scoping.
+    ///
+    /// Deliberately **not** an error, for the same reason
+    /// [`ApprovalScope::Unscoped`](crate::harness::policy::ApprovalScope)
+    /// is not: a claimant added later that forgets to name a scope degrades to
+    /// today's behaviour rather than to a silently dropped delegation.
+    #[default]
+    Unscoped,
+    /// One workflow run, keyed by its run id.
+    ///
+    /// Workflow runs are `tokio::spawn`ed and are **not** under the cycle lock —
+    /// several genuinely overlap, bounded only by the #401 in-flight cap. That
+    /// is the concurrency this scoping exists for.
+    Run(String),
+}
+
+tokio::task_local! {
+    /// The scope this task's delegation calls file into, installed for the
+    /// duration of a claim by [`DelegationClaim::scoped`] (issue #661).
+    ///
+    /// # Why ambient, and why that is sound here
+    ///
+    /// The delegation tools are constructed with a queue handle and nothing
+    /// else, and they are wired **statically**: belts are cached per roster by
+    /// [`HarnessPool::ensure`](crate::harness::HarnessPool::ensure) and rebuilt
+    /// rarely, so a tool cannot be handed a run id at call time — the same
+    /// constraint that put the #176 depth chain on this queue rather than in a
+    /// parameter.
+    ///
+    /// A task-local is sound on this path because a turn does not leave its
+    /// task, and this is not a new dependency: the queue's neighbours
+    /// ([`ApprovalRequestQueue`](crate::harness::policy::ApprovalRequestQueue))
+    /// and `with_stop_hooks` are already task-local scopes over these same
+    /// turns.
+    static CURRENT_SCOPE: DelegationScope;
 }
 
 /// A shared, in-memory queue the delegation tools push onto and the harness
@@ -360,11 +442,15 @@ impl Delegation {
 /// commitment is a boolean rather than a destination.
 #[derive(Clone, Default)]
 pub struct DelegationQueue {
-    inner: Arc<Mutex<Vec<Delegation>>>,
-    /// What the live claim on this queue permits (issues #453, #267).
-    /// [`DrainClaim::Unclaimed`] — nothing drains — is the default and the
-    /// fail-safe direction.
-    committed: Arc<Mutex<DrainClaim>>,
+    inner: Arc<Mutex<BTreeMap<DelegationScope, Vec<Delegation>>>>,
+    /// What the live claim on each scope's bucket permits (issues #453, #267,
+    /// #661).
+    ///
+    /// A scope with no entry is [`DrainClaim::Unclaimed`] — nothing drains —
+    /// which keeps the pre-#661 default and its fail-safe direction: a claimant
+    /// that has not claimed stages nothing, and now cannot be *un*-claimed by a
+    /// concurrent one either.
+    committed: Arc<Mutex<BTreeMap<DelegationScope, DrainClaim>>>,
     /// Desk keys a `delegate_to_desk` call named that the company does not have
     /// (issue #272).
     ///
@@ -375,7 +461,15 @@ pub struct DelegationQueue {
     /// filled by the tool during a turn, read by the drain right after, and
     /// wiped by the same [`clear`](Self::clear) that keeps a prior turn from
     /// leaking into this one.
-    refused: Arc<Mutex<Vec<String>>>,
+    ///
+    /// Bucketed per [`DelegationScope`] since issue #661, and this field is why
+    /// that issue is a **live** defect rather than a latent one:
+    /// [`push_refusal`](Self::push_refusal) is called by `DelegateToDeskTool`
+    /// *before* the claim is consulted, so an ungrounded hand-off from a
+    /// concurrently-running workflow node already lands here today — and a chat
+    /// turn's [`drain_refusals`](Self::drain_refusals) would take it, record it
+    /// on its own card, and clear it.
+    refused: Arc<Mutex<BTreeMap<DelegationScope, Vec<String>>>>,
     /// The **scope chain**: the resolved desk ids of the hand-offs currently
     /// being executed, outermost first (issue #176).
     ///
@@ -396,7 +490,21 @@ pub struct DelegationQueue {
     /// Deliberately **not** touched by [`clear`](Self::clear): clearing runs
     /// between delegations *inside* a scope, and dropping the chain there would
     /// reset the depth of a chain that is still running.
-    scope: Arc<Mutex<Vec<String>>>,
+    ///
+    /// # Bucketed, and why depth is unaffected (issue #661)
+    ///
+    /// Renamed from `scope` to `chains` when it became a map, because "the
+    /// scope of the scope" was about to mean two things: the key is a
+    /// [`DelegationScope`] (*which claimant*), the value is that claimant's own
+    /// #176 chain (*how deep it is nested*).
+    ///
+    /// Depth accounting is untouched by the bucketing. Depth still **is**
+    /// `chain.len()`, still has no counter beside it, and is still read and
+    /// written only within one claimant's own bucket — so a concurrent run can
+    /// neither deepen nor shallow another's chain. Every existing caller is
+    /// [`DelegationScope::Unscoped`], where this is one `Vec` under one key and
+    /// therefore byte-for-byte the pre-#661 structure.
+    chains: Arc<Mutex<BTreeMap<DelegationScope, Vec<String>>>>,
 }
 
 impl DelegationQueue {
@@ -413,12 +521,34 @@ impl DelegationQueue {
         self.inner
             .lock()
             .expect("delegation queue")
+            .entry(Self::current_scope())
+            .or_default()
             .push(delegation);
     }
 
-    /// What the live claim on this queue permits (issues #453, #267).
+    /// The [`DelegationScope`] the calling task is running under (issue #661).
+    ///
+    /// [`DelegationScope::Unscoped`] outside any
+    /// [`DelegationClaim::scoped`] — which is every chat and task path, and the
+    /// reason they are unaffected by the bucketing.
+    fn current_scope() -> DelegationScope {
+        CURRENT_SCOPE
+            .try_with(Clone::clone)
+            .unwrap_or(DelegationScope::Unscoped)
+    }
+
+    /// What the live claim on **this scope's** bucket permits (issues #453,
+    /// #267, #661).
+    ///
+    /// A scope nobody has claimed reads [`DrainClaim::Unclaimed`], so the
+    /// fail-safe default survives the move to a map.
     pub fn claim_state(&self) -> DrainClaim {
-        *self.committed.lock().expect("delegation commitment")
+        self.committed
+            .lock()
+            .expect("delegation commitment")
+            .get(&Self::current_scope())
+            .copied()
+            .unwrap_or_default()
     }
 
     /// Whether a drain site has committed to draining this queue (issue #453).
@@ -440,9 +570,12 @@ impl DelegationQueue {
     /// `?`, or a panic mid-turn used to leave items staged for the next caller
     /// to clear, so correctness depended on every future path remembering. Now
     /// the claim's scope *is* the window in which delegating works.
+    /// Since issue #661 this claims the calling task's **scope**, which for
+    /// every existing caller is [`DelegationScope::Unscoped`] — the signature
+    /// and the behaviour are both unchanged for them.
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
     pub fn claim(&self) -> DelegationClaim {
-        self.claim_as(DrainClaim::Full)
+        self.claim_as(Self::current_scope(), DrainClaim::Full)
     }
 
     /// Claims this queue for a turn whose operator message triaged as a
@@ -456,14 +589,39 @@ impl DelegationQueue {
     /// This exists because withholding the claim outright was too blunt: it
     /// took `delegate_to_desk` away too, and that tool is how a question the
     /// orchestrator cannot answer alone gets routed to a desk that can.
+    /// Claims one workflow run's bucket, permitting only the board writes a run
+    /// may perform (issue #661).
+    ///
+    /// The scope is the run id, so concurrent runs — several of which are live
+    /// at once under the #401 in-flight cap — cannot see, take, clear, or be
+    /// cleared by each other, nor by the chat cycle running beside them.
+    ///
+    /// The returned claim only routes calls once the run's turns are executed
+    /// inside [`DelegationClaim::scoped`]; holding it alone claims the bucket
+    /// but leaves the ambient scope unset.
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
-    pub fn claim_answering(&self) -> DelegationClaim {
-        self.claim_as(DrainClaim::Answering)
+    pub fn claim_board(&self, run_id: impl Into<String>) -> DelegationClaim {
+        self.claim_as(DelegationScope::Run(run_id.into()), DrainClaim::Board)
     }
 
-    /// The shared body of the two claim constructors.
-    fn claim_as(&self, state: DrainClaim) -> DelegationClaim {
-        self.clear();
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim_answering(&self) -> DelegationClaim {
+        self.claim_as(Self::current_scope(), DrainClaim::Answering)
+    }
+
+    /// The shared body of the claim constructors.
+    ///
+    /// # Everything it touches is `scope`'s and only `scope`'s (issue #661)
+    ///
+    /// This function is where the defect lived. `clear()` and `reset_scope()`
+    /// were global, so a claim taken by *any* claimant destroyed every other
+    /// claimant's staged delegations and reset a running chain's depth — safe
+    /// only for as long as every claimant serialised under the chat cycle lock,
+    /// which workflow runs do not. Both are now bucketed, so the entry clear
+    /// keeps its meaning (a claimant never inherits its own predecessor's
+    /// leftovers) while losing its reach.
+    fn claim_as(&self, scope: DelegationScope, state: DrainClaim) -> DelegationClaim {
+        self.clear_scope(&scope);
         // Issue #176: a claim opens a fresh chain. The chain outlives an
         // ordinary `clear`, so it is reset on the two boundaries that really do
         // end a chain — the claim's acquire and its `Drop` — and nowhere else.
@@ -472,24 +630,41 @@ impl DelegationQueue {
         // the *next* operator message start at depth 2 and refuse its first
         // hand-off. Same every-exit-path discipline the claim already applies to
         // the queue itself.
-        self.reset_scope();
-        *self.committed.lock().expect("delegation commitment") = state;
+        self.reset_chain(&scope);
+        self.committed
+            .lock()
+            .expect("delegation commitment")
+            .insert(scope.clone(), state);
         DelegationClaim {
             queue: self.clone(),
+            scope,
         }
     }
 
     /// How deep the delegation chain currently running is: `0` inside the
     /// orchestrator's own turn, `1` inside a desk lead it handed work to, and so
     /// on (issue #176).
+    ///
+    /// Read from the calling scope's own chain since issue #661, so a
+    /// concurrent workflow run's nesting cannot deepen a chat turn's depth (or
+    /// vice versa). Depth is still exactly `chain.len()`.
     pub fn scope_depth(&self) -> usize {
-        self.scope.lock().expect("delegation scope").len()
+        self.chains
+            .lock()
+            .expect("delegation scope")
+            .get(&Self::current_scope())
+            .map_or(0, Vec::len)
     }
 
     /// The resolved desk ids currently on the chain, outermost first (issue
     /// #176) — the set a hand-off target is checked against for a cycle.
     pub fn scope_chain(&self) -> Vec<String> {
-        self.scope.lock().expect("delegation scope").clone()
+        self.chains
+            .lock()
+            .expect("delegation scope")
+            .get(&Self::current_scope())
+            .cloned()
+            .unwrap_or_default()
     }
 
     /// Enters the scope of a hand-off to `desk_id`, for as long as the returned
@@ -500,18 +675,30 @@ impl DelegationQueue {
     /// exactly as deep as it found it. `desk_id` must be the **resolved** id
     /// rather than whatever key the model typed, so the cycle check compares
     /// identities rather than spellings.
+    ///
+    /// The guard records which [`DelegationScope`]'s chain it pushed onto
+    /// (issue #661) and pops from that one, rather than from whatever scope
+    /// happens to be ambient when it drops — so the pop cannot land in another
+    /// claimant's chain and take a live level off it.
     #[must_use = "the scope pops on drop; dropping it immediately leaves the chain unchanged"]
     pub fn enter_scope(&self, desk_id: String) -> ScopeGuard {
-        self.scope.lock().expect("delegation scope").push(desk_id);
+        let scope = Self::current_scope();
+        self.chains
+            .lock()
+            .expect("delegation scope")
+            .entry(scope.clone())
+            .or_default()
+            .push(desk_id);
         ScopeGuard {
             queue: self.clone(),
+            scope,
         }
     }
 
-    /// Empties the scope chain. Called only where a chain genuinely ends — the
-    /// claim's acquire and release.
-    fn reset_scope(&self) {
-        self.scope.lock().expect("delegation scope").clear();
+    /// Empties one scope's chain. Called only where a chain genuinely ends —
+    /// the claim's acquire and release.
+    fn reset_chain(&self, scope: &DelegationScope) {
+        self.chains.lock().expect("delegation scope").remove(scope);
     }
 
     /// Enqueues a delegation unless nothing will drain it, or `cap` are already
@@ -565,7 +752,18 @@ impl DelegationQueue {
             DrainClaim::Answering if !delegation.answers() => {
                 return Staged::NoDrain(NoDrainReason::Triage);
             }
-            DrainClaim::Answering | DrainClaim::Full => {}
+            // Issue #661: a workflow run may open and assign cards, but may not
+            // move one through its lifecycle or hand off for a reply it has
+            // nowhere to put. Two refusals rather than one, because the causes
+            // are unrelated and a model told the wrong one is being told
+            // something false about what it may do next.
+            DrainClaim::Board if !delegation.writes_board_only() => {
+                return Staged::NoDrain(match delegation {
+                    Delegation::DelegateToDesk { .. } => NoDrainReason::WorkflowHandOff,
+                    _ => NoDrainReason::WorkflowLifecycle,
+                });
+            }
+            DrainClaim::Answering | DrainClaim::Full | DrainClaim::Board => {}
         }
         // Issue #176: checked after the claim (a context that drains nothing is
         // still the only fact worth reporting) and before the queue lock, so the
@@ -576,17 +774,29 @@ impl DelegationQueue {
             return Staged::NoDrain(NoDrainReason::Depth);
         }
         let mut guard = self.inner.lock().expect("delegation queue");
-        if guard.len() >= cap {
+        let bucket = guard.entry(Self::current_scope()).or_default();
+        if bucket.len() >= cap {
             return Staged::OverCap;
         }
-        guard.push(delegation);
+        bucket.push(delegation);
         Staged::Queued
     }
 
     /// Records that a hand-off named `desk`, which the company cannot hand work
     /// to, so the drain can report the attempt (issue #272).
+    ///
+    /// Files into the calling scope's bucket (issue #661). This call needs no
+    /// claim — `DelegateToDeskTool` reaches it on the ungrounded path *before*
+    /// consulting [`claim_state`](Self::claim_state) — which is what made the
+    /// shared vector reachable from a workflow node today, with no drain wired
+    /// and nothing else changed.
     pub fn push_refusal(&self, desk: String) {
-        self.refused.lock().expect("delegation queue").push(desk);
+        self.refused
+            .lock()
+            .expect("delegation queue")
+            .entry(Self::current_scope())
+            .or_default()
+            .push(desk);
     }
 
     /// How many refused desk keys are recorded right now (issue #176).
@@ -598,7 +808,11 @@ impl DelegationQueue {
     /// is used in for parked approvals, and for the same reason: a difference
     /// across a turn is the only honest way to say *this* turn did it.
     pub fn refusals_queued(&self) -> usize {
-        self.refused.lock().expect("delegation queue").len()
+        self.refused
+            .lock()
+            .expect("delegation queue")
+            .get(&Self::current_scope())
+            .map_or(0, Vec::len)
     }
 
     /// Drains up to `cap` refused desk keys recorded **after** the first
@@ -607,13 +821,22 @@ impl DelegationQueue {
     /// [`drain_refusals`](Self::drain_refusals) also clears the tail; this one
     /// deliberately does not, because the entries before `from` belong to an
     /// outer turn that has not read them yet.
+    ///
+    /// `from` indexes this scope's own bucket (issue #661), which is the same
+    /// vector [`refusals_queued`](Self::refusals_queued) counted — so the
+    /// sample-either-side-of-a-turn pattern keeps its meaning, and can no
+    /// longer be thrown off by a concurrent claimant pushing between the two
+    /// samples.
     pub fn drain_refusals_after(&self, from: usize, cap: usize) -> Vec<String> {
         let mut guard = self.refused.lock().expect("delegation queue");
-        if guard.len() <= from {
+        let Some(bucket) = guard.get_mut(&Self::current_scope()) else {
+            return Vec::new();
+        };
+        if bucket.len() <= from {
             return Vec::new();
         }
-        let take = (guard.len() - from).min(cap);
-        guard.drain(from..from + take).collect()
+        let take = (bucket.len() - from).min(cap);
+        bucket.drain(from..from + take).collect()
     }
 
     /// Drains up to `cap` refused desk keys (FIFO) and discards the rest, so a
@@ -623,9 +846,12 @@ impl DelegationQueue {
     /// have grown is the operator's only record that a hand-off was attempted.
     pub fn drain_refusals(&self, cap: usize) -> Vec<String> {
         let mut guard = self.refused.lock().expect("delegation queue");
-        let take = guard.len().min(cap);
-        let dropped = guard.len() - take;
-        let drained: Vec<String> = guard.drain(..take).collect();
+        let Some(bucket) = guard.get_mut(&Self::current_scope()) else {
+            return Vec::new();
+        };
+        let take = bucket.len().min(cap);
+        let dropped = bucket.len() - take;
+        let drained: Vec<String> = bucket.drain(..take).collect();
         if dropped > 0 {
             tracing::warn!(
                 dropped,
@@ -634,15 +860,49 @@ impl DelegationQueue {
                  recorded on the card"
             );
         }
-        guard.clear();
+        // Issue #661: this scope's tail only. It used to clear the whole shared
+        // vector, which is what let one claimant's drain swallow another's
+        // pending refusals.
+        bucket.clear();
         drained
     }
 
     /// Empties the queue (called before an orchestrator turn so stale
     /// delegations from a prior turn never leak into this one).
+    ///
+    /// Empties **this scope's** staged delegations and refusals only (issue
+    /// #661); a concurrent claimant's are untouched.
     pub fn clear(&self) {
-        self.inner.lock().expect("delegation queue").clear();
-        self.refused.lock().expect("delegation queue").clear();
+        self.clear_scope(&Self::current_scope());
+    }
+
+    /// [`clear`](Self::clear) against an explicitly named scope, for the two
+    /// callers that know their scope rather than inheriting it from the task:
+    /// the claim's acquire and its `Drop` (issue #661).
+    ///
+    /// `Drop` in particular cannot read the ambient scope — a claim is very
+    /// often dropped outside its own [`scoped`](DelegationClaim::scoped) future
+    /// — so it must carry the scope it claimed.
+    fn clear_scope(&self, scope: &DelegationScope) {
+        self.inner.lock().expect("delegation queue").remove(scope);
+        self.refused.lock().expect("delegation queue").remove(scope);
+    }
+
+    /// Releases a claim: discards everything the claim's scope staged and
+    /// returns that scope to [`DrainClaim::Unclaimed`] (issue #661).
+    ///
+    /// A cancelled or panicking run's staged writes dying with the run is the
+    /// intended semantics, matching the stance
+    /// [`ApprovalClaim`](crate::harness::policy::ApprovalClaim) takes one queue
+    /// over: staged work that nothing will now drain is work that must not
+    /// survive to be executed under somebody else's turn.
+    fn release(&self, scope: &DelegationScope) {
+        self.committed
+            .lock()
+            .expect("delegation commitment")
+            .remove(scope);
+        self.clear_scope(scope);
+        self.reset_chain(scope);
     }
 
     /// Drains up to `cap` queued delegations (FIFO) and discards the rest, so a
@@ -656,9 +916,12 @@ impl DelegationQueue {
     /// work the model already claimed it had done.
     pub fn drain(&self, cap: usize) -> Vec<Delegation> {
         let mut guard = self.inner.lock().expect("delegation queue");
-        let take = guard.len().min(cap);
-        let dropped = guard.len() - take;
-        let drained: Vec<Delegation> = guard.drain(..take).collect();
+        let Some(bucket) = guard.get_mut(&Self::current_scope()) else {
+            return Vec::new();
+        };
+        let take = bucket.len().min(cap);
+        let dropped = bucket.len() - take;
+        let drained: Vec<Delegation> = bucket.drain(..take).collect();
         if dropped > 0 {
             tracing::warn!(
                 dropped,
@@ -667,14 +930,21 @@ impl DelegationQueue {
                  boundary should have refused these before they were queued"
             );
         }
-        guard.clear();
+        // Issue #661: this scope's tail only — draining a chat turn must not
+        // throw away what a concurrently-running workflow run has staged.
+        bucket.clear();
         drained
     }
 
-    /// The number of queued delegations (test/observability).
+    /// The number of queued delegations in the calling scope
+    /// (test/observability).
     #[cfg(test)]
     pub fn queued(&self) -> usize {
-        self.inner.lock().expect("delegation queue").len()
+        self.inner
+            .lock()
+            .expect("delegation queue")
+            .get(&Self::current_scope())
+            .map_or(0, Vec::len)
     }
 }
 
@@ -728,6 +998,26 @@ pub enum NoDrainReason {
     /// cannot do board work (it can) nor that the message was a question (it was
     /// not) — it must say the chain has run as deep as the company allows.
     Depth,
+    /// The queue is claimed by a workflow run ([`DrainClaim::Board`], issue
+    /// #661) and the call would move a card through its lifecycle, which is the
+    /// operator's lane rather than the run's.
+    ///
+    /// Distinct from [`WorkflowHandOff`](Self::WorkflowHandOff) because the
+    /// causes are unrelated: this one is a deliberate authority boundary that no
+    /// amount of wiring will move, and the model's recourse is to leave the card
+    /// for a person. Collapsing the two would tell a model that `review_task`
+    /// failed for want of somewhere to put a reply, which is untrue and points
+    /// it at the wrong alternative.
+    WorkflowLifecycle,
+    /// The queue is claimed by a workflow run ([`DrainClaim::Board`], issue
+    /// #661) and the call is a hand-off, whose only value is a synchronous reply
+    /// that a run has nowhere to land.
+    ///
+    /// A run has no conversation behind it and nobody watching at 3am, so the
+    /// reply would be composed and dropped. The recourse is real and worth
+    /// naming: open a card for the desk instead, which persists and is exactly
+    /// what a run *can* do.
+    WorkflowHandOff,
 }
 
 impl NoDrainReason {
@@ -743,6 +1033,8 @@ impl NoDrainReason {
             Self::Unwired => "drain_unwired",
             Self::Triage => "triaged_as_question",
             Self::Depth => "depth_capped",
+            Self::WorkflowLifecycle => "workflow_lifecycle_operator_only",
+            Self::WorkflowHandOff => "workflow_handoff_no_reply_target",
         }
     }
 }
@@ -773,6 +1065,25 @@ pub enum DrainClaim {
     /// (issue #267). The drain runs exactly as under [`Full`](Self::Full); only
     /// delegations that [`answer`](Delegation::answers) may be staged.
     Answering,
+    /// A workflow run has claimed its own scope's bucket (issue #661). The
+    /// drain runs exactly as under [`Full`](Self::Full); only delegations that
+    /// [`write the board only`](Delegation::writes_board_only) may be staged.
+    ///
+    /// This is [`Answering`](Self::Answering)'s shape inverted, and inverted is
+    /// the right word: that one permits the hand-off and refuses the board
+    /// writes, this one permits the board writes and refuses the hand-off. Both
+    /// exist because withholding the claim outright is too blunt — it says "no
+    /// board work at all", which for a run is false and would leave the
+    /// `→ task cards` seed unable to make a card.
+    ///
+    /// # The refusals are load-bearing for loop safety
+    ///
+    /// A run may open a card and set its owner; it may not move one between
+    /// columns. `todo → planning` is only ever written by an operator drag and
+    /// `planning → in_progress` is the dispatch gate, so run → card → dispatch
+    /// → run cycles stay bounded precisely because every dispatch requires an
+    /// operator act. Relaxing the column rule would take that bound with it.
+    Board,
 }
 
 /// The live claim on a [`DelegationQueue`] — proof that some drain site is
@@ -790,17 +1101,50 @@ pub enum DrainClaim {
 /// first.
 pub struct DelegationClaim {
     queue: DelegationQueue,
+    /// The scope this claim owns (issue #661) — carried rather than read from
+    /// the task on drop, because a claim is routinely dropped outside its own
+    /// [`scoped`](Self::scoped) future, where the ambient scope is no longer
+    /// its own.
+    scope: DelegationScope,
+}
+
+impl DelegationClaim {
+    /// The scope this claim owns.
+    pub fn scope(&self) -> &DelegationScope {
+        &self.scope
+    }
+
+    /// Runs `fut` with this claim's scope installed, so every delegation call
+    /// inside it files into — and drains from — this claim's bucket (issue
+    /// #661).
+    ///
+    /// The whole turn goes inside. A call that escapes the future lands in
+    /// [`DelegationScope::Unscoped`] rather than in another claimant's bucket,
+    /// which is the conservative direction: unclaimed there means an honest
+    /// in-turn refusal, never somebody else's delegation being executed.
+    ///
+    /// Chat and task callers do not need this and do not use it — they claim
+    /// `Unscoped`, which is what an un-installed task-local already reads as.
+    pub async fn scoped<F, T>(&self, fut: F) -> T
+    where
+        F: std::future::Future<Output = T>,
+    {
+        CURRENT_SCOPE.scope(self.scope.clone(), fut).await
+    }
 }
 
 impl Drop for DelegationClaim {
     fn drop(&mut self) {
-        *self.queue.committed.lock().expect("delegation commitment") = DrainClaim::Unclaimed;
-        self.queue.clear();
+        // Issue #661: everything released here is keyed to this claim's own
+        // scope. Before that this reset a single global commitment and cleared
+        // one shared vector, so a claim ending anywhere un-claimed the queue
+        // everywhere — the exit half of the same defect the acquire had.
+        //
         // Issue #176: the chain ends with the claim. `ScopeGuard` pops its own
         // entry on every ordinary exit, so this is the belt to that braces — a
         // panic mid-nested-turn unwinds past the guards, and a chain left
         // standing would make the next message start at depth 2.
-        self.queue.reset_scope();
+        self.queue.release(&self.scope);
     }
 }
 
@@ -816,11 +1160,23 @@ impl Drop for DelegationClaim {
 /// take a live outer level off the chain with them.
 pub struct ScopeGuard {
     queue: DelegationQueue,
+    /// Which claimant's chain this level was pushed onto (issue #661), so the
+    /// pop lands in that same chain rather than in whichever one is ambient at
+    /// drop time.
+    scope: DelegationScope,
 }
 
 impl Drop for ScopeGuard {
     fn drop(&mut self) {
-        self.queue.scope.lock().expect("delegation scope").pop();
+        if let Some(chain) = self
+            .queue
+            .chains
+            .lock()
+            .expect("delegation scope")
+            .get_mut(&self.scope)
+        {
+            chain.pop();
+        }
     }
 }
 
@@ -1972,6 +2328,22 @@ fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
              say plainly what still needs another desk, or open a task card for it with \
              `spawn_task`, which still works. Do not retry this call; it will fail the same way, \
              and do NOT report the hand-off as done."
+        ),
+        NoDrainReason::WorkflowLifecycle => format!(
+            "Refused: you are running inside a workflow, which can put work on the board but \
+             cannot move it through review, so {effect}. Deciding a card is done is the \
+             operator's call, not this run's. You CAN open a card with `spawn_task` and set who \
+             owns it with `assign_task` — do that and leave the verdict to a person. Do not retry \
+             this call; it will fail the same way, and do NOT report the card as reviewed, \
+             approved or moved."
+        ),
+        NoDrainReason::WorkflowHandOff => format!(
+            "Refused: you are running inside a workflow, which has no conversation for a desk's \
+             reply to come back to, so {effect}. A hand-off is only worth making when somebody is \
+             waiting on the answer, and here nobody is. Open a card for that desk instead with \
+             `spawn_task` — naming the desk as its assignee — which persists and reaches them. Do \
+             not retry this call; it will fail the same way, and do NOT report the work as handed \
+             over or the desk as having replied."
         ),
     }
 }
@@ -7993,5 +8365,328 @@ name = "Morning"
         );
         assert_eq!(fresh.len(), 0, "an oversized run must not be cached");
         assert!(fresh.get("run-giant").is_none());
+    }
+
+    // -----------------------------------------------------------------------
+    // Issue #661: the queue is scoped per claimant
+    // -----------------------------------------------------------------------
+
+    /// A card, titled so a drain can be identified by what it carried.
+    fn card(title: &str) -> Delegation {
+        Delegation::SpawnTask {
+            title: title.to_string(),
+            note: None,
+            assignee: None,
+        }
+    }
+
+    fn hand_off() -> Delegation {
+        Delegation::DelegateToDesk {
+            desk: "design".to_string(),
+            instruction: "have a look".to_string(),
+        }
+    }
+
+    fn titles(drained: Vec<Delegation>) -> Vec<String> {
+        drained
+            .into_iter()
+            .map(|d| match d {
+                Delegation::SpawnTask { title, .. } => title,
+                other => panic!("expected a card, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn stage(queue: &DelegationQueue, d: Delegation) -> Staged {
+        queue.push_within_cap(d, MAX_DELEGATIONS_PER_TURN, NO_DEPTH_BOUND)
+    }
+
+    /// **The regression this whole change exists for.**
+    ///
+    /// A workflow run taking a claim while the chat cycle has work staged must
+    /// leave that work alone. Before the scoping, `claim_as` opened with a
+    /// global `clear()`, so this exact interleaving destroyed a chat turn's
+    /// staged card and its refusal — and the turn had already told the operator
+    /// the card was opened.
+    ///
+    /// Runs are `tokio::spawn`ed and are not under the cycle lock (#401 allows
+    /// several at once), so this interleaving is reachable rather than
+    /// theoretical.
+    #[tokio::test]
+    async fn a_workflow_claim_leaves_a_concurrent_chat_turns_staged_work_intact() {
+        let queue = DelegationQueue::default();
+
+        // A chat turn is mid-flight with a card staged and a refusal recorded.
+        let _chat = queue.claim();
+        assert_eq!(stage(&queue, card("chat")), Staged::Queued);
+        queue.push_refusal("nonexistent-desk".to_string());
+
+        // A workflow run claims, concurrently. This is the moment that used to
+        // wipe the chat's bucket.
+        let run = queue.claim_board("run-1");
+        run.scoped(async { assert_eq!(stage(&queue, card("run")), Staged::Queued) })
+            .await;
+
+        // The chat's staged card and refusal are both still there…
+        assert_eq!(queue.queued(), 1);
+        assert_eq!(queue.refusals_queued(), 1);
+        assert_eq!(titles(queue.drain(MAX_DELEGATIONS_PER_TURN)), ["chat"]);
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            ["nonexistent-desk"]
+        );
+
+        // …and the run still has its own, drained separately.
+        let run_drained = run
+            .scoped(async { queue.drain(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(titles(run_drained), ["run"]);
+    }
+
+    /// The half of the defect that is **live today**, with no drain wired and
+    /// nothing else changed.
+    ///
+    /// `DelegateToDeskTool` calls [`DelegationQueue::push_refusal`] on the
+    /// ungrounded path *before* it consults the claim, so an invented desk named
+    /// by a workflow node already reaches the shared vector. A chat turn's
+    /// `drain_refusals` would then take it, record it on that turn's card, and
+    /// clear it — a hand-off nobody on that turn attempted.
+    #[tokio::test]
+    async fn a_runs_ungrounded_hand_off_is_not_recorded_on_a_chat_turns_card() {
+        let queue = DelegationQueue::default();
+        let _chat = queue.claim();
+
+        let run = queue.claim_board("run-1");
+        run.scoped(async { queue.push_refusal("marketing".to_string()) })
+            .await;
+
+        // Nothing to report on the chat turn's card: it attempted no hand-off.
+        assert_eq!(queue.refusals_queued(), 0);
+        assert!(queue.drain_refusals(MAX_DELEGATIONS_PER_TURN).is_empty());
+
+        // The run's own refusal is intact and still its own to read.
+        let seen = run
+            .scoped(async { queue.drain_refusals(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(seen, ["marketing"]);
+    }
+
+    /// Two runs and the chat cycle interleaved: each sees only its own, and
+    /// neither draining nor claiming reaches across.
+    #[tokio::test]
+    async fn two_runs_and_the_chat_cycle_neither_drain_nor_clear_each_other() {
+        let queue = DelegationQueue::default();
+
+        let _chat = queue.claim();
+        assert_eq!(stage(&queue, card("chat")), Staged::Queued);
+
+        let run_a = queue.claim_board("run-a");
+        run_a
+            .scoped(async { assert_eq!(stage(&queue, card("a")), Staged::Queued) })
+            .await;
+
+        // B claims *after* A staged — the acquire-time clear must not reach A.
+        let run_b = queue.claim_board("run-b");
+        run_b
+            .scoped(async { assert_eq!(stage(&queue, card("b")), Staged::Queued) })
+            .await;
+
+        assert_eq!(queue.queued(), 1, "the chat cycle sees only its own");
+        assert_eq!(run_a.scoped(async { queue.queued() }).await, 1);
+        assert_eq!(run_b.scoped(async { queue.queued() }).await, 1);
+
+        // Draining A takes A's and only A's.
+        let drained_a = run_a
+            .scoped(async { queue.drain(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(titles(drained_a), ["a"]);
+        assert_eq!(queue.queued(), 1);
+        assert_eq!(run_b.scoped(async { queue.queued() }).await, 1);
+
+        assert_eq!(titles(queue.drain(MAX_DELEGATIONS_PER_TURN)), ["chat"]);
+        let drained_b = run_b
+            .scoped(async { queue.drain(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(titles(drained_b), ["b"]);
+    }
+
+    /// A claim's `Drop` discards its own bucket and un-claims its own scope —
+    /// and reaches nothing else. A cancelled run's staged writes dying with the
+    /// run is the intended semantics; a chat turn's surviving it is the point.
+    #[tokio::test]
+    async fn dropping_a_claim_discards_only_its_own_bucket() {
+        let queue = DelegationQueue::default();
+
+        let _chat = queue.claim();
+        assert_eq!(stage(&queue, card("chat")), Staged::Queued);
+
+        {
+            let run = queue.claim_board("run-1");
+            run.scoped(async { assert_eq!(stage(&queue, card("run")), Staged::Queued) })
+                .await;
+            run.scoped(async { queue.push_refusal("ghost".to_string()) })
+                .await;
+        } // the run is cancelled here
+
+        // Its bucket went with it, and its scope is claimable again from
+        // scratch rather than left committed.
+        let after = CURRENT_SCOPE
+            .scope(DelegationScope::Run("run-1".to_string()), async {
+                (queue.queued(), queue.refusals_queued(), queue.claim_state())
+            })
+            .await;
+        assert_eq!(after, (0, 0, DrainClaim::Unclaimed));
+
+        // The chat turn is untouched — still claimed, still holding its card.
+        assert_eq!(queue.claim_state(), DrainClaim::Full);
+        assert_eq!(titles(queue.drain(MAX_DELEGATIONS_PER_TURN)), ["chat"]);
+    }
+
+    /// The #176 scope chain is per claimant, and its depth accounting is
+    /// unchanged by that.
+    ///
+    /// Depth is still exactly `chain.len()` and still gates a hand-off at the
+    /// bound; what it no longer does is count another claimant's nesting.
+    #[tokio::test]
+    async fn a_scope_chain_is_per_claimant_and_depth_is_unchanged() {
+        let queue = DelegationQueue::default();
+        let _chat = queue.claim();
+
+        let _outer = queue.enter_scope("design".to_string());
+        assert_eq!(queue.scope_depth(), 1);
+        assert_eq!(queue.scope_chain(), ["design"]);
+
+        let run = queue.claim_board("run-1");
+        run.scoped(async {
+            // A run opens its own chain at depth 0 however deep the chat is.
+            assert_eq!(queue.scope_depth(), 0);
+            assert!(queue.scope_chain().is_empty());
+
+            let _a = queue.enter_scope("eng".to_string());
+            let _b = queue.enter_scope("qa".to_string());
+            assert_eq!(queue.scope_depth(), 2);
+            assert_eq!(queue.scope_chain(), ["eng", "qa"]);
+        })
+        .await;
+
+        // The chat's chain is exactly as deep as it was left, and its guard
+        // popped from its own chain rather than the run's.
+        assert_eq!(queue.scope_depth(), 1);
+        assert_eq!(queue.scope_chain(), ["design"]);
+
+        // Depth still gates at the bound, counting this claimant's chain only:
+        // one level deep against a bound of 1 refuses…
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 1),
+            Staged::NoDrain(NoDrainReason::Depth)
+        );
+        // …and against a bound of 2 it stages, which a run's two levels would
+        // have blocked had they been counted here.
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 2),
+            Staged::Queued
+        );
+    }
+
+    /// The [`DrainClaim::Board`] permit matrix: both kinds a run may perform
+    /// stage, and both it may not are refused — each for its own reason.
+    #[tokio::test]
+    async fn a_board_claim_permits_cards_and_refuses_review_and_hand_off() {
+        let queue = DelegationQueue::default();
+        let run = queue.claim_board("run-1");
+
+        run.scoped(async {
+            assert_eq!(stage(&queue, card("open a card")), Staged::Queued);
+            assert_eq!(
+                stage(
+                    &queue,
+                    Delegation::AssignTask {
+                        task_id: "t1".to_string(),
+                        assignee: "design".to_string(),
+                        note: None,
+                    }
+                ),
+                Staged::Queued
+            );
+
+            // Lifecycle is the operator's lane.
+            assert_eq!(
+                stage(
+                    &queue,
+                    Delegation::ReviewTask {
+                        task_id: "t1".to_string(),
+                        decision: ReviewDecision::Approve,
+                        note: None,
+                    }
+                ),
+                Staged::NoDrain(NoDrainReason::WorkflowLifecycle)
+            );
+            // A hand-off has nowhere to put the reply it exists for.
+            assert_eq!(
+                stage(&queue, hand_off()),
+                Staged::NoDrain(NoDrainReason::WorkflowHandOff)
+            );
+        })
+        .await;
+    }
+
+    /// The refusal text is what a model reads and reacts to, so both wordings
+    /// have to name the real cause and what the run *can* do instead — and must
+    /// not be each other's.
+    #[test]
+    fn the_two_workflow_refusals_say_what_the_run_can_do_instead() {
+        let lifecycle = no_drain(
+            REVIEW_TASK_TOOL,
+            "the card was NOT reviewed",
+            NoDrainReason::WorkflowLifecycle,
+        );
+        assert!(
+            lifecycle.contains("running inside a workflow"),
+            "{lifecycle}"
+        );
+        assert!(lifecycle.contains("operator's call"), "{lifecycle}");
+        assert!(
+            lifecycle.contains("`spawn_task`") && lifecycle.contains("`assign_task`"),
+            "it must name what the run can do instead: {lifecycle}"
+        );
+        assert!(
+            !lifecycle.contains("no conversation"),
+            "the lifecycle refusal must not borrow the hand-off's cause: {lifecycle}"
+        );
+
+        let hand_off = no_drain(
+            DELEGATE_TO_DESK_TOOL,
+            "nothing was handed to the design desk",
+            NoDrainReason::WorkflowHandOff,
+        );
+        assert!(hand_off.contains("running inside a workflow"), "{hand_off}");
+        assert!(hand_off.contains("no conversation"), "{hand_off}");
+        assert!(
+            hand_off.contains("`spawn_task`"),
+            "it must name the durable alternative: {hand_off}"
+        );
+        assert!(
+            !hand_off.contains("operator's call"),
+            "the hand-off refusal must not borrow the lifecycle's cause: {hand_off}"
+        );
+
+        // Both keep the do-not-report-it-as-done half every refusal here needs.
+        for text in [&lifecycle, &hand_off] {
+            assert!(text.contains("Do not retry this call"), "{text}");
+            assert!(text.contains("do NOT report"), "{text}");
+        }
+
+        // …and they stay countable apart in the logs, from each other and from
+        // the three that came before.
+        let labels = [
+            NoDrainReason::Unwired,
+            NoDrainReason::Triage,
+            NoDrainReason::Depth,
+            NoDrainReason::WorkflowLifecycle,
+            NoDrainReason::WorkflowHandOff,
+        ]
+        .map(|r| r.as_str());
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "{labels:?}");
     }
 }
