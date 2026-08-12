@@ -87,6 +87,9 @@ impl FakeHost {
             meta: RepoMeta {
                 default_branch: "main".into(),
                 size_kb,
+                // Read-only by default: the write tier fails closed, so a test
+                // that wants a push-capable credential opts in with `pushable`.
+                can_push: false,
             },
             seen_tokens: StdMutex::new(Vec::new()),
             fail: false,
@@ -98,6 +101,13 @@ impl FakeHost {
             fail: true,
             ..Self::new(1)
         }
+    }
+
+    /// A forge whose credential the `permissions.push` probe reports as
+    /// push-capable.
+    fn pushable(mut self) -> Self {
+        self.meta.can_push = true;
+        self
     }
 }
 
@@ -776,6 +786,146 @@ async fn pull_request_without_a_forge_client_says_so() {
     assert!(
         matches!(err, OpenCompanyError::Unimplemented(_)),
         "an unwired forge must not read as an empty diff: {err:?}"
+    );
+}
+
+// -- push capability (issue #734) --------------------------------------------
+
+/// A fetch probes `permissions.push` and records a push-capable credential, and
+/// in doing so **heals a binding that predates the field** without a re-bind:
+/// `bind_local` stores no capability (unknown → cannot-push), and the fetch is
+/// where the recorded answer becomes `Some(true)`.
+#[tokio::test]
+async fn a_fetch_probes_and_records_a_push_capable_credential() {
+    let scratch = Scratch::new("push-capable");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    let mgr = mgr.with_host(Arc::new(FakeHost::new(1).pushable()));
+
+    let bound = mgr
+        .bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    // The migration precondition: a binding with no probed capability reads as
+    // cannot-push, never as "unknown, allow".
+    assert_eq!(
+        bound.can_push, None,
+        "an unprobed binding must carry no push capability"
+    );
+
+    // A credential the forge answers for is what makes the re-probe run.
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    let updated = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        updated.can_push,
+        Some(true),
+        "the fetch must record the probed push capability"
+    );
+    // And it is persisted, not merely returned.
+    let listed = mgr.get("fixture").await.unwrap();
+    assert_eq!(listed.can_push, Some(true));
+}
+
+/// A read-only credential is recorded as `Some(false)` — a definite
+/// cannot-push, distinct from the unknown `None` a pre-field binding carries.
+/// This is the value the write tier fails closed on.
+#[tokio::test]
+async fn a_fetch_records_a_read_only_credential_as_cannot_push() {
+    let scratch = Scratch::new("read-only");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    // `FakeHost::new` is read-only unless made `pushable`.
+    let mgr = mgr.with_host(Arc::new(FakeHost::new(1)));
+
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    let updated = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        updated.can_push,
+        Some(false),
+        "a read-only credential must be recorded as a definite cannot-push"
+    );
+}
+
+/// With no forge client wired, a fetch cannot probe and must leave the recorded
+/// capability untouched — an unknown stays unknown (fail-closed), never
+/// silently promoted.
+#[tokio::test]
+async fn a_fetch_without_a_forge_client_leaves_push_capability_unknown() {
+    let scratch = Scratch::new("no-host-probe");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    let updated = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        updated.can_push, None,
+        "with nothing to probe against, the capability must stay unknown"
+    );
+}
+
+/// Once the capability is known, a fetch must NOT re-probe. `fetch` runs on the
+/// agent checkout path (before every `repo_checkout`), so re-probing a known
+/// capability would add a GitHub round trip — and burn rate limit — on every
+/// checkout. Only an unknown (pre-field) capability heals; a known one is left
+/// alone. Counting the tokens the forge saw is what distinguishes "healed once"
+/// from "re-probes every time".
+#[tokio::test]
+async fn a_known_capability_is_not_re_probed_on_every_fetch() {
+    let scratch = Scratch::new("no-reprobe");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    let host = Arc::new(FakeHost::new(1).pushable());
+    let mgr = mgr.with_host(host.clone());
+
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    // First fetch: the capability is unknown (bind_local records none), so it
+    // probes exactly once and records the answer.
+    let first = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(first.can_push, Some(true));
+    assert_eq!(
+        host.seen_tokens.lock().unwrap().len(),
+        1,
+        "the first fetch heals the unknown capability with one probe"
+    );
+
+    // Second fetch: the capability is now known, so no further probe is made.
+    mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        host.seen_tokens.lock().unwrap().len(),
+        1,
+        "a known capability must not be re-probed on a subsequent fetch"
     );
 }
 

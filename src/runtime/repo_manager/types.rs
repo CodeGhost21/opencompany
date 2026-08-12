@@ -284,6 +284,18 @@ pub struct RepoBinding {
     pub size_bytes: u64,
     /// When the binding was created, in epoch milliseconds.
     pub bound_at_millis: u64,
+    /// Whether the bound credential can push, as the forge's `permissions.push`
+    /// advertised it when last probed (issue #734). Probed at bind time and
+    /// re-probed on every fetch, so a token whose scope changed heals without a
+    /// re-bind.
+    ///
+    /// `None` means **unknown** — the binding predates this field, or no forge
+    /// client was wired to probe it — and it **reads as "cannot push"**
+    /// everywhere the write tier gates on it: unknown is fail-closed, never
+    /// "allow". Serde-additive (`default`) so bindings written before this field
+    /// existed round-trip to `None` rather than failing to load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_push: Option<bool>,
 }
 
 /// The persisted index: every binding for one company, in one document.
@@ -310,6 +322,12 @@ pub struct RepoMeta {
     /// does not have to match what is advertised, which is why there is a
     /// post-fetch cap as well.
     pub size_kb: u64,
+    /// Whether the probing credential can push to this repository, as the
+    /// forge's `permissions.push` reports it (issue #734). A fine-grained
+    /// read-only PAT reports `false`; absent permissions (an unauthenticated or
+    /// malformed response) also read as `false` — the write tier fails closed on
+    /// this, so an unknown answer must never read as "can push".
+    pub can_push: bool,
 }
 
 /// A pull request's metadata plus its unified diff.
@@ -518,9 +536,39 @@ mod test {
             last_fetched_millis: Some(1),
             size_bytes: 10,
             bound_at_millis: 1,
+            can_push: None,
         };
         let json = serde_json::to_string(&binding).unwrap();
         assert!(!json.contains("SENTINEL"), "{json}");
         assert!(json.contains("tokenFingerprint"), "{json}");
+        // An unknown capability is omitted rather than written as `null`, so an
+        // older build reading this document is unaffected.
+        assert!(!json.contains("canPush"), "{json}");
+    }
+
+    /// A binding persisted before `can_push` existed (issue #734) must load with
+    /// the field absent → `None` → cannot-push: the document round-trips rather
+    /// than failing to deserialize, and an unknown capability never reads as
+    /// "allow". Re-probe on the next fetch is what then heals it to a definite
+    /// answer.
+    #[test]
+    fn a_binding_written_before_can_push_deserializes_as_unknown() {
+        // Exactly the shape an older build wrote: no `canPush` key at all.
+        let legacy = r#"{
+            "key": "acme-widgets",
+            "url": "https://github.com/acme/widgets",
+            "owner": "acme",
+            "repo": "widgets",
+            "branches": ["main"],
+            "tokenFingerprint": "0f1e2d3c4b5a",
+            "lastFetchedMillis": 1,
+            "sizeBytes": 10,
+            "boundAtMillis": 1
+        }"#;
+        let binding: RepoBinding = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            binding.can_push, None,
+            "an absent capability must read as unknown (cannot-push), not a load failure"
+        );
     }
 }

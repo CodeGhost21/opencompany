@@ -195,6 +195,15 @@ impl RepoHost for HttpRepoHost {
                 .unwrap_or("main")
                 .to_string(),
             size_kb: json.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            // `permissions` is present only on an authenticated read (it always
+            // is here — the token is a per-call argument). A missing block, or a
+            // missing `push` key, reads as `false`: the write tier fails closed,
+            // so an absent answer must never be mistaken for "can push".
+            can_push: json
+                .get("permissions")
+                .and_then(|p| p.get("push"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
         })
     }
 

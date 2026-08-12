@@ -193,6 +193,33 @@ pub fn grants_repo_explicit(grants: &[String]) -> bool {
         .any(|grant| grant == "repo" || grant.starts_with("repo."))
 }
 
+/// Whether a tool-grant list **explicitly** grants the repository *write* tier
+/// (issue #734) — the tier under which an agent's work can be pushed to a real
+/// remote and opened as a pull request.
+///
+/// This is the tightest predicate on this surface, and deliberately tighter than
+/// **both** of its neighbours. Do not "harmonise" it back toward either shape:
+///
+/// * Unlike [`grants_repo_explicit`], a **bare `repo` grant confers nothing
+///   here.** Every company adopting the read tier writes bare `repo`; if that
+///   silently carried push, a company that asked for agents *reading* code would
+///   get agents *pushing* it — exactly the outcome issue #247's write tier exists
+///   to prevent. Read and write are separate decisions, so they are separate
+///   grants. Widening this to the `repo` / `repo.*` shape reintroduces that
+///   footgun.
+/// * Unlike [`grants_workspace_write_explicit`], not even a *bare namespace*
+///   token confers it: only the **exact** string `repo.write` does. `repo`,
+///   `repo.read`, any other `repo.*` sub-grant, and the catch-all `*` all confer
+///   nothing. Matching a `repo.write` *prefix* (`starts_with`) would let a stray
+///   `repo.writer` slip through; the exact-string match is the point.
+///
+/// Lives here (always compiled) so the feature-gated harness wiring
+/// (`build::build_agent`) and always-compiled tooling share one source of truth,
+/// as with the read predicate above.
+pub fn grants_repo_write_explicit(grants: &[String]) -> bool {
+    grants.iter().any(|grant| grant == "repo.write")
+}
+
 /// Whether a tool-grant list **explicitly** grants writes to the company
 /// workspace (issue #237).
 ///
@@ -908,6 +935,37 @@ mod test {
         // A substring match must not count as the repo namespace.
         assert!(!grants_repo_explicit(&["reporting".into()]));
         assert!(!grants_repo_explicit(&["repository".into()]));
+    }
+
+    /// The repository *write* tier (issue #734) is conferred ONLY by the exact
+    /// string `repo.write` — never a bare `repo`, never a `repo.write` prefix,
+    /// never the catch-all `*`. Read and write are separate decisions.
+    #[test]
+    fn repo_write_is_conferred_only_by_the_exact_grant() {
+        assert!(grants_repo_write_explicit(&["repo.write".into()]));
+        assert!(grants_repo_write_explicit(&[
+            "web.*".into(),
+            "repo.write".into()
+        ]));
+        // The catch-all `*` must NOT grant write.
+        assert!(!grants_repo_write_explicit(&["*".into()]));
+        // A read grant is genuinely read-only.
+        assert!(!grants_repo_write_explicit(&["repo.read".into()]));
+        assert!(!grants_repo_write_explicit(&["repo.checkout".into()]));
+        assert!(!grants_repo_write_explicit(&[]));
+        // A prefix match must not count: `repo.writer` is not `repo.write`.
+        assert!(!grants_repo_write_explicit(&["repo.writer".into()]));
+    }
+
+    /// **The regression this predicate exists to prevent.** Every company
+    /// adopting the read tier writes bare `repo`; that must confer read tools
+    /// (`grants_repo_explicit`) and **not** push (`grants_repo_write_explicit`),
+    /// so a company reading code never silently gains agents pushing it. Named so
+    /// its purpose survives a refactor that "harmonises" the two predicates.
+    #[test]
+    fn bare_repo_confers_read_but_not_write() {
+        assert!(grants_repo_explicit(&["repo".into()]));
+        assert!(!grants_repo_write_explicit(&["repo".into()]));
     }
 
     /// `repo` is a budgetable namespace, so a `[plan].token_budgets` key of
