@@ -73,7 +73,8 @@ max_delegation_depth = 2           # how deep one message's hand-off chain may r
                                    # 1 = desks may not re-delegate at all; 1..=4
 
 [policy]                           # see company-brain/approvals.md
-mode = "supervised"                # readonly | supervised (default) | auto | full
+mode = "supervised"                # readonly | supervised | auto | full
+                                   # parse default supervised; new companies get auto
 always_approve = ["publish_artifact"]   # default []; names a tool or an open
                                    # effect kind — see approvals.md
 auto_approve_under_usd = 1.0
@@ -238,7 +239,13 @@ prompt = "Weekly review and operator digest"
   outward reads run unattended, anything that leaves the company or spends on
   submit still parks). `always_approve` lists effect kinds that park for
   approval regardless of amount and wins over every tier including `full`;
-  `auto_approve_under_usd` lets small spends through. **A tool name is an
+  `auto_approve_under_usd` lets small spends through. The parse default is
+  `supervised`, with all money/publish/filing effects gated — but a **new**
+  company is given `auto`, written into its manifest explicitly rather than
+  left to that default. See
+  [approvals.md](../company-brain/approvals.md#which-tier-a-new-company-gets)
+  for why those are two separate knobs, and why moving the parse default is the
+  one thing issue #605 declined to do. **A tool name is an
   effect kind** — the harness projects one onto the other — so
   `["publish_artifact"]` and `["payment.send"]` are the same syntax at
   different segment counts (issue #684). Operator-authored effect kinds remain

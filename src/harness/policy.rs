@@ -1611,27 +1611,20 @@ mod tests {
         use crate::ports::approvals::ApprovalGate;
         use crate::ports::types::PolicyDecision;
 
-        // A leading segment, an exact dotted kind, a bare tool name, a case
-        // variant, and — last — a name the fence deliberately does NOT gate.
+        // A leading segment, an exact dotted kind, a bare tool name, an
+        // unrelated declared tool that must NOT be gated, and a case variant.
         //
-        // Every name here is one the tier itself has no opinion about under
-        // `full`, so the only thing that can make the two paths disagree is the
-        // fence. A priced name like `web_search` would drag the harness's
+        // Every name here is one both paths leave to the fence: the tier has no
+        // opinion about it under `full`, **and** it is a declared, non-priced
+        // tool, so the per-call judgement (issue #338) is silent on it too — the
+        // thing that used to make a not-gated name diverge after `full` decided
+        // to allow was that undeclared tools stop under the judgement. The
+        // near-miss the segment boundary exists to exclude (`payment` vs
+        // `payroll.export`) stopped fitting here once the judge began stopping
+        // undeclared tools; that boundary is pinned in `always_approve::test`
+        // instead. A priced name like `web_search` would drag the harness's
         // metered-read and budget arms into a comparison that is not about
-        // `always_approve`, so it is deliberately absent.
-        //
-        // The un-gated control is `file_write`, not the `payroll.export`
-        // near-miss the shared matcher's own tests use. The harness path has
-        // one layer the native gate does not — the per-call judgement arm
-        // (issue #338), which fail-closes an *undeclared* call that is not a
-        // pure read. `payroll.export` is undeclared, so the harness parks it
-        // for that reason alone; the gate is effect-level and mode-driven, so
-        // under `full` it allows it. That divergence is the documented shape of
-        // the two layers, not an `always_approve` disagreement, and an
-        // assertion demanding agreement on it is exactly the one that goes
-        // stale the next time #338's net widens. It is pinned separately below.
-        // `file_write` is declared, grantable and fence-ungated, so both paths
-        // agree on it with nothing to do.
+        // `always_approve`, so it is deliberately absent here.
         let fence = &["payment", "filing.submit", "publish_artifact"];
         let names = [
             "payment.send",
@@ -1639,7 +1632,7 @@ mod tests {
             "filing.submit",
             "publish_artifact",
             "PUBLISH_ARTIFACT",
-            "file_write",
+            "workspace_read",
         ];
 
         // `full` on both sides, so the tier decides nothing and any parking
@@ -1693,7 +1686,7 @@ mod tests {
         ));
         assert_eq!(
             harness
-                .check(&request("file_write", serde_json::json!({})))
+                .check(&request("workspace_read", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow
         );

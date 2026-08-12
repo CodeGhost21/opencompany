@@ -84,6 +84,48 @@ pub(crate) fn hide_contents(approval: &mut ApprovalSummary) {
     approval.contents_hidden = true;
 }
 
+/// The same rule applied to the **executed** effects on a task's detail read
+/// (issue #705).
+///
+/// #618 restricted the money on an approval — the effect a person has *not yet*
+/// signed off. The identical amount on the effect once it has run was projected
+/// by a different DTO on a different route, and that route was never covered:
+/// any Member could `GET` a card and read the dollar value of every irreversible
+/// effect on it.
+///
+/// It lives here, beside [`for_principal`], rather than in the task module,
+/// because the thing that must not fork is the *rule*. A second redactor in the
+/// tasks route could drift from this one, and two role checks disagreeing about
+/// what an operator may see is worse than the leak either was written to close.
+///
+/// Takes `may_read_contents` rather than the principal because
+/// [`ScopedCompany`](crate::server::ops::ScopedCompany) deliberately drops the
+/// role at the edge, carrying this decision forward instead — see the field's
+/// own note. The decision is still made by
+/// [`may_read_approval_contents`] and nowhere else.
+///
+/// Takes the whole list, like [`for_principal`], so a caller cannot apply it to
+/// some entries and forget others.
+pub(crate) fn effects_for_principal(
+    may_read_contents: bool,
+    mut effects: Vec<crate::server::ops::tasks::IrreversibleEffect>,
+) -> Vec<crate::server::ops::tasks::IrreversibleEffect> {
+    if may_read_contents {
+        return effects;
+    }
+    for effect in &mut effects {
+        // `amount_hidden` only where something was actually withheld: an effect
+        // that never carried money must not report itself as redacted, or
+        // "nothing to show" and "not shown to you" stop being distinguishable
+        // in the direction that matters.
+        if effect.amount_usd.is_some() {
+            effect.amount_usd = None;
+            effect.amount_hidden = true;
+        }
+    }
+    effects
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

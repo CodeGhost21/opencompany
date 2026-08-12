@@ -87,9 +87,9 @@ pub use types::{
     Connection, DEFAULT_ALWAYS_APPROVE, DEFAULT_MAX_DELEGATION_DEPTH, DEFAULT_MAX_IN_FLIGHT_RUNS,
     DEFAULT_SEARCH_DAILY_CALLS, GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS,
     Inference, KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, McpServer, ORCHESTRATOR_TIER,
-    PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, Place, Plan, Policy, Schedule, Skill, TIERS,
-    TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit, grants_repo_explicit,
-    grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
+    PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule,
+    Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit,
+    grants_repo_explicit, grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,

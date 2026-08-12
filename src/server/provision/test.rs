@@ -1145,3 +1145,119 @@ async fn webhook_emitted_on_approval_requested() {
     assert!(!approval.1.is_empty());
     assert!(approval.1.starts_with("kh1="));
 }
+
+// ---------------------------------------------------------------------------
+// Issue #605 — the tier a provisioned company is recorded on
+// ---------------------------------------------------------------------------
+
+/// The tier `id` was persisted with, read back off the stored record rather
+/// than off the response.
+///
+/// The record is what matters here: it is the manifest a rebuild re-reads and
+/// the only place a platform-provisioned tenant's tier is written down at all,
+/// since it has no `company.toml` anywhere on disk.
+async fn recorded_mode(state: &AppState, id: &str) -> String {
+    let id = CompanyId::new(id);
+    let runtime = state.registry().get(&id).expect("company is registered");
+    runtime
+        .store()
+        .load(&id)
+        .await
+        .expect("store readable")
+        .expect("record exists")
+        .manifest
+        .policy
+        .mode
+}
+
+/// Issue #605: a company provisioned from a manifest that names no tier is
+/// recorded on `auto`, explicitly.
+///
+/// This is the one creation path with no template behind it — `serve` and the
+/// desktop app both read a `companies/*/company.toml`, and every shipped preset
+/// declares `mode`. So this is where the "new companies get `auto`" half of
+/// #605 is actually delivered.
+///
+/// Asserting `auto` is also what pins the change as *doing something*: the serde
+/// default is still `supervised`, deliberately (see `Policy::mode`), so a
+/// regression that dropped the provisioning write would record `supervised`
+/// here and fail rather than quietly reverting the feature.
+#[tokio::test]
+async fn a_provisioned_company_with_no_stated_tier_is_recorded_on_auto() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    let app = router(state.clone());
+
+    let response = app
+        .oneshot(provision_req(
+            Some(PLATFORM_SECRET),
+            "[company]\nname = \"Acme\"\n",
+        ))
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+
+    assert_eq!(
+        recorded_mode(&state, "acme").await,
+        crate::company::PROVISIONED_POLICY_MODE,
+        "a manifest that states no tier must be recorded on the provisioning \
+         default, explicitly — not left to the serde default"
+    );
+    assert_ne!(
+        crate::company::PROVISIONED_POLICY_MODE,
+        crate::company::Policy::default().mode,
+        "if these ever coincide this test proves nothing — it would pass with \
+         the provisioning write deleted"
+    );
+}
+
+/// ...and a manifest that *does* state a tier keeps it, whichever tier it is.
+///
+/// **Preserve, never widen**, which is the property the whole of #605 turns on.
+/// Walked over `POLICY_MODES` rather than spot-checked, so a fifth tier cannot
+/// silently escape the guarantee the way `auto` escaped the prose tier lists in
+/// #660: the day someone adds one, this covers it without being edited.
+///
+/// `supervised` is the sharp case and the reason this is a walk and not a single
+/// `readonly` assertion — it is the value the serde default *also* produces, so
+/// a broken "did the author declare a mode?" check is invisible on every other
+/// tier and caught only here.
+#[tokio::test]
+async fn a_provisioned_company_keeps_whatever_tier_it_states() {
+    let home_dir = home();
+    let state = platform_state(home_dir.path(), None);
+    let app = router(state.clone());
+
+    let mut checked = 0;
+    for mode in crate::company::POLICY_MODES {
+        let name = format!("Acme {mode}");
+        let manifest = format!("[company]\nname = \"{name}\"\n[policy]\nmode = \"{mode}\"\n");
+        let response = app
+            .clone()
+            .oneshot(provision_req(Some(PLATFORM_SECRET), &manifest))
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::CREATED,
+            "provisioning `{mode}` failed"
+        );
+
+        let id = json_body(response).await["id"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        assert_eq!(
+            recorded_mode(&state, &id).await,
+            *mode,
+            "`{mode}` was stated in the manifest and must survive provisioning \
+             untouched"
+        );
+        checked += 1;
+    }
+    assert_eq!(
+        checked,
+        crate::company::POLICY_MODES.len(),
+        "the walk skipped a tier"
+    );
+}
