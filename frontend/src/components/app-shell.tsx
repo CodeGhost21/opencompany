@@ -1043,7 +1043,19 @@ export function AppShell({
           {view === "overview" && (
             <Overview client={client} company={company} />
           )}
-          {view === "company" && <OrgChartView client={client} company={company} />}
+          {view === "company" && (
+            <OrgChartView
+              client={client}
+              company={company}
+              // Issue #485: chat's member pane links in at a desk
+              // (`#/company/<deskId>`), which needs the hash's second segment
+              // to reach this view at all — it was dropped here, so the chart
+              // had no per-desk address to link to. `useHashView` hands the
+              // segment back unvalidated, so the chart resolves an unknown id
+              // itself rather than this shell guessing which desks exist.
+              focusDeskId={sub}
+            />
+          )}
           {view === "chat" && (
             <ChatView
               client={client}
