@@ -2480,6 +2480,56 @@ mod tests {
         }
     }
 
+    /// Issue #661 (M5): the synchronous run response carries the run's board
+    /// rows, in the same camelCase shape the journal event and the history route
+    /// use — so a console that pressed Run learns what the run did to the board
+    /// without a second read.
+    ///
+    /// The omission half matters as much: a run that touched no card must send no
+    /// `board` key, so every existing caller's body is byte-unchanged.
+    #[test]
+    fn the_run_response_carries_board_rows_and_omits_them_when_empty() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-1".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: vec![crate::ports::WorkflowRunBoardRow {
+                action: crate::ports::WorkflowBoardAction::Assigned,
+                task_id: Some("card-1".into()),
+                title: None,
+                assignee: Some("ceo".into()),
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["board"][0]["action"], "assigned");
+        assert_eq!(json["board"][0]["taskId"], "card-1");
+        assert_eq!(json["board"][0]["assignee"], "ceo");
+        assert!(
+            json["board"][0].get("title").is_none(),
+            "an assign row names no title — the console resolves it by id: {json}"
+        );
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-2".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+        })
+        .expect("serialize");
+        assert!(
+            json.get("board").is_none(),
+            "a run that touched no card sends no board key: {json}"
+        );
+    }
+
     /// The run response carries `deliveries` in camelCase — this is the ONLY
     /// place an operator learns a report was not delivered, since a delivery
     /// failure never fails the run.

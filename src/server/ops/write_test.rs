@@ -8401,3 +8401,136 @@ async fn the_export_document_is_built_from_the_redacted_detail() {
         "the exported document must not carry an amount this reader may not read"
     );
 }
+
+// ── Issue #661 (M5): the console's two new reads ───────────────────────────
+
+/// A run's board rows reach `GET …/workflows/runs`.
+///
+/// This is the surface PR3's console history panel consumes, and the only one a
+/// **scheduled** run has: nobody awaited its response, so without this the sole
+/// evidence a 3am run opened a card is the card itself, with nothing saying
+/// which run put it there.
+///
+/// Asserted through the real route and the real group-by-run fold, because the
+/// fold is where a row can be dropped — a `WorkflowRunFinished` that settles an
+/// open entry writes every field across, and one missing line there is invisible
+/// to a serialization test.
+#[tokio::test]
+async fn the_run_history_carries_a_runs_board_rows() {
+    use crate::ports::types::CompanyEvent;
+    use crate::ports::{WorkflowBoardAction, WorkflowRunBoardRow};
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    for event in [
+        CompanyEvent::WorkflowRunStarted {
+            workflow_id: "digest".into(),
+            run_id: "run-1".into(),
+            scheduled: true,
+        },
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: true,
+            run_id: Some("run-1".into()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: vec![WorkflowRunBoardRow {
+                action: WorkflowBoardAction::Spawned,
+                task_id: Some("card-1".into()),
+                title: Some("Reply to the auditor".into()),
+                assignee: None,
+            }],
+        },
+        // A second run that touched no card, so the omission is asserted on a
+        // real row rather than on an absence that could be the fold failing.
+        CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".into(),
+            scheduled: false,
+            run_id: Some("run-2".into()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+        },
+    ] {
+        runtime.events().append(&company, event).await.unwrap();
+    }
+
+    let (status, runs) = send(&state, "GET", "/api/v1/company/workflows/runs", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let runs = runs.as_array().expect("an array of runs");
+
+    let settled = runs
+        .iter()
+        .find(|r| r["runId"] == "run-1")
+        .unwrap_or_else(|| panic!("run-1 must be in the history: {runs:?}"));
+    assert_eq!(settled["board"][0]["action"], "spawned");
+    assert_eq!(settled["board"][0]["taskId"], "card-1");
+    assert_eq!(settled["board"][0]["title"], "Reply to the auditor");
+
+    let untouched = runs
+        .iter()
+        .find(|r| r["runId"] == "run-2")
+        .unwrap_or_else(|| panic!("run-2 must be in the history: {runs:?}"));
+    assert!(
+        untouched["board"].is_null(),
+        "a run that touched no card must omit the key entirely, so every existing history row's \
+         wire shape is unchanged: {untouched}"
+    );
+}
+
+/// A card opened by a run carries its provenance onto the board read, and a card
+/// opened any other way is byte-unchanged.
+///
+/// The second half is the compatibility claim and needs its own card rather than
+/// a re-read of the first: `skip_serializing_if` is what keeps every card the
+/// board rendered before #661 identical, and only an actually-absent field
+/// proves it.
+#[tokio::test]
+async fn a_card_opened_by_a_run_projects_its_provenance() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let company = CompanyId::new("acme");
+    let runtime = state.registry().get(&company).unwrap();
+
+    let mut from_run = discussion_card("t-run", "Reply to the auditor");
+    from_run.origin_run_id = Some("run-1".to_string());
+    from_run.origin_workflow_id = Some("digest".to_string());
+    runtime.tasks().upsert(&company, &from_run).await.unwrap();
+    runtime
+        .tasks()
+        .upsert(&company, &discussion_card("t-hand", "Opened by hand"))
+        .await
+        .unwrap();
+
+    let (status, body) = send(&state, "GET", "/api/v1/company/tasks", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let cards = body["tasks"].as_array().expect("an array of cards");
+
+    let from_run = cards
+        .iter()
+        .find(|c| c["id"] == "t-run")
+        .unwrap_or_else(|| panic!("the run's card must be on the board: {cards:?}"));
+    assert_eq!(from_run["originRunId"], "run-1");
+    assert_eq!(from_run["originWorkflowId"], "digest");
+
+    let by_hand = cards
+        .iter()
+        .find(|c| c["id"] == "t-hand")
+        .unwrap_or_else(|| panic!("the hand-opened card must be on the board: {cards:?}"));
+    assert!(
+        by_hand["originRunId"].is_null() && by_hand["originWorkflowId"].is_null(),
+        "a card no run opened must carry neither key, so the board's existing wire shape is \
+         unchanged: {by_hand}"
+    );
+}
