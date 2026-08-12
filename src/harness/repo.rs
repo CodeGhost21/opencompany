@@ -68,6 +68,7 @@
 //!   output, and #244's nudge must never ask an agent whether somebody else's
 //!   repository is a deliverable.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
@@ -135,16 +136,46 @@ const HOST_TRUNCATION_MARKER: &str = "[truncated:";
 /// The default is an empty ledger. A path recorded on a ledger nobody claims is
 /// simply never deleted by the janitor — the boot sweep is the backstop for
 /// exactly that case, so the failure mode is disk, not correctness.
+///
+/// # A second list, because a checkout must outlive an approval park (issue #796)
+///
+/// The `inner` list is turn-scoped: the janitor drains it however the turn ends,
+/// which is right for a checkout a plain turn made and finished with. But the
+/// write tier (#247/#735) needs a checkout to survive across the operator
+/// approving intermediate steps — `repo_checkout` → edit → `git_operations`
+/// commit → `repo_publish` are each a `Reach::Consequence` step that **parks**
+/// under supervision, and a park ends the turn. With one list the commit the
+/// publish depends on is deleted between the parked steps, and the chain
+/// deadlocks (issue #796); the contract these tools state — "deleted at **task**
+/// end" (#245 §5, #247 §7) — was never actually honoured.
+///
+/// So a checkout a task turn parked with is moved from `inner` into `retained`
+/// under that task's id ([`retain_for_task`](Self::retain_for_task)), where the
+/// janitor cannot reach it; the resumed turn moves it back
+/// ([`reclaim`](Self::reclaim)); and it is deleted only when the task truly ends
+/// ([`purge_task`](Self::purge_task)) or its parked grant is denied/expired,
+/// caught lazily by [`sweep_orphans`](Self::sweep_orphans). Keying on the task
+/// is what stops an unrelated chat turn sharing this ledger from either purging
+/// or inheriting a parked task's tree.
 #[derive(Clone, Debug, Default)]
 pub struct CheckoutLedger {
     inner: Arc<Mutex<Vec<PathBuf>>>,
     /// The task the current turn runs under (issue #735) — what names the
     /// `oc/<company>/<task>` branch `repo_publish` pushes to. Held on the cell
     /// the repository tools already share and the turn's entry point already
-    /// claims, rather than as a second `HarnessDeps` field: the task and the
-    /// checkouts have the exact same per-turn lifetime. `None` on a turn with no
-    /// card, where `repo_publish` refuses (issue #735 ships task turns only).
+    /// claims, rather than as a second `HarnessDeps` field. `None` on a turn with
+    /// no card, where `repo_publish` refuses (issue #735 ships task turns only).
+    ///
+    /// The task and a turn-scoped checkout no longer share one lifetime: issue
+    /// #796 lets a task's checkout outlive the turn across an approval park, held
+    /// in `retained` under this same id.
     task: Arc<Mutex<Option<String>>>,
+    /// Checkouts held across an approval park, keyed by the task that parked
+    /// (issue #796). Off the turn-scoped `inner` list the janitor drains, so a
+    /// park cannot delete them; drained by [`purge_task`](Self::purge_task) at
+    /// task end and by [`sweep_orphans`](Self::sweep_orphans) when the grant that
+    /// would resume them is gone.
+    retained: Arc<Mutex<HashMap<String, Vec<PathBuf>>>>,
 }
 
 impl CheckoutLedger {
@@ -166,6 +197,19 @@ impl CheckoutLedger {
         if !guard.contains(&path) {
             guard.push(path);
         }
+    }
+
+    /// Whether `path` is already on the turn-scoped list (issue #796).
+    ///
+    /// True when a resumed step [`reclaim`](Self::reclaim)ed this checkout onto
+    /// the active list, or when the same turn already materialized it — either
+    /// way, re-cloning over it would delete the agent's own commits, so
+    /// `repo_checkout` reuses it instead.
+    pub fn has_active(&self, path: &Path) -> bool {
+        self.inner
+            .lock()
+            .expect("checkout ledger")
+            .contains(&path.to_path_buf())
     }
 
     /// The paths recorded so far, without emptying.
@@ -197,6 +241,121 @@ impl CheckoutLedger {
             }
         }
         removed
+    }
+
+    /// Moves the turn-scoped list into the retained set under `task` (issue
+    /// #796), so the turn's janitor no longer deletes it.
+    ///
+    /// Called when a task turn ends by **parking** — an approval it raised will
+    /// resume the same task in a later turn, and the checkout the resumed step
+    /// operates on must still be there. Idempotent and additive: a second park
+    /// of the same task merges the new paths in rather than replacing the set,
+    /// so a checkout retained by an earlier park survives a later one.
+    pub fn retain_for_task(&self, task: &str) {
+        let taken = {
+            let mut guard = self.inner.lock().expect("checkout ledger");
+            std::mem::take(&mut *guard)
+        };
+        if taken.is_empty() {
+            return;
+        }
+        let mut retained = self.retained.lock().expect("checkout ledger retained");
+        let slot = retained.entry(task.to_string()).or_default();
+        for path in taken {
+            if !slot.contains(&path) {
+                slot.push(path);
+            }
+        }
+    }
+
+    /// Moves a task's retained checkouts back onto the turn-scoped list (issue
+    /// #796), so the resuming turn owns them again and its janitor deletes them
+    /// if the task now finishes without parking again.
+    ///
+    /// The inverse of [`retain_for_task`](Self::retain_for_task). A no-op when
+    /// the task retained nothing, which is the ordinary case for a resumed step
+    /// that never touched a repository.
+    pub fn reclaim(&self, task: &str) {
+        let paths = self
+            .retained
+            .lock()
+            .expect("checkout ledger retained")
+            .remove(task)
+            .unwrap_or_default();
+        if paths.is_empty() {
+            return;
+        }
+        let mut guard = self.inner.lock().expect("checkout ledger");
+        for path in paths {
+            if !guard.contains(&path) {
+                guard.push(path);
+            }
+        }
+    }
+
+    /// Deletes a task's retained checkouts and forgets them (issue #796),
+    /// returning how many paths were removed.
+    ///
+    /// The task-end counterpart of [`purge`](Self::purge): where `purge` drains
+    /// the turn-scoped list, this drains one task's held-across-park set. Same
+    /// best-effort deletion — a path that will not delete is logged and
+    /// forgotten, and the boot sweep is the backstop.
+    pub fn purge_task(&self, task: &str) -> usize {
+        let paths = self
+            .retained
+            .lock()
+            .expect("checkout ledger retained")
+            .remove(task)
+            .unwrap_or_default();
+        let mut removed = 0;
+        for path in paths {
+            match remove_path(&path) {
+                Ok(()) => removed += 1,
+                Err(err) => tracing::warn!(
+                    path = %path.display(),
+                    task = %task,
+                    "[repo] could not remove a retained checkout at task end: {err}"
+                ),
+            }
+        }
+        removed
+    }
+
+    /// Deletes every retained checkout whose task no longer has a live grant
+    /// (issue #796), returning how many paths were removed.
+    ///
+    /// This is the deny/expire cleanup, done lazily from the harness rather than
+    /// coupled into the runtime's approval path: a task's tree sits in
+    /// `retained` **with no live grant** only after the parked approval was
+    /// denied or expired — while it is being resumed it has been
+    /// [`reclaim`](Self::reclaim)ed onto the turn-scoped list, and while it waits
+    /// for the operator its grant is live. So "retained, and `is_live` says no"
+    /// is exactly the orphaned set. Called at each turn's janitor claim, where
+    /// both this ledger and the live grant set are in reach.
+    pub fn sweep_orphans(&self, is_live: impl Fn(&str) -> bool) -> usize {
+        let orphaned: Vec<String> = {
+            let retained = self.retained.lock().expect("checkout ledger retained");
+            retained
+                .keys()
+                .filter(|task| !is_live(task))
+                .cloned()
+                .collect()
+        };
+        orphaned.iter().map(|task| self.purge_task(task)).sum()
+    }
+
+    /// The tasks currently holding a retained checkout (tests / observability).
+    #[cfg(test)]
+    pub fn retained_tasks(&self) -> Vec<String> {
+        let mut tasks: Vec<String> = self
+            .retained
+            .lock()
+            .expect("checkout ledger retained")
+            .keys()
+            .cloned()
+            .collect();
+        tasks.sort();
+        tasks
     }
 }
 
@@ -683,6 +842,31 @@ impl Tool for RepoCheckoutTool {
         }
 
         let dest = self.context.checkout_root().join(&binding.key);
+        // Issue #796: if this task already holds this checkout — reclaimed from
+        // an earlier parked step, or materialized earlier in this same turn —
+        // reuse it rather than re-cloning. `materialize` removes the destination
+        // first, which on a resumed step would delete exactly the commits the
+        // pending publish depends on. The guard is the ledger's active list, so a
+        // first checkout still clones and refreshes from the mirror as before.
+        if self.context.ledger.has_active(&dest)
+            && dest.is_dir()
+            && let Ok(out) = git::run(&dest, &["rev-parse", "HEAD"], None, None).await
+            && let Ok(head) = out.require("git rev-parse")
+        {
+            let relative = format!("{CHECKOUT_SUBDIR}/{}", binding.key);
+            tracing::debug!(
+                repo = %binding.key,
+                path = %relative,
+                head = %head,
+                "[repo] reused a checkout held across an approval"
+            );
+            return Ok(ToolResult::success(format!(
+                "You already have {}/{} checked out at commit {head} in `{relative}` — the working \
+                 tree from before the operator approved this step, with your commits intact. \
+                 Continue working there; do not re-clone. It is removed when this task ends.",
+                binding.owner, binding.repo
+            )));
+        }
         // Recorded BEFORE the clone, not after it: a materialize that fails
         // half-way has still created bytes, and a ledger written on the success
         // path only would leak exactly the checkouts nobody wants left behind.

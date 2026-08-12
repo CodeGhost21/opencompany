@@ -551,6 +551,110 @@ fn purging_a_path_that_is_already_gone_succeeds() {
     assert_eq!(ledger.purge(), 1);
 }
 
+/// A checkout retained for a task survives the turn's purge, comes back on
+/// reclaim, and is deleted by the turn's janitor only once the task finishes —
+/// the lifecycle that lets a checkout outlive an approval park (issue #796).
+#[test]
+fn a_retained_checkout_survives_a_purge_and_returns_on_reclaim() {
+    let scratch = Scratch::new("retain");
+    let tree = scratch.join("held");
+    std::fs::create_dir_all(&tree).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(tree.clone());
+    assert!(ledger.has_active(&tree));
+
+    // Parked: move it off the turn-scoped list, under the task.
+    ledger.retain_for_task("t-1");
+    assert!(
+        !ledger.has_active(&tree),
+        "retain left it on the active list"
+    );
+    assert_eq!(ledger.retained_tasks(), vec!["t-1".to_string()]);
+
+    // The turn's janitor now purges nothing — the tree is held.
+    assert_eq!(ledger.purge(), 0);
+    assert!(
+        tree.is_dir(),
+        "a retained checkout was purged with the turn"
+    );
+
+    // Resumed: reclaim brings it back under the turn's janitor.
+    ledger.reclaim("t-1");
+    assert!(ledger.has_active(&tree));
+    assert!(ledger.retained_tasks().is_empty());
+
+    // ...and now the janitor deletes it, the task having finished.
+    assert_eq!(ledger.purge(), 1);
+    assert!(!tree.exists());
+}
+
+/// `purge_task` deletes a task's held checkout directly — the task-end path,
+/// where the work resumed and finished rather than being reclaimed by a turn.
+/// A second call, or an unknown task, is a no-op.
+#[test]
+fn purge_task_deletes_a_held_checkout() {
+    let scratch = Scratch::new("purge-task");
+    let tree = scratch.join("held");
+    std::fs::create_dir_all(&tree).unwrap();
+    let ledger = CheckoutLedger::default();
+    ledger.record(tree.clone());
+    ledger.retain_for_task("t-1");
+
+    assert_eq!(ledger.purge_task("t-1"), 1);
+    assert!(!tree.exists());
+    assert!(ledger.retained_tasks().is_empty());
+    assert_eq!(ledger.purge_task("t-1"), 0);
+    assert_eq!(ledger.purge_task("nope"), 0);
+}
+
+/// `sweep_orphans` deletes a held checkout the moment no live grant names its
+/// task — the denied/expired cleanup — and leaves a task still awaiting its
+/// resume alone (issue #796).
+#[test]
+fn sweep_orphans_purges_only_tasks_with_no_live_grant() {
+    let scratch = Scratch::new("sweep-orphans");
+    let live = scratch.join("live");
+    let dead = scratch.join("dead");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::create_dir_all(&dead).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(live.clone());
+    ledger.retain_for_task("t-live");
+    ledger.record(dead.clone());
+    ledger.retain_for_task("t-dead");
+
+    // Only `t-live` still has a grant behind it.
+    let removed = ledger.sweep_orphans(|task| task == "t-live");
+    assert_eq!(removed, 1);
+    assert!(live.is_dir(), "a task still awaiting its resume was swept");
+    assert!(!dead.exists(), "an orphaned task's checkout survived");
+    assert_eq!(ledger.retained_tasks(), vec!["t-live".to_string()]);
+}
+
+/// A second park of the same task merges its paths in rather than replacing the
+/// set, so a checkout retained by the first park survives the second (issue
+/// #796).
+#[test]
+fn retaining_a_task_twice_keeps_both_checkouts() {
+    let scratch = Scratch::new("retain-twice");
+    let first = scratch.join("first");
+    let second = scratch.join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(first.clone());
+    ledger.retain_for_task("t-1");
+    ledger.record(second.clone());
+    ledger.retain_for_task("t-1");
+
+    assert_eq!(ledger.purge_task("t-1"), 2);
+    assert!(!first.exists());
+    assert!(!second.exists());
+}
+
 /// The boot sweep removes every agent's `workspace/repos` under **this**
 /// company and leaves its siblings — the tenant-scoping that keeps one
 /// company's boot from deleting another's bytes.
