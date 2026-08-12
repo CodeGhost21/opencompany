@@ -1307,6 +1307,8 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
             .get("head")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // The card this publish belongs to, so a host-side failure can be reported
+        // on it.
         let task = effect
             .payload
             .get("task")
@@ -1328,8 +1330,36 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                  configured to perform it",
             ));
         };
-        // The push is the irreversible half: its failure fails the effect.
-        repos.push_published(repo, branch, head).await?;
+        // The push is the irreversible half, and it fails the effect — but never
+        // silently (issue #815). A failed push leaves the effect recorded as
+        // executed (the at-most-once guard), so re-approving is a no-op; the
+        // operator has to KNOW it failed and re-run the task, or the publish
+        // vanishes with the change staged in the mirror and nothing on the remote.
+        if let Err(err) = repos.push_published(repo, branch, head).await {
+            tracing::warn!(branch, "[repo] could not publish the branch: {err}");
+            if !task.is_empty() {
+                let note = format!(
+                    "Could not publish `{branch}` to the remote: {err}. Nothing reached the \
+                     remote, and this approval will not retry on its own \u{2014} re-run the task \
+                     to publish again."
+                );
+                if let Err(e) = rt
+                    .events
+                    .append(
+                        &rt.id,
+                        CompanyEvent::TaskDiscussionPosted {
+                            task_id: task.to_string(),
+                            text: note,
+                            by: None,
+                        },
+                    )
+                    .await
+                {
+                    tracing::warn!("[repo] could not record the push failure on the task: {e}");
+                }
+            }
+            return Err(err);
+        }
 
         // Issue #736: open a pull request for the pushed branch, best-effort. The
         // push has landed, so a PR failure must NOT fail the effect — the branch
@@ -1352,8 +1382,8 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
                 if !task.is_empty() {
                     let note = format!(
                         "Published `{branch}` to the remote, but the pull request could not be \
-                         opened: {err}. The branch is on the remote — open a PR from it by hand, \
-                         or approve another publish to retry."
+                         opened: {err}. The branch is on the remote \u{2014} open a PR from it by \
+                         hand, or approve another publish to retry."
                     );
                     if let Err(e) = rt
                         .events
