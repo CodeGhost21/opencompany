@@ -444,6 +444,15 @@ commits, namespaced branches, operator approval — is a separate follow-up, and
 the confinement above is arranged so that adding it is an explicit new capability
 rather than a hole that was already open.
 
+Its groundwork (issue #734) has landed without opening that path: a `repo.write`
+grant now exists — distinct from and tighter than `repo`, so a bare `repo` (the
+read tier every company sets) never confers it and the catch-all `*` never
+confers it — and each binding records whether its bound credential can push, read
+from the forge's `permissions.push` at bind time and healed on the next fetch
+when it is still unknown. Granting `repo.write` over a read-only credential is
+fail-closed: it warns and wires nothing. No tool consumes either yet; they are
+what the push follow-up will gate on.
+
 Also absent: a distinct uid or read-only bind mount for the agent shell (the real
 filesystem boundary, named under ["The honest limit"](#the-honest-limit)), and
 forges other than GitHub.
