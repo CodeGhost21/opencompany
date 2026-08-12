@@ -102,6 +102,24 @@ export const DESTINATION_KINDS: { value: WorkflowDestination["kind"]; label: str
   { value: "channel", label: "Channel — a wired chat channel" },
 ];
 
+/**
+ * The collapsed-form label for a stored destination value.
+ *
+ * The output node's destination `Select` stores `node.destinationKind` — or the
+ * `"__none__"` sentinel when unset, because a `Select` item cannot carry an
+ * empty string. base-ui renders the raw stored value in the collapsed control
+ * unless it is given explicit text, so without this the trigger showed a bare
+ * `__none__` while the open list showed a friendly label. Maps the sentinel and
+ * every {@link DESTINATION_KINDS} value to its prosumer label; an unrecognized
+ * value falls back to itself. Issue #813.
+ */
+export function destinationLabel(value: string): string {
+  if (value === "__none__" || value === "") {
+    return "Nowhere (run result only)";
+  }
+  return DESTINATION_KINDS.find((kind) => kind.value === value)?.label ?? value;
+}
+
 /** A directed edge between two node ids, with an optional branch label. */
 export interface WorkflowEdge {
   from: string;
