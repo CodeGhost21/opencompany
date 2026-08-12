@@ -824,6 +824,38 @@ fn validate_tool_call_node(node: &RawNode, record: &CompanyRecord) -> Result<()>
     Ok(())
 }
 
+/// The wired `tool_call` slugs this company can actually reach from a workflow,
+/// for grounding the create-time copilot (issue #753).
+///
+/// It is the exact companion of [`validate_tool_call_node`]'s grant half: a slug
+/// survives here iff that gate would accept it — its namespace covered by
+/// `[tools].allow`, with the priced `search` family requiring an **explicit**
+/// `search` grant (a `*` wildcard never confers it). So the tools the copilot
+/// shows the model are precisely the ones a proposed `tool_call` node will clear
+/// at courtesy validation, and the two cannot drift: both read
+/// [`WORKFLOW_TOOL_SLUGS`](crate::workflows::caps) (itself pinned to
+/// `namespace_of`) and both apply the same grant rule.
+///
+/// Gated with the copilot it serves — the only caller is
+/// `crate::harness::workflow_build`, and the grant helpers live behind the
+/// `openhuman` feature, so in the default build this would be dead code over
+/// symbols that are not compiled.
+#[cfg(feature = "openhuman")]
+pub(crate) fn workflow_callable_tool_slugs(record: &CompanyRecord) -> Vec<String> {
+    let grants = &record.manifest.tools.allow;
+    crate::workflows::caps::WORKFLOW_TOOL_SLUGS
+        .iter()
+        .filter(|(_slug, namespace)| {
+            if *namespace == "search" {
+                crate::company::grants_search_explicit(grants)
+            } else {
+                crate::harness::build::grants_cover(grants, namespace)
+            }
+        })
+        .map(|(slug, _namespace)| (*slug).to_string())
+        .collect()
+}
+
 /// An opaque version token for a stored overlay body: the hex SHA-256 of the
 /// TOML exactly as persisted.
 ///
