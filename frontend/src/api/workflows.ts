@@ -341,6 +341,19 @@ export interface WorkflowRunOutcome {
    * and absent must read as "not cancelled".
    */
   cancelled?: boolean;
+  /**
+   * System notices raised about this run (issue #638) — today, that a node
+   * gated more tool calls than the per-batch cap allows and the excess was
+   * discarded.
+   *
+   * NOT a failure. A run that overflowed the cap still succeeded: its nodes
+   * ran and its output is valid. Render it as a warning beside the outcome,
+   * never as an error, or a run that worked reads as one that broke.
+   *
+   * Omitted on the wire for the overwhelming majority of runs, which raise
+   * nothing — so absent must read as "nothing to tell you", not "unknown".
+   */
+  notices?: string[];
 }
 
 export function listWorkflows(

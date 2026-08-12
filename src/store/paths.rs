@@ -215,6 +215,21 @@ impl Bundle {
         self.dir.join("events.jsonl")
     }
 
+    /// The company's repository mirror cache (issue #245).
+    ///
+    /// The same location
+    /// [`DataLayout::company_repos_dir`](crate::store::DataLayout::company_repos_dir)
+    /// names — resolved through the bundle so [`slug`] is applied in exactly one
+    /// place, rather than by a caller that would have to reimplement it.
+    ///
+    /// Note what it is *not*: bundle content. Nothing in the fs store reads or
+    /// creates it, and on a mongodb tenant no other part of this directory
+    /// exists at all. It shares the prefix so a company's whole footprint stays
+    /// in one subtree and one quota walk.
+    pub fn repos_dir(&self) -> PathBuf {
+        self.dir.join("repos")
+    }
+
     /// Path to the append-only ledger.
     pub fn ledger_jsonl(&self) -> PathBuf {
         self.dir.join("ledger.jsonl")

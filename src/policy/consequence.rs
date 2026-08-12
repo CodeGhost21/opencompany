@@ -485,6 +485,37 @@ const DECLARED: &[Declared] = &[
         EffectGroup::Identity,
         Reach::Consequence,
     ),
+    // ---- Bound repositories -------------------------------------------------
+    // Issue #245's agent half. The classification is re-derived rather than
+    // borrowed from the nearest-looking neighbour, because both names read like
+    // reads and neither is one in the sense this table means.
+    //
+    // `Consequence`, not `Nothing`, for two reasons that hold independently:
+    //
+    //  1. **Both pull third-party-authored content into the agent's context.**
+    //     A repository's source and a pull request's diff are written by people
+    //     outside this company, and the agent is about to reason over them. That
+    //     is the same shape as `web_fetch` — which is `Consequence` for exactly
+    //     this reason — not the shape of reading the company's own notes.
+    //  2. **Both reach the forge host-side under the operator's credential.**
+    //     `repo_checkout` refreshes the mirror over the network before it
+    //     clones; `repo_pr` is a GitHub API call. An agent deciding when a
+    //     company's credential is used is a decision an operator would want to
+    //     have seen.
+    //
+    // `repo_checkout` additionally materializes thousands of files into a
+    // sandbox the same agent may hold `shell` over, which is why it is denied
+    // under `readonly` — a tier whose contract is that nothing changes cannot
+    // admit a tool whose whole purpose is to write a tree.
+    //
+    // `PerCall` for both, and this is the part a future edit is most likely to
+    // want to loosen: a standing grant here would be a week of unattended
+    // "check out anything bound, whenever you like", which is precisely the
+    // permission the `Standing` field refuses to describe. `EffectGroup::Other`
+    // because there is no consequence word for it — the label and the
+    // permission are separate answers (issue #444).
+    d("repo_checkout", EffectGroup::Other, Reach::Consequence),
+    d("repo_pr", EffectGroup::Other, Reach::Consequence),
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
@@ -912,6 +943,11 @@ mod tests {
             "media_generate_video",
             "mcp_call_tool",
             "run_workflow",
+            // Issue #245: both reach a forge under the company's credential and
+            // pull third-party-authored content into the agent's context, and
+            // one of them writes a tree.
+            "repo_checkout",
+            "repo_pr",
             "some_tool_nobody_declared",
         ] {
             assert!(
@@ -987,6 +1023,8 @@ mod tests {
             "run_workflow",
             "mcp_call_tool",
             "mcp_registry_tool_call",
+            "repo_checkout",
+            "repo_pr",
         ] {
             assert_eq!(
                 c(tool).standing,
@@ -1514,5 +1552,130 @@ mod tests {
                 "`{name}` is a live tool constant with no declaration"
             );
         }
+    }
+
+    /// Where the console keeps the words an operator reads instead of a tool
+    /// name. Named once so both the parser and every failure message point at
+    /// the same file.
+    const LANGUAGE_TS: &str = "frontend/src/lib/language.ts";
+
+    /// The keys of one object literal in [`LANGUAGE_TS`].
+    ///
+    /// A line parser rather than the two alternatives, and the reasons are the
+    /// same ones that make this a `cargo test` at all:
+    ///
+    /// * a **checked-in generated manifest** of the declared set would give the
+    ///   contract two failure sites and a window between the declaration commit
+    ///   and the regenerate commit where nothing is wrong;
+    /// * a **CI grep** would have no local signal for the Rust contributor who
+    ///   adds the next `Reach::Consequence` line — and that is who introduced
+    ///   all three instances of this defect (#372, #551 → #671, now #701).
+    ///
+    /// It is deliberately literal about the shape it accepts: an object literal
+    /// opened by `const <NAME>` on a line ending in `{` and closed by a `};`
+    /// line. Anything else panics rather than returning a short list, because a
+    /// parser that silently reads nothing turns this test into a green light
+    /// for the exact regression it exists to catch — see the vacuity guards in
+    /// [`every_consequence_tool_has_a_console_label`].
+    fn label_keys(source: &str, decl: &str) -> Vec<String> {
+        let mut lines = source.lines();
+        let opened = lines.any(|line| {
+            let line = line.trim_start();
+            line.starts_with(&format!("const {decl}")) && line.ends_with('{')
+        });
+        assert!(
+            opened,
+            "no `const {decl} … {{` line in {LANGUAGE_TS}. If the table was \
+             renamed or reshaped, update this parser — do not delete the test"
+        );
+
+        let mut keys = Vec::new();
+        for line in lines {
+            let line = line.trim();
+            if line == "};" {
+                return keys;
+            }
+            if line.is_empty() || line.starts_with("//") || line.starts_with('*') {
+                continue;
+            }
+            let Some((key, _)) = line.split_once(':') else {
+                continue;
+            };
+            keys.push(key.trim().trim_matches('"').to_string());
+        }
+        panic!("`const {decl}` in {LANGUAGE_TS} is never closed by a `}};` line");
+    }
+
+    /// Every tool that reaches an operator resolves to a sentence, not to
+    /// "Use one of its tools" (issue #701).
+    ///
+    /// The console's `approvalAction` resolves `EFFECT_LABELS` → `TOOL_LABELS`
+    /// → a generic fallback, so a gated tool in neither table asks an operator
+    /// to consent to "use one of its tools" — the #372 defect. It has now
+    /// recurred three times, and every time the commit that caused it was a
+    /// Rust one adding a `Reach::Consequence` declaration with no reason to
+    /// open the frontend at all. So the coupling belongs here, next to
+    /// [`DECLARED`], where that contributor's `cargo test` reports it.
+    ///
+    /// Scoped to the whole [`Reach::Consequence`] class rather than to the
+    /// per-call subset. The grantable ones (`file_write`, `edit`,
+    /// `apply_patch`, `csv_export`) park exactly the same way, and they are
+    /// *also* the ones issue #374's Standing-permissions list renders through
+    /// `toolAction` with no payload block to disambiguate them. A test scoped
+    /// to `Standing::PerCall` would ship blind to four instances of the class
+    /// it exists to kill.
+    #[test]
+    fn every_consequence_tool_has_a_console_label() {
+        let source = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/frontend/src/lib/language.ts"
+        ));
+        let effects = label_keys(source, "EFFECT_LABELS");
+        let tools = label_keys(source, "TOOL_LABELS");
+
+        // Vacuity guards. A parse that quietly returned nothing would report
+        // every gated tool as unlabelled — noisy, and therefore self-correcting.
+        // A parse that quietly returned *the wrong block* would report none of
+        // them, which is the failure that matters: the test would pass forever
+        // while the console regressed. These anchors are entries with no reason
+        // to move, so a reformat of `language.ts` breaks here loudly instead.
+        for anchor in ["payment.send", "workflow.approve"] {
+            assert!(
+                effects.iter().any(|k| k == anchor),
+                "parsed EFFECT_LABELS from {LANGUAGE_TS} without `{anchor}` — \
+                 the parser is reading the wrong block, not the table shrinking"
+            );
+        }
+        for anchor in ["shell", "workspace_create"] {
+            assert!(
+                tools.iter().any(|k| k == anchor),
+                "parsed TOOL_LABELS from {LANGUAGE_TS} without `{anchor}` — \
+                 the parser is reading the wrong block, not the table shrinking"
+            );
+        }
+        assert!(
+            effects.len() >= 15 && tools.len() >= 10,
+            "parsed only {} EFFECT_LABELS and {} TOOL_LABELS keys from \
+             {LANGUAGE_TS}; both tables are larger than that, so the parser is \
+             stopping early",
+            effects.len(),
+            tools.len()
+        );
+
+        let mut unlabelled: Vec<&str> = declared_tools()
+            .filter(|tool| c(tool).reach.parks_under_supervision())
+            .filter(|tool| !effects.iter().any(|k| k == tool) && !tools.iter().any(|k| k == tool))
+            .collect();
+        unlabelled.sort_unstable();
+        assert!(
+            unlabelled.is_empty(),
+            "{unlabelled:?} park for an operator but have no entry in either \
+             label map in {LANGUAGE_TS}, so their approval card reads \"Use one \
+             of its tools\". Add each to TOOL_LABELS — a gated tool's label \
+             only ever appears above the payload block, which is what \
+             EFFECT_LABELS entries do not assume and why its \
+             EFFECT_DONE_LABELS mirror would demand a past-tense twin these \
+             kinds never reach"
+        );
     }
 }

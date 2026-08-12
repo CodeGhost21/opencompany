@@ -360,17 +360,29 @@ impl DrainedRequests {
     /// and that assertion is #561's real guarantee — the cap quoted is the one
     /// the drain was taken against, never a constant the call site had lying
     /// around. Rewording around it beat loosening it.
+    ///
+    /// # Agreement
+    ///
+    /// Every countable word in the sentence branches on `n`, verbs and pronouns
+    /// included — a single discard reads "1 further gated tool call was not
+    /// raised … It was not run". Only the nouns branched at first, so the one
+    /// case an operator is most likely to hit read as "1 … call **were** not
+    /// raised". The sentence exists to be believed; ungrammatical is a reason
+    /// not to believe it.
     pub fn overflow_notice(&self) -> Option<String> {
         (self.discarded > 0).then(|| {
             let n = self.discarded;
             let cap = self.cap;
             let calls = if n == 1 { "call" } else { "calls" };
             let them = if n == 1 { "it" } else { "them" };
+            let were = if n == 1 { "was" } else { "were" };
+            let they = if n == 1 { "It" } else { "They" };
+            let they_are = if n == 1 { "it is" } else { "they are" };
             format!(
-                "Heads up: {n} further gated tool {calls} were not raised for approval. One \
+                "Heads up: {n} further gated tool {calls} {were} not raised for approval. One \
                  batch can raise at most {cap}, and {n} more needed your sign-off than that. \
-                 They were **not** run and they are **not** on the Approvals page — ask the \
-                 agent again to get {them} back."
+                 {they} {were} **not** run and {they_are} **not** on the Approvals page — ask \
+                 the agent again to get {them} back."
             )
         })
     }
@@ -824,13 +836,23 @@ impl ApprovalPolicy {
         self.budget_usd_daily
     }
 
-    /// Whether `kind` is in the manifest's `always_approve` list. Matches either
-    /// the exact dotted kind or a leading segment (so `payment` matches
-    /// `payment.send`).
+    /// Whether `kind` is in the manifest's `always_approve` list.
+    ///
+    /// Delegates to [`always_approve::matches`](crate::policy::always_approve::matches)
+    /// so this path and the native-effect gate
+    /// ([`ManifestApprovalGate`](crate::policy::ManifestApprovalGate)) read one
+    /// rule. They used to hold two: this one matched the exact kind or a
+    /// leading segment, the gate matched exactly — so `always_approve =
+    /// ["payment"]` gated a tool call here and silently missed the
+    /// identically-named native effect there (issue #684).
+    ///
+    /// `kind` is the tool name on this path, which is not a coincidence to
+    /// paper over: [`effect_for`](Self::effect_for) below projects a flagged
+    /// call onto an [`Effect`] by making the tool name the effect kind
+    /// verbatim, so the two namespaces the issue describes are one namespace
+    /// read twice.
     fn always_requires_approval(&self, kind: &str) -> bool {
-        self.always_approve
-            .iter()
-            .any(|entry| entry == kind || kind.starts_with(&format!("{entry}.")))
+        crate::policy::always_approve::matches(&self.always_approve, kind)
     }
 
     /// Best-effort USD amount carried by a tool call's arguments, from either an
@@ -1568,6 +1590,102 @@ mod tests {
         ));
     }
 
+    /// The two approval paths must decide the same operator list the same way
+    /// (issue #684).
+    ///
+    /// This is the assertion whose absence let the defect ship. Each path had
+    /// its own matcher and its own tests, and each path's tests passed: the
+    /// native gate matched dotted kinds exactly, this one matched tool names
+    /// with a leading-segment rule, and nothing anywhere compared them. So
+    /// `always_approve = ["payment"]` parked here and waved through there, and
+    /// the shipped default — three dotted kinds, no tool names — was live on
+    /// the gate and inert on the harness, which is the path a company using the
+    /// openhuman toolbelt actually runs.
+    ///
+    /// It asserts agreement rather than a fixed verdict per path deliberately.
+    /// Pinning "the harness parks `payment`" would go green again the moment
+    /// the two implementations drifted apart in the other direction.
+    #[tokio::test]
+    async fn both_approval_paths_agree_on_the_same_always_approve_list() {
+        use crate::policy::ManifestApprovalGate;
+        use crate::ports::approvals::ApprovalGate;
+        use crate::ports::types::PolicyDecision;
+
+        // A leading segment, an exact dotted kind, a bare tool name, a
+        // near-miss that must NOT be gated, and a case variant.
+        //
+        // Every name here is one the tier itself has no opinion about under
+        // `full`, so the only thing that can make the two paths disagree is the
+        // fence. A priced name like `web_search` would drag the harness's
+        // metered-read and budget arms into a comparison that is not about
+        // `always_approve`, so it is deliberately absent.
+        let fence = &["payment", "filing.submit", "publish_artifact"];
+        let names = [
+            "payment.send",
+            "payment",
+            "filing.submit",
+            "publish_artifact",
+            "PUBLISH_ARTIFACT",
+            "payroll.export",
+        ];
+
+        // `full` on both sides, so the tier decides nothing and any parking
+        // observed is the override's doing.
+        let harness = policy("full", fence, None);
+        let gate = ManifestApprovalGate::new(Policy {
+            mode: "full".to_string(),
+            always_approve: fence.iter().map(|s| s.to_string()).collect(),
+            auto_approve_under_usd: None,
+        });
+
+        let mut agreed = 0;
+        for name in names {
+            let harness_parks = matches!(
+                harness.check(&request(name, serde_json::json!({}))).await,
+                ToolPolicyDecision::RequireApproval { .. }
+            );
+            let effect = Effect {
+                kind: name.to_string(),
+                group: EffectGroup::Other,
+                amount_usd: None,
+                established_thread: false,
+                first_time_counterparty: false,
+                payload: serde_json::Value::Null,
+                agent: None,
+                run_id: None,
+            };
+            let gate_parks = matches!(
+                gate.evaluate(&CompanyId::new("acme"), &effect)
+                    .await
+                    .unwrap(),
+                PolicyDecision::RequireApproval
+            );
+            assert_eq!(
+                harness_parks, gate_parks,
+                "`{name}` parks on one approval path and not the other — \
+                 one operator list, two answers (issue #684)"
+            );
+            agreed += 1;
+        }
+        assert_eq!(agreed, names.len(), "every name must have been compared");
+
+        // Non-vacuity: the comparison above is only worth something if the
+        // fence actually separates these names. Two paths that both allowed
+        // everything would agree perfectly and prove nothing.
+        assert!(matches!(
+            harness
+                .check(&request("payment.send", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        assert_eq!(
+            harness
+                .check(&request("payroll.export", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::Allow
+        );
+    }
+
     /// Issue #560's contract, stated as the operator reads it: the agent works
     /// without interrupting me, and stops before anything that leaves the
     /// building or spends money.
@@ -1623,6 +1741,11 @@ mod tests {
             ("mcp_registry_tool_call", serde_json::json!({})),
             ("run_workflow", serde_json::json!({})),
             ("composio_authorize", serde_json::json!({})),
+            // Issue #245: a checkout writes a tree of third-party source into a
+            // sandbox this agent may also hold `shell` over, and both tools
+            // reach the forge under the company's credential.
+            ("repo_checkout", serde_json::json!({})),
+            ("repo_pr", serde_json::json!({})),
             (
                 "composio_execute",
                 serde_json::json!({ "tool": "GMAIL_SEND_EMAIL" }),
@@ -1820,6 +1943,53 @@ mod tests {
                 .group,
             EffectGroup::Spend
         );
+    }
+
+    /// What string a per-call **tool** gate actually puts in front of an
+    /// operator (issue #701).
+    ///
+    /// The issue could not answer this from the frontend, and declined to
+    /// invent labels without it — rightly: a card whose job is informed consent
+    /// is worse off with a label naming the wrong action than with a vague one.
+    /// The answer is that a tool gate parks under the tool's own raw name.
+    /// [`ApprovalPolicy::require_approval`] is the only construction site for a
+    /// `RequireApproval` decision, it builds its request through
+    /// [`ApprovalPolicy::effect_for`], and that sets `kind` to `tool_name`
+    /// verbatim; `CompanyRuntime::pending_approvals` — the only projection
+    /// point for an `ApprovalSummary` — copies it through unchanged.
+    ///
+    /// Two of the seven invite the opposite guess, so both are pinned here
+    /// rather than argued in prose:
+    ///
+    /// * `publish_artifact` does **not** park as `external.publish`. That kind
+    ///   exists only as a native workflow-gate class and a `DEFAULT_ALWAYS_APPROVE`
+    ///   entry; `harness::publish` builds no effect and touches no gate.
+    /// * `run_workflow` does **not** park as `workflow.approve`. That kind is a
+    ///   workflow *resuming* mid-run (issue #395, `WORKFLOW_APPROVE_KIND`),
+    ///   which is a different event from an agent asking to start one.
+    ///
+    /// So all seven need entries in the console's tool-label table, and this
+    /// test is what stops that answer decaying back into a guess.
+    #[test]
+    fn parked_kind_is_the_tool_name() {
+        let p = policy("supervised", &[], None);
+        for tool in [
+            "curl",
+            "git_operations",
+            "http_request",
+            "mcp_call_tool",
+            "publish_artifact",
+            "read_workspace_state",
+            "run_workflow",
+        ] {
+            assert_eq!(
+                p.effect_for(tool, &serde_json::json!({})).kind,
+                tool,
+                "`{tool}` parks under a kind the console's tool-label table does \
+                 not key on; the label added for it in `language.ts` is now \
+                 unreachable"
+            );
+        }
     }
 
     /// Per-tenant Composio (issue #110): the read tools are read-only (allowed
@@ -2058,6 +2228,61 @@ mod tests {
         ] {
             assert_eq!(
                 full.check(&request(tool, serde_json::json!({}))).await,
+                ToolPolicyDecision::Allow,
+                "{tool} under full mode"
+            );
+        }
+    }
+
+    /// The repository pair across all four tiers (issue #245), asserted as a
+    /// line rather than as four independent facts.
+    ///
+    /// `readonly` **denies** rather than parks, and that is the one verdict here
+    /// worth arguing: both names read like reads. `repo_checkout` writes
+    /// thousands of files into the agent's sandbox, which a tier whose whole
+    /// contract is "nothing changes" cannot admit; `repo_pr` reaches a third
+    /// party under the company's credential, which is the other half of the same
+    /// contract. Parking either under `readonly` would be worse than denying,
+    /// because openhuman resolves a `RequireApproval` inline and never
+    /// re-dispatches — the operator would approve a call that then does not run.
+    ///
+    /// The parked request's `kind` is checked too, because the console's plain
+    /// language table is keyed on exactly that string: a `kind` that is not the
+    /// tool name silently falls through to "Use one of its tools".
+    #[tokio::test]
+    async fn the_repository_pair_parks_under_supervision_and_is_denied_read_only() {
+        let args = serde_json::json!({ "repo": "acme/widgets" });
+        for mode in ["supervised", "auto"] {
+            let p = policy(mode, &[], None);
+            for tool in ["repo_checkout", "repo_pr"] {
+                let decision = p.check(&request(tool, args.clone())).await;
+                let ToolPolicyDecision::RequireApproval { .. } = decision else {
+                    panic!("{tool} must park under {mode}, got {decision:?}");
+                };
+                assert_eq!(
+                    p.effect_for(tool, &args).kind,
+                    tool,
+                    "the approval card's kind must be the tool name, or the console \
+                     cannot label it"
+                );
+            }
+        }
+
+        let readonly = policy("readonly", &[], None);
+        for tool in ["repo_checkout", "repo_pr"] {
+            assert!(
+                matches!(
+                    readonly.check(&request(tool, args.clone())).await,
+                    ToolPolicyDecision::Deny { .. }
+                ),
+                "{tool} must be denied under readonly, not parked"
+            );
+        }
+
+        let full = policy("full", &[], None);
+        for tool in ["repo_checkout", "repo_pr"] {
+            assert_eq!(
+                full.check(&request(tool, args.clone())).await,
                 ToolPolicyDecision::Allow,
                 "{tool} under full mode"
             );
@@ -2406,12 +2631,40 @@ mod tests {
     }
 
     /// One dropped request reads as one, not as "1 calls".
+    ///
+    /// The nouns agreed from the start; the verbs and pronouns did not, so a
+    /// single discard read "1 further gated tool call **were** not raised …
+    /// **They were** not run and **they are** not on the Approvals page". The
+    /// whole sentence has to agree, not the countable nouns in it — an operator
+    /// reading a confidently-worded, ungrammatical notice has cause to wonder
+    /// what else about it is stale.
     #[test]
     fn the_overflow_notice_is_singular_for_a_single_dropped_request() {
         let drained = DrainedRequests::new(Vec::new(), 1, 8);
         let notice = drained.overflow_notice().expect("one is still an overflow");
         assert!(notice.contains("1 further gated tool call "), "{notice}");
         assert!(!notice.contains("calls"), "{notice}");
+        assert!(notice.contains("call was not raised"), "{notice}");
+        assert!(notice.contains("It was **not** run"), "{notice}");
+        assert!(notice.contains("it is **not** on the"), "{notice}");
+        assert!(!notice.contains("were"), "{notice}");
+        assert!(!notice.contains("they"), "{notice}");
+        assert!(!notice.contains("They"), "{notice}");
+    }
+
+    /// …and the plural is untouched: the agreement fix must not singularise the
+    /// case that was already right.
+    #[test]
+    fn the_overflow_notice_stays_plural_for_several_dropped_requests() {
+        let drained = DrainedRequests::new(Vec::new(), 3, 8);
+        let notice = drained.overflow_notice().expect("three is an overflow");
+        assert!(
+            notice.contains("3 further gated tool calls were not"),
+            "{notice}"
+        );
+        assert!(notice.contains("They were **not** run"), "{notice}");
+        assert!(notice.contains("they are **not** on the"), "{notice}");
+        assert!(!notice.contains(" was "), "{notice}");
     }
 
     /// The notice names the cap the drain was actually taken against, not one a
@@ -3730,6 +3983,10 @@ mod tests {
             // Anything a remote server chooses to advertise.
             "mcp_registry_tool_call",
             "mcp_call_tool",
+            // Third-party source and diffs, fetched under the operator's
+            // credential (issue #245).
+            "repo_checkout",
+            "repo_pr",
             // Named consequences, unchanged.
             "composio_authorize",
             "pay_invoice",

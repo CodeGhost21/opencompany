@@ -259,14 +259,19 @@ fn dto_from_decl(
 }
 
 /// Every roster agent's *effective* tool grants (issue #568), as
-/// `(agent_id, grants)`. The roster is exactly what the harness builds in
+/// `(agent_id, grants)`.
+///
+/// `pub(super)` since issue #245: the repositories surface answers the same
+/// question about a different namespace ("who can read this?"), and a second
+/// roster walk beside this one is exactly how the two consoles would come to
+/// disagree with each other and with the harness. The roster is exactly what the harness builds in
 /// `build_roster`: the manifest agents (each with its own `tools` narrowed by
 /// the company `allow`), plus the promoted overlay teammates. An overlay
 /// teammate has no manifest `tools` row, so it inherits the full company `allow`
 /// — the standard grant `overlay_agent_to_manifest` gives it — and an overlay id
 /// already claimed by a manifest agent is skipped, both mirroring the harness so
 /// console reachability equals what an agent is actually granted.
-fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
+pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
     let mut grants: Vec<(String, Vec<String>)> = record
         .manifest

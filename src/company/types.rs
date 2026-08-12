@@ -57,8 +57,41 @@ pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 /// Channels the runtime knows how to enable under `[channels.*]`.
 pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
 
-/// Effect kinds gated for approval by default under a `supervised` policy.
-pub const DEFAULT_ALWAYS_APPROVE: &[&str] = &["payment.send", "filing.submit", "external.publish"];
+/// Effect kinds gated for approval by default — **empty on purpose** (issue
+/// #684).
+///
+/// This shipped as `["payment.send", "filing.submit", "external.publish"]`, and
+/// the promise it read as was not one the runtime kept. `always_approve` wins
+/// over every tier including `full`, so a company shipping the default believed
+/// payments, filings and publishing were gated. On the **harness** path —
+/// the one every company using the openhuman toolbelt runs — the list is
+/// matched against the tool name, and none of those three names a tool, so
+/// nothing was gated at all.
+///
+/// The list is now matched by one shared rule on both paths
+/// ([`always_approve::matches`](crate::policy::always_approve::matches)), and it
+/// ships empty rather than being repaired, for three reasons:
+///
+/// * **Two of the three name capabilities this product does not have.** There
+///   is no payment tool and no `Sign`-group tool in the declaration table, and
+///   nothing outside test code emits either kind. A default cannot gate a
+///   capability that does not exist.
+/// * **The third must not be defaulted.** The real name behind
+///   `external.publish` is `publish_artifact`, and issue #658 ruled that `full`
+///   publishes unattended — an operator who wants otherwise writes
+///   `always_approve = ["publish_artifact"]`. Defaulting it would overturn that
+///   ruling silently.
+/// * **It costs no protection.** The default mode is `supervised`, and
+///   `ManifestApprovalGate::evaluate_supervised` already parks every `Spend`,
+///   `Sign` and `Publish` effect on its own. The three entries added nothing to
+///   the default configuration; they only ever mattered under `auto` and
+///   `full`, tiers an operator opts into for unattended operation.
+///
+/// An operator who wants a specific gate still writes one. Operator-authored
+/// effect kinds remain open-ended because a hosted brain may emit a kind this
+/// repository has never seen; see [`crate::policy::always_approve`] for why a
+/// registry-based validator would reject working custom fences.
+pub const DEFAULT_ALWAYS_APPROVE: &[&str] = &[];
 
 /// Priorities a company may assign to a prioritized `[[connection]]`.
 pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
@@ -71,8 +104,8 @@ pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
 /// maps individual tools onto these namespaces. A `[plan].token_budgets` key
 /// outside this set is a manifest error. Lives here (not the feature-gated
 /// harness) so manifest validation can see it in the default build.
-pub const GATEABLE_NAMESPACES: [&str; 7] = [
-    "shell", "code", "web", "subagent", "media", "composio", "search",
+pub const GATEABLE_NAMESPACES: [&str; 8] = [
+    "shell", "code", "web", "subagent", "media", "composio", "search", "repo",
 ];
 
 /// Whether a tool-grant list **explicitly** grants the real-money `media`
@@ -122,6 +155,27 @@ pub fn grants_search_explicit(grants: &[String]) -> bool {
     grants
         .iter()
         .any(|grant| grant == "search" || grant.starts_with("search."))
+}
+
+/// Whether a tool-grant list **explicitly** grants the bound-repository `repo`
+/// namespace (issue #245, agent half).
+///
+/// Like [`grants_media_explicit`], [`grants_composio_explicit`] and
+/// [`grants_search_explicit`], the catch-all `*` does **not** confer it, and the
+/// reason is sharper here than for any of them: `repo_checkout` materializes a
+/// third party's source — and, through `repo_pr`, a third party's patch — inside
+/// an agent's sandbox, where the same agent may also hold `shell`. That is a
+/// company deciding to let its agents read real code under an operator-installed
+/// credential, and a decision of that size is made by name rather than inherited
+/// from a wildcard set for file and shell tools.
+///
+/// Matches the bare `repo` grant or any `repo.*` sub-grant. Lives here (always
+/// compiled) so both the feature-gated harness wiring (`build::build_agent`) and
+/// the always-compiled console capability route key off one source of truth.
+pub fn grants_repo_explicit(grants: &[String]) -> bool {
+    grants
+        .iter()
+        .any(|grant| grant == "repo" || grant.starts_with("repo."))
 }
 
 /// Whether a tool-grant list **explicitly** grants writes to the company
@@ -615,7 +669,18 @@ pub struct Policy {
     /// decision rather than a rider on adding the tier.
     #[serde(default = "default_policy_mode")]
     pub mode: String,
-    /// Effect kinds that always park for approval regardless of amount.
+    /// Effect kinds that always park for approval regardless of amount, and
+    /// regardless of tier — this list wins over `full`.
+    ///
+    /// A tool name is an effect kind (the harness projects one onto the other),
+    /// so `["publish_artifact"]` and `["payment.send"]` are the same syntax at
+    /// different segment counts. Matched by
+    /// [`always_approve::matches`](crate::policy::always_approve::matches) on
+    /// both approval paths (issue #684). Native effect kinds are open-ended, so
+    /// configured entries are not restricted to this build's declared tools.
+    ///
+    /// Defaults to [`DEFAULT_ALWAYS_APPROVE`], which is empty — see there for
+    /// why.
     #[serde(default = "default_always_approve")]
     pub always_approve: Vec<String>,
     /// Spends strictly under this many USD skip approval.
@@ -793,6 +858,32 @@ mod test {
         assert!(!grants_composio_explicit(&[]));
         // A substring match must not count as the composio namespace.
         assert!(!grants_composio_explicit(&["composiotools".into()]));
+    }
+
+    /// Bound repositories (issue #245, agent half) are granted ONLY by an
+    /// explicit `repo` / `repo.*` grant — never by the catch-all `*`. A
+    /// `repo_checkout` puts a third party's source inside a sandbox an agent may
+    /// also hold `shell` over, so a wildcard set for file and shell tools must
+    /// not carry it in.
+    #[test]
+    fn repo_grant_requires_explicit_namespace_not_wildcard() {
+        assert!(grants_repo_explicit(&["repo".into()]));
+        assert!(grants_repo_explicit(&["repo.checkout".into()]));
+        assert!(grants_repo_explicit(&["web.*".into(), "repo".into()]));
+        // The catch-all `*` must NOT grant repo.
+        assert!(!grants_repo_explicit(&["*".into()]));
+        assert!(!grants_repo_explicit(&["web.*".into()]));
+        assert!(!grants_repo_explicit(&[]));
+        // A substring match must not count as the repo namespace.
+        assert!(!grants_repo_explicit(&["reporting".into()]));
+        assert!(!grants_repo_explicit(&["repository".into()]));
+    }
+
+    /// `repo` is a budgetable namespace, so a `[plan].token_budgets` key of
+    /// that name is accepted rather than rejected as unknown.
+    #[test]
+    fn repo_is_a_gateable_namespace() {
+        assert!(GATEABLE_NAMESPACES.contains(&"repo"));
     }
 
     /// The `[tools.composio]` sub-section parses its toolkit allowlist and an

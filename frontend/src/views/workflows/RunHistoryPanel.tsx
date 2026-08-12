@@ -300,6 +300,31 @@ function RunHistoryRow({
           Finished — this run routed no reports.
         </p>
       )}
+      {/* Issue #638. Rendered ALONGSIDE the outcome above rather than as one
+          more branch of it, because a notice is not a terminal state — a run
+          can succeed, be stopped, or fail and still have discarded gated calls
+          the operator needs to know about. Folding it into the chain would have
+          made it invisible for every outcome except the one branch it sat in.
+
+          Deliberately not a destructive Alert: nothing failed. It is the same
+          tone as the cancelled line — something happened that you need to know,
+          not something that went wrong.
+
+          Coloured with `--status-blocked-text` rather than a palette amber:
+          that token is the console's "needs your attention, nothing is broken"
+          state, it is the one a gated call already reads as elsewhere, and it
+          themes for both schemes on its own — which the `dark:` pair it
+          replaced had to restate by hand. `text-2xs` is the same 11px rung the
+          sibling lines above use, by name. */}
+      {(run.notices ?? []).map((notice, i) => (
+        <p
+          key={i}
+          className="text-2xs text-[var(--status-blocked-text)]"
+          data-testid="workflow-run-notice"
+        >
+          {notice}
+        </p>
+      ))}
     </div>
   );
 }

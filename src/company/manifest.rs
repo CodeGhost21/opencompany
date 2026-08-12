@@ -453,9 +453,16 @@ mod tests {
         assert_eq!(manifest.tools.provider, "openhuman");
         assert_eq!(manifest.policy.mode, "supervised");
         assert!(!manifest.place.discoverable);
-        assert_eq!(
-            manifest.policy.always_approve,
-            vec!["payment.send", "filing.submit", "external.publish"]
+        // Issue #684: this asserted the three-string default verbatim, which is
+        // how the defect survived — the list's *contents* were pinned and its
+        // *effect* never was, so a list that matched nothing passed. It is
+        // empty now, and what makes the defaults prosumer-safe is the
+        // `supervised` mode asserted above: `evaluate_supervised` parks every
+        // Spend / Sign / Publish effect on its own.
+        assert!(
+            manifest.policy.always_approve.is_empty(),
+            "the default always-approve list is empty on purpose — see \
+             DEFAULT_ALWAYS_APPROVE"
         );
     }
 
@@ -884,9 +891,24 @@ mod tests {
                 skill.id
             );
         }
-        // A supervised policy with a defined always-approve fence.
+        // A supervised policy with a defined always-approve fence. Asserting
+        // only `!is_empty()` is what let the template ship three entries that
+        // matched nothing on its harness path (issue #684): a list's length
+        // says nothing about whether it fires.
         assert_eq!(manifest.policy.mode, "supervised");
         assert!(!manifest.policy.always_approve.is_empty());
+        // What was actually wrong is that none of the old entries named a tool,
+        // and the template runs the openhuman harness. A shipped template must
+        // demonstrate a gate that works on its own path, not merely a plausible
+        // effect-kind string.
+        assert!(
+            crate::policy::always_approve::matches(
+                &manifest.policy.always_approve,
+                "publish_artifact"
+            ),
+            "the template's fence names no declared tool, so nothing in it can \
+             park a harness tool call — the shape of issue #684"
+        );
         // The weekly opportunity loop is a schedule.
         assert!(!manifest.schedules.is_empty());
     }

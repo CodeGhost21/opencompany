@@ -91,6 +91,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/api.md](runtime/api.md) | HTTP surface and auth model |
 | [runtime/config.md](runtime/config.md) | Configuration and the one-key story |
+| [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |
