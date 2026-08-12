@@ -126,6 +126,47 @@ export function PeopleView({ client, company }: Props) {
     }
   }
 
+  /**
+   * Invites someone and reports what actually reached them (issue #584).
+   *
+   * Deliberately not routed through `act`, which toasts unconditional success
+   * on any 2xx. That is right for revoking or suspending, where the write is
+   * the whole outcome, and wrong here: the grant landing and the person being
+   * told are two different things, and a host with no mail transport does the
+   * first without the second. Reporting them as one is what sent QA looking
+   * for an email nobody had sent.
+   *
+   * Every outcome reloads, because the invite exists in all of them — only the
+   * follow-up the operator owes differs.
+   */
+  async function inviteAndReport(email: string, role: UserRole) {
+    try {
+      const result = await sendInvite(client, company, email, role);
+      await load();
+      if (result.delivery === "sent") {
+        toast.success(`Invited ${email}`, {
+          description: "They've been emailed a link to sign in.",
+        });
+      } else if (result.delivery === "no_transport") {
+        toast.warning(`${email} can now sign in — but nothing was emailed`, {
+          description:
+            "This host has no email set up, so you'll need to tell them yourself. " +
+            "They sign in with this address on the login page.",
+        });
+      } else {
+        toast.warning(`${email} was invited, but the email didn't send`, {
+          description:
+            "They can still sign in with this address — tell them, or revoke and " +
+            "re-invite to try sending again.",
+        });
+      }
+    } catch (err) {
+      // A real refusal: already a member, already invited, or not an address.
+      // The server's wording is the useful part.
+      toast.error(err instanceof ApiError ? err.message : `Couldn't invite ${email}.`);
+    }
+  }
+
   if (loading) {
     return (
       <div className="space-y-3 p-6">
@@ -256,7 +297,7 @@ export function PeopleView({ client, company }: Props) {
         open={inviteOpen}
         onOpenChange={setInviteOpen}
         onInvite={async (email, role) => {
-          await act(`Invited ${email}`, () => sendInvite(client, company, email, role));
+          await inviteAndReport(email, role);
           setInviteOpen(false);
         }}
       />
@@ -377,10 +418,18 @@ function InviteRow({ invite, onRevoke }: { invite: Invite; onRevoke: () => void 
           {invite.role === "admin" ? <Badge variant="secondary">Admin</Badge> : null}
           {fromManifest ? <Badge variant="outline">From manifest</Badge> : null}
         </div>
-        <p className="truncate text-xs text-muted-foreground">
+        <p className="truncate text-xs text-muted-foreground" data-testid="invite-meta">
           {fromManifest
             ? "Listed in the company manifest — remove them from [users].admins there"
-            : `Invited ${relative(invite.createdAtMillis)} · expires ${relative(invite.expiresAtMillis)}`}
+            : `Invited ${relative(invite.createdAtMillis)} · expires ${relative(invite.expiresAtMillis)} · ${
+                // Whether anyone actually told them. A row that said only
+                // "invited" reads as "we contacted them", which is the
+                // assumption issue #584 is about; on a host with no mail the
+                // follow-up is the operator's and they need to know it.
+                invite.notifiedAtMillis
+                  ? "invite email sent"
+                  : "no invite email sent — let them know"
+              }`}
         </p>
       </div>
       {/* A manifest invite has no record to delete, and the manifest would
@@ -413,8 +462,9 @@ function InviteDialog({
         <DialogHeader>
           <DialogTitle>Invite someone</DialogTitle>
           <DialogDescription>
-            They'll be able to sign in with a magic link. Nothing is emailed now —
-            an invite just makes the address eligible.
+            We'll email them a link to the sign-in page, and they'll be able to
+            sign in with this address. If this host has no email set up, we'll
+            tell you so you can pass it on yourself.
           </DialogDescription>
         </DialogHeader>
         <form
