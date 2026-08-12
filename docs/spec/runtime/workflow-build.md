@@ -58,7 +58,9 @@ uses, on `updated_at_millis`).
 
 The direction is inverted exactly as in [Planning](planning.md): the **host**
 gathers the roster (which teammates an `agent` node may name), the node-kind
-vocabulary, and the names of the workflows that already exist, and hands the
+vocabulary (the builder emits within `BUILDER_NODE_KINDS`, a subset of the
+authoring set — see [workflow-vocabulary.md](workflow-vocabulary.md)), and the
+names of the workflows that already exist, and hands the
 model a complete picture. The model runs with **no tools** and only synthesizes
 — so collisions and unknown-agent references are rare by construction, and a
 builder pass can no more act on the world than a planning pass can.

@@ -2,9 +2,11 @@
 //!
 //! A company's workflow graphs live on disk as
 //! [`WorkflowFile`](crate::company::workflow_file::WorkflowFile)s — a data-only
-//! node/edge model with six node kinds (trigger / agent / tool_call /
-//! http_request / condition / output). This module runs one directly on the
-//! embedded [`tinyflows`] engine, with **agent** nodes routed to the company's
+//! node/edge model whose accepted node kinds are
+//! [`WORKFLOW_NODE_KINDS`](crate::company::workflow_file::WORKFLOW_NODE_KINDS)
+//! (the authoring contract; see `docs/spec/runtime/workflow-vocabulary.md`).
+//! This module runs one directly on the embedded [`tinyflows`] engine, with
+//! **agent** nodes routed to the company's
 //! [`HarnessPool`](crate::harness::HarnessPool) so a step inherits the roster's
 //! persona / model / memory / approval policy / metering (never a second pool).
 //!
