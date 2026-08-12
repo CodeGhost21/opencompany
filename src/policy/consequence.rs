@@ -1279,9 +1279,17 @@ mod tests {
     /// next call and the feature reads as broken.
     #[test]
     fn one_host_in_two_spellings_is_one_scope() {
+        let expected = Some("https://docs.rs".to_string());
+        // Assert each spelling against the concrete scope rather than only
+        // against each other, so a regression to `None` for both cannot pass
+        // the test vacuously.
         assert_eq!(
             standing_scope_of(WEB_FETCH, &fetching("HTTPS://Docs.RS/Serde")),
+            expected,
+        );
+        assert_eq!(
             standing_scope_of(WEB_FETCH, &fetching("https://docs.rs/serde")),
+            expected,
         );
     }
 
