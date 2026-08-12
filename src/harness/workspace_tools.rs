@@ -657,7 +657,7 @@ fn echo_path(path: &str) -> String {
 /// token exists for, so it needs a real random source.
 fn fence_nonce() -> String {
     let mut bytes = [0u8; 16];
-    getrandom::getrandom(&mut bytes)
+    getrandom::fill(&mut bytes)
         .expect("the OS CSPRNG is unavailable; cannot mint a content fence");
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
