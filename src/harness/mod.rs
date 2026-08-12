@@ -5227,11 +5227,19 @@ budget_usd_daily = 0.0
             // pass while never having looked at them, which is the exact way
             // `describe_workflow` stayed invisible here while parking in
             // production.
-            deps.repos = Some(Arc::new(crate::runtime::RepoManager::new(
-                CompanyId::new("acme"),
-                dir.path().join("repos"),
-                Arc::new(crate::store::FsSecretStore::new(dir.path())),
-            )));
+            // Issue #752 added a fourth gate: a backend that keeps the
+            // credential off this container's disk. Declared here for the same
+            // reason the binding below is — without it the belt would be
+            // missing `repo_checkout` / `repo_pr` and this check would pass
+            // while never having looked at them.
+            deps.repos = Some(Arc::new(
+                crate::runtime::RepoManager::new(
+                    CompanyId::new("acme"),
+                    dir.path().join("repos"),
+                    Arc::new(crate::store::FsSecretStore::new(dir.path())),
+                )
+                .with_storage_kind(crate::store::StorageKind::Mongodb),
+            ));
             deps.repo_bindings = vec![crate::runtime::repo_manager::types::RepoBinding {
                 key: "acme-widgets-000000000000".to_string(),
                 url: "https://github.com/acme/widgets".to_string(),
