@@ -159,12 +159,27 @@ pub struct WorkflowScheduler {
     /// is once a minute forever, so the warning is latched here and re-armed
     /// only when the situation changes — see [`note_unwired`](Self::note_unwired).
     warned_unwired: HashSet<CompanyId>,
-    /// Workflows this scheduler has already run its one restart catch-up check
-    /// for (issue #241). Keyed per `(company, workflow)` and checked the FIRST
-    /// time each is seen — not once globally — so a tenant provisioned after boot
-    /// and a workflow created at runtime each get their catch-up when they first
+    /// Workflows whose one restart catch-up attempt has **completed** (issue
+    /// #241). Keyed per `(company, workflow)` and inserted the FIRST time each is
+    /// seen — not once globally — so a tenant provisioned after boot and a
+    /// workflow created at runtime each get their catch-up when they first
     /// appear, rather than being missed by a boot-only pass. Swept when a company
     /// leaves the registry, like [`warned_unwired`](Self::warned_unwired).
+    ///
+    /// The invariant is **latched ⇔ the catch-up attempt COMPLETED**, not merely
+    /// "was reached once". An attempt completes when it fires the make-up
+    /// (`Ok(true)`), finds a peer already claimed the minute (`Ok(false)`), or
+    /// finds nothing to make up (`missed_instant == None`) — all terminal. But an
+    /// attempt that could not run to a verdict on a *transient* condition —
+    /// admission rejected at the #401 cap, the durable anchor read failing, the
+    /// catch-up claim failing, or a still-in-flight prior run holding the overlap
+    /// slot — DROPS the key again (issue #661 F2), so a later tick re-attempts the
+    /// make-up while the missed minute is still inside the catch-up window rather
+    /// than the transient forfeiting that workflow's catch-up for the life of the
+    /// process. The re-attempt is bounded: at most one [`latest_fire`] read per
+    /// key per minute-tick, and it stops the moment an attempt completes.
+    ///
+    /// [`latest_fire`]: crate::ports::ScheduleFireStore::latest_fire
     caught_up: HashSet<WorkflowKey>,
     /// How many unwired-company warnings have been emitted, so a test can assert
     /// the latch actually suppresses the repeat.
@@ -468,15 +483,39 @@ impl WorkflowScheduler {
                                         Err(err) => {
                                             drop(guard);
                                             drop(claim);
+                                            // Issue #661 (F2): a transient claim
+                                            // failure defers, it does not forfeit.
+                                            // Drop the first-sight latch (the #676
+                                            // at-cap style, above) so a later tick
+                                            // re-attempts the make-up while `missed`
+                                            // is still inside the catch-up window.
+                                            self.caught_up.remove(&key);
                                             tracing::warn!(%company, workflow = %file.id, %err, "workflow scheduler: could not claim catch-up fire; skipping (fail closed)");
                                         }
                                     }
+                                } else {
+                                    // Issue #661 (F2): the overlap slot is held by
+                                    // a prior run still in flight, so the make-up
+                                    // could not even be attempted this tick. Drop
+                                    // the first-sight latch so a later tick — once
+                                    // that run finishes and frees the slot —
+                                    // re-attempts it while `missed` is still inside
+                                    // the catch-up window, rather than the overlap
+                                    // forfeiting catch-up for this key entirely.
+                                    self.caught_up.remove(&key);
                                 }
                             }
                         }
                         // Fail closed: without a trustworthy anchor we cannot tell
                         // a missed fire from an already-made one.
                         Err(err) => {
+                            // Issue #661 (F2): the anchor read failed transiently,
+                            // so this attempt reached no verdict. Drop the
+                            // first-sight latch so a later tick re-reads the anchor
+                            // and re-attempts catch-up — without this, one flaky
+                            // read permanently forfeits this workflow's make-up for
+                            // the life of the process.
+                            self.caught_up.remove(&key);
                             tracing::warn!(%company, workflow = %file.id, %err, "workflow scheduler: could not read catch-up anchor; skipping catch-up (fail closed)");
                         }
                     }
@@ -615,7 +654,10 @@ impl WorkflowScheduler {
         // still-present workflow leaves one stale entry, harmless: it is only a
         // "have I run catch-up for this" bit and a re-created workflow of the same
         // id is a first sight again only after this sweep — acceptable, since a
-        // re-created workflow's anchor is whatever it last durably fired.)
+        // re-created workflow's anchor is whatever it last durably fired. That the
+        // anchor survives a delete+recreate is the durable-identity reuse issue
+        // #708 documents on `workflow_schedule_id` — bounded by the catch-up
+        // window, fixed by purging the fire ledger at delete time, not re-keying.)
         self.caught_up
             .retain(|(company, _)| registry.get(company).is_some());
 
@@ -749,6 +791,43 @@ fn lock_in_flight(
 /// not depend on any positional index. The `workflow-` prefix (a hyphen, never a
 /// colon) keeps it readable in a log line; the fs backend hashes it before it
 /// can address the filesystem, so a console-chosen `<workflow_id>` is safe.
+///
+/// # Identity reuse across delete+recreate (issue #708)
+///
+/// Because this key is the workflow id alone, deleting a workflow and recreating
+/// one with the **same id** makes the new workflow **inherit the old one's fire
+/// ledger** — its durable `claim_fire` / [`latest_fire`] rows survive the delete
+/// (`delete_workflow` in `src/server/ops/workflows.rs` tears down the graph,
+/// revisions, and events, but not the schedule's claim rows). Two effects, each
+/// bounded by [`CATCHUP_WINDOW_MINUTES`]:
+///
+/// * **one suppressed minute** — if the recreated schedule matches a minute the
+///   old id already claimed, `claim_fire` returns `false` and that single
+///   occurrence is skipped; and
+/// * **one inherited make-up** — the first-sight catch-up reads the stale anchor,
+///   so it may fire (or decline) a make-up on the *deleted* workflow's history.
+///   The `caught_up` sweep note in [`tick`](WorkflowScheduler::tick) already
+///   spells this out: a re-created workflow's anchor is whatever it last durably
+///   fired, so it is a first sight against a non-empty ledger.
+///
+/// The key is **deliberately not re-keyed** to erase that history, for three
+/// reasons — the re-key was considered for #661 and rejected:
+///
+/// 1. **Per-deploy catch-up loss** — a new key orphans every deployed tenant's
+///    existing anchors, so the first boot after the change treats every armed
+///    schedule as a fresh install and forfeits its legitimate restart catch-up.
+/// 2. **Rolling-deploy double-fire (a #241 regression)** — during a rolling
+///    deploy, mixed-version replicas would key the same minute under two ids and
+///    both could win a claim: the exact cross-replica double-fire the #241
+///    durable claim exists to prevent.
+/// 3. It is the natural, restart-stable `(company, workflow)` identity that
+///    survives a restart without depending on a positional index.
+///
+/// The real fix purges the fire-ledger rows at delete time instead (a new
+/// [`ScheduleFireStore`](crate::ports::ScheduleFireStore) delete method, called
+/// from `delete_company_workflow`), leaving the key as-is. Tracked in issue #708.
+///
+/// [`latest_fire`]: crate::ports::ScheduleFireStore::latest_fire
 fn workflow_schedule_id(workflow_id: &str) -> String {
     format!("workflow-{workflow_id}")
 }
@@ -3421,5 +3500,276 @@ to = "done"
         );
         wait_for(|| started.lock().unwrap().len() == 1).await;
         assert_eq!(started.lock().unwrap()[0].input["catchUp"], true);
+    }
+
+    // --- issue #661 (F2): a transient failure DEFERS the first-sight catch-up,
+    // it does not forfeit it ----------------------------------------------------
+
+    use crate::error::OpenCompanyError;
+    use crate::ports::ScheduleFireStore;
+
+    /// An in-memory [`ScheduleFireStore`] that can be told to fail its first N
+    /// `latest_fire` reads and/or its first N `claim_fire` writes, then behaves
+    /// normally. The double for issue #661 F2: a transient store error on the
+    /// first-sight catch-up must drop the `caught_up` latch so a later tick
+    /// re-attempts the make-up, rather than one flaky call forfeiting it for the
+    /// life of the process. `seed` presets an anchor WITHOUT consuming a fail
+    /// budget, so a test can arrange a genuine missed fire and still arm the
+    /// failure it wants to observe.
+    struct FlakyFires {
+        claims: Mutex<HashMap<(String, String), HashSet<u64>>>,
+        fail_latest: AtomicUsize,
+        fail_claim: AtomicUsize,
+    }
+
+    impl FlakyFires {
+        fn new() -> Self {
+            Self {
+                claims: Mutex::new(HashMap::new()),
+                fail_latest: AtomicUsize::new(0),
+                fail_claim: AtomicUsize::new(0),
+            }
+        }
+        /// Arm the next `n` `latest_fire` reads to fail (armed AFTER any seeding).
+        fn arm_latest_failures(&self, n: usize) {
+            self.fail_latest.store(n, Ordering::SeqCst);
+        }
+        /// Arm the next `n` `claim_fire` writes to fail.
+        fn arm_claim_failures(&self, n: usize) {
+            self.fail_claim.store(n, Ordering::SeqCst);
+        }
+        /// Preset an anchor directly, bypassing the fail budgets.
+        fn seed(&self, company: &str, schedule: &str, minute: u64) {
+            self.claims
+                .lock()
+                .unwrap()
+                .entry((company.to_string(), schedule.to_string()))
+                .or_default()
+                .insert(minute);
+        }
+    }
+
+    #[async_trait]
+    impl ScheduleFireStore for FlakyFires {
+        async fn claim_fire(&self, c: &CompanyId, s: &str, m: u64) -> crate::Result<bool> {
+            if self.fail_claim.load(Ordering::SeqCst) > 0 {
+                self.fail_claim.fetch_sub(1, Ordering::SeqCst);
+                return Err(OpenCompanyError::Store("flaky claim store".into()));
+            }
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .entry((c.as_ref().to_string(), s.to_string()))
+                .or_default()
+                .insert(m))
+        }
+        async fn latest_fire(&self, c: &CompanyId, s: &str) -> crate::Result<Option<u64>> {
+            if self.fail_latest.load(Ordering::SeqCst) > 0 {
+                self.fail_latest.fetch_sub(1, Ordering::SeqCst);
+                return Err(OpenCompanyError::Store("flaky claim store".into()));
+            }
+            Ok(self
+                .claims
+                .lock()
+                .unwrap()
+                .get(&(c.as_ref().to_string(), s.to_string()))
+                .and_then(|set| set.iter().max().copied()))
+        }
+        async fn prune_fires_before(&self, _c: &CompanyId, _m: u64) -> crate::Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// [`company_with_overlays`] with a caller-supplied [`ScheduleFireStore`], so a
+    /// test can drive the scheduler against a flaky claim store (issue #661 F2).
+    async fn company_with_overlays_and_fires(
+        home: &std::path::Path,
+        id: &str,
+        overlays: Vec<OverlayWorkflow>,
+        runner: Option<Arc<dyn WorkflowRunner>>,
+        lifecycle: &str,
+        fires: Arc<dyn ScheduleFireStore>,
+    ) -> CompanyRegistry {
+        let company = CompanyId::new(id);
+        let mut runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+            .with_id(company.clone())
+            .with_schedule_fires(fires)
+            .build()
+            .await
+            .expect("builds");
+        if let Some(runner) = runner {
+            runtime.set_workflow_runner(runner);
+        }
+        let store = runtime.store().clone();
+        let mut record: CompanyRecord = store
+            .load(&company)
+            .await
+            .expect("loads")
+            .expect("the builder materialized a record");
+        record.overlay_workflows = overlays;
+        record.lifecycle = lifecycle.to_string();
+        store.save(&record).await.expect("saves");
+
+        let registry = CompanyRegistry::new();
+        registry.insert(company, Arc::new(runtime));
+        registry
+    }
+
+    /// A transient anchor-read failure on first sight DEFERS the catch-up: the
+    /// latch is dropped so the NEXT tick re-reads the anchor and makes up the
+    /// missed fire, instead of one flaky `latest_fire` forfeiting it forever.
+    #[tokio::test]
+    async fn a_transient_anchor_read_error_defers_first_sight_catch_up() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let fires = Arc::new(FlakyFires::new());
+        let registry = company_with_overlays_and_fires(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+            fires.clone(),
+        )
+        .await;
+        // Anchor two Mondays back; the most recent missed Monday is 2026-07-13.
+        fires.seed("acme", "workflow-digest", minute_at(2026, 7, 6, 9, 0));
+        // The FIRST anchor read fails; the second (next tick) succeeds.
+        fires.arm_latest_failures(1);
+
+        // "Now" is a Tuesday, so the current minute never matches — isolating the
+        // catch-up as the only possible fire.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+
+        // First tick: the anchor read errors, so catch-up is deferred and the
+        // latch dropped — nothing fires, nothing is claimed.
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "a flaky anchor read defers the catch-up on first sight"
+        );
+        assert!(started.lock().unwrap().is_empty());
+
+        // Second tick: the anchor read now succeeds, so the deferred make-up lands
+        // at the ORIGINAL missed minute, proving the latch did not forfeit it.
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "the next tick re-attempts and fires the deferred catch-up"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        let run = started.lock().unwrap()[0].clone();
+        assert_eq!(run.input["catchUp"], true);
+        assert_eq!(
+            run.input["firedAtMs"],
+            minute_at(2026, 7, 13, 9, 0) * MINUTE_MS,
+            "the make-up carries the original missed minute"
+        );
+    }
+
+    /// A transient claim failure on the first-sight catch-up DEFERS it and — the
+    /// part that would otherwise be a silent leak — releases the admission guard,
+    /// so the in-flight slot is not permanently occupied by a run that never
+    /// started. A later tick re-attempts and fires it.
+    #[tokio::test]
+    async fn a_transient_claim_error_on_catch_up_defers_not_forfeits() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let fires = Arc::new(FlakyFires::new());
+        let registry = company_with_overlays_and_fires(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+            fires.clone(),
+        )
+        .await;
+        // Anchor two Mondays back; the most recent missed Monday is 2026-07-13.
+        fires.seed("acme", "workflow-digest", minute_at(2026, 7, 6, 9, 0));
+        // The FIRST claim (the catch-up claim) fails; the next succeeds.
+        fires.arm_claim_failures(1);
+
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        // "Now" is a Tuesday: the current minute never matches, isolating catch-up.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+
+        // First tick: the catch-up claim errors after admission, so the guard is
+        // released on the fail-closed arm — no run starts, no guard leaks.
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "a flaky catch-up claim defers, firing nothing"
+        );
+        assert!(started.lock().unwrap().is_empty());
+        assert_eq!(
+            runtime.run_supervisor().len(),
+            0,
+            "the admission guard was released — no in-flight slot leaked"
+        );
+
+        // Second tick: the claim now succeeds, so the deferred make-up fires.
+        assert_eq!(
+            scheduler.tick().await,
+            1,
+            "the next tick re-attempts and fires the deferred catch-up"
+        );
+        wait_for(|| started.lock().unwrap().len() == 1).await;
+        assert_eq!(started.lock().unwrap()[0].input["catchUp"], true);
+    }
+
+    /// The overlap arm: when a prior run still holds the in-flight slot on first
+    /// sight, the catch-up cannot even be attempted — so the latch is dropped
+    /// (not left set), letting a later tick re-attempt once the slot frees. Driven
+    /// directly on the private latch, since the overlap-on-first-sight race is not
+    /// cheap to stage through the public tick alone.
+    #[tokio::test]
+    async fn an_overlap_on_first_sight_drops_the_catch_up_latch() {
+        let home_dir = tmp_home();
+        let home = home_dir.path().to_path_buf();
+        let (runner, started, _completed) = RecordingRunner::new();
+        let registry = company_with_overlays(
+            &home,
+            "acme",
+            vec![overlay("digest", Some("0 9 * * MON"))],
+            Some(runner),
+            "running",
+        )
+        .await;
+        let company = CompanyId::new("acme");
+        let runtime = registry.get(&company).unwrap();
+        // A genuine missed fire is available (anchor two Mondays back).
+        runtime
+            .schedule_fires()
+            .claim_fire(&company, "workflow-digest", minute_at(2026, 7, 6, 9, 0))
+            .await
+            .unwrap();
+
+        // "Now" is a Tuesday, so nothing matches the current minute — the only
+        // path that could touch the latch this tick is the first-sight catch-up.
+        let clock = Arc::new(FakeClock::new(millis_at(2026, 7, 14, 9, 0)));
+        let mut scheduler = WorkflowScheduler::new(registry.clone(), clock);
+
+        // Occupy the overlap slot for this key BEFORE the tick, standing in for a
+        // prior scheduled run still executing when first sight happens.
+        let key = (company.clone(), "digest".to_string());
+        let _held = scheduler.claim(&key).expect("take the overlap slot");
+
+        assert_eq!(
+            scheduler.tick().await,
+            0,
+            "the overlap suppresses the catch-up attempt this tick"
+        );
+        assert!(started.lock().unwrap().is_empty());
+        assert!(
+            !scheduler.caught_up.contains(&key),
+            "the latch was dropped, so a later tick will re-attempt the catch-up"
+        );
     }
 }
