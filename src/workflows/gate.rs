@@ -432,11 +432,11 @@ mod tests {
     /// A company record whose `[policy]` is the only thing under test.
     ///
     /// `always_approve` is written explicitly on every call — including as an
-    /// empty list — because the manifest default is NOT empty
-    /// ([`DEFAULT_ALWAYS_APPROVE`](crate::company::DEFAULT_ALWAYS_APPROVE) is
-    /// `payment.send` / `filing.submit` / `external.publish`). Letting it
-    /// default would make these tests read as if the tier decided something the
-    /// always-approve list had actually decided.
+    /// empty list. [`DEFAULT_ALWAYS_APPROVE`](crate::company::DEFAULT_ALWAYS_APPROVE)
+    /// is empty as of issue #684, so letting it default would no longer decide
+    /// anything behind these tests' backs; writing it out stays the rule
+    /// anyway, because a test that borrows a shipped default tests the default
+    /// rather than the mechanism, and this module's subject is the tier.
     fn company(mode: &str, always_approve: &[&str]) -> CompanyRecord {
         let always = always_approve
             .iter()

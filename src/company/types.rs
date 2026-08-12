@@ -57,8 +57,41 @@ pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 /// Channels the runtime knows how to enable under `[channels.*]`.
 pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
 
-/// Effect kinds gated for approval by default under a `supervised` policy.
-pub const DEFAULT_ALWAYS_APPROVE: &[&str] = &["payment.send", "filing.submit", "external.publish"];
+/// Effect kinds gated for approval by default — **empty on purpose** (issue
+/// #684).
+///
+/// This shipped as `["payment.send", "filing.submit", "external.publish"]`, and
+/// the promise it read as was not one the runtime kept. `always_approve` wins
+/// over every tier including `full`, so a company shipping the default believed
+/// payments, filings and publishing were gated. On the **harness** path —
+/// the one every company using the openhuman toolbelt runs — the list is
+/// matched against the tool name, and none of those three names a tool, so
+/// nothing was gated at all.
+///
+/// The list is now matched by one shared rule on both paths
+/// ([`always_approve::matches`](crate::policy::always_approve::matches)), and it
+/// ships empty rather than being repaired, for three reasons:
+///
+/// * **Two of the three name capabilities this product does not have.** There
+///   is no payment tool and no `Sign`-group tool in the declaration table, and
+///   nothing outside test code emits either kind. A default cannot gate a
+///   capability that does not exist.
+/// * **The third must not be defaulted.** The real name behind
+///   `external.publish` is `publish_artifact`, and issue #658 ruled that `full`
+///   publishes unattended — an operator who wants otherwise writes
+///   `always_approve = ["publish_artifact"]`. Defaulting it would overturn that
+///   ruling silently.
+/// * **It costs no protection.** The default mode is `supervised`, and
+///   `ManifestApprovalGate::evaluate_supervised` already parks every `Spend`,
+///   `Sign` and `Publish` effect on its own. The three entries added nothing to
+///   the default configuration; they only ever mattered under `auto` and
+///   `full`, tiers an operator opts into for unattended operation.
+///
+/// An operator who wants a specific gate still writes one. Operator-authored
+/// effect kinds remain open-ended because a hosted brain may emit a kind this
+/// repository has never seen; see [`crate::policy::always_approve`] for why a
+/// registry-based validator would reject working custom fences.
+pub const DEFAULT_ALWAYS_APPROVE: &[&str] = &[];
 
 /// Priorities a company may assign to a prioritized `[[connection]]`.
 pub const CONNECTION_PRIORITIES: &[&str] = &["low", "medium", "high"];
@@ -636,7 +669,18 @@ pub struct Policy {
     /// decision rather than a rider on adding the tier.
     #[serde(default = "default_policy_mode")]
     pub mode: String,
-    /// Effect kinds that always park for approval regardless of amount.
+    /// Effect kinds that always park for approval regardless of amount, and
+    /// regardless of tier — this list wins over `full`.
+    ///
+    /// A tool name is an effect kind (the harness projects one onto the other),
+    /// so `["publish_artifact"]` and `["payment.send"]` are the same syntax at
+    /// different segment counts. Matched by
+    /// [`always_approve::matches`](crate::policy::always_approve::matches) on
+    /// both approval paths (issue #684). Native effect kinds are open-ended, so
+    /// configured entries are not restricted to this build's declared tools.
+    ///
+    /// Defaults to [`DEFAULT_ALWAYS_APPROVE`], which is empty — see there for
+    /// why.
     #[serde(default = "default_always_approve")]
     pub always_approve: Vec<String>,
     /// Spends strictly under this many USD skip approval.
