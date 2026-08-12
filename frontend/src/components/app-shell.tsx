@@ -417,6 +417,31 @@ export function AppShell({
     setLastViewedChannel({});
     setUnreadSince(Date.now());
     activeChatChannelRef.current = null;
+
+    // Then replace that mount-time floor with the one the host remembers for
+    // this person (issue #755). Until this lands the browser floor stands, so
+    // the first paint is the old behaviour rather than a blank badge; when it
+    // lands, channels this person left unread come back unread.
+    //
+    // Merged into whatever the operator has viewed since, rather than
+    // assigned: this request is in flight while the console is usable, and a
+    // channel opened in that window must not have its fresh floor overwritten
+    // by an older stored one.
+    client
+      .readState(company)
+      .then(({ markers }) => {
+        if (cancelled || markers.length === 0) return;
+        setLastViewedChannel((viewed) => {
+          const merged = { ...viewed };
+          for (const m of markers) {
+            merged[m.channelId] = Math.max(merged[m.channelId] ?? 0, m.lastReadAt);
+          }
+          return merged;
+        });
+      })
+      .catch(() => {
+        /* host without `/chat/read-state`, or offline — the browser floor stands */
+      });
     // Another company's approval ids are another namespace, and a settled card
     // must not survive the switch as a ghost in the new company's channels.
     setDecidedApprovals({});
@@ -548,14 +573,23 @@ export function AppShell({
   const onChannelViewed = useCallback(
     (channelId: string) => {
       activeChatChannelRef.current = channelId;
-      setLastViewedChannel((v) => ({ ...v, [channelId]: Date.now() }));
+      const at = Date.now();
+      setLastViewedChannel((v) => ({ ...v, [channelId]: at }));
+      // The durable half (issue #755). Fire-and-forget on purpose: the local
+      // floor above has already cleared the badge, so a failed write costs a
+      // stale marker on the next load, not a wrong badge now. The host's write
+      // is monotonic, so the many calls this makes while a live channel grows
+      // are idempotent and cannot move the floor backwards.
+      void client.markChannelRead(channelId, at, company).catch(() => {
+        /* older host, or offline — the in-browser floor still holds this session */
+      });
       // The same fact, persisted, so re-entering Chat returns to the channel
       // the operator was reading instead of whichever sorts first (issue #412).
       // The ref above cannot do it: it dies with this mount, and a reload is
       // exactly one of the trips that has to survive.
       writeLastChannel(scope, channelId);
     },
-    [scope],
+    [scope, client, company],
   );
 
   const setThreadMessages = (
