@@ -76,9 +76,17 @@ function SelectTrigger({
  * `max-w` then stops a long option pushing the popup off-screen:
  * `--available-width` is what the positioner measured to the viewport edge, and
  * 28rem is a readable line length, so it takes the smaller of the two.
+ *
+ * **The floor is capped by that same ceiling, and it has to be.** When the two
+ * conflict CSS resolves in favour of `min-width` — measured, not assumed:
+ * `min-width:max(9rem,40rem)` against `max-width:min(28rem,20rem)` lays out at
+ * 640px, not 320px. So an uncapped floor would let a trigger wider than the
+ * space beside it push the popup straight off the viewport, which is the one
+ * thing `max-w` is here to prevent. Wrapping the floor in the same `min(…)`
+ * makes the ceiling authoritative in every case.
  */
 const SELECT_POPUP_CLASSES =
-  "relative isolate z-50 max-h-(--available-height) max-w-[min(28rem,var(--available-width))] min-w-[max(9rem,var(--anchor-width))] origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10"
+  "relative isolate z-50 max-h-(--available-height) max-w-[min(28rem,var(--available-width))] min-w-[min(max(9rem,var(--anchor-width)),28rem,var(--available-width))] origin-(--transform-origin) overflow-x-hidden overflow-y-auto rounded-lg bg-popover text-popover-foreground shadow-md ring-1 ring-foreground/10"
 
 function SelectContent({
   className,

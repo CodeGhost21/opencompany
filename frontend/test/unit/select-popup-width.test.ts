@@ -76,12 +76,23 @@ describe("the select popup's width", () => {
 
   it("takes the trigger's width as a floor, so it is never narrower", () => {
     renderSelect();
-    expect(popup()?.className ?? "").toMatch(/min-w-\[max\(9rem,var\(--anchor-width\)\)\]/);
+    expect(popup()?.className ?? "").toMatch(/min-w-\[min\(max\(9rem,var\(--anchor-width\)\)/);
   });
 
   it("keeps a ceiling, so one long option cannot push it off-screen", () => {
     renderSelect();
     expect(popup()?.className ?? "").toMatch(/max-w-\[min\(28rem,var\(--available-width\)\)\]/);
+  });
+
+  it("caps the floor by the ceiling, because min-width outranks max-width", () => {
+    // Not a style preference — a measured CSS rule. `min-width:max(9rem,40rem)`
+    // against `max-width:min(28rem,20rem)` lays out at 640px, not 320px, so an
+    // uncapped floor lets a trigger wider than the space beside it push the
+    // popup off the viewport and quietly defeats the ceiling above.
+    renderSelect();
+    expect(popup()?.className ?? "").toMatch(
+      /min-w-\[min\(max\(9rem,var\(--anchor-width\)\),28rem,var\(--available-width\)\)\]/,
+    );
   });
 
   it("still renders its options", () => {
