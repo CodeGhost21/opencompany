@@ -804,6 +804,31 @@ pub enum CompanyEvent {
         /// no-deliverable case adds nothing to the log.
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         artifact_ids: Vec<String>,
+        /// The conversation the card was raised from (issue #377), when one
+        /// was — [`TaskRecord::origin_chat_id`](crate::ports::tasks::TaskRecord::origin_chat_id),
+        /// stamped here at the moment the run settles.
+        ///
+        /// **Captured, never derived.** [`desk`](Self::DeskTaskCompleted::desk)
+        /// is the *responder* — an agent id like `engineer` — and a channel is
+        /// a desk id like `engineering`, so no reader can recover the origin
+        /// from the fields that were already here. Deriving it at completion
+        /// time would also re-open issue #435's failure mode: two places
+        /// deciding "which conversation is this?" by different rules. The card
+        /// has recorded its origin since #151, on every conversational path
+        /// that opens one, so the terminal simply carries what the card already
+        /// knows.
+        ///
+        /// `None` is a **positive fact**, not a lost id: nobody raised this
+        /// card from a conversation (it was created on the board, by a
+        /// scheduler, or before #151). Such a card belongs to no channel and
+        /// `chat_history::owns` deliberately keeps it out of every one of them
+        /// — it is emphatically *not* folded into the General desk.
+        ///
+        /// Additive: `#[serde(default)]` so every journal line written before
+        /// this field existed still replays, and skipped when absent so a
+        /// board-created card adds nothing to the log.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        origin_chat_id: Option<String>,
     },
     /// A human posted to a task's discussion thread (issue #335).
     ///
@@ -3562,6 +3587,7 @@ mod test {
             output: "shipped".to_string(),
             column: "in_review".to_string(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(json.contains(r#""kind":"DeskTaskCompleted""#));
@@ -3569,8 +3595,61 @@ mod test {
             !json.contains("artifact_ids"),
             "a task that published nothing must add nothing to the log: {json}"
         );
+        assert!(
+            !json.contains("origin_chat_id"),
+            "a board-created card names no conversation, so it must add nothing \
+             to the log either: {json}"
+        );
         let back: CompanyEvent = serde_json::from_str(&json).unwrap();
         assert_eq!(back, done);
+    }
+
+    /// Issue #377: the terminal carries the conversation the card was raised
+    /// from, and a line written before the field existed still replays as
+    /// origin-less — which is the truth about it (nobody raised it from a chat
+    /// that this log records), not a default standing in for a lost id.
+    ///
+    /// The legacy blob is asserted verbatim for the same reason #244's is: it
+    /// is exactly what is already on disk in every company's event log. If this
+    /// fails, the change needs a migration rather than a `#[serde(default)]`.
+    #[test]
+    fn desk_task_completed_carries_its_origin_chat_and_still_reads_the_old_shape() {
+        let done = CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "engineer".to_string(),
+            output: "shipped".to_string(),
+            column: "in_review".to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: Some("engineering".to_string()),
+        };
+        let json = serde_json::to_string(&done).unwrap();
+        assert!(json.contains(r#""origin_chat_id":"engineering""#), "{json}");
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(&json).unwrap(),
+            done,
+            "the origin must survive the round trip"
+        );
+
+        // The responder and the channel are different words on purpose — this
+        // is why the origin has to be carried rather than derived from `desk`.
+        assert!(
+            !json.contains(r#""desk":"engineering""#),
+            "the responder is not the channel: {json}"
+        );
+
+        let legacy = r#"{"kind":"DeskTaskCompleted","task_id":"t-1","desk":"ceo","output":"shipped","column":"in_review"}"#;
+        assert_eq!(
+            serde_json::from_str::<CompanyEvent>(legacy).unwrap(),
+            CompanyEvent::DeskTaskCompleted {
+                task_id: "t-1".to_string(),
+                desk: "ceo".to_string(),
+                output: "shipped".to_string(),
+                column: "in_review".to_string(),
+                artifact_ids: Vec::new(),
+                origin_chat_id: None,
+            },
+            "a pre-#377 journal line must replay with no origin, not fail"
+        );
     }
 
     /// Issue #244: the terminal anchor names what the run published, and a line
@@ -3587,6 +3666,7 @@ mod test {
             output: "Drafted the launch spec.".to_string(),
             column: "in_review".to_string(),
             artifact_ids: vec!["art-1".to_string(), "art-2".to_string()],
+            origin_chat_id: None,
         };
         let json = serde_json::to_string(&done).unwrap();
         assert!(
@@ -3608,6 +3688,7 @@ mod test {
                 output: "shipped".to_string(),
                 column: "in_review".to_string(),
                 artifact_ids: Vec::new(),
+                origin_chat_id: None,
             },
             "a pre-#244 journal line must replay with no artifacts, not fail"
         );

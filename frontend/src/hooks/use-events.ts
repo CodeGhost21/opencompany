@@ -73,19 +73,34 @@ export type CompanyStreamEvent =
        *  newer host is not a type error. */
       change: string;
     }
-  // A dispatched card's run finished (issue #185). The host has projected this
-  // since #185; the console named no type for it, so it fell through to
-  // `default:` and was dropped — the same "the view does not subscribe" half of
-  // #464, one event over. A settle moves the card between columns, so the board
-  // wants it.
+  // A dispatched card's run finished (issue #185/#377). The host has projected
+  // this since #185; the console named no type for it until #464, so it fell
+  // through to `default:` and was dropped — the same "the view does not
+  // subscribe" half of #464, one event over. A settle moves the card between
+  // columns, so the board wants it.
+  //
+  // Issue #377 made it a *chat* frame as well as a board one, and reshaped it
+  // in both directions:
+  //
+  // - `chatId` in: the conversation the card was raised from, captured on the
+  //   card at raise time. Absent when nothing raised it from a chat — a
+  //   board-created card, a scheduler's. Such a settle belongs to no channel
+  //   and gets no marker, exactly as a `chatId`-less `approval_parked` stays on
+  //   the Approvals page.
+  // - `output` out: the run's prose already reaches the same channel as the
+  //   orchestrator's relay bubble, so the host stopped projecting it rather
+  //   than leave a second copy on the wire for a future reader to render.
+  //   Nothing in this console read it.
   | {
       type: "desk_task_completed";
       seq: number;
       atMillis: number;
       taskId: string;
+      /** The *responder* that ran it — an agent id, never a channel id. */
       desk: string;
-      output: string;
       column: string;
+      /** The channel the card was raised in; absent for a board-created card. */
+      chatId?: string;
     }
   | {
       type: "mcp_call_failed";
@@ -309,6 +324,23 @@ interface Options {
    */
   onTaskEvent?: (event: CompanyStreamEvent) => void;
   /**
+   * Called for each `desk_task_completed` frame (issue #377) so the shell can
+   * post a card-linked system marker into the channel the card was raised in.
+   *
+   * Beside {@link Options.onTaskEvent}, not instead of it: one frame, two
+   * genuinely different reactions. The board still wants its refetch tick — a
+   * settle moves a card between columns — and the channel wants a line saying
+   * the card settled and where. Folding them would force one subscriber to be
+   * both a counter and a payload.
+   *
+   * Takes the **payload**, for the same reason {@link Options.onWorkspaceEvent}
+   * does: the reaction depends on *which* conversation and *which* column, and
+   * a counter can say neither. The frame-loss trap that made the workflow
+   * canvas fold an event window does not apply — a dropped frame costs one
+   * marker that the next hydration restores from history, never wrong state.
+   */
+  onDispatchTerminal?: (event: CompanyStreamEvent) => void;
+  /**
    * Called for each `workspace_changed` frame (issue #327) so the Workspace
    * view can re-read the tree — and the open note — live.
    *
@@ -396,6 +428,7 @@ export function useEvents(
     pendingApprovals,
     onAgentReply,
     onTaskEvent,
+    onDispatchTerminal,
     onWorkspaceEvent,
     onTurnEvent,
     onWorkflowRunEvent,
@@ -412,6 +445,10 @@ export function useEvents(
   useEffect(() => {
     onTaskEventRef.current = onTaskEvent;
   }, [onTaskEvent]);
+  const onDispatchTerminalRef = useRef(onDispatchTerminal);
+  useEffect(() => {
+    onDispatchTerminalRef.current = onDispatchTerminal;
+  }, [onDispatchTerminal]);
   const onWorkspaceEventRef = useRef(onWorkspaceEvent);
   useEffect(() => {
     onWorkspaceEventRef.current = onWorkspaceEvent;
@@ -472,6 +509,7 @@ export function useEvents(
           handleEvent(event, {
             onAgentReply: onAgentReplyRef.current,
             onTaskEvent: onTaskEventRef.current,
+            onDispatchTerminal: onDispatchTerminalRef.current,
             onWorkspaceEvent: onWorkspaceEventRef.current,
             onTurnEvent: onTurnEventRef.current,
             onWorkflowRunEvent: onWorkflowRunEventRef.current,
@@ -513,6 +551,7 @@ export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers)
   const {
     onAgentReply,
     onTaskEvent,
+    onDispatchTerminal,
     onWorkspaceEvent,
     onTurnEvent,
     onWorkflowRunEvent,
@@ -555,8 +594,22 @@ export function handleEvent(event: CompanyStreamEvent, subscribers: Subscribers)
     // toasts that do matter. The card appearing on the board IS the
     // notification.
     case "task_card_changed":
+      onTaskEvent?.(event);
+      break;
+    // Issue #377: the settle is two facts at once, so it reaches two
+    // subscribers. The board gets its tick, exactly as it has since #464 — a
+    // settle moves a card between columns. The channel the card was raised in
+    // gets a marker saying it settled and where, which is the fact that was
+    // missing: a reader watching only the relay prose could not tell a card
+    // that parked in `paused` from one that finished.
+    //
+    // Still **no toast**, and for the reason written above the board arm: this
+    // fires on every settle, and the marker appearing in the channel IS the
+    // notification. A toast on top would be the second notification for one
+    // action that #379 argues against.
     case "desk_task_completed":
       onTaskEvent?.(event);
+      onDispatchTerminal?.(event);
       break;
     // Issue #327, and **no toast** for the same reason the board frames above
     // raise none — more strongly, if anything. A workspace write is not an

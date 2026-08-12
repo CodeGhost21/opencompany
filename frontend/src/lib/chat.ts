@@ -1,5 +1,16 @@
 import type { ChatHistoryMessageDto, TurnStep } from "@/api/types";
 
+/**
+ * The company's main line, by thread id.
+ *
+ * Mirrors the host's `MAIN_THREAD_ID` (`src/server/chat_history.rs`), whose
+ * `is_general_chat` folds this id, `"General"` and the **empty string** into a
+ * single conversation. Named rather than spelled inline because
+ * {@link dispatchMarkerPlacement} has to resolve an empty origin to *this*
+ * thread rather than to nothing — see the rules on that function.
+ */
+export const MAIN_THREAD_ID = "main";
+
 /** One person's reaction on one line. Mirrors `ChatReactionDto` on the host. */
 export interface Reaction {
   emoji: string;
@@ -110,6 +121,47 @@ export function liveReplyIdentity(event: { seq: number }): { messageId: string }
 }
 
 /**
+ * How the console labels each board column in a marker. Must stay in step with
+ * the host's `dispatch_marker_text` (`src/server/chat_history.rs`) and with
+ * `TASK_COLUMNS` (`./tasks-sample.ts`), which is where the same labels render
+ * on the board itself.
+ */
+const COLUMN_LABELS: Record<string, string> = {
+  todo: "To-do",
+  planning: "Planning",
+  in_progress: "In progress",
+  paused: "Paused",
+  in_review: "In review",
+  done: "Done",
+};
+
+/**
+ * The channel line a settled dispatch leaves behind (issue #377) —
+ * `finished → In review`.
+ *
+ * The console needs its own copy because the live SSE frame is **thin**: it
+ * carries the raw column id, not prose, exactly as `task_card_changed` and
+ * `approval_parked` do. The host holds the same sentence for the rehydrated
+ * half (`dispatch_marker_text`), and unit tests on both sides pin the identical
+ * literals — the same contract `BOARD_COLUMNS`/`TASK_COLUMNS` already live
+ * with.
+ *
+ * Drift between the two can only *reword* a marker across a reload; it can
+ * never double one, because the dedupe is on identity (`h<seq>`) and not on
+ * content. That was #483's lesson and it is what makes two spellings a
+ * tolerable cost rather than a returning bug.
+ *
+ * "finished" means the run **stopped**, not that it succeeded — a cancelled or
+ * failed dispatch says `finished → To-do`, a parked one `finished → Paused`.
+ * The misleading case this exists for is precisely the run that stopped without
+ * finishing the work. An unrecognised column id passes through verbatim rather
+ * than rendering blank.
+ */
+export function dispatchMarkerText(column: string): string {
+  return `finished → ${COLUMN_LABELS[column] ?? column}`;
+}
+
+/**
  * Build a stamped message. `at` is injected so callers stay pure/testable.
  *
  * `messageId` is the host's own id for the line, when the caller already has
@@ -141,6 +193,80 @@ export function makeMessage(
   };
 }
 
+/** The fields {@link dispatchMarkerPlacement} reads off a `desk_task_completed` frame. */
+export interface DispatchTerminalFrame {
+  taskId: string;
+  column: string;
+  /** The channel the card was raised in; absent for a board-created card. */
+  chatId?: string;
+  /** The host's `StoredEvent` sequence — the marker's durable identity. */
+  seq: number;
+  atMillis: number;
+}
+
+/** Where a settled dispatch's marker goes, and the line to put there. */
+export interface DispatchMarkerPlacement {
+  /** The chat thread the card was raised in. */
+  threadId: string;
+  /** The channel rendering that thread, or `null` when this company has none. */
+  channelId: string | null;
+  message: ChatMessage;
+}
+
+/**
+ * Decide where a settled dispatch's marker belongs (issue #377), or that it
+ * belongs nowhere.
+ *
+ * A named function rather than three lines inside the shell's injector, for the
+ * reason {@link liveReplyIdentity} is one: every rule below is a decision that
+ * silently stops being made if it is inlined, and each of them has a specific
+ * bug on the other side of it.
+ *
+ * - **No `chatId` → `null`.** Nothing raised that card from a conversation (it
+ *   was opened on the board, or by a scheduler), so no channel is the right
+ *   one. The host already declines to file such a card into any desk's history;
+ *   this is the live half of the same rule, and the two must agree or a marker
+ *   would appear live and vanish on reload.
+ * - **An empty `chatId` is the General thread, not an absent one.** The host
+ *   folds `""` into General (`is_general_chat` treats an empty id, `"main"` and
+ *   `"General"` as one conversation), and the chat route takes `chat` straight
+ *   off the request body without normalising it — so a client posting
+ *   `chat: ""` stores `origin_chat_id: Some("")` and the projection emits
+ *   `chatId: ""`. Treating that as absent would drop the live marker while
+ *   `chat/history` still served the rehydrated twin: the marker would appear
+ *   only after a reload, which is the live-vs-history split the whole
+ *   identity-dedupe exists to prevent. Absent means `undefined`, and only
+ *   `undefined`. (The REST create path already normalises a blank field away
+ *   for the same reason — issue #246.)
+ * - **`channelId: null` when the thread matches no channel** — never a fall
+ *   back to whatever channel the operator has open. The shell's `noteInChannel`
+ *   does fall back, deliberately, because an approval decision has to be seen;
+ *   a marker does not, and falling back would file one conversation's settle
+ *   into another. That is issue #368's bug, and this is the shape that makes
+ *   re-introducing it impossible rather than merely discouraged.
+ * - **The line is born under the host's id** (`h<seq>`), which is exactly what
+ *   `chat/history` mints for the same event — so {@link fromHistory}'s twin
+ *   dedupes against it on the next reload. Identity, not content: #483 was a
+ *   content check hydration could never satisfy.
+ */
+export function dispatchMarkerPlacement(
+  event: DispatchTerminalFrame,
+  chatChannelByThread: Record<string, string>,
+): DispatchMarkerPlacement | null {
+  if (event.chatId === undefined) return null;
+  // `""` is the General thread spelled empty, not a missing origin — see above.
+  const threadId = event.chatId === "" ? MAIN_THREAD_ID : event.chatId;
+  return {
+    threadId,
+    channelId: chatChannelByThread[threadId] ?? null,
+    message: makeMessage("system", dispatchMarkerText(event.column), {
+      taskId: event.taskId,
+      messageId: String(event.seq),
+      at: event.atMillis,
+    }),
+  };
+}
+
 /**
  * Maps a desk's persisted transcript (`GET .../chat/history`, issue #65) to
  * the console's chat lines, preserving `mine`/author/text and ordering — the
@@ -150,7 +276,13 @@ export function makeMessage(
  */
 export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
   return entries.map((entry) => {
-    const from: ChatMessage["from"] = entry.mine ? "you" : "company";
+    // A host-authored system line (issue #377's dispatch marker) is neither
+    // yours nor the company's voice: it renders as a centred pill, not a
+    // bubble. Read off the author the host projected — `mine` is false for it,
+    // so without this check a rehydrated marker came back as a company message
+    // and a settle read like something an agent had said.
+    const from: ChatMessage["from"] =
+      entry.author === "system" ? "system" : entry.mine ? "you" : "company";
     return {
       id: hostMessageId(entry.id),
       from,
@@ -172,7 +304,13 @@ export function fromHistory(entries: ChatHistoryMessageDto[]): ChatMessage[] {
       // Rehydrate the "card opened" chip (issue #246) for the same reason as
       // the timeline above: a chip that lives only on the live POST response
       // vanishes on the first thread switch.
-      taskId: from === "company" ? entry.taskId : undefined,
+      //
+      // System rows carry it too (issue #377): a dispatch marker's whole
+      // usefulness is the link to the card that settled, and dropping the id
+      // here would leave a rehydrated marker as a sentence with nowhere to go.
+      // Only your own lines never have one — you did not open a card by
+      // speaking.
+      taskId: from === "you" ? undefined : entry.taskId,
     };
   });
 }

@@ -4208,6 +4208,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         },
     ] {
         runtime.events().append(&company, event).await.unwrap();
@@ -5164,6 +5165,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         },
         // After the window closed — must not leak either.
         approval("after"),
@@ -5566,6 +5568,7 @@ async fn a_task_that_never_waited_reports_no_waiting_fields() {
                 output: "shipped".into(),
                 column: "in_review".into(),
                 artifact_ids: Vec::new(),
+                origin_chat_id: None,
             },
         )
         .await

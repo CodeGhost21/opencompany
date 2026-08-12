@@ -3,7 +3,7 @@
 // and gives the company side a consistent identity (a "desk" you're talking to).
 
 import type { DeskDto, TeamMemberDto } from "../api/types";
-import type { ChatMessage } from "./chat";
+import { MAIN_THREAD_ID, type ChatMessage } from "./chat";
 import { toneFor } from "./team";
 
 export interface ThreadContact {
@@ -27,7 +27,7 @@ const DESK_TONES = ["sky", "violet", "amber", "emerald", "rose", "cyan"];
 /** The company's main line — the orchestrator you talk to for anything. */
 function mainThread(): Thread {
   return {
-    id: "main",
+    id: MAIN_THREAD_ID,
     contact: { name: "Your company", kind: "company" },
     blurb: "The main line — ask for anything",
     messages: [],

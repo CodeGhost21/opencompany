@@ -12,6 +12,9 @@ use std::collections::HashMap;
 
 use crate::company::runtime::CompanyRuntime;
 use crate::error::OpenCompanyError;
+use crate::ports::tasks::{
+    COLUMN_DONE, COLUMN_IN_PROGRESS, COLUMN_IN_REVIEW, COLUMN_PAUSED, COLUMN_PLANNING, COLUMN_TODO,
+};
 use crate::ports::types::{Actor, ActorKind, CompanyEvent, EventSeq, StoredEvent, TurnStep};
 use crate::server::ops::language::DEFAULT_DESK as GENERAL_DESK;
 
@@ -86,13 +89,78 @@ pub fn same_conversation(a: Option<&str>, b: Option<&str>) -> bool {
 /// `resolvable_parent`, which now folds through the same rule: a continuation
 /// could be parented to a root the main line refuses to render, and the console
 /// drops a reply whose parent it cannot find rather than showing it flat.
+///
+/// **A third kind of event routes here since issue #377**: the dispatch
+/// terminal. A card raised from a channel settles somewhere — `in_review`,
+/// `paused`, `todo` — and until #377 nothing structural said so in the channel
+/// it came from, so a reader saw the agent's relay prose and reasonably
+/// concluded the work had finished when it had in fact parked. The terminal
+/// routes by the origin the card recorded at raise time, matched on exactly the
+/// terms the other two are.
+///
+/// **`None` is not the General desk.** Everywhere else in this module a missing
+/// chat id means *the id was never addressed* and folds into General; on a
+/// terminal it means *no conversation raised this card* — it was created on the
+/// board, by a scheduler, or before the origin was recorded. Folding that into
+/// General would post a marker about board-only work into the operator's main
+/// line, which is a different bug from the one #377 fixes, so this arm answers
+/// `false` for every desk including General. It is the single most bug-prone
+/// line in this function and has its own test.
 pub fn owns(desk_id: &str, desk_name: &str, event: &CompanyEvent) -> bool {
     let stored = match event {
         CompanyEvent::AgentReply { chat_id, .. } => Some(chat_id.as_str()),
         CompanyEvent::OperatorMessage { chat, .. } => chat.as_deref(),
+        // Issue #377. `None` short-circuits to `false` here rather than
+        // falling through to the shared tail: `same_conversation` reads a
+        // `None` as "unaddressed, therefore General", and this event's `None`
+        // means the opposite — no conversation raised this card, so it belongs
+        // to no conversation's history.
+        CompanyEvent::DeskTaskCompleted { origin_chat_id, .. } => match origin_chat_id.as_deref() {
+            Some(origin) => Some(origin),
+            None => return false,
+        },
         _ => return false,
     };
     same_conversation(stored, Some(desk_id)) || same_conversation(stored, Some(desk_name))
+}
+
+/// The channel line a settled dispatch leaves behind (issue #377) —
+/// `finished → In review`.
+///
+/// Deliberately **structural and short**: where the card landed, and nothing
+/// else. The run's prose already reaches the same channel as the orchestrator's
+/// relay bubble (#151), so repeating it here would put one run's words into one
+/// conversation twice. What was missing was never the words — it was the fact
+/// that the card *settled*, and *where*, which a reader watching only the prose
+/// could not tell apart from "still working".
+///
+/// "finished" means *the run stopped*, not *it succeeded* — the same reading
+/// [`CompanyEvent::DeskTaskCompleted`] itself takes. A cancelled or failed
+/// dispatch lands in To-do and says so; a paused one says Paused. That is the
+/// whole point: the misleading case this exists for is precisely the run that
+/// stopped without finishing the work.
+///
+/// An unrecognised column id passes through **verbatim**, the same posture
+/// `harness::lifecycle::relay_text` takes — a newer host naming a column this
+/// build has not heard of should read a little raw, never render blank.
+///
+/// Pinned by tests on both sides of the wire: the console has its own
+/// `dispatchMarkerText` (`frontend/src/lib/chat.ts`), because the live SSE
+/// frame carries the raw column id rather than prose. Two spellings of one
+/// sentence can only *reword* a marker across a reload — never double it, since
+/// the dedupe is on identity — but the tests couple them anyway, on the same
+/// terms `BOARD_COLUMNS` and the console's `TASK_COLUMNS` are coupled.
+pub fn dispatch_marker_text(column: &str) -> String {
+    let landing = match column {
+        COLUMN_TODO => "To-do",
+        COLUMN_PLANNING => "Planning",
+        COLUMN_IN_PROGRESS => "In progress",
+        COLUMN_PAUSED => "Paused",
+        COLUMN_IN_REVIEW => "In review",
+        COLUMN_DONE => "Done",
+        other => other,
+    };
+    format!("finished → {landing}")
 }
 
 /// Who is reading a desk history. `mine` is relative to this.
@@ -312,6 +380,40 @@ impl MessageView {
                     reactions: Vec::new(),
                 }
             }
+            // The dispatch terminal (issue #377), as the channel marker a
+            // reader needs to see the card settle.
+            //
+            // A **dedicated arm**, not a lean on the defensive fallback below:
+            // that one renders `format!("{other:?}")`, so without this the
+            // marker would reach a person as a line of Rust `Debug` output —
+            // and it would do so only on reload, which is the half of this
+            // feature nobody watches while developing it.
+            //
+            // Authored as `system` on both keys, which is what makes the
+            // console render it as a centred pill rather than a company bubble
+            // (`MessageRow`), and `mine: false` because nobody said it.
+            // `task_id` carries the card so the pill can link to it — the same
+            // field, and therefore the same renderer, an `AgentReply`'s "card
+            // opened" chip uses. No new `MessageView` field: this type is
+            // shared with the GraphQL `Message` projection, and the reuse is
+            // what keeps #377 additive on both wire surfaces at once.
+            //
+            // No `steps` and no `parent_id`: a marker is not a turn and is
+            // never threaded, so `ThreadPanel` needs nothing from it.
+            CompanyEvent::DeskTaskCompleted {
+                task_id, column, ..
+            } => MessageView {
+                id,
+                channel: "system".to_string(),
+                author: "system".to_string(),
+                text: dispatch_marker_text(&column),
+                at_millis,
+                mine: false,
+                steps: Vec::new(),
+                task_id: Some(task_id),
+                parent_id: None,
+                reactions: Vec::new(),
+            },
             // `owns` never admits other variants into a history.
             other => MessageView {
                 id,
@@ -702,5 +804,157 @@ mod test {
         };
         assert!(owns(GENERAL_DESK, GENERAL_DESK, &event));
         assert!(!owns("strategy", "Strategy desk", &event));
+    }
+
+    /* ---- issue #377: the dispatch terminal as a channel marker ---- */
+
+    /// A settled dispatch, as the harness journals it. `desk` is deliberately
+    /// an agent id (`engineer`) and never a channel id (`engineering`) — that
+    /// difference is the whole reason the origin has to be carried.
+    fn desk_task_completed(origin: Option<&str>, column: &str) -> CompanyEvent {
+        CompanyEvent::DeskTaskCompleted {
+            task_id: "t-1".to_string(),
+            desk: "engineer".to_string(),
+            output: "the run's prose".to_string(),
+            column: column.to_string(),
+            artifact_ids: Vec::new(),
+            origin_chat_id: origin.map(str::to_string),
+        }
+    }
+
+    /// The terminal routes by the origin the card recorded, on exactly the same
+    /// terms a reply does: the desk's id or its name, and nothing else.
+    #[test]
+    fn a_terminal_belongs_to_the_channel_its_card_was_raised_in() {
+        let event = desk_task_completed(Some("engineering"), COLUMN_IN_REVIEW);
+        assert!(owns("engineering", "Engineering desk", &event));
+        // …and by the desk's *name*, for a card whose origin was journaled
+        // under it — the same either-spelling rule a reply routes by.
+        let by_name = desk_task_completed(Some("Engineering desk"), COLUMN_IN_REVIEW);
+        assert!(owns("engineering", "Engineering desk", &by_name));
+        // …and nowhere else. A settle in one channel must not surface in
+        // another, which is what would make the marker worse than no marker.
+        assert!(!owns("strategy", "Strategy desk", &event));
+        assert!(!owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event));
+        // The responder is not the channel — matching on it would file every
+        // settle under a desk whose id happens to equal an agent's.
+        assert!(!owns("engineer", "engineer", &event));
+    }
+
+    /// **The most bug-prone line in `owns`.** A card no conversation raised
+    /// belongs to no conversation's history — General emphatically included.
+    ///
+    /// Everywhere else in this module a missing chat id means "unaddressed,
+    /// therefore General". On a terminal it means the opposite: the card was
+    /// created on the board, by a scheduler, or before the origin was recorded.
+    /// Folding it would post markers about board-only work into the operator's
+    /// main line, which is a *new* bug rather than the one #377 fixes.
+    #[test]
+    fn a_terminal_with_no_origin_belongs_to_nobody_not_to_general() {
+        let event = desk_task_completed(None, COLUMN_IN_REVIEW);
+        assert!(
+            !owns(GENERAL_DESK, GENERAL_DESK, &event),
+            "an origin-less terminal must not fold into the General desk",
+        );
+        assert!(
+            !owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event),
+            "nor into the console's main line, which is General's other spelling",
+        );
+        assert!(!owns("", "", &event));
+        assert!(!owns("engineering", "Engineering desk", &event));
+    }
+
+    /// A terminal whose origin *is* one of General's four spellings still folds
+    /// like every other event does — the exception above is about `None`, not
+    /// about loosening [`same_conversation`].
+    #[test]
+    fn a_terminal_raised_on_the_main_line_folds_like_any_other_event() {
+        for origin in [GENERAL_DESK, MAIN_THREAD_ID, ""] {
+            let event = desk_task_completed(Some(origin), COLUMN_PAUSED);
+            assert!(
+                owns(MAIN_THREAD_ID, MAIN_THREAD_ID, &event),
+                "a terminal stored as `{origin}` belongs to the main line",
+            );
+            assert!(
+                owns(GENERAL_DESK, GENERAL_DESK, &event),
+                "…and to the General desk's own id/name",
+            );
+            assert!(
+                !owns("strategy", "Strategy desk", &event),
+                "…and to no named desk",
+            );
+        }
+    }
+
+    /// The marker's wording, pinned per column. The console holds the same
+    /// literals (`dispatchMarkerText`, `frontend/src/lib/chat.ts`) because the
+    /// live frame carries the raw column id; these two tests are what couple
+    /// them.
+    #[test]
+    fn the_marker_names_where_the_card_landed() {
+        assert_eq!(
+            dispatch_marker_text(COLUMN_IN_REVIEW),
+            "finished → In review"
+        );
+        assert_eq!(dispatch_marker_text(COLUMN_PAUSED), "finished → Paused");
+        assert_eq!(dispatch_marker_text(COLUMN_TODO), "finished → To-do");
+        assert_eq!(dispatch_marker_text(COLUMN_DONE), "finished → Done");
+        assert_eq!(dispatch_marker_text(COLUMN_PLANNING), "finished → Planning");
+        assert_eq!(
+            dispatch_marker_text(COLUMN_IN_PROGRESS),
+            "finished → In progress"
+        );
+    }
+
+    /// A column this build has not heard of reads a little raw rather than
+    /// rendering blank — the same fallback `relay_text` takes, and the reason a
+    /// newer host cannot produce an empty pill here.
+    #[test]
+    fn an_unknown_column_passes_through_verbatim() {
+        assert_eq!(
+            dispatch_marker_text("shipped_to_orbit"),
+            "finished → shipped_to_orbit"
+        );
+    }
+
+    /// The terminal projects as a system line carrying its card — not as the
+    /// `Debug` dump the defensive fallback would have rendered into a person's
+    /// transcript.
+    #[test]
+    fn project_renders_a_terminal_as_a_card_linked_system_marker() {
+        let view = MessageView::project(
+            at(
+                21,
+                desk_task_completed(Some("engineering"), COLUMN_IN_REVIEW),
+            ),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert_eq!(view.author, "system");
+        assert_eq!(view.channel, "system");
+        assert_eq!(view.text, "finished → In review");
+        assert_eq!(
+            view.task_id.as_deref(),
+            Some("t-1"),
+            "the pill links the card"
+        );
+        assert!(!view.mine);
+        assert!(view.steps.is_empty(), "a marker is not a turn");
+        assert!(view.parent_id.is_none(), "a marker is never threaded");
+        assert_eq!(view.id, "21", "the host id the console dedupes a reload on");
+    }
+
+    /// The run's prose stays out of the marker. It already reaches this same
+    /// channel as the orchestrator's relay bubble (#151); repeating it here
+    /// would put one run's words into one conversation twice.
+    #[test]
+    fn the_marker_does_not_repeat_the_runs_prose() {
+        let view = MessageView::project(
+            at(22, desk_task_completed(Some("engineering"), COLUMN_PAUSED)),
+            &Viewer::Operator,
+            &labels(),
+        );
+        assert!(!view.text.contains("the run's prose"), "{}", view.text);
+        assert_eq!(view.text, "finished → Paused");
     }
 }
