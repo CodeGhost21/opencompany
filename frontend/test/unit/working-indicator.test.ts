@@ -138,6 +138,42 @@ describe("prefers-reduced-motion", () => {
     render({ steps: [step({ status: "running", label: "Draft the reply" })] });
     expect(container.querySelectorAll(".animate-pulse").length).toBe(1);
   });
+
+  it("subscribes on a webview whose MediaQueryList predates addEventListener", () => {
+    // `stubMatchMedia` hands back both spellings, so it cannot catch this: a
+    // `MediaQueryList` became an `EventTarget` only in Safari 14, and calling
+    // `addEventListener` on an older one throws rather than degrading. That
+    // throw escapes the effect and unmounts the chat view, so the failure this
+    // pins is a blank surface, not a missing animation.
+    let subscribed: (() => void) | null = null;
+    Object.defineProperty(window, "matchMedia", {
+      configurable: true,
+      writable: true,
+      value: (query: string) => ({
+        matches: query.includes("prefers-reduced-motion") ? reduceMotion : false,
+        media: query,
+        addListener: (cb: () => void) => {
+          subscribed = cb;
+        },
+        removeListener: () => {
+          subscribed = null;
+        },
+        dispatchEvent: () => false,
+        onchange: null,
+      }),
+    });
+
+    reduceMotion = true;
+    expect(() =>
+      render({ steps: [step({ status: "running", label: "Draft the reply" })] }),
+    ).not.toThrow();
+
+    // Rendered, read the preference, and left a live subscription behind —
+    // proving it took the legacy path rather than merely surviving it.
+    expect(visibleLabel()).toBe("Draft the reply");
+    expect(container.querySelectorAll(".animate-pulse").length).toBe(0);
+    expect(subscribed).toBeTypeOf("function");
+  });
 });
 
 describe("runningStepLabel", () => {
