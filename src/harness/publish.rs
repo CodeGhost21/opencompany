@@ -153,9 +153,16 @@ const SCAN_SKIP_DIRS: [&str; 8] = [
 
 /// File names the scan ignores wherever they appear.
 ///
-/// `audit.log` is the per-workspace shell audit trail the `shell` toolbelt
-/// writes (`AuditConfig::log_path`), so any agent granted shell rewrites it on
-/// every run.
+/// `audit.log` **used to be** the per-workspace shell audit trail: the `shell`
+/// toolbelt wrote `<workspace>/audit.log` (`AuditConfig::log_path`), so any agent
+/// granted shell rewrote it on every run and the scan would have nudged about it
+/// after every dispatch. Issue #775 moved that sink out of the workspace
+/// entirely, to the host-owned `companies/<slug>/audit/<agent>/`, so the original
+/// reason no longer applies to a workspace created after that change.
+///
+/// The entry stays anyway, for two reasons that outlive the move: a workspace
+/// provisioned before it still holds the legacy file, and `audit.log` is a
+/// plausible name for something else to write. Neither is ever a deliverable.
 const SCAN_SKIP_FILES: [&str; 1] = ["audit.log"];
 
 /// Whether a directory entry is hidden, and therefore skipped.
