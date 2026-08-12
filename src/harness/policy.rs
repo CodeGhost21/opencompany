@@ -1619,6 +1619,17 @@ mod tests {
         // fence. A priced name like `web_search` would drag the harness's
         // metered-read and budget arms into a comparison that is not about
         // `always_approve`, so it is deliberately absent.
+        //
+        // The near-miss is `query_payment`, not `payroll.export`: the harness
+        // also fail-closes on undeclared effectful tools (issue #338), so an
+        // ungated but spend-classified name like `payroll.export` would be
+        // parked by the harness's per-call judgement while the gate's
+        // authored-node path (issue #674) waves it through. That divergence is
+        // real and deliberate, and dragging it into an always-approve
+        // agreement test would compare two different questions. `query_payment`
+        // is a payment-*read* — the read prefix keeps the per-call judgement
+        // silent — so the fence is the only thing that can move it, which is
+        // precisely what this test measures.
         let fence = &["payment", "filing.submit", "publish_artifact"];
         let names = [
             "payment.send",
@@ -1626,7 +1637,7 @@ mod tests {
             "filing.submit",
             "publish_artifact",
             "PUBLISH_ARTIFACT",
-            "payroll.export",
+            "query_payment",
         ];
 
         // `full` on both sides, so the tier decides nothing and any parking
