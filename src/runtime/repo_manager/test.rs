@@ -934,7 +934,13 @@ async fn a_known_capability_is_not_re_probed_on_every_fetch() {
 /// Clones `mirror` into `dest` and commits one file, returning the new HEAD SHA.
 /// Stands in for an agent's task-scoped checkout with committed work — the thing
 /// `stage_publish` fetches from.
-fn checkout_with_commit(scratch: &Scratch, mirror: &Path, dest: &Path, file: &str, body: &str) -> String {
+fn checkout_with_commit(
+    scratch: &Scratch,
+    mirror: &Path,
+    dest: &Path,
+    file: &str,
+    body: &str,
+) -> String {
     git_at(
         &scratch.0,
         &[
@@ -982,7 +988,10 @@ async fn a_publish_stages_the_agents_commit_and_pushes_the_namespaced_branch() {
     let head = checkout_with_commit(&scratch, &mirror, &checkout, "FIX.md", "the fix\n");
 
     // Stage: the agent's HEAD lands on the host-owned branch, host-side.
-    let branch = mgr.stage_publish("fixture", &checkout, "task-1").await.unwrap();
+    let branch = mgr
+        .stage_publish("fixture", &checkout, "task-1")
+        .await
+        .unwrap();
     assert_eq!(branch, "oc/acme/task-1", "the branch is host-namespaced");
     let staged = git_at(&mirror, &["rev-parse", "refs/heads/oc/acme/task-1"]);
     assert_eq!(staged, head, "the mirror ref points at the agent's commit");
@@ -1042,11 +1051,11 @@ async fn a_push_to_anything_but_this_companys_namespace_is_refused() {
         .unwrap();
 
     for bad in [
-        "main",              // the default branch
-        "oc/other/task-1",   // a foreign company's namespace
-        "oc/acme/",          // the bare prefix, no task
-        "oc/acme/../main",   // a traversal out of the namespace
-        "refs/heads/main",   // a fully-qualified default ref
+        "main",            // the default branch
+        "oc/other/task-1", // a foreign company's namespace
+        "oc/acme/",        // the bare prefix, no task
+        "oc/acme/../main", // a traversal out of the namespace
+        "refs/heads/main", // a fully-qualified default ref
     ] {
         let err = mgr.push_published("fixture", bad).await.unwrap_err();
         assert!(
@@ -1082,7 +1091,9 @@ async fn a_non_fast_forward_publish_is_refused_never_forced() {
     let c1 = scratch.join("checkout1");
     let head_a = checkout_with_commit(&scratch, &mirror, &c1, "A.md", "A\n");
     mgr.stage_publish("fixture", &c1, "task-1").await.unwrap();
-    mgr.push_published("fixture", "oc/acme/task-1").await.unwrap();
+    mgr.push_published("fixture", "oc/acme/task-1")
+        .await
+        .unwrap();
 
     // A divergent commit B (a sibling of A, not its descendant) staged onto the
     // same branch and pushed. Since the push never forces, the remote refuses
