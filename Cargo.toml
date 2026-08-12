@@ -437,3 +437,18 @@ tempfile = "3"
 # real child process. Dev-only: under resolver v2 this feature is not unified
 # into normal builds, so the shipped binary is unchanged.
 tokio = { version = "1", features = ["test-util"] }
+
+# Issue #392: measures what a per-append flush costs, so the per-record-kind
+# durability policy rests on a number rather than an intuition. Default features
+# off — the plotting and rayon extras would be dead weight in every test lane's
+# dependency graph, and this bench reports numbers rather than charts.
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
+
+# Opt-in only (`cargo bench --bench journal_append`). Not wired into CI: it is a
+# measurement of the host's storage, and a shared runner's numbers would mean
+# nothing to gate on.
+[[bench]]
+name = "journal_append"
+harness = false

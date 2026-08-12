@@ -379,9 +379,18 @@ struct GrantState {
     /// buffered instead and the cycle runner drains it after the cycle it
     /// belongs to. A crash between consuming and draining loses the
     /// `GrantConsumed` record, which on replay re-arms a grant whose tool
-    /// already ran — the same at-most-once trade the effect journal makes, and
-    /// in the safe direction: the operator is asked again rather than the tool
-    /// firing again unasked.
+    /// already ran: the `ApprovalGranted` that minted it survives, the
+    /// redemption does not, and [`GrantSet::consume`] will admit the identical
+    /// call a second time with **no** new approval card — until the grant's own
+    /// [`GRANT_TTL_MILLIS`] retires it.
+    ///
+    /// This is a duplication window, not the safe direction, and it is stated
+    /// that way because it used to be recorded here as the opposite. What issue
+    /// #392 could close from the journal's side it did: `GrantConsumed` is
+    /// host-durable, so a record that reached the append is on stable storage
+    /// before the append returns. This buffer is the half that remains — closing
+    /// it means recording the redemption where it happens, which needs a journal
+    /// handle at the `ToolPolicy::check` seam.
     consumed: Vec<ApprovalId>,
     /// Standing grants (issue #374), keyed by their own id.
     ///
