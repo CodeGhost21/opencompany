@@ -79,7 +79,7 @@ use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
 
-use super::workspace_scaffold::{create_folder, ensure_agent_folder};
+use super::workspace_scaffold::ensure_agent_folder;
 
 /// One publish, as [`materialize`] needs it.
 ///
@@ -661,6 +661,25 @@ fn split_source(source: &str) -> Result<Vec<&str>> {
 }
 
 /// Adopt-or-create the folder `name` under `parent`, keeping `nodes` current.
+///
+/// # The snapshot answers, the store decides (issue #759)
+///
+/// The `nodes` snapshot is a fast path and nothing more: a hit means the folder
+/// was already there when the tree was read, and a folder does not stop
+/// existing. A *miss* is only a statement about that instant, and the create
+/// used to act on it later — so two publishes needing `Agents/<agent>/<task>/`
+/// both saw it free and both created, leaving two folders under one name.
+///
+/// That state does not decay. The `many` arm below answers a duplicated name
+/// with `Conflict`, so a race lasting microseconds refuses every later publish
+/// beneath that path, for every agent, permanently. The write therefore always
+/// goes through [`WorkspaceStore::adopt_or_create_folder`], which decides the
+/// contention where it can actually be decided — under the store's own lock,
+/// transaction or unique index.
+///
+/// The node pushed back into the snapshot is the one the **store** returned, so
+/// a publisher that adopted somebody else's folder walks on with the winner's
+/// id rather than one it invented.
 async fn resolve_folder(
     workspace: &dyn WorkspaceStore,
     company: &CompanyId,
@@ -677,26 +696,12 @@ async fn resolve_folder(
              beneath it"
         ))),
         [] => {
-            let id = create_folder(
-                workspace,
-                company,
-                name,
-                Some(parent.to_string()),
-                origin(agent_id),
-            )
-            .await?;
-            nodes.push(WorkspaceNode {
-                id: id.clone(),
-                name: name.to_string(),
-                kind: NodeKind::Folder,
-                parent_id: Some(parent.to_string()),
-                updated_at_millis: now_millis(),
-                created_by: origin(agent_id),
-                updated_by: origin(agent_id),
-                mime: None,
-                size: None,
-                sha256: None,
-            });
+            let node = workspace
+                .adopt_or_create_folder(company, Some(parent), name, origin(agent_id))
+                .await?
+                .into_node();
+            let id = node.id.clone();
+            nodes.push(node);
             Ok(id)
         }
         many => Err(OpenCompanyError::Conflict(format!(
@@ -795,6 +800,19 @@ mod test {
                 return WorkspaceStore::create(&*self.0, company, node, content).await;
             }
             Err(OpenCompanyError::InvalidRequest("over quota".to_string()))
+        }
+        /// Folders are claimed for real, for the same reason `create` lets them
+        /// through: the scaffold walks `Agents/<id>/<task>/` on the way in, and
+        /// refusing that would fail the publish before it ever reaches the file
+        /// this double exists to refuse.
+        async fn adopt_or_create_folder(
+            &self,
+            company: &CompanyId,
+            parent: Option<&str>,
+            name: &str,
+            origin: WorkspaceOrigin,
+        ) -> Result<crate::ports::workspace::FolderClaim> {
+            WorkspaceStore::adopt_or_create_folder(&*self.0, company, parent, name, origin).await
         }
         async fn create_binary(
             &self,
@@ -1162,6 +1180,15 @@ mod test {
         ) -> Result<WorkspaceNode> {
             WorkspaceStore::rename_move(&*self.0, company, id, name, parent).await
         }
+        async fn adopt_or_create_folder(
+            &self,
+            company: &CompanyId,
+            parent: Option<&str>,
+            name: &str,
+            origin: WorkspaceOrigin,
+        ) -> Result<crate::ports::workspace::FolderClaim> {
+            WorkspaceStore::adopt_or_create_folder(&*self.0, company, parent, name, origin).await
+        }
         async fn swap_files(
             &self,
             company: &CompanyId,
@@ -1331,6 +1358,333 @@ mod test {
             1,
             "and revising it must not fork the path either: {after:?}"
         );
+    }
+
+    /// A real store that holds the first `arrivals` `tree()` reads at a
+    /// two-party barrier, so two publishers provably act on the *same* snapshot.
+    ///
+    /// # Why the tree read and not the folder write
+    ///
+    /// This is the race's own precondition: both publishers read "that folder is
+    /// not there", and before issue #759 both then created. Pausing where the
+    /// snapshot is taken forces exactly that interleaving without replacing any
+    /// of the code under test — the folder claim, whichever backend decides it,
+    /// runs for real afterwards.
+    ///
+    /// It is also the only pause point that exists **on both sides of the fix**,
+    /// which is what lets these two tests be run against the base commit to
+    /// watch them fail. A barrier inside the new primitive could only ever
+    /// observe the fixed code.
+    ///
+    /// `arrivals` is a budget rather than a switch: after that many `tree()`
+    /// calls the barrier is bypassed, so a publisher that fails early (which is
+    /// exactly what the *unfixed* code does) cannot strand its partner waiting
+    /// for a rendezvous that will never come.
+    struct PausedTreeRead {
+        inner: Arc<FsOps>,
+        barrier: Arc<tokio::sync::Barrier>,
+        arrivals: std::sync::atomic::AtomicUsize,
+    }
+
+    impl PausedTreeRead {
+        fn new(inner: Arc<FsOps>, arrivals: usize) -> Self {
+            Self {
+                inner,
+                barrier: Arc::new(tokio::sync::Barrier::new(2)),
+                arrivals: std::sync::atomic::AtomicUsize::new(arrivals),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl WorkspaceStore for PausedTreeRead {
+        async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>> {
+            let budget = self
+                .arrivals
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok();
+            if budget {
+                self.barrier.wait().await;
+            }
+            WorkspaceStore::tree(&*self.inner, company).await
+        }
+        async fn read(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, String)>> {
+            WorkspaceStore::read(&*self.inner, company, id).await
+        }
+        async fn write(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            content: &str,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write(&*self.inner, company, id, content, author).await
+        }
+        async fn create(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            content: Option<&str>,
+        ) -> Result<()> {
+            WorkspaceStore::create(&*self.inner, company, node, content).await
+        }
+        async fn adopt_or_create_folder(
+            &self,
+            company: &CompanyId,
+            parent: Option<&str>,
+            name: &str,
+            origin: WorkspaceOrigin,
+        ) -> Result<crate::ports::workspace::FolderClaim> {
+            WorkspaceStore::adopt_or_create_folder(&*self.inner, company, parent, name, origin)
+                .await
+        }
+        async fn create_binary(
+            &self,
+            company: &CompanyId,
+            node: &WorkspaceNode,
+            bytes: &[u8],
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::create_binary(&*self.inner, company, node, bytes).await
+        }
+        async fn write_binary(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            bytes: &[u8],
+            mime: Option<&str>,
+            author: WorkspaceOrigin,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::write_binary(&*self.inner, company, id, bytes, mime, author).await
+        }
+        async fn read_bytes(
+            &self,
+            company: &CompanyId,
+            id: &str,
+        ) -> Result<Option<(WorkspaceNode, crate::ports::workspace::BlobStream)>> {
+            WorkspaceStore::read_bytes(&*self.inner, company, id).await
+        }
+        async fn rename_move(
+            &self,
+            company: &CompanyId,
+            id: &str,
+            name: Option<&str>,
+            parent: Option<Option<&str>>,
+        ) -> Result<WorkspaceNode> {
+            WorkspaceStore::rename_move(&*self.inner, company, id, name, parent).await
+        }
+        async fn swap_files(
+            &self,
+            company: &CompanyId,
+            expected_id: Option<&str>,
+            replacement_id: &str,
+            name: &str,
+        ) -> Result<Option<WorkspaceNode>> {
+            WorkspaceStore::swap_files(&*self.inner, company, expected_id, replacement_id, name)
+                .await
+        }
+        async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool> {
+            WorkspaceStore::delete(&*self.inner, company, id).await
+        }
+        async fn is_empty(&self, company: &CompanyId) -> Result<bool> {
+            WorkspaceStore::is_empty(&*self.inner, company).await
+        }
+    }
+
+    /// Every node under `parent` carrying `name`, by id.
+    fn named_children(nodes: &[WorkspaceNode], parent: &str, name: &str) -> Vec<String> {
+        nodes
+            .iter()
+            .filter(|n| n.parent_id.as_deref() == Some(parent) && n.name == name)
+            .map(|n| n.id.clone())
+            .collect()
+    }
+
+    /// Issue #759, the folder half of the publish walk: two publishers needing
+    /// the same **task folder** that does not exist yet.
+    ///
+    /// The filenames differ on purpose. Issue #697 already made two publishers
+    /// contending for one *file* path resolve to a single winner, so a test
+    /// using one filename would be satisfied by that fix alone and would say
+    /// nothing about the folder above it. Different names means both files must
+    /// land — and they can only both land if the folder they land in is one
+    /// folder.
+    ///
+    /// The last assertion is the one that speaks to severity. A duplicated
+    /// folder is not a transient: `resolve_folder`'s ambiguity arm answers
+    /// `Conflict` for every later publish beneath that path, for every agent,
+    /// permanently. Proving a third publish still works is proving the momentary
+    /// race did not become a standing outage.
+    #[tokio::test]
+    async fn two_publishes_needing_one_task_folder_share_it_rather_than_duplicating_it() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+
+        // Seed only the agent folder, by publishing something for a different
+        // task. The task folder under test must still be absent — that is the
+        // create arm this test exists for.
+        materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-seed",
+                ..target("seed.md", "# Seed")
+            },
+        )
+        .await
+        .expect("seeding `Agents/cmo/`");
+        let agent_folder = ws
+            .tree(&co)
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|n| n.name == "cmo")
+            .expect("the agent folder exists")
+            .id;
+        assert!(
+            named_children(&ws.tree(&co).await.unwrap(), &agent_folder, "t-9").is_empty(),
+            "the race is about a task folder that does not exist yet"
+        );
+
+        // Four arrivals: each publisher reads the tree twice on this path — once
+        // in the member-folder minter, once in `materialize` itself — and the
+        // second rendezvous is the one that puts both of them on a snapshot with
+        // no `t-9` in it.
+        let racing = PausedTreeRead::new(ops.clone(), 4);
+        let left = materialize(
+            &racing,
+            &co,
+            PublishTarget {
+                task_id: "t-9",
+                ..target("left.md", "# From the left")
+            },
+        );
+        let right = materialize(
+            &racing,
+            &co,
+            PublishTarget {
+                task_id: "t-9",
+                ..target("right.md", "# From the right")
+            },
+        );
+        let (left, right) = tokio::join!(left, right);
+        let left = left.expect("the left publish must succeed");
+        let right = right.expect("the right publish must succeed");
+
+        let nodes = ws.tree(&co).await.unwrap();
+        let task_folders = named_children(&nodes, &agent_folder, "t-9");
+        assert_eq!(
+            task_folders.len(),
+            1,
+            "one task folder, or every later publish beneath it is refused forever: {nodes:?}"
+        );
+        let task_folder = &task_folders[0];
+
+        for (id, name) in [(&left.node_id, "left.md"), (&right.node_id, "right.md")] {
+            let node = nodes
+                .iter()
+                .find(|n| &n.id == id)
+                .unwrap_or_else(|| panic!("the published node for {name} is in the tree"));
+            assert_eq!(node.name, name);
+            assert_eq!(
+                node.parent_id.as_deref(),
+                Some(task_folder.as_str()),
+                "both deliverables must land in the one task folder"
+            );
+        }
+
+        // …and the path stays publishable, which a duplicate would have ended.
+        materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-9",
+                ..target("later.md", "# A later publish")
+            },
+        )
+        .await
+        .expect("the shared task folder must still accept a publish");
+        let after = ws.tree(&co).await.unwrap();
+        assert_eq!(
+            named_children(&after, &agent_folder, "t-9").len(),
+            1,
+            "and it must still be one folder: {after:?}"
+        );
+    }
+
+    /// The same race one level up, on the folders the *scaffold* mints:
+    /// `Agents/` and `Agents/<agent-id>/`.
+    ///
+    /// Nothing is seeded, so both publishers read an empty tree and both need
+    /// the root and the agent's own folder. Different task ids keep the task
+    /// folders apart, so the only thing they can contend for is the pair
+    /// `ensure_member_folder` claims — which is what pins that conversion
+    /// independently of `resolve_folder`'s.
+    ///
+    /// Two arrivals rather than four: the rendezvous that matters is the member
+    /// minter's tree read, and budgeting only that one leaves a publisher that
+    /// fails there (the unfixed behaviour) unable to strand its partner.
+    #[tokio::test]
+    async fn two_publishers_minting_one_agent_folder_share_it_rather_than_duplicating_it() {
+        let (_dir, ops, co) = stores();
+        let ws: &dyn WorkspaceStore = ops.as_ref();
+        assert!(ws.is_empty(&co).await.unwrap(), "nothing is seeded");
+
+        let racing = PausedTreeRead::new(ops.clone(), 2);
+        let left = materialize(
+            &racing,
+            &co,
+            PublishTarget {
+                task_id: "t-left",
+                ..target("left.md", "# From the left")
+            },
+        );
+        let right = materialize(
+            &racing,
+            &co,
+            PublishTarget {
+                task_id: "t-right",
+                ..target("right.md", "# From the right")
+            },
+        );
+        let (left, right) = tokio::join!(left, right);
+        left.expect("the left publish must succeed");
+        right.expect("the right publish must succeed");
+
+        let nodes = ws.tree(&co).await.unwrap();
+        let roots: Vec<&WorkspaceNode> = nodes
+            .iter()
+            .filter(|n| n.parent_id.is_none() && n.name == AGENTS_ROOT)
+            .collect();
+        assert_eq!(
+            roots.len(),
+            1,
+            "one `{AGENTS_ROOT}` root — two would make every agent folder ambiguous: {nodes:?}"
+        );
+        assert_eq!(
+            named_children(&nodes, &roots[0].id, "cmo").len(),
+            1,
+            "one folder for the agent, or the agent can never publish again: {nodes:?}"
+        );
+
+        // The whole subtree stays usable afterwards.
+        materialize(
+            ws,
+            &co,
+            PublishTarget {
+                task_id: "t-later",
+                ..target("later.md", "# A later publish")
+            },
+        )
+        .await
+        .expect("the agent's folder must still accept a publish");
     }
 
     /// Issue #662. A shape-changing publish whose replacement **fails** must
@@ -1619,15 +1973,9 @@ mod test {
             .0
             .parent_id
             .unwrap();
-        create_folder(
-            ws,
-            &co,
-            "launch.md",
-            Some(parent),
-            WorkspaceOrigin::Operator,
-        )
-        .await
-        .unwrap();
+        ws.adopt_or_create_folder(&co, Some(&parent), "launch.md", WorkspaceOrigin::Operator)
+            .await
+            .expect("claim the folder standing in the note's place");
 
         let refused = materialize(ws, &co, target("launch.md", "body"))
             .await

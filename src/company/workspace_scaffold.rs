@@ -150,8 +150,14 @@ pub async fn ensure_workspace_scaffold(
                 "[workspace] {why}; not provisioning the `{root}` root"
             ),
             Found::Free => {
-                if let Err(e) =
-                    create_folder(store, company, root, None, WorkspaceOrigin::Seed).await
+                // Through the store primitive, so a boot racing a publish (or
+                // two tenant replicas booting together) adopts rather than
+                // duplicating the root — see `ensure_member_folder`. The
+                // warn-and-continue reporting is unchanged: a convenience folder
+                // must not take down a boot.
+                if let Err(e) = store
+                    .adopt_or_create_folder(company, None, root, WorkspaceOrigin::Seed)
+                    .await
                 {
                     tracing::warn!(
                         company = %company,
@@ -231,6 +237,22 @@ pub async fn ensure_desk_folder(
 
 /// The shared body of [`ensure_agent_folder`] and [`ensure_desk_folder`]:
 /// resolve `root`, then resolve `id` beneath it, creating what is missing.
+///
+/// # The tree read is a fast path; the store decides (issue #759)
+///
+/// [`find`] answering `Free` describes the instant the tree was read, and the
+/// create used to act on it afterwards. Two agents first producing something at
+/// once therefore both saw `Agents/` free — or both saw `Agents/<id>/` free —
+/// and both created, leaving two folders under one name. Nothing repairs that:
+/// [`find`] answers a duplicated name with `Collision` from then on, so a race
+/// lasting microseconds refuses that agent's folder forever.
+///
+/// Both creates now go through [`WorkspaceStore::adopt_or_create_folder`], which
+/// resolves the contention inside the store. That also makes the stale snapshot
+/// harmless: a caller whose read predates another's create adopts the folder
+/// that exists rather than minting a rival, and — because the root claim returns
+/// the *winner's* id — the member folder beneath it is claimed under the same
+/// parent either way.
 async fn ensure_member_folder(
     store: &dyn WorkspaceStore,
     company: &CompanyId,
@@ -253,13 +275,23 @@ async fn ensure_member_folder(
 
     let root_id = match find(&nodes, None, root) {
         Found::Folder(id) => id,
-        Found::Free => create_folder(store, company, root, None, WorkspaceOrigin::Seed).await?,
+        Found::Free => {
+            store
+                .adopt_or_create_folder(company, None, root, WorkspaceOrigin::Seed)
+                .await?
+                .into_node()
+                .id
+        }
         Found::Collision(why) => return Err(OpenCompanyError::Conflict(why)),
     };
 
     match find(&nodes, Some(&root_id), id) {
         Found::Folder(existing) => Ok(existing),
-        Found::Free => create_folder(store, company, id, Some(root_id), origin).await,
+        Found::Free => Ok(store
+            .adopt_or_create_folder(company, Some(&root_id), id, origin)
+            .await?
+            .into_node()
+            .id),
         Found::Collision(why) => Err(OpenCompanyError::Conflict(why)),
     }
 }
@@ -304,34 +336,6 @@ pub(crate) fn find(nodes: &[WorkspaceNode], parent: Option<&str>, name: &str) ->
             count = many.len()
         )),
     }
-}
-
-/// Create one folder and hand back its id.
-///
-/// `pub(crate)` so [`artifact_mirror`](crate::company::artifact_mirror) mints
-/// the folders beneath `Agents/<id>/` the same way this module mints the ones
-/// above them — one creation shape, one set of origin-stamping rules.
-pub(crate) async fn create_folder(
-    store: &dyn WorkspaceStore,
-    company: &CompanyId,
-    name: &str,
-    parent_id: Option<String>,
-    origin: WorkspaceOrigin,
-) -> Result<String> {
-    let node = WorkspaceNode {
-        id: crate::ports::generate_id(),
-        name: name.to_string(),
-        kind: NodeKind::Folder,
-        parent_id,
-        updated_at_millis: crate::ports::now_millis(),
-        created_by: origin.clone(),
-        updated_by: origin,
-        mime: None,
-        size: None,
-        sha256: None,
-    };
-    store.create(company, &node, None).await?;
-    Ok(node.id)
 }
 
 /// Whether `name` is usable as a single workspace path segment.

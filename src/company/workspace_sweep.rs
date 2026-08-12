@@ -243,10 +243,29 @@ mod tests {
 
     use super::*;
     use crate::company::workspace_scaffold::{
-        DESKS_ROOT, create_folder, ensure_agent_folder, ensure_workspace_scaffold,
+        DESKS_ROOT, ensure_agent_folder, ensure_workspace_scaffold,
     };
     use crate::ports::workspace::WorkspaceOrigin;
     use crate::store::FsOps;
+
+    /// Claim one folder and hand back its id.
+    ///
+    /// The store primitive (issue #759), spelled for a test that only wants a
+    /// folder to exist. It replaced the scaffold's old `create_folder` helper,
+    /// which was a plain read-then-create and is gone.
+    async fn claim_folder(
+        ws: &dyn WorkspaceStore,
+        company: &CompanyId,
+        name: &str,
+        parent: Option<&str>,
+        origin: WorkspaceOrigin,
+    ) -> String {
+        ws.adopt_or_create_folder(company, parent, name, origin)
+            .await
+            .expect("claim a folder")
+            .into_node()
+            .id
+    }
 
     async fn store() -> (tempfile::TempDir, Arc<dyn WorkspaceStore>) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -332,15 +351,14 @@ mod tests {
             .find(|node| node.name == "cmo")
             .unwrap()
             .id;
-        create_folder(
+        claim_folder(
             ws.as_ref(),
             &company,
             "task-1",
-            Some(cmo),
+            Some(&cmo),
             WorkspaceOrigin::Seed,
         )
-        .await
-        .unwrap();
+        .await;
 
         let removed = sweep_empty_agent_folders(ws.as_ref(), &company, false)
             .await
@@ -454,45 +472,41 @@ mod tests {
         ensure_workspace_scaffold(ws.as_ref(), &company)
             .await
             .unwrap();
-        create_folder(
+        claim_folder(
             ws.as_ref(),
             &company,
             "Archive",
             None,
             WorkspaceOrigin::Operator,
         )
-        .await
-        .unwrap();
-        let desks = create_folder(
+        .await;
+        let desks = claim_folder(
             ws.as_ref(),
             &company,
             DESKS_ROOT,
             None,
             WorkspaceOrigin::Seed,
         )
-        .await
-        .unwrap();
-        create_folder(
+        .await;
+        claim_folder(
             ws.as_ref(),
             &company,
             "creative_studio",
-            Some(desks),
+            Some(&desks),
             WorkspaceOrigin::Seed,
         )
-        .await
-        .unwrap();
+        .await;
         let ceo = ensure_agent_folder(ws.as_ref(), &company, "ceo")
             .await
             .unwrap();
-        create_folder(
+        claim_folder(
             ws.as_ref(),
             &company,
             "drafts",
-            Some(ceo),
+            Some(&ceo),
             WorkspaceOrigin::Seed,
         )
-        .await
-        .unwrap();
+        .await;
 
         let removed = sweep_empty_agent_folders(ws.as_ref(), &company, false)
             .await
@@ -519,15 +533,14 @@ mod tests {
     async fn a_company_with_no_agents_root_is_a_no_op() {
         let (_dir, ws) = store().await;
         let company = CompanyId::new("fresh");
-        create_folder(
+        claim_folder(
             ws.as_ref(),
             &company,
             "Notes",
             None,
             WorkspaceOrigin::Operator,
         )
-        .await
-        .unwrap();
+        .await;
 
         let removed = sweep_empty_agent_folders(ws.as_ref(), &company, false)
             .await
