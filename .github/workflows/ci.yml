@@ -1063,14 +1063,28 @@ jobs:
       # it PACKAGES, and those are different claims: the steps above drive
       # `cargo` directly and build the console themselves with
       # `working-directory: frontend`, so `tauri.conf.json` — the file that says
-      # how the app is actually assembled — is read by nothing in this lane.
+      # how the app is actually assembled — was read by nothing in this lane.
       #
       # It was wrong for the whole life of the split. `beforeBuildCommand` named
-      # `../frontend`, which escapes the repository from the working directory
-      # Tauri runs the hook in, so `cargo tauri build` and `cargo tauri dev`
-      # failed on their first step for every developer while this lane stayed
-      # green (issue #616). A lane that never invokes the packaging entry point
-      # makes the first real launch the integration test.
+      # `../frontend`, which escapes the repository from the directory Tauri ran
+      # the hook in, so `cargo tauri build` and `cargo tauri dev` failed on their
+      # first step for every developer while this lane stayed green (issue #616).
+      # A lane that never invokes the packaging entry point makes the first real
+      # launch the integration test.
+      #
+      # The console is built by the `npm run build` step above rather than by a
+      # `beforeBuildCommand`, and that is now load-bearing: Tauri runs that hook
+      # from a directory it DERIVES, by scanning for a `package.json`, and which
+      # one it picks is not stable. On a developer's macOS checkout it lands in
+      # `frontend/`; on this runner it landed in `vendor/openhuman/` — also a
+      # directory with a `package.json`, reached first because the filesystems
+      # enumerate in different orders. No relative path is correct from both, and
+      # neither is `$(git rev-parse --show-toplevel)`, which answers with the
+      # SUBMODULE's root once the hook lands inside one. So there is no hook: the
+      # console is built explicitly, before packaging, by a step whose working
+      # directory this file states outright. `frontendDist` stays relative to
+      # `src-tauri/`, which is where `tauri.conf.json` lives and is therefore the
+      # one path here that cannot drift.
       #
       # `--debug`, not a release build: this step exists to execute the config
       # and link a binary, and the `Test` step above already compiled that graph
@@ -1085,27 +1099,18 @@ jobs:
       # installed `@tauri-apps/cli`, so this costs nothing, where
       # `cargo install tauri-cli` would compile the CLI from source.
       #
-      # BOTH directories, and that is the whole point of the step rather than a
-      # belt-and-braces second run. Tauri resolves `beforeBuildCommand`'s working
-      # directory from where the CLI was invoked — `<repo>/frontend` from the
-      # repository root, `<repo>` from `src-tauri/` — so a relative prefix is
-      # correct from one and broken from the other, and each invocation is blind
-      # to the other's failure:
+      # BOTH directories, because a packaging step that runs from exactly one is
+      # how #616 stayed invisible: every other step in this lane runs from the
+      # repository root, which is the one place the broken hook happened to work.
+      # Nothing cwd-dependent is left to gate today, so what these two now defend
+      # is that nothing cwd-dependent comes BACK — a reintroduced relative hook
+      # fails one of them whichever direction it is wrong in. The second run is
+      # nearly free: same profile, same cache, everything already built.
       #
-      #   hook value        from repo root   from src-tauri/
-      #   `../frontend`     passes           FAILS  ← what shipped (#616)
-      #   `frontend`        FAILS            passes ← the obvious "fix"
-      #
-      # A single-directory step would therefore have gated exactly half of this
-      # class, and the half it gated depends on which directory it picked. The
-      # committed hook resolves its own path and passes from both; these two runs
-      # are what keeps it that way. The second is nearly free — same profile,
-      # same cache, everything already built.
-      #
-      # The CLI finds a project by searching SUBFOLDERS of the working directory
-      # rather than ancestors, which is also why these two and no others: from
-      # `frontend/` it would find the console wrapper above instead, a different
-      # app that happens to share this one's `productName`.
+      # These two and no others: the CLI finds a project by searching SUBFOLDERS
+      # of the working directory rather than ancestors, so from `frontend/` it
+      # would package the console wrapper above instead — a different app that
+      # happens to share this one's `productName`.
       - name: Package (from the repository root)
         run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
 

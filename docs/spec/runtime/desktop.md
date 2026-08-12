@@ -48,40 +48,52 @@ dev profile and a release build would recompile the host for no extra claim;
 `--no-bundle` because the failure being gated happens at the first step of
 `tauri build`, long before a `.deb` exists.
 
-There are two of them, from the repository root and from `src-tauri/`, because
-one would gate half the failure class — see the table below. Which half depends
-on which directory it ran in, which is the least useful property a gate can
-have.
+There are two of them, from the repository root and from `src-tauri/`. Every
+other step in this lane runs from the repository root, which is the one place
+the broken hook happened to work — a single-directory packaging step is how #616
+stayed invisible. Nothing working-directory-dependent survives in the config
+today, so what the pair defends now is that none comes back.
 
-### The hook's working directory is not where you think
+### Build the console first: there is no `beforeBuildCommand`
 
-`frontendDist` is resolved relative to `src-tauri/`. `beforeBuildCommand` is
-**not** — Tauri runs it from the app directory, and which directory that is
-depends on where the CLI was invoked:
+Both hooks are empty, and that is deliberate. **Build `frontend/dist` before you
+package**:
 
-| invoked from | hook runs in    |
-| ------------ | --------------- |
-| repo root    | `<repo>/frontend` |
-| `src-tauri/` | `<repo>`        |
-
-So no relative prefix is correct for both, and each one passes in exactly the
-directory that hides it:
-
-| hook value      | from repo root | from `src-tauri/` |
-| --------------- | -------------- | ----------------- |
-| `../frontend`   | passes         | **fails** — what shipped |
-| `frontend`      | **fails**      | passes            |
-| resolved below  | passes         | passes            |
-
-The hook therefore resolves its own path and depends on no working directory:
-
-```json
-"beforeBuildCommand": "npm --prefix \"$(git rev-parse --show-toplevel)/frontend\" run build"
+```sh
+npm --prefix frontend run build     # from the repository root
+cargo tauri build                   # or: frontend/node_modules/.bin/tauri build
 ```
 
-The cost is a POSIX shell and a git checkout, which is what every lane and every
-developer has. A Windows `cmd` host would not expand it; when the desktop grows a
-Windows runner, that is the line to revisit.
+`frontendDist` is resolved relative to `src-tauri/`, where `tauri.conf.json`
+lives, so it means the same thing from every working directory. A hook does not:
+Tauri runs it from an app directory it *derives*, by scanning for a
+`package.json`, and which one it finds is not stable across machines. The
+committed `../frontend` escaped the repository entirely from `src-tauri/`
+([#616](https://github.com/tinyhumansai/opencompany/issues/616)), and the
+opposite prefix fails from the repository root — each is correct in exactly the
+directory that hides the other:
+
+| hook value    | from repo root | from `src-tauri/` |
+| ------------- | -------------- | ----------------- |
+| `../frontend` | passes         | **fails** — what shipped |
+| `frontend`    | **fails**      | passes            |
+
+Resolving the path inside the hook does not rescue it either. `$(git rev-parse
+--show-toplevel)/frontend` passes from both of those, and still broke in CI: the
+hook landed in `vendor/openhuman/` — another directory with a `package.json`,
+reached first because a Linux runner enumerates directories in a different order
+than a developer's macOS checkout — and `git rev-parse` inside a submodule
+answers with the *submodule's* root. The CLI offers no flag, config key or
+environment variable naming the app directory, so nothing computed from the
+working directory can be trusted.
+
+Deleting the hook removes the whole class. The cost is that `tauri dev` no longer
+starts Vite for you — run `npm --prefix frontend run dev` alongside it; `devUrl`
+already points at `localhost:5173` — and that packaging a stale console is now
+possible locally, where before it was merely likely. The failure mode is at least
+legible: Tauri reports `Unable to find your web assets … frontendDist is set to
+"../frontend/dist"` with the absolute path it resolved, rather than an `npm
+ENOENT` for a directory nobody named.
 
 ## N connections, and no active one
 
