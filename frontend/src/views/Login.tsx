@@ -303,12 +303,19 @@ export function Login({
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@company.com"
+                  aria-describedby={
+                    suggestedEmail && email === suggestedEmail ? "email-hint" : undefined
+                  }
                 />
                 {suggestedEmail && email === suggestedEmail ? (
                   // Otherwise the prefilled address reads as somebody else's,
                   // and the natural move is to clear it — which is the one
                   // address this host will not answer for.
-                  <p className="text-xs text-muted-foreground" data-testid="suggested-email-hint">
+                  <p
+                    id="email-hint"
+                    className="text-xs text-muted-foreground"
+                    data-testid="suggested-email-hint"
+                  >
                     The operator account on this computer. Nothing is mailed —
                     the link comes back here.
                   </p>

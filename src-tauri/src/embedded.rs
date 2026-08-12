@@ -241,20 +241,10 @@ mod test {
         let seeded = first.companies().to_vec();
         drop(first);
 
-        // Retried because the data root is released asynchronously; see the
-        // note in `stopping_a_host_frees_its_root_and_its_port`.
-        let mut last = None;
-        for _ in 0..50 {
-            match start(dir.path().to_path_buf()).await {
-                Ok(relaunched) => {
-                    assert_eq!(relaunched.companies(), seeded.as_slice());
-                    return;
-                }
-                Err(error) => last = Some(error),
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-        }
-        panic!("a released root must become takeable: {last:?}");
+        // `take_root` retries because the data root is released asynchronously;
+        // see the note in `stopping_a_host_frees_its_root_and_its_port`.
+        let relaunched = take_root(dir.path().to_path_buf()).await;
+        assert_eq!(relaunched.companies(), seeded.as_slice());
     }
 
     #[tokio::test]

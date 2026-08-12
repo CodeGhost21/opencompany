@@ -182,12 +182,19 @@ pub async fn bootstrap_companies(
         if summary.lifecycle == "archived" {
             continue;
         }
-        let Some(record) = store.load(&summary.id).await? else {
-            continue;
-        };
         // One unreadable bundle must not cost the operator every other company
         // on the machine, so this warns and moves on rather than failing the
-        // boot. The seed below is what still runs if *nothing* could be adopted.
+        // boot — the load as much as the build below. The seed further down is
+        // what still runs if *nothing* could be adopted.
+        let record = match store.load(&summary.id).await {
+            Ok(Some(record)) => record,
+            // Listed a moment ago and gone now: a bundle removed under us.
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::warn!(company = %summary.id, %error, "could not read a stored company");
+                continue;
+            }
+        };
         match register(state, summary.id.clone(), record.manifest, None).await {
             Ok(()) => registered.push(summary.id),
             Err(error) => {
@@ -404,6 +411,43 @@ mod tests {
             "and no second bundle was written"
         );
         assert!(relaunched.registry().sole().is_some());
+    }
+
+    /// A damaged bundle costs its own company and nothing else.
+    ///
+    /// The failure this rules out is the whole-desktop one: a boot that gave up
+    /// on the first unreadable bundle would leave an operator with no local host
+    /// at all — not even the companies that are perfectly intact — and the
+    /// console renders that as "no embedded host", which reads like the app is
+    /// broken rather than like one company is.
+    #[tokio::test]
+    async fn a_damaged_bundle_does_not_take_the_healthy_one_with_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state_over(directory.path());
+        let healthy = first_run_manifest(DEFAULT_PRESET_ID).unwrap();
+        let healthy_id = company_id_from_name(&healthy.company.name);
+        register(&state, healthy_id.clone(), healthy, None)
+            .await
+            .unwrap();
+
+        let damaged = directory.path().join("companies").join("broken");
+        std::fs::create_dir_all(&damaged).unwrap();
+        std::fs::write(
+            damaged.join("company.toml"),
+            "this is not manifest = toml {{",
+        )
+        .unwrap();
+
+        let relaunched = state_over(directory.path());
+        let ids = bootstrap_companies(&relaunched, DEFAULT_PRESET_ID)
+            .await
+            .expect("a damaged bundle must not fail the boot");
+
+        assert_eq!(ids, vec![healthy_id], "the intact company still comes up");
+        assert!(
+            relaunched.registry().sole().is_some(),
+            "and it is the only one, rather than joined by a second starter"
+        );
     }
 
     /// Archiving removes a company from the registry deliberately. A boot that

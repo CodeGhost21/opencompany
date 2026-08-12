@@ -213,8 +213,8 @@ bootstraps its own:
    `archived` ones (archiving removes a company from the registry on purpose,
    and re-registering it at the next launch would undo that quietly). The
    bundle is the only authority — a desktop company has no source directory to
-   re-read — and `RuntimeBuilder::build` carries the persisted record's console
-   -created desks, agents and workflows forward.
+   re-read — and `RuntimeBuilder::build` carries the persisted record's
+   console-created desks, agents and workflows forward.
 2. **Seed** the `DEFAULT_PRESET_ID` preset when there were none, stamping the
    preset slug as the record's template provenance. Fallback rather than
    unconditional: seeding on every launch would hand the operator a second
