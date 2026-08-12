@@ -46,32 +46,40 @@ Each of these is real. None of them is a sandbox.
 | Database per tenant | `OPENCOMPANY_MONGODB_URI` is scoped to that tenant's database | [storage.md](../runtime/storage.md) |
 | Tool grants are per agent, and `repo` needs naming | `grants_repo_explicit` — the catch-all `*` does **not** confer `repo`, `media`, `composio` or `search` | `src/company/types.rs` |
 | Repo tools need a grant, a wired manager **and** a binding | Three gates in `build_agent`, each fail-closed with a warning | `src/harness/build.rs` |
-| Repo credentials refused on a plaintext secret backend | Issue #752 C3 — bind and boot both refuse unless `OPENCOMPANY_STORAGE=mongodb` | `src/store/select.rs`, `src/runtime/repo_manager.rs` |
+| Repo credentials refused on a plaintext secret backend | Issue #752 C3 — bind, company boot and agent build all refuse unless `OPENCOMPANY_STORAGE=mongodb` | `src/store/select.rs`, `src/runtime/repo_manager.rs`, `src/runtime/builder.rs`, `src/harness/build.rs` |
 | Classic PATs refused at intake | `ghp_…` reads every repository the account can reach; the route refuses it and says how to make a fine-grained one | `src/server/ops/repos.rs` |
 | The credential never reaches argv, the environment or a file | A git credential helper on stdin, with an emptied environment | [repos.md](../runtime/repos.md) |
 | A checkout cannot reach the mirror it came from | Full object copy over `file://`, no hardlinks, no `alternates`, every back-reference severed | `src/harness/repo.rs` |
 | A push at a mirror is refused by the mirror | A `pre-receive` hook installed in every mirror | `install_push_refusal` |
 | Checkouts do not survive a turn | Orphaned checkouts swept at boot, tenant-scoped | `sweep_orphaned_checkouts` |
 | Repository configuration cannot make git run programs | `core.hooksPath=/dev/null`, no system/global config, scratch `$HOME`, deadline on every invocation | [repos.md](../runtime/repos.md) |
-| A publish is host-shaped and human-approved | Host-generated branch name, never the default branch, no force, all inside `RepoManager` | issue #735 |
 | Shell without an audit logger is no shell | `workspace_audit` returns `None` → the whole `shell` namespace is withheld | `src/harness/toolbelt.rs` |
 | Copilot turns reach nothing | `ConfinedToolPolicy` denies every tool call by name, empty belt, empty memory | `src/harness/confine.rs` |
 | Web tools reject private and metadata IPs | OpenHuman's `url_guard`, always, regardless of allowlist | `src/harness/toolbelt.rs` |
 | Per-company web allowlist, when set | `[tools].web_allowed_domains`; empty means allow-any-public | `src/harness/toolbelt.rs` |
 
-Two of those deserve their honest reading rather than their headline.
-
-**The approval gate on publish (#735) is adequate for what it guards, and it
-guards a tool.** A push is low-frequency, high-consequence and irreversible,
-which is exactly the shape an approval gate is for, and its constraints are
-structural rather than prompt-reachable. But it runs in the same process and
-gates `repo_publish`. An injected agent moving data out does not call
-`repo_publish`. It calls `shell` and runs `git push` — or `curl`.
-
 **The exec `SecurityPolicy` is advisory.** `workspace_only`,
 `block_high_risk_commands` and `require_approval_for_medium_risk` are read by
 filesystem tools and by a command classifier. `workspace_dir` and `action_dir`
 set the shell's **working directory**. A working directory is not a jail.
+
+### On the write tier's approval gate, which is not here yet
+
+The repository **write** tier (#247, #734–#738) is in flight and is **not on
+`main`** as this is written — there is no `repo_publish` in the tree. When it
+lands, its approval gate is adequate for what it guards: a push is
+low-frequency, high-consequence and irreversible, exactly the shape an approval
+gate is for, and its constraints (host-generated branch name, never the default
+branch, no force, all inside `RepoManager`) are structural rather than
+prompt-reachable.
+
+It is still not a shell boundary. It runs in the same process and gates a
+*tool*. An injected agent moving data out does not call `repo_publish` — it
+calls `shell` and runs `git push`, or `curl`. So the gate does not lower the
+priority of anything in this document, and it must not be cited as if it did.
+
+A suggested precondition, not a code dependency: **the write tier should not
+reach a tenant whose pod lacks default-deny egress.**
 
 ## What is not enforced
 
@@ -229,8 +237,8 @@ directory:
 | C4 | Wire `cwd_jail` Landlock for the agent shell, plus a CI lane that builds the feature | opencompany | open — secondary |
 | C5 | Short-lived single-repository installation tokens instead of a long-lived write PAT | `opencompany-microservice` | open — before the write tier ships broadly |
 
-A suggested precondition, not a code dependency: **the write tier should not
-reach a tenant whose pod lacks default-deny egress.**
+The write tier (#247, #734–#738) is a separate line of work, not a child of
+this one — but see the precondition above.
 
 ## Related
 
