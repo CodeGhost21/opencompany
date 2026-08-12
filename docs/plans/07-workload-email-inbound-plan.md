@@ -1,5 +1,17 @@
 # WS7 Inbound — IMAP Receive: Implementation Plan
 
+> **Status: shipped.** This plan landed whole in
+> [PR #143](https://github.com/tinyhumansai/opencompany/pull/143) (`51e0d639`),
+> including the outbound `send_email` half the text below still calls deferred.
+> It is **not** current documentation and must not be read as one: for how the
+> inbound path behaves today see
+> [`docs/spec/runtime/api-write-plane.md`](../spec/runtime/api-write-plane.md)
+> (the `…/inboxes/ingest` route and the `InboxStore` both inbound paths file
+> into) and [`docs/modules/runtime/README.md`](../modules/runtime/README.md)
+> (`mailbox_poller.rs` under "Background listeners"). The page is retained as
+> the WS7 email train's historical record, per this folder's convention — see
+> the note on retained plans in [README.md](README.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add IMAP-poll receiving so a running company reads its own `<slug>@opencompany.work` mailbox and each new message drives an agent cycle — reusing the existing `InboxStore` + `WebhookReceived` path.
@@ -29,6 +41,17 @@
 - Create: `src/runtime/mailbox_poller.rs` — `MailboxPoller`.
 - Modify: `src/runtime/mod.rs` — `pub mod mailbox_poller;`.
 - Modify: `src/bin/opencompany.rs` — construct config + receiver, spawn a poller per company.
+
+## Tasks
+
+The seven task sketches live on two sibling pages, split along the module
+boundary the implementation shipped on, because this file was over the
+repository's 500-line ceiling:
+
+| Page | Tasks | Covers |
+|---|---|---|
+| [07-workload-email-inbound-transport.md](07-workload-email-inbound-transport.md) | 1–4 | `imap` Cargo feature, `MailReceiver`/`InboundEmail` + mock, `TenantMailboxConfig::from_env`, `AsyncImapReceiver` + `parse_message` |
+| [07-workload-email-inbound-runtime.md](07-workload-email-inbound-runtime.md) | 5–7 | shared `file_and_notify`, `MailboxPoller`, starting a poller per company in `serve` |
 
 ---
 
