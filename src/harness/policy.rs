@@ -1714,8 +1714,9 @@ mod tests {
         //   fail-closes an undeclared non-read call — a layer the effect gate
         //   does not have, and the reason the near-miss cannot live inside the
         //   agreement loop above.
+        let fence_list: Vec<String> = fence.iter().map(|s| s.to_string()).collect();
         assert!(
-            !crate::policy::always_approve::matches(&always_approve_vec(fence), "payroll.export"),
+            !crate::policy::always_approve::matches(&fence_list, "payroll.export"),
             "the operator list must not gate the leading-segment near-miss"
         );
         assert!(matches!(
@@ -1724,25 +1725,20 @@ mod tests {
                 .await,
             ToolPolicyDecision::RequireApproval { .. }
         ));
+        let near_miss_effect = Effect {
+            kind: "payroll.export".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
         assert_eq!(
-            gate.evaluate(
-                &CompanyId::new("acme"),
-                &Effect {
-                    kind: "payroll.export".to_string(),
-                    ..Effect {
-                        group: EffectGroup::Other,
-                        amount_usd: None,
-                        established_thread: false,
-                        first_time_counterparty: false,
-                        payload: serde_json::Value::Null,
-                        agent: None,
-                        run_id: None,
-                        kind: String::new(),
-                    }
-                },
-            )
-            .await
-            .unwrap(),
+            gate.evaluate(&CompanyId::new("acme"), &near_miss_effect)
+                .await
+                .unwrap(),
             PolicyDecision::Allow
         );
     }
