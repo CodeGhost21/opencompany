@@ -2409,6 +2409,10 @@ pub fn orchestrator_tools(
     workflow_runner: WorkflowRunnerHandle,
     run_supervisor: crate::runtime::RunSupervisor,
     store: Arc<dyn CompanyStore>,
+    // Issue #274's snapshot ring, for the #661 (M7) edit/delete tools. `None`
+    // makes those two refuse rather than write with no undo — see
+    // `HarnessDeps::workflow_revisions`.
+    workflow_revisions: Option<Arc<dyn crate::ports::WorkflowRevisionStore>>,
     workflow_refs: WorkflowRefQueue,
     run_outputs: RunOutputCache,
     minter: String,
@@ -2445,11 +2449,33 @@ pub fn orchestrator_tools(
     // log it journals the audit event to.
     tools.push(Box::new(CreateWorkflowTool::new(
         company.clone(),
-        workflow_source_dir,
+        workflow_source_dir.clone(),
         store.clone(),
-        events,
+        events.clone(),
         workflow_refs,
     )));
+    // Issue #661 (M7): the other three quarters of the workflow-authoring
+    // surface — read the graph, replace it, remove it. Registered right after
+    // `create_workflow` because they are its lifecycle: without them an agent
+    // that got a graph wrong could only create a second one beside it forever.
+    // All three share one handle, so the ports can never be wired to some of
+    // them and not others. See [`crate::harness::workflow_admin`].
+    let workflow_admin = crate::harness::workflow_admin::WorkflowAdmin::new(
+        company.clone(),
+        workflow_source_dir,
+        store.clone(),
+        workflow_revisions,
+        events,
+    );
+    tools.push(Box::new(
+        crate::harness::workflow_admin::ReadWorkflowTool::new(workflow_admin.clone()),
+    ));
+    tools.push(Box::new(
+        crate::harness::workflow_admin::UpdateWorkflowTool::new(workflow_admin.clone()),
+    ));
+    tools.push(Box::new(
+        crate::harness::workflow_admin::DeleteWorkflowTool::new(workflow_admin),
+    ));
     tools.push(Box::new(AddAgentTool::new(
         company,
         store,
@@ -3436,7 +3462,7 @@ impl Tool for ReadRunOutputTool {
 /// it, so nothing else has to change.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowArgs {
+pub(crate) struct CreateWorkflowArgs {
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -3451,7 +3477,7 @@ struct CreateWorkflowArgs {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowArgNode {
+pub(crate) struct CreateWorkflowArgNode {
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -3478,7 +3504,7 @@ struct CreateWorkflowArgNode {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowArgEdge {
+pub(crate) struct CreateWorkflowArgEdge {
     #[serde(default)]
     from: String,
     #[serde(default)]
@@ -3692,77 +3718,7 @@ impl Tool for CreateWorkflowTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "A short unique id (the on-disk filename stem): no spaces, slashes, or `..`."
-                },
-                "name": {
-                    "type": "string",
-                    "description": "A human-readable name, unique among the company's workflows (case-insensitive)."
-                },
-                "description": {
-                    "type": "string",
-                    "description": "An optional one-line description of what the workflow does."
-                },
-                "nodes": {
-                    "type": "array",
-                    "description": "The graph's nodes. Exactly one must be a `trigger`.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Node id, unique within the graph." },
-                            "kind": {
-                                "type": "string",
-                                "enum": ["trigger", "agent", "tool_call", "http_request", "condition", "output"],
-                                "description": "One of the six node kinds."
-                            },
-                            "name": { "type": "string", "description": "Human-readable node name." },
-                            "summary": { "type": "string", "description": "Optional short description of the step." },
-                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
-                            "config": {
-                                "type": "object",
-                                "description": "Kind-specific settings, a JSON object. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; `args` must be LITERAL values, not `=`-expressions; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
-                            },
-                            "destination": {
-                                "type": "object",
-                                "description": "On an `output` node only: where the report goes.",
-                                "properties": {
-                                    "kind": {
-                                        "type": "string",
-                                        "enum": ["owner", "email", "channel"],
-                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
-                                    },
-                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
-                                },
-                                "required": ["kind"],
-                                "additionalProperties": false
-                            }
-                        },
-                        "required": ["id", "kind", "name"],
-                        "additionalProperties": false
-                    }
-                },
-                "edges": {
-                    "type": "array",
-                    "description": "Directed edges between node ids.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from": { "type": "string", "description": "Source node id." },
-                            "to": { "type": "string", "description": "Destination node id." },
-                            "label": { "type": "string", "description": "Optional branch label (e.g. `yes`/`no` off a condition)." }
-                        },
-                        "required": ["from", "to"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["id", "name", "nodes"],
-            "additionalProperties": false
-        })
+        create_workflow_parameters_schema()
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -3840,6 +3796,88 @@ impl Tool for CreateWorkflowTool {
             }
         }
     }
+}
+
+/// The `create_workflow` parameter schema, lifted out of the tool so
+/// [`UpdateWorkflowTool`](crate::harness::workflow_admin::UpdateWorkflowTool)
+/// advertises the SAME graph shape it deserializes (issue #661, M7).
+///
+/// Both tools parse [`CreateWorkflowArgs`]; a second hand-written copy of this
+/// object would be free to drift from that struct — and from this one — with
+/// nothing to notice. The update tool adds `expected_version` to the result and
+/// rewrites `required`; everything else is shared by construction.
+pub(crate) fn create_workflow_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "A short unique id (the on-disk filename stem): no spaces, slashes, or `..`."
+            },
+            "name": {
+                    "type": "string",
+                    "description": "A human-readable name, unique among the company's workflows (case-insensitive)."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "An optional one-line description of what the workflow does."
+                },
+                "nodes": {
+                    "type": "array",
+                    "description": "The graph's nodes. Exactly one must be a `trigger`.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Node id, unique within the graph." },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["trigger", "agent", "tool_call", "http_request", "condition", "output"],
+                                "description": "One of the six node kinds."
+                            },
+                            "name": { "type": "string", "description": "Human-readable node name." },
+                            "summary": { "type": "string", "description": "Optional short description of the step." },
+                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
+                            "config": {
+                                "type": "object",
+                                "description": "Kind-specific settings, a JSON object. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; `args` must be LITERAL values, not `=`-expressions; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
+                            },
+                            "destination": {
+                                "type": "object",
+                                "description": "On an `output` node only: where the report goes.",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["owner", "email", "channel"],
+                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
+                                    },
+                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
+                                },
+                                "required": ["kind"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["id", "kind", "name"],
+                        "additionalProperties": false
+                    }
+                },
+                "edges": {
+                    "type": "array",
+                    "description": "Directed edges between node ids.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": { "type": "string", "description": "Source node id." },
+                            "to": { "type": "string", "description": "Destination node id." },
+                            "label": { "type": "string", "description": "Optional branch label (e.g. `yes`/`no` off a condition)." }
+                        },
+                        "required": ["from", "to"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["id", "name", "nodes"],
+            "additionalProperties": false
+    })
 }
 
 #[cfg(test)]
@@ -6262,7 +6300,10 @@ name = "Morning"
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_nine() {
+    fn orchestrator_tools_includes_all_twelve() {
+        use crate::harness::workflow_admin::{
+            DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
+        };
         let queue = DelegationQueue::default();
         let tools = orchestrator_tools(
             CompanyId::new("acme"),
@@ -6273,6 +6314,7 @@ name = "Morning"
             WorkflowRunnerHandle::default(),
             crate::runtime::RunSupervisor::default(),
             Arc::new(MemStore::default()),
+            None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
             "ceo".to_string(),
@@ -6281,11 +6323,15 @@ name = "Morning"
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
-        // `read_run_output` makes nine.
-        assert_eq!(names.len(), 9, "got {names:?}");
+        // `read_run_output` makes nine; #661's read/update/delete_workflow
+        // trio makes twelve.
+        assert_eq!(names.len(), 12, "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&READ_RUN_OUTPUT_TOOL), "got {names:?}");
         assert!(names.contains(&CREATE_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&UPDATE_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&DELETE_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&ADD_AGENT_TOOL), "got {names:?}");
         assert!(names.contains(&QUERY_COMPANY_TOOL), "got {names:?}");
         assert!(names.contains(&SPAWN_TASK_TOOL), "got {names:?}");
@@ -6295,6 +6341,21 @@ name = "Morning"
         // `read_run_output` sits immediately after `run_workflow`.
         let run_at = names.iter().position(|n| *n == RUN_WORKFLOW_TOOL).unwrap();
         assert_eq!(names[run_at + 1], READ_RUN_OUTPUT_TOOL, "got {names:?}");
+        // The #661 trio sits immediately after `create_workflow`: they are its
+        // lifecycle, and a model reads the belt in order.
+        let created_at = names
+            .iter()
+            .position(|n| *n == CREATE_WORKFLOW_TOOL)
+            .unwrap();
+        assert_eq!(
+            &names[created_at + 1..created_at + 4],
+            &[
+                READ_WORKFLOW_TOOL,
+                UPDATE_WORKFLOW_TOOL,
+                DELETE_WORKFLOW_TOOL
+            ],
+            "got {names:?}"
+        );
     }
 
     #[tokio::test]

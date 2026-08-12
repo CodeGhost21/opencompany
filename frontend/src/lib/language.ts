@@ -225,6 +225,11 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   // hand-off to the operator is the misleading-label failure this issue refused
   // to risk, so the label states what is true under either reading.
   run_workflow: "Run one of its saved workflows",
+  // Issue #661 (M7). Only the delete of the three parks — `read_workflow` and
+  // `update_workflow` are `Reach::Nothing` — so only the delete needs words
+  // here, and "permanently" is the load-bearing one: an update keeps the prior
+  // version in the workflow's history, while this takes that history with it.
+  delete_workflow: "Permanently delete one of its saved workflows",
   // The four tools an operator may grant standing on (#444). They are not in the
   // catch-all `Other` group by accident — they are the low-consequence writes
   // the standing-grant feature exists to apply to, which means they are the

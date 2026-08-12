@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         workflow_refs: Default::default(),
         run_outputs: Default::default(),
         run_output_store: None,
+        workflow_revisions: None,
         approval_requests: opencompany::harness::policy::ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

@@ -128,7 +128,8 @@ prompt = "Weekly review and operator digest"
 
   It never confers the orchestrator's *authority* — `assign_task`,
   `review_task`, `add_agent`, `query_company`, `run_workflow`,
-  `create_workflow` stay orchestrator-only. A member gets what it needs to pass
+  `create_workflow`, and the #661 workflow-admin trio (`read_workflow`,
+  `update_workflow`, `delete_workflow`) stay orchestrator-only. A member gets what it needs to pass
   a slice on and to leave the rest tracked, and nothing more.
 
   Three runtime guards bound what it can do, all enforced at the tool boundary
