@@ -276,6 +276,60 @@ describe("validateProposal", () => {
     );
     expect(out).toMatchObject({ reason: expect.stringContaining("config.slug") });
   });
+
+  /**
+   * `set: { kind: null }` used to slip through: the string-typed unknown-kind
+   * check is skipped for a non-string, and the coherence pass saw a node whose
+   * kind was `null`, so a graph the host rejects on write was offered as a diff.
+   */
+  it("refuses an update whose kind is present but not a string", () => {
+    const out = validateProposal(
+      { summary: "s", ops: [{ op: "updateNode", id: "send", set: { kind: null } }] },
+      g,
+    );
+    expect(out).toMatchObject({ reason: expect.stringContaining("invalid kind") });
+  });
+
+  /**
+   * The whole reply is raw model JSON, so any field can be the wrong type. An
+   * `agent` set to an object must be refused, not throw `.trim` and take the
+   * entire validation down with it.
+   */
+  it("refuses — without throwing — an agent field that isn't a string", () => {
+    const run = () =>
+      validateProposal(
+        {
+          summary: "s",
+          ops: [{ op: "updateNode", id: "collect", set: { agent: { id: "analyst" } } }],
+        },
+        g,
+      );
+    expect(run).not.toThrow();
+    expect(run()).toMatchObject({ reason: expect.stringContaining("agent") });
+  });
+
+  /**
+   * A later op is judged against the graph as the proposal builds it, not the
+   * original. Adding a valid `tool_call` and then emptying its `config` in the
+   * same proposal produces the slug-less node the host rejects — caught only
+   * because the update sees the node the add just introduced.
+   */
+  it("judges a later op against a node the same proposal added", () => {
+    const out = validateProposal(
+      {
+        summary: "s",
+        ops: [
+          {
+            op: "addNode",
+            node: { id: "call", kind: "tool_call", name: "Call", config: { slug: "web_search" } },
+          },
+          { op: "updateNode", id: "call", set: { config: {} } },
+        ],
+      },
+      g,
+    );
+    expect(out).toMatchObject({ reason: expect.stringContaining("config.slug") });
+  });
 });
 
 describe("applyProposal", () => {

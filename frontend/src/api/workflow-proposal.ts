@@ -217,6 +217,10 @@ export function validateProposal(
         const coherence = nodeKindConfigProblem(built);
         if (coherence) return { reason: coherence };
         ids.add(id);
+        // Kept in step with `ids` so a later op in the same proposal judges
+        // against the graph as these edits build it, not the original — an
+        // `updateNode` on a node this proposal just added must see it.
+        byId.set(id, built);
         ops.push({ op: "addNode", node: built });
         break;
       }
@@ -240,6 +244,18 @@ export function validateProposal(
         if (unknown) {
           return { reason: `The proposed change to \`${id}\` sets \`${unknown}\`, which isn't a step field.` };
         }
+        // A `kind` that is present but not a string slips past the string check
+        // below (`typeof … === "string"` is false), passes `nodeKindConfigProblem`
+        // on a node whose kind is `null`/an object, and applies a graph the host
+        // rejects on write. Reject it here with the same actionable shape.
+        if ("kind" in (set as object)) {
+          const proposedKind = (set as Record<string, unknown>).kind;
+          if (typeof proposedKind !== "string" || proposedKind.trim() === "") {
+            return {
+              reason: `The proposed change to \`${id}\` sets an invalid kind — it must name a node kind, one of: ${WORKFLOW_NODE_KINDS.join(", ")}.`,
+            };
+          }
+        }
         // Judge the node this update WOULD produce, the way `applyProposal` will
         // build it — existing merged with `set`. A change that switches a node's
         // kind, or replaces its `config`, can leave it incoherent for its kind;
@@ -253,6 +269,8 @@ export function validateProposal(
         }
         const updated = nodeKindConfigProblem(merged);
         if (updated) return { reason: updated };
+        // Kept in step so a further op in the same proposal sees this change.
+        byId.set(id, merged as WorkflowNode);
         ops.push({ op: "updateNode", id, set: set as Partial<WorkflowNode> });
         break;
       }
@@ -262,6 +280,7 @@ export function validateProposal(
           return { reason: `A proposed removal targets \`${id || "?"}\`, which isn't in this workflow.` };
         }
         ids.delete(id);
+        byId.delete(id);
         ops.push({ op: "removeNode", id });
         break;
       }

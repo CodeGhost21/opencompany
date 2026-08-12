@@ -482,7 +482,10 @@ export function nodeKindConfigProblem(node: {
 
   switch (node.kind) {
     case "agent":
-      return (node.agent ?? "").trim()
+      // `node` may be raw proposal JSON, so `agent` can be any type — guard the
+      // string check rather than `.trim()` a non-string (which would throw and
+      // take the whole validation down instead of refusing the one node).
+      return typeof node.agent === "string" && node.agent.trim()
         ? null
         : "An agent step names no teammate — set its `agent` field to a roster member (not inside `config`).";
     case "tool_call":
