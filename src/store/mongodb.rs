@@ -2813,8 +2813,19 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
                 Err(err) if is_duplicate_key(&err) => {
                     // Lost the race: somebody else holds this path. The staged
                     // node is already detached, so only its payload remains to
-                    // reclaim — the same cleanup the replace arm owes.
-                    self.drop_blobs(company, replacement_id, None).await?;
+                    // reclaim — the same cleanup the replace arm owes. A
+                    // cleanup failure must not turn the clean loss into a
+                    // reported publish failure: the compare-and-swap already
+                    // lost, and the boot orphan sweep finishes this later.
+                    if let Err(err) = self.drop_blobs(company, replacement_id, None).await {
+                        tracing::warn!(
+                            company = %company,
+                            node_id = %replacement_id,
+                            error = %err,
+                            "workspace first publish lost the race but staged GridFS payload \
+                             cleanup was deferred"
+                        );
+                    }
                     Ok(None)
                 }
                 Err(err) => Err(mongo_err(err)),
