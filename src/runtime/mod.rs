@@ -136,6 +136,7 @@ pub use workflow_outcome::{
 };
 pub use workflow_resume::WORKFLOW_APPROVE_KIND;
 pub use workflow_scheduler::WorkflowScheduler;
+pub(crate) use workflow_scheduler::workflow_schedule_id;
 pub use workflow_spawn::WorkflowSpawn;
 pub use workspace_events::WorkspaceAnnouncer;
 pub use workspace_quota::{

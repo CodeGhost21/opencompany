@@ -4,9 +4,51 @@ on:
   push:
   pull_request:
 
+# Issue #770. Cancellation is scoped to NON-DEFAULT refs, and the asymmetry is
+# the whole point: on a PR branch a new push makes the previous run's answer
+# worthless, so killing it is right; on `main` a new merge makes the previous
+# run's answer the ONLY evidence that the merge before it was safe, so killing
+# it destroys the one check standing between a bad merge and every branch cut
+# afterwards.
+#
+# It had already stopped working. Of the last fourteen runs on `main`, twelve
+# were `cancelled` and one succeeded — merges were landing minutes apart against
+# a `Rust (openhuman, tinycortex)` lane that takes ~26 minutes, so each merge
+# killed its predecessor's verification before it could conclude. The honest
+# state of `main` across that stretch was neither known-good nor known-broken.
+# Nothing was red; the signal simply was not there. Verification thinned out
+# precisely when the merge rate made it most valuable, which is the property
+# that makes this worse than a lane that is merely slow.
+#
+# `format('refs/heads/{0}', …default_branch)` rather than a literal
+# `'refs/heads/main'`: the literal silently reverts to cancel-everything the day
+# the default branch is renamed, and it would do so without failing anything —
+# the same class of quietly-vacuous check this file exists to argue against.
+# Both triggers populate `github.event.repository`, so the expression resolves
+# on `push` and `pull_request` alike.
+#
+# PR runs are UNAFFECTED. A `pull_request` run's `github.ref` is
+# `refs/pull/<n>/merge`, never `refs/heads/<default>`, so the expression is true
+# there and stale runs still die on a new push.
+#
+# WHAT THIS DOES NOT BUY, stated plainly. Turning cancellation off does not give
+# every merge its own conclusive run: the group still admits at most one running
+# plus one pending run, and a newer arrival supersedes the older *pending* one.
+# So the tip always eventually gets a full run, but a fast burst of merges loses
+# individual attribution — a red run on the tip covers the union of merges since
+# the last conclusive one, and finding which merge did it is a bisect. That is
+# the deliberate trade: per-merge attribution costs a run per merge (a per-run
+# group keyed on `github.run_id`, roughly 10x the minutes), and the alternative
+# that is cheaper — an hourly scheduled run on `main` — tells you later and
+# attributes the breakage to nothing at all. The structurally correct answer is
+# a MERGE QUEUE, which verifies the exact merged state before it becomes `main`
+# and makes this question moot; it needs a `merge_group` trigger plus a
+# branch-protection change no PR can make, and with a 26–30 minute critical path
+# it either serialises merges to ~2/hour or has to batch. Issue #793 carries that
+# evaluation; this block is the fix that does not need anyone's settings.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
 permissions:
   contents: read
@@ -104,6 +146,58 @@ jobs:
           fi
           echo "$count \`uses:\` references, all pinned to a commit SHA."
 
+      # Issue #592, and the same argument as the pin check above. The vendored
+      # openhuman submodule init was copied into four jobs in this file and a
+      # fifth in `release.yml`, ~340 lines apart here — far enough that a reader
+      # edits one copy and never learns the others exist. The copies then
+      # drifted: `release.yml` was missing `vendor/tinyhumans-sdk` and the
+      # nested `tinycortex` init, which fails `cargo build --locked` outright at
+      # manifest resolution. It stayed invisible only because that workflow is
+      # `workflow_dispatch`-only and had never run. This job's header records
+      # the general lesson — a comment is a guard only for people who read it,
+      # and one failed to stop the `Desktop` job landing unpinned. A grep is the
+      # cheapest thing that says no.
+      #
+      # The pattern is the inline-copy signature specifically: `git -C
+      # vendor/<path> submodule update`. It deliberately does NOT match the
+      # `Report vendored openhuman drift` step's `git -C vendor/openhuman
+      # rev-parse|fetch|merge-base|rev-list` — a different command that belongs
+      # inline — nor `deploy-staging.yml`'s root-level `git submodule update
+      # --init --recursive`, which is a different shape fetching a different set
+      # (it also takes `vendor/tinyagents`, and runs against a `submodules:
+      # false` checkout).
+      - name: Vendored submodule init is not inlined
+        run: |
+          set -euo pipefail
+          failed=0
+
+          inlined=$(grep -rnE 'git[[:space:]]+-C[[:space:]]+vendor/[^[:space:]]+[[:space:]]+submodule[[:space:]]+update' \
+            .github/workflows/ || true)
+          if [ -n "$inlined" ]; then
+            echo "::error title=Inlined vendored submodule init::A workflow initializes the vendored submodules inline, running a \`submodule update\` against a \`vendor/\` checkout. That list lives in exactly one place, scripts/ci/init-vendored-submodules.sh — call the script instead. Copies drift, and a lane missing a submodule then fails on its own while its siblings stay green." >&2
+            echo "$inlined" >&2
+            failed=1
+          fi
+
+          # Zero would pass the check above while asserting nothing — the
+          # failure mode issue #555 exists to remember. A rename or a mass
+          # delete must not leave this job green while checking nothing.
+          #
+          # Anchored to the whole `run:` line, so it counts CALL SITES and not
+          # mentions. An unanchored search would match the prose in this very
+          # step, which would make this check permanently and silently green —
+          # the same vacuity it exists to catch.
+          callers=$(grep -rlE '^[[:space:]]*run:[[:space:]]*scripts/ci/init-vendored-submodules\.sh[[:space:]]*$' \
+            .github/workflows/ || true)
+          if [ -z "$callers" ]; then
+            echo "::error title=Submodule init script unreferenced::No workflow calls scripts/ci/init-vendored-submodules.sh, so the check above is green while guarding nothing. Either the script was renamed and this job was not updated, or the call sites were removed. Restore the call: \`run: scripts/ci/init-vendored-submodules.sh\`." >&2
+            failed=1
+          fi
+
+          [ "$failed" -eq 0 ] || exit 1
+          echo "Vendored submodule init is inlined nowhere and called from:"
+          echo "$callers"
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
@@ -113,27 +207,18 @@ jobs:
           persist-credentials: false
           submodules: true
 
-      # `openhuman_core` is an optional path dependency, so Cargo must resolve
-      # its vendored-crate manifests even for the default (offline) build where
-      # the `openhuman` feature is off. `submodules: true` is not recursive, so
-      # init the nested crates its manifest names.
+      # `submodules: true` is not recursive, so the crates nested under
+      # `vendor/openhuman` still have to be fetched. Required even for this
+      # default (offline) build, where the `openhuman` feature is off:
+      # `openhuman_core` is an optional path dependency, but Cargo reads every
+      # path dependency's manifest during resolution regardless of features.
       #
-      # `tinyhumans-sdk` is NOT one of the `[patch]` targets — openhuman consumes
-      # it as a plain unconditional path dependency because it is unpublished
-      # (issue #499). It still has to be on disk: Cargo reads every path
-      # dependency's manifest during resolution, so a missing checkout fails the
-      # DEFAULT build too, not just `--features openhuman`.
+      # The list of crates lives in the script and only there — add a submodule
+      # under `vendor/openhuman` there, not here (issue #592). The script also
+      # carries the rest of the reasoning, including why `tinyhumans-sdk` is in
+      # the list despite having no `[patch]` entry (issue #499).
       - name: Init vendored openhuman crate submodules
-        run: |
-          git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
-            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
-            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
-          # tinycortex declares its own `tinyagents` path dependency, so its
-          # manifest must resolve too. Harmless for the default build; required
-          # for any `--features openhuman` build.
-          git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
-            vendor/tinyagents
+        run: scripts/ci/init-vendored-submodules.sh
 
       # Issue #499: say out loud how far the vendored pin has drifted.
       #
@@ -206,6 +291,33 @@ jobs:
       - name: Verify Cargo.lock is in sync
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+      # Issue #770. Every lane in this file pins an explicit feature set, and
+      # cargo features are additive — so the DEFAULT FATE of a feature-gated test
+      # is "compiled by `Check (--all-features)`, executed by nothing". Nothing
+      # reports it: no lane goes red, no count reads zero, the test simply is not
+      # selected. Six features had accumulated never-executed tests that way,
+      # including the `sidecar` brain's whole offline end-to-end suite and two
+      # OAuth secret-lifecycle tests in `app::types`.
+      #
+      # This is the same family as #475, #477, #555 and #592, every one of which
+      # was found BY HAND after the fact. The steps added below fix the six known
+      # cases; this one is what makes the seventh fail at the moment it is
+      # introduced rather than months later. A new feature cannot merge until
+      # someone writes down which lane runs its tests, or why none does.
+      #
+      # HERE, on `rust`, and after the lock check specifically: the script reads
+      # `cargo metadata --locked` for its feature list — ground truth rather than
+      # a Cargo.toml grep, which would miss the implicit feature of an optional
+      # dependency named without `dep:` — so it needs this job's submodule
+      # checkout to resolve the vendored path manifests, and it should run after
+      # the step that names a stale lock as a stale lock.
+      #
+      # It compiles nothing and takes seconds, so it belongs on the fast default
+      # lane where a classification mistake is reported early, not behind the
+      # 26-minute gated compile.
+      - name: Assert every feature has a test lane or a stated reason
+        run: scripts/ci/assert-feature-lanes.sh
+
       # No `--locked` here, and none is owed: `cargo fmt` is a `rustfmt` wrapper
       # that never resolves the dependency graph, and `cargo-fmt` does not
       # accept the flag.
@@ -249,6 +361,50 @@ jobs:
       # would double the job's test time for no coverage.
       - name: Test the SQLite backend
         run: cargo test --locked --features sqlite --lib store::sqlite
+
+      # Issue #770. Two more suites in the shape the SQLite step above rescued:
+      # gated behind a feature, compiled by `Check (--all-features)`, and run by
+      # NOTHING. Both are offline and add no dependency this job does not already
+      # build, which is why they ride the fast default lane rather than earning
+      # jobs of their own.
+      #
+      # Through `run-scoped-suite.sh`, which asserts a NON-ZERO count. A filter
+      # that stops matching prints `0 passed` and exits 0, so a lane added to run
+      # a gated suite can report success having run none of it — the same defect
+      # one level up. The count is what separates "everything passed" from
+      # "nothing ran", exactly as the MongoDB job argues below.
+      #
+      # NO `sidecar` LANE HERE, and its absence is deliberate. That feature gates
+      # fourteen tests that had never run; twelve pass and the two offline
+      # end-to-end cases its own documentation advertises FAIL (the inference
+      # callback fires zero times). Issue #800 has the diagnosis. The lane lands
+      # with the fix rather than red, because a lane allowed to be red is the
+      # state #428 was filed about — and until then
+      # `scripts/ci/feature-lanes.txt` records the debt as `owed`, so it is
+      # countable instead of silent.
+      #
+      # `export`: the bundle round-trip. Only `pack_tar`/`unpack_tar` are gated,
+      # so nine of the ten tests this selects already run at default features —
+      # the tenth, `tar_pack_unpack_roundtrip`, is the one that never has. The
+      # nine are re-run rather than filtered out because splitting them apart
+      # would cost a second filter to save milliseconds on an already-compiled
+      # tree.
+      - name: Test the export bundle
+        run: scripts/ci/run-scoped-suite.sh "export bundle" export store::export
+
+      # `imap`/`smtp`: the mail surface. One gated test runs here today — the
+      # RFC822 parser — and it is a parser, which is precisely the kind of code
+      # that rots silently. `smtp` is compiled alongside deliberately: it carries
+      # no gated test of its own yet (see scripts/ci/feature-lanes.txt), and
+      # building both means a mail test added on either side has a lane already.
+      #
+      # `live_smoke::send_then_receive_roundtrip` stays `#[ignore]`d and is NOT
+      # covered by this step. It dials a real mailbox with real credentials, so
+      # it is one `--ignored` flag away from running in a lane that now compiles
+      # it — and still executes nowhere. Issue #798 tracks giving it a mail
+      # service container; until then, say so rather than imply otherwise.
+      - name: Test the mail surface
+        run: scripts/ci/run-scoped-suite.sh "mail (imap)" imap,smtp server::ops::imap
 
       # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
       # binary. Building one over there would mean a second submodule checkout
@@ -354,14 +510,10 @@ jobs:
       # its manifest during resolution even where the feature selection excludes
       # `openhuman`. A missing checkout fails THIS build too, not just a gated
       # one. `submodules: true` is not recursive, hence the explicit init.
+      #
+      # The list lives in the script and only there (issue #592).
       - name: Init vendored openhuman crate submodules
-        run: |
-          git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
-            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
-            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
-          git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
-            vendor/tinyagents
+        run: scripts/ci/init-vendored-submodules.sh
 
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
@@ -409,6 +561,26 @@ jobs:
           fi
           echo "MongoDB backend suite: ${passed} tests passed."
 
+      # Issue #770. The step above pins `--lib store::mongodb`, and there is one
+      # `mongodb`-gated test that lives OUTSIDE that module:
+      # `store::select::mongodb_selection_requires_uri`, which asserts that
+      # selecting the Mongo backend without a URI is an error rather than a
+      # silent fallback. The filter above cannot reach `store::select`, no other
+      # lane enables `mongodb`, and `Check (--all-features)` only compiles it —
+      # so it ran nowhere.
+      #
+      # This is the #555 comment above happening a second time to the same
+      # feature, one module over: a filter that is right about the module it
+      # names says nothing about the module it does not. The classification
+      # table records `store::select` alongside `store::mongodb` for exactly this
+      # reason, and `assert-feature-lanes.sh` fails if either filter stops
+      # appearing here.
+      #
+      # It needs no server (it asserts the failure BEFORE connecting), so it
+      # rides this job for the feature build rather than earning one of its own.
+      - name: Test the MongoDB storage selection
+        run: scripts/ci/run-scoped-suite.sh "mongodb selection" mongodb store::select
+
   # Issue #202. The `Rust` job above builds DEFAULT FEATURES ONLY, so every line
   # behind `openhuman` (`src/harness/**`, `src/workflows/**`, `src/runtime/`
   # `delegation*`, and the `live_company_turn` example) and every line behind
@@ -445,20 +617,15 @@ jobs:
           submodules: true
 
       # Identical to the `rust` job's init, and for the same reason: `submodules:
-      # true` is not recursive. Keep it targeted to the crate submodules named
-      # by OpenHuman's manifest; see the rust job for why `tinyhumans-sdk` is in
-      # the list despite having no `[patch]` entry.
+      # true` is not recursive. This lane is the one that actually compiles the
+      # nested graph rather than only resolving it, `--features openhuman`
+      # reaching every vendored crate the script names, plus tinycortex's own
+      # `tinyagents`.
+      #
+      # The list lives in the script and only there (issue #592), including why
+      # the init is targeted rather than `--recursive`.
       - name: Init vendored openhuman crate submodules
-        run: |
-          git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
-            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
-            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
-          # tinycortex declares its own `tinyagents` path dependency, so its
-          # manifest must resolve too. Harmless for the default build; required
-          # for any `--features openhuman` build.
-          git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
-            vendor/tinyagents
+        run: scripts/ci/init-vendored-submodules.sh
 
       # `--features openhuman` links system libraries the default build does not.
       # Mirrors the builder stage of the repo `Dockerfile`: OpenSSL headers
@@ -597,8 +764,89 @@ jobs:
       # `--locked` per issue #251's rule for every graph-resolving invocation:
       # this is a fourth distinct feature resolution, so without it this lane
       # would be the one place CI silently re-resolves the dependency graph.
-      - name: Test tool-belt contract (openhuman, mcp, telegram)
-        run: cargo test --locked --features openhuman,mcp,telegram --lib harness::build::tests
+      # `+media` since issue #770, and the widening is the point rather than a
+      # tidy-up. `media` gates two tests — the belt's media-namespace mapping in
+      # `harness::build` and the tool-name/namespace pin in `harness::toolbelt` —
+      # and BOTH were compiled by `Check (--all-features)` and run by nothing.
+      # Adding the feature to the set this step already builds runs the first at
+      # no extra compile; the second needs its own filter, below, because
+      # `harness::build::tests` does not reach `harness::toolbelt`.
+      #
+      # These tools spend real money (`media_generate_image` / `_video` against a
+      # MANAGED platform credential), and what they are gated on is the belt
+      # entry that decides whether an agent can reach them at all. An unrun
+      # namespace pin is the wrong thing to have never executed.
+      - name: Test tool-belt contract (openhuman, mcp, telegram, media)
+        run: scripts/ci/run-scoped-suite.sh "tool-belt contract" openhuman,mcp,telegram,media harness::build::tests
+
+      # The `media` toolbelt's other half: the three tool names and their single
+      # `media` namespace. Same feature set as the step above, so this costs a
+      # filtered re-run of an already-compiled tree and no fourth resolution.
+      - name: Test the media toolbelt
+        run: scripts/ci/run-scoped-suite.sh "media toolbelt" openhuman,mcp,telegram,media harness::toolbelt
+
+      # The `mcp` OAuth-flow state, which the belt filter above never reached.
+      # `app::types` holds two gated tests — a parked flow is SINGLE-USE (a
+      # replayed callback finds nothing) and it EXPIRES, with a sweep on park so
+      # an abandoned flow's client secret cannot outlive its TTL even if nobody
+      # ever takes it. Both are secret-lifetime invariants, both were run by
+      # nothing, and neither is the sort of property to discover is broken from a
+      # production incident.
+      #
+      # A separate invocation, not a second bare argument on the step above: the
+      # first bare argument is the filter and a second would narrow the selection
+      # to nothing — the trap the ACP step already documents, and the reason
+      # `run-scoped-suite.sh` takes exactly one filter.
+      - name: Test the MCP OAuth flow state
+        run: scripts/ci/run-scoped-suite.sh "mcp oauth state" openhuman,mcp,telegram,media app::types
+
+      # Issue #770. `composio` gated TWENTY-FOUR tests that ran nowhere — the
+      # largest single pocket found. `src/harness/composio_catalog.rs` says so in
+      # its own doc comment ("the live tools are behind `composio`, which CI
+      # never *runs*"), which is a fact about this file that nothing enforced.
+      #
+      # What was unrun is not incidental: per-tenant ISOLATION (each tenant only
+      # ever carries its own token; a rotated token is scrubbed per call; an
+      # error body reflecting the token is scrubbed), the allowlist refusals that
+      # happen BEFORE any network call, and the end-to-end proof that an agent
+      # discovers and calls an action unaided across two large toolkits. Tenant
+      # token isolation is the property that keeps one company out of another's
+      # Gmail; it had no runner.
+      #
+      # All offline — the Composio backend is scripted in every one of them.
+      #
+      # `openhuman,tinycortex,composio` rather than a bare `--features composio`
+      # (which would imply `openhuman` anyway): matching this job's own set means
+      # the vendored tree is already built and only this crate recompiles.
+      # `composio` adds no `openhuman_core/*` subfeature, so there is no vendored
+      # rebuild at all.
+      #
+      # TWO NARROW FILTERS RATHER THAN THE BARE WORD `composio`, which would be a
+      # substring match sweeping every composio module at once. That wider
+      # selection is what this lane should eventually be, and it cannot be yet:
+      # of the 24, two FAIL. `server::ops::composio::tests::an_admin_is_unaffected`
+      # dials `api.tinyhumans.ai` for real once the feature is on (it passes today
+      # only because the un-gated stub stands in), and the scripted two-toolkit
+      # turn reaches neither provider. Issue #801 has both diagnoses; the wider
+      # filter lands with the fix, not as a red lane (#428).
+      #
+      # These two groups are chosen because they are the ones whose silence cost
+      # the most. `isolation_tests` is per-tenant token isolation — each tenant
+      # only ever carries its own token and sees its own accounts, a rotated
+      # token is scrubbed per call, an error body reflecting the token is
+      # scrubbed. That is the property keeping one company out of another's
+      # Gmail, and it had no runner at all. `ops_helper_tests` is the allowlist
+      # refusals that must happen BEFORE any network call, plus the catalog and
+      # connection projections.
+      #
+      # Separate invocations, each with its own asserted count, for the reason
+      # the ACP step above states: the first bare argument is the filter and a
+      # second would narrow the selection to nothing.
+      - name: Test Composio tenant isolation
+        run: scripts/ci/run-scoped-suite.sh "composio isolation" openhuman,tinycortex,composio harness::composio::isolation_tests
+
+      - name: Test the Composio ops helpers
+        run: scripts/ci/run-scoped-suite.sh "composio ops helpers" openhuman,tinycortex,composio harness::composio::ops_helper_tests
 
       # Issue #477. Before this step, `tinyplace` was COMPILED by CI and
       # EXECUTED by nothing. `Check (--all-features)` above builds every
@@ -1004,14 +1252,10 @@ jobs:
       # The desktop links the host crate by path, so its optional vendored
       # manifests must resolve here for the same reason they must in `rust` —
       # Cargo reads every path dependency's manifest during resolution.
+      #
+      # The list lives in the script and only there (issue #592).
       - name: Init vendored openhuman crate submodules
-        run: |
-          git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
-            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
-            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
-          git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
-            vendor/tinyagents
+        run: scripts/ci/init-vendored-submodules.sh
 
       # Tauri's system dependencies. `wry` links webkit2gtk, so this is what
       # makes the desktop tree buildable at all — and it is precisely why the

@@ -105,7 +105,11 @@ async fn main() -> anyhow::Result<()> {
         context: Arc::new(FsContextStore::new(dir.path())),
         store: Arc::new(FsCompanyStore::new(dir.path())),
         meter: Some(meter.clone()),
-        workspace_root: dir.path().to_path_buf(),
+        workspace_root: dir.path().join("harness"),
+        // Issue #775: the shell audit sink hangs off the data root as
+        // `companies/<slug>/audit/<agent>/`, deliberately a sibling of the
+        // workspace tree rather than inside it.
+        audit_root: dir.path().to_path_buf(),
         model_override,
         tasks: None,
         skills: None,

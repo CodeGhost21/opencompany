@@ -923,6 +923,7 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             error,
             cancelled,
             notices,
+            board,
         } => {
             let mut o = envelope("workflow_run_finished");
             o["workflowId"] = json!(workflow_id);
@@ -950,6 +951,18 @@ fn project_event(stored: &StoredEvent) -> Option<serde_json::Value> {
             // without having to compare against an empty list.
             if !notices.is_empty() {
                 o["notices"] = json!(notices);
+            }
+            // Issue #661 (M5): the same presence-check discipline once more, and
+            // the same widens-nothing argument as `deliveries` above — in fact a
+            // weaker claim, because a board row is structural by construction (see
+            // `WorkflowRunBoardRow`) rather than by this arm choosing what to
+            // forward. It carries ids and the card's own title, which the board
+            // read already serves this same console under the same guard.
+            //
+            // Projected so a console watching a run live learns it opened a card at
+            // the moment it settles, rather than only on the next history read.
+            if !board.is_empty() {
+                o["board"] = json!(board);
             }
             o
         }
@@ -1245,6 +1258,8 @@ async fn run_chat(
             // here infers the choice from the text (decision D2a).
             deliverable: message.deliverable.unwrap_or_default(),
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         if let Err(err) = runtime.upsert_task(&record).await {
             tracing::warn!(error = %err, "failed to open task card for chat request");
@@ -2450,6 +2465,7 @@ mod test {
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            audit_root: home.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -5165,6 +5181,7 @@ mod test {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["type"], "workflow_run_finished");
@@ -5208,6 +5225,7 @@ mod test {
             error: Some("no inference source for agent node `worker`".into()),
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         }))
         .expect("workflow_run_finished is an attention signal");
         assert_eq!(v["error"], "no inference source for agent node `worker`");
@@ -5320,6 +5338,7 @@ mod test {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         }))
         .expect("projected");
         assert_eq!(with_id["runId"], "run-9");
@@ -5333,6 +5352,7 @@ mod test {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         }))
         .expect("projected");
         assert!(legacy.get("runId").is_none(), "{legacy}");

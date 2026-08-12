@@ -263,6 +263,7 @@ fn build_brain(
         // The agent workspaces hang off here. Nothing has created a single
         // directory under it — that is the precondition under test.
         workspace_root: dir.join("harness"),
+        audit_root: dir.join("harness"),
         model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
         artifacts: None,
@@ -319,6 +320,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 

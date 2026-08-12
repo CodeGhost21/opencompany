@@ -19,6 +19,10 @@
 /// downstream agent node's turn (an `agent -> agent` pipeline passes data).
 #[cfg(test)]
 mod agent_upstream_input_test;
+/// Issue #661 (M5): end-to-end proof that a workflow node can open and re-own a
+/// board card, and that everything it may not do stays refused.
+#[cfg(test)]
+mod board_turn_test;
 pub mod caps;
 pub mod delivery;
 /// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes

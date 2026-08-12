@@ -4393,6 +4393,7 @@ mod tests {
             error: None,
             cancelled: false,
             notices: Vec::new(),
+            board: Vec::new(),
         });
 
         assert!(!summary.contains(RECIPIENT), "{summary}");
@@ -4420,6 +4421,7 @@ mod tests {
             error: None,
             cancelled: true,
             notices: Vec::new(),
+            board: Vec::new(),
         });
 
         assert!(summary.contains("stopped"), "{summary}");
@@ -6621,6 +6623,7 @@ name = "Morning"
                 cancelled: false,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             })
         }
     }
@@ -6745,6 +6748,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         });
         let calls = runner_impl.calls.clone();
         let runner: Arc<dyn WorkflowRunner> = Arc::new(runner_impl);
@@ -6789,6 +6793,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -6888,6 +6893,7 @@ name = "Morning"
             cancelled: true,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -6923,6 +6929,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7125,6 +7132,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7191,6 +7199,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7267,6 +7276,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7366,6 +7376,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }));
         let handle = WorkflowRunnerHandle::default();
         handle.set(&runner);
@@ -7982,6 +7993,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         };
         let md = summarize_run(&file, &run, "run-xyz", RunOutputStored::Stored);
         assert!(md.contains("last of 3 items — third"), "{md}");
@@ -7996,6 +8008,7 @@ name = "Morning"
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         };
         let md = summarize_run(&file, &run_one, "run-1", RunOutputStored::Stored);
         assert!(md.contains("1 item(s) — only"), "{md}");
@@ -8032,6 +8045,7 @@ name = "Morning"
                 cancelled: false,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),
@@ -8060,6 +8074,7 @@ name = "Morning"
                 cancelled: true,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cancel_cache.clone(),
@@ -8095,6 +8110,7 @@ name = "Morning"
                 cancelled: false,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),
@@ -8156,6 +8172,7 @@ name = "Morning"
                 cancelled: false,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             },
             WorkflowRefQueue::default(),
             cache.clone(),

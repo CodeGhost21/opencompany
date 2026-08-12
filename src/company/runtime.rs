@@ -2262,6 +2262,8 @@ mod tests {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
 
         let first = runtime.open_run(&card).await.expect("an attempt is minted");
@@ -2352,6 +2354,8 @@ mod tests {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
 
         // Positive control: on a live runtime the cycle runs, so the row is
