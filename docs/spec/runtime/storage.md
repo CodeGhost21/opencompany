@@ -110,6 +110,30 @@ and `owners`; and the WS3 console-surface collections `tasks`, `workspace`,
 `facts`, `usage`, `skills`, and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
 on each `record` (see [`UsageMeter`](ports-console.md#usagemeter)).
 
+**Path-uniqueness indexes on `workspace_nodes`.** This backend has neither a
+per-company lock nor a transaction it can require of its deployment, so "one node
+per path" cannot be a read followed by a write; it is the database's own
+invariant. Two **partial unique** indexes carry it: `(company_id,
+file_path_key)` for files (issue #697) and `(company_id, folder_path_key)` for
+the folders `adopt_or_create_folder` claims (issue #759). Both keys encode
+`{parent_id}\0{name}` — NUL, because no node name may contain one — and both are
+separate fields on purpose, so a folder and a note may still share a name exactly
+as they always could. This is a race fix, not a new tree rule.
+
+*Partial* is what makes them safe to add to a live tenant: a plain unique index
+is built over every existing document, so a company that already lost one of
+these races would fail index creation, and that failure happens during
+`ensure_indexes` — taking the tenant's startup down. Restricted to documents that
+*have* the field, each index covers everything written from now on and ignores
+history it cannot repair; legacy duplicates keep being refused one layer up.
+
+Only the primitives stamp the keys. Plain `create` does not stamp
+`folder_path_key`, so console-made folders are unguarded (and unaffected). A
+folder that `rename_move` touches **drops** its key: the claim exists to decide
+contention on the publish walk, and a key that travelled with a hand-moved folder
+would keep guarding the path it left — refusing that path forever, which is the
+outage the primitive exists to prevent.
+
 ### Multi-tenant isolation (two layers)
 
 1. **Database per tenant (recommended).** The hosting layer (the
@@ -188,6 +212,12 @@ monotonic event sequence, export totality) it exercises each WS3 store —
 `assert_skill_state_store`, `assert_inbox_store`, `assert_usage_meter` — plus a
 dedicated `assert_usage_retention` that verifies samples older than the 90-day
 window are evicted on write. A new backend passes only when all of these hold.
+
+`assert_workspace_folder_claims` (issue #759) additionally drives eight
+concurrent callers at one `(parent, name)`: all must succeed, all must come away
+holding the same folder, and exactly one may report having created it. That case
+is the point of the function — a naive read-then-create passes every sequential
+assertion beside it and fails only there, which is the defect's exact shape.
 
 ## Testing
 

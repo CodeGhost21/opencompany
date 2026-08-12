@@ -139,6 +139,9 @@ pub trait WorkspaceStore: Send + Sync {
     async fn write(&self, company: &CompanyId, id: &str, content: &str,
                    author: WorkspaceOrigin) -> Result<WorkspaceNode>;
     async fn create(&self, /* parent, name, kind, content */) -> Result<WorkspaceNode>;
+    async fn adopt_or_create_folder(&self, company: &CompanyId, parent: Option<&str>,
+                                    name: &str, origin: WorkspaceOrigin)
+        -> Result<FolderClaim>;                  // Created | Adopted  (#759)
     async fn rename_move(&self, /* id, new_name, new_parent */) -> Result<WorkspaceNode>;
     async fn delete(&self, company: &CompanyId, id: &str) -> Result<bool>;
     async fn is_empty(&self, company: &CompanyId) -> Result<bool>;
@@ -190,6 +193,40 @@ and writes blob-first/document-second, deleting in the mirror order, so a crash
 strands only a blob nothing references; `MongoStore::from_database` sweeps those
 at boot. Tenancy in the shared bucket is a filter on `metadata.company_id` **and**
 `metadata.node_id` for every read, delete and sweep.
+
+**Folder claims (#759).** `adopt_or_create_folder` is the only way the publish
+walk and the `Agents/` scaffold create a folder. It is a store primitive rather
+than a read plus a `create` because the read is honest about one instant and the
+create acts on it later: two publishes needing `Agents/<agent>/<task>/` both saw
+it free, and sqlite and mongodb both created — leaving two folders under one
+name. That state does not decay. Path resolution answers a duplicated name with
+`Conflict`, so a race lasting microseconds refuses every later publish beneath
+that path, for every agent, permanently.
+
+Afterwards exactly one folder answers to `(parent, name)` among the nodes this
+primitive governs, and the returned node is it. A `parent` of `None` is the
+workspace root, so the roots are claimed by the same call as everything below
+them. Adoption **preserves the original authorship stamp**: `origin` is used only
+when this call is the one that creates. A file holding the name, or a
+pre-existing ambiguity, is a `Conflict` — fail-closed, exactly as before.
+
+`FolderClaim::{Created, Adopted}` exists for one consumer: `WorkspaceAnnouncer`
+emits its node-created frame **only** on `Created`. A frame for a folder that was
+already standing would tell an open console something appeared when nothing did,
+on the adoption path nearly every publish takes.
+
+It is deliberately not `swap_files`' compare-and-swap. That stages a payload and
+makes the loser *fail*, which is right for a file — its bytes are a content claim
+with one legitimate winner. A folder is a payload-free container claim: two
+publishers wanting one folder want the same thing, so the loser must adopt and
+carry on. That also dissolves loser cleanup, since a loser never owns a folder.
+
+Backends decide it where each of them can: `FsOps` under the workspace-index lock
+it already holds for every write (single-process per data dir by contract),
+sqlite inside a `TransactionBehavior::Immediate` transaction (two stores can open
+one file), and MongoDB with a second partial unique index — see `storage.md`. The
+agent's own `workspace_create` tool is **not** routed through this: adopting there
+would silently merge two intentionally separate hand-made folders.
 
 **Search (#607).** Workspace search is a **company-layer helper**
 (`company::workspace_search`) over the port's existing `tree` + `read`, not a
