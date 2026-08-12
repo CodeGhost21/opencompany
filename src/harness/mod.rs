@@ -110,6 +110,13 @@ pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
+/// Issue #661 (M7): `read_workflow` / `update_workflow` / `delete_workflow` —
+/// the agent's way to fix or retire a workflow instead of only ever creating
+/// another one beside it. Kept out of `orchestrator.rs` (already the largest
+/// file in `src/harness/`) because the three share a handle, a guard and a set
+/// of refusals with each other rather than with anything there. See
+/// [`workflow_admin`].
+pub mod workflow_admin;
 /// Issue #339: the staging queue the orchestrator's `run_workflow` /
 /// `create_workflow` tools push a workflow reference onto and the
 /// [`HarnessBrain`] drains at the end of a dispatch, so a card that built or

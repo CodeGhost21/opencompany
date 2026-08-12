@@ -366,6 +366,161 @@ pub(crate) fn raw_workflow_from_toml(toml_src: &str) -> Result<RawWorkflow> {
     })
 }
 
+/// A stored graph split into the part an *agent* authoring schema can express
+/// and the part it cannot (issue #661, M7).
+///
+/// The agent-facing `create_workflow` / `update_workflow` tools deliberately
+/// carry a narrower node shape than the REST body: `schedule`, `on_error`,
+/// `retry` and `requires_approval` are unattended-run **policy**, reserved for
+/// an operator (see `CreateWorkflowArgs` in
+/// [`crate::harness::orchestrator`]). That narrowing is safe on *create* — a
+/// graph with no policy fields is simply authored without them — but on a
+/// full-replacement *edit* it is a hazard: replaying a read graph back through
+/// the narrow schema would silently drop whatever policy an operator had put on
+/// it, and dropping a `requires_approval` is removing a gate rather than
+/// forgetting a field.
+///
+/// So the projection is explicit about both halves rather than emitting the
+/// spec and hoping. [`Self::spec`] round-trips; [`Self::unexpressible`] is the
+/// evidence the write tools refuse on and the read tool reports.
+///
+/// Gated with the agent tools that are its only consumer
+/// (`crate::harness::workflow_admin`), the same way `courtesy_validate_draft`
+/// is gated with the builder it serves: in a default build this would be dead
+/// code.
+#[cfg(feature = "openhuman")]
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct WorkflowSpecProjection {
+    /// `{id, name, description?, nodes[], edges[]}` — exactly the JSON the
+    /// agent `update_workflow` tool accepts, so a graph read here can be edited
+    /// and handed straight back without reshaping.
+    pub(crate) spec: serde_json::Value,
+    /// The trigger's cron, when the stored body carries one. Read-only: an
+    /// agent can neither author nor preserve one.
+    pub(crate) schedule: Option<String>,
+    /// Every per-node policy field [`Self::spec`] cannot carry, in node order:
+    /// `(node id, [(field name, rendered value)])`. Empty means the whole graph
+    /// survives a round trip through the agent schema.
+    pub(crate) unexpressible: Vec<(String, Vec<(&'static str, String)>)>,
+}
+
+#[cfg(feature = "openhuman")]
+impl WorkflowSpecProjection {
+    /// A one-line, agent-readable rendering of [`Self::unexpressible`], e.g.
+    /// ``node `review` (requires_approval), node `fetch` (on_error, retry)``.
+    /// Empty string when nothing is unexpressible.
+    pub(crate) fn unexpressible_summary(&self) -> String {
+        self.unexpressible
+            .iter()
+            .map(|(node, fields)| {
+                let names: Vec<&str> = fields.iter().map(|(name, _)| *name).collect();
+                format!("node `{node}` ({})", names.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Projects a stored [`RawWorkflow`] onto the agent authoring schema, keeping
+/// the residue (see [`WorkflowSpecProjection`]).
+///
+/// Additive and read-only: it builds a fresh JSON value and touches nothing.
+/// It lives here, beside [`raw_workflow_from_toml`] whose output it consumes,
+/// rather than in `workflow_create.rs` — the two are a read pair, and the
+/// create module is the busier merge surface.
+///
+/// `config` is converted TOML → JSON, which cannot fail in this direction (TOML
+/// has no shape JSON lacks; the lossy direction is the one
+/// `raw_workflow_from_spec` guards).
+#[cfg(feature = "openhuman")]
+pub(crate) fn project_workflow_spec(raw: &RawWorkflow) -> WorkflowSpecProjection {
+    let mut nodes = Vec::with_capacity(raw.nodes.len());
+    let mut unexpressible = Vec::new();
+    let mut schedule = None;
+
+    for node in &raw.nodes {
+        let mut entry = serde_json::Map::new();
+        entry.insert("id".into(), serde_json::Value::String(node.id.clone()));
+        entry.insert("kind".into(), serde_json::Value::String(node.kind.clone()));
+        entry.insert("name".into(), serde_json::Value::String(node.name.clone()));
+        if let Some(summary) = &node.summary {
+            entry.insert("summary".into(), serde_json::Value::String(summary.clone()));
+        }
+        if let Some(agent) = &node.agent {
+            entry.insert("agent".into(), serde_json::Value::String(agent.clone()));
+        }
+        if let Some(config) = &node.config
+            && let Ok(json) = serde_json::to_value(config)
+        {
+            entry.insert("config".into(), json);
+        }
+        if let Some(destination) = &node.destination
+            && let Ok(json) = serde_json::to_value(destination)
+        {
+            entry.insert("destination".into(), json);
+        }
+        nodes.push(serde_json::Value::Object(entry));
+
+        // The residue. `schedule` is collected separately because it is a
+        // property of the *workflow* (only a trigger's is load-bearing — see
+        // [`WorkflowFile::trigger_schedule`]), not of the node an operator
+        // would go edit.
+        if node.kind == WorkflowNodeKind::Trigger.as_str()
+            && let Some(cron) = &node.schedule
+        {
+            schedule = Some(cron.clone());
+        }
+        let mut fields: Vec<(&'static str, String)> = Vec::new();
+        if let Some(on_error) = &node.on_error {
+            fields.push(("on_error", on_error.clone()));
+        }
+        if let Some(retry) = &node.retry {
+            fields.push((
+                "retry",
+                serde_json::to_string(retry).unwrap_or_else(|_| "set".to_string()),
+            ));
+        }
+        if let Some(requires_approval) = node.requires_approval {
+            fields.push(("requires_approval", requires_approval.to_string()));
+        }
+        if !fields.is_empty() {
+            unexpressible.push((node.id.clone(), fields));
+        }
+    }
+
+    let edges: Vec<serde_json::Value> = raw
+        .edges
+        .iter()
+        .map(|edge| {
+            let mut entry = serde_json::Map::new();
+            entry.insert("from".into(), serde_json::Value::String(edge.from.clone()));
+            entry.insert("to".into(), serde_json::Value::String(edge.to.clone()));
+            if let Some(label) = &edge.label {
+                entry.insert("label".into(), serde_json::Value::String(label.clone()));
+            }
+            serde_json::Value::Object(entry)
+        })
+        .collect();
+
+    let mut spec = serde_json::Map::new();
+    spec.insert("id".into(), serde_json::Value::String(raw.id.clone()));
+    spec.insert("name".into(), serde_json::Value::String(raw.name.clone()));
+    if let Some(description) = &raw.description {
+        spec.insert(
+            "description".into(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
+    spec.insert("nodes".into(), serde_json::Value::Array(nodes));
+    spec.insert("edges".into(), serde_json::Value::Array(edges));
+
+    WorkflowSpecProjection {
+        spec: serde_json::Value::Object(spec),
+        schedule,
+        unexpressible,
+    }
+}
+
 /// Parses one workflow graph from TOML source, validating it in full.
 ///
 /// Unknown keys are tolerated. On a validation failure every problem is

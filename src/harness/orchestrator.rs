@@ -3436,7 +3436,7 @@ impl Tool for ReadRunOutputTool {
 /// it, so nothing else has to change.
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowArgs {
+pub(crate) struct CreateWorkflowArgs {
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -3451,7 +3451,7 @@ struct CreateWorkflowArgs {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowArgNode {
+pub(crate) struct CreateWorkflowArgNode {
     #[serde(default)]
     id: String,
     #[serde(default)]
@@ -3478,7 +3478,7 @@ struct CreateWorkflowArgNode {
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct CreateWorkflowArgEdge {
+pub(crate) struct CreateWorkflowArgEdge {
     #[serde(default)]
     from: String,
     #[serde(default)]
@@ -3692,77 +3692,7 @@ impl Tool for CreateWorkflowTool {
     }
 
     fn parameters_schema(&self) -> Value {
-        json!({
-            "type": "object",
-            "properties": {
-                "id": {
-                    "type": "string",
-                    "description": "A short unique id (the on-disk filename stem): no spaces, slashes, or `..`."
-                },
-                "name": {
-                    "type": "string",
-                    "description": "A human-readable name, unique among the company's workflows (case-insensitive)."
-                },
-                "description": {
-                    "type": "string",
-                    "description": "An optional one-line description of what the workflow does."
-                },
-                "nodes": {
-                    "type": "array",
-                    "description": "The graph's nodes. Exactly one must be a `trigger`.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "id": { "type": "string", "description": "Node id, unique within the graph." },
-                            "kind": {
-                                "type": "string",
-                                "enum": ["trigger", "agent", "tool_call", "http_request", "condition", "output"],
-                                "description": "One of the six node kinds."
-                            },
-                            "name": { "type": "string", "description": "Human-readable node name." },
-                            "summary": { "type": "string", "description": "Optional short description of the step." },
-                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
-                            "config": {
-                                "type": "object",
-                                "description": "Kind-specific settings, a JSON object. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; `args` must be LITERAL values, not `=`-expressions; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
-                            },
-                            "destination": {
-                                "type": "object",
-                                "description": "On an `output` node only: where the report goes.",
-                                "properties": {
-                                    "kind": {
-                                        "type": "string",
-                                        "enum": ["owner", "email", "channel"],
-                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
-                                    },
-                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
-                                },
-                                "required": ["kind"],
-                                "additionalProperties": false
-                            }
-                        },
-                        "required": ["id", "kind", "name"],
-                        "additionalProperties": false
-                    }
-                },
-                "edges": {
-                    "type": "array",
-                    "description": "Directed edges between node ids.",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "from": { "type": "string", "description": "Source node id." },
-                            "to": { "type": "string", "description": "Destination node id." },
-                            "label": { "type": "string", "description": "Optional branch label (e.g. `yes`/`no` off a condition)." }
-                        },
-                        "required": ["from", "to"],
-                        "additionalProperties": false
-                    }
-                }
-            },
-            "required": ["id", "name", "nodes"],
-            "additionalProperties": false
-        })
+        create_workflow_parameters_schema()
     }
 
     fn permission_level(&self) -> PermissionLevel {
@@ -3840,6 +3770,88 @@ impl Tool for CreateWorkflowTool {
             }
         }
     }
+}
+
+/// The `create_workflow` parameter schema, lifted out of the tool so
+/// [`UpdateWorkflowTool`](crate::harness::workflow_admin::UpdateWorkflowTool)
+/// advertises the SAME graph shape it deserializes (issue #661, M7).
+///
+/// Both tools parse [`CreateWorkflowArgs`]; a second hand-written copy of this
+/// object would be free to drift from that struct — and from this one — with
+/// nothing to notice. The update tool adds `expected_version` to the result and
+/// rewrites `required`; everything else is shared by construction.
+pub(crate) fn create_workflow_parameters_schema() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "A short unique id (the on-disk filename stem): no spaces, slashes, or `..`."
+            },
+            "name": {
+                    "type": "string",
+                    "description": "A human-readable name, unique among the company's workflows (case-insensitive)."
+                },
+                "description": {
+                    "type": "string",
+                    "description": "An optional one-line description of what the workflow does."
+                },
+                "nodes": {
+                    "type": "array",
+                    "description": "The graph's nodes. Exactly one must be a `trigger`.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "id": { "type": "string", "description": "Node id, unique within the graph." },
+                            "kind": {
+                                "type": "string",
+                                "enum": ["trigger", "agent", "tool_call", "http_request", "condition", "output"],
+                                "description": "One of the six node kinds."
+                            },
+                            "name": { "type": "string", "description": "Human-readable node name." },
+                            "summary": { "type": "string", "description": "Optional short description of the step." },
+                            "agent": { "type": "string", "description": "On an `agent` node only: the roster teammate id that performs the step." },
+                            "config": {
+                                "type": "object",
+                                "description": "Kind-specific settings, a JSON object. `tool_call`: `{ \"slug\": \"<wired shell/code/web/search tool>\", \"args\": {…} }` (slug required; `args` must be LITERAL values, not `=`-expressions; Composio/GitHub/media are agent-turn families — use an `agent` node instead). `http_request`: `{ \"method\": \"GET\", \"url\": \"https://…\" }`. `condition`: `{ \"field\": \"<boolean expression>\" }` with `yes`/`no` edge labels. Never include null values — they can't be stored."
+                            },
+                            "destination": {
+                                "type": "object",
+                                "description": "On an `output` node only: where the report goes.",
+                                "properties": {
+                                    "kind": {
+                                        "type": "string",
+                                        "enum": ["owner", "email", "channel"],
+                                        "description": "`owner` (company admins; no target), `email` (target is an address), or `channel` (target is a wired channel id)."
+                                    },
+                                    "target": { "type": "string", "description": "The recipient: an email address (`email`) or channel id (`channel`). Absent for `owner`." }
+                                },
+                                "required": ["kind"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "required": ["id", "kind", "name"],
+                        "additionalProperties": false
+                    }
+                },
+                "edges": {
+                    "type": "array",
+                    "description": "Directed edges between node ids.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "from": { "type": "string", "description": "Source node id." },
+                            "to": { "type": "string", "description": "Destination node id." },
+                            "label": { "type": "string", "description": "Optional branch label (e.g. `yes`/`no` off a condition)." }
+                        },
+                        "required": ["from", "to"],
+                        "additionalProperties": false
+                    }
+                }
+            },
+            "required": ["id", "name", "nodes"],
+            "additionalProperties": false
+    })
 }
 
 #[cfg(test)]
