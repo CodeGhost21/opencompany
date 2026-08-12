@@ -36,6 +36,7 @@ PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
 DELETE …/workspace/{nodeId}                  delete a node
 POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays (#700)
+POST   …/workspace/merge-duplicate-folders?dry_run=    repair a raced tree (#759)
 POST   …/skills                             add a custom skill
 GET    …/skills/registry                     browse the shared skill library
 POST   …/skills/{slug}/install              install a registry/company skill
@@ -114,6 +115,39 @@ reads as empty to anything path-shaped while the recursive delete would still
 take it (#671), and sqlite and mongodb both accept such a name. An ambiguous
 root is a `409`, not a guess. Each removal announces its own
 `WorkspaceChanged{removed}` (#327); a second run removes nothing.
+
+`POST …/workspace/merge-duplicate-folders` (#759) repairs a tree a publish race
+already broke. Two concurrent first publishes of one deliverable can each create
+the folder they both read as missing; from then on every publish beneath that
+path is refused as ambiguous, for every agent, until somebody edits the tree.
+Stopping new races does nothing for a tenant already in that state, and on a
+hosted tenant this route is the only way out of it — operator-triggered, never
+automatic, for the reason the sweep above is.
+
+A duplicate set is two or more sibling **folders** sharing a name, matched by
+`parent_id` and never by rendered path. The oldest by `updated_at_millis` wins,
+with the node id breaking a tie so a preview and the confirm behind it cannot
+disagree. The losers' children are `rename_move`d into the winner — ids
+preserved, so an artifact recorded against a published node still resolves —
+and a folder-folder collision among those children becomes another merge in the
+same run, iterating to a fixpoint. Nothing is renamed, nothing is overwritten,
+and a loser is deleted only once it is **structurally empty in a fresh read**
+taken after the relocations, so a publish landing mid-merge leaves its folder
+standing rather than losing anything (#671 / #700 discipline).
+
+Any collision involving a **file** is refused and reported: two files at one
+path are two documents, and every rule for picking one discards somebody's work.
+`?dry_run=true` answers `{"wouldMerge":[{id,name,intoId,moved:[{id,name}…],
+removed}…],"residuals":[…]}` and touches nothing; the real call answers
+`{"merged":[…],"residuals":[…]}`, and which field carries the folds is what
+actually happened. `residuals` is on **both**, always — each entry is
+`{id,name,parentId?,cause}` with `cause` one of `fileSharesTheName` (a note
+shares the duplicated name, so the whole group was left alone), `fileInTheWay`
+(the winner already holds a note of that name), or `treeMovedOn` (the store
+refused the move because the tree changed; run it again). It is the half of the
+answer that says whether the tree is actually repaired. Moves and deletes
+announce `WorkspaceChanged` (#327); a second run with nothing left to do changes
+nothing.
 
 All three workspace `GET`s — tree, file and `search` — and the `POST` / `PATCH`
 node bodies carry `createdBy` and `updatedBy` (#326), each
