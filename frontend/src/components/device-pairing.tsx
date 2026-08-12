@@ -19,7 +19,7 @@
 import { useState } from "react";
 import { KeyRound, Loader2 } from "lucide-react";
 
-import { isDesktopRuntime } from "@/api/transport";
+import { isDesktopRuntime, mayCarryACredential } from "@/api/transport";
 import { forgetDevice, pairDevice } from "@/api/transport/desktop";
 import { Button } from "@/components/ui/button";
 import {
@@ -45,6 +45,11 @@ export function DevicePairing() {
   if (!isDesktopRuntime() || !connection) return null;
 
   const paired = connection.credential.kind === "device";
+  // A host this machine must not hand a session to. The core refuses the claim
+  // too — that is the check that counts, since it also covers anything invoking
+  // `oc_pair_device` directly — but a form that cannot succeed should say so
+  // before someone fetches a code from another screen to type into it.
+  const encrypted = mayCarryACredential(connection.baseUrl);
 
   const submit = async () => {
     const trimmed = code.trim();
@@ -80,7 +85,9 @@ export function DevicePairing() {
         <CardDescription>
           {paired
             ? "This machine is paired with this host and signs in as you."
-            : "Pair this machine so it acts as you rather than anonymously. Ask this host's web console for a pairing code under Settings → devices."}
+            : encrypted
+              ? "Pair this machine so it acts as you rather than anonymously. Ask this host's web console for a pairing code under Settings → devices."
+              : "This host is reached over an unencrypted connection, so pairing is unavailable — a session sent to it could be read by anyone on the network path."}
         </CardDescription>
       </CardHeader>
       <CardContent>
@@ -120,7 +127,17 @@ export function DevicePairing() {
             {error}
           </p>
         ) : null}
-        {!paired ? (
+        {!paired && !encrypted ? (
+          // No form at all, rather than a disabled one. A greyed-out field
+          // invites a person to hunt for what would enable it, and the answer
+          // is not on this screen — it is the host's address, which they
+          // change by re-adding it over https.
+          <p role="alert" data-testid="pairing-insecure-host" className="text-xs text-destructive">
+            {connection.baseUrl} is not encrypted. Pair over https, or from a host running on
+            this machine.
+          </p>
+        ) : null}
+        {!paired && encrypted ? (
           <div className="space-y-2">
             <div className="flex items-center gap-2">
               <Input
