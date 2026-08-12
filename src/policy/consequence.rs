@@ -909,8 +909,12 @@ fn web_fetch_scope_of(args: &serde_json::Value) -> Option<String> {
         return None;
     }
     // The authority ends at the first delimiter that starts the path, query or
-    // fragment. `split` always yields at least one element, so this cannot fail.
-    let authority = rest.split(['/', '?', '#']).next()?;
+    // fragment. `\` is included because WHATWG — followed by the `url`/`reqwest`
+    // clients the harness actually uses — treats it as a path separator in
+    // `http(s)` URLs, so `https://evil.example\@docs.rs/` has host `evil.example`
+    // and must not read `docs.rs`. `split` always yields at least one element,
+    // so this cannot fail.
+    let authority = rest.split(['/', '?', '#', '\\']).next()?;
     // Credentials sit before the LAST `@`; the host is whatever follows it.
     let host_port = match authority.rsplit_once('@') {
         Some((_, after)) => after,
