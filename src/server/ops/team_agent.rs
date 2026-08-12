@@ -100,7 +100,7 @@ pub(super) enum AgentSource {
 
 /// The fields a `PATCH` accepts for an overlay teammate. Sent to the console so
 /// it renders the same rule the host enforces.
-const OVERLAY_EDITABLE: [&str; 3] = ["name", "role", "description"];
+const OVERLAY_EDITABLE: [&str; 4] = ["name", "role", "description", "tools"];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -289,6 +289,18 @@ pub(super) struct EditAgent {
     role: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
+    /// The teammate's tool scope (issue #619). Absent leaves it alone; an
+    /// **empty array** is the deliberate way back to the company's standard
+    /// grant, which is why this is a plain `Option` and not a double option —
+    /// `[]` already spells "clear it" without needing `null` to mean something
+    /// different from omission.
+    ///
+    /// #661 made a teammate scopable at *creation* (`POST …/team` and
+    /// `add_agent`). This is the half that was missing: narrowing one that
+    /// already exists, without deleting and recreating it — which would orphan
+    /// its workspace folder, budget row, desk memberships and inbox.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
 }
 
 /// `GET {scope}/team/{agent_id}` — one agent, read.
@@ -348,6 +360,11 @@ async fn edit_agent(
 
     let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
     let role = trimmed_field(body.role.as_deref(), "role").map_err(|e| e.into_response())?;
+    let tools = body
+        .tools
+        .map(|globs| trimmed_globs(&globs))
+        .transpose()
+        .map_err(|e| e.into_response())?;
 
     {
         let agent = record
@@ -368,6 +385,15 @@ async fn edit_agent(
             agent.description = description
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty());
+        }
+        // Issue #619: stored verbatim, exactly like a manifest `[[agent]].tools`
+        // line. The company `allow` ceiling is applied at *read* time by
+        // `agent_effective_grants`, so a glob the company does not cover is
+        // surfaced as asked-for-but-not-granted rather than silently dropped
+        // here — and this route can only ever narrow a teammate within a grant
+        // the company already made.
+        if let Some(tools) = tools {
+            agent.tools = tools;
         }
     }
 
@@ -406,6 +432,34 @@ fn trimmed_field(value: Option<&str>, field: &str) -> Result<Option<String>, Api
         ))));
     }
     Ok(Some(trimmed.to_string()))
+}
+
+/// Trims a submitted tool-scope list, refusing a blank entry and dropping
+/// duplicates (issue #619).
+///
+/// A blank glob is a `400` rather than a stored empty string for a sharper
+/// reason than tidiness: `""` matches nothing an operator meant, so it would
+/// read as a scope that grants nothing while looking like a scope that was set.
+/// Duplicates are dropped rather than refused — a repeated glob is harmless and
+/// the resolved grant list is de-duplicated downstream anyway.
+///
+/// Same `ApiError`-not-`Response` return shape as [`trimmed_field`], for the
+/// reason given there.
+fn trimmed_globs(globs: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(globs.len());
+    for glob in globs {
+        let trimmed = glob.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "a tool grant can't be empty. Send an empty list to give this teammate the company's standard grant.".to_string(),
+            )));
+        }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Builds one agent's detail from the loaded record, or 404s when the id names
@@ -1122,9 +1176,112 @@ members = ["writer", "ceo"]
         let (_, agent) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&agent["editable"]),
-            vec!["name", "role", "description"],
+            vec!["name", "role", "description", "tools"],
             "{agent}"
         );
+    }
+
+    /// Issue #619: a teammate can be narrowed **after** it exists, not only at
+    /// creation.
+    ///
+    /// #661 made the scope writable on `POST …/team` and through `add_agent`.
+    /// This is the half that was missing — without it, correcting a teammate's
+    /// grant means deleting and recreating it, which orphans its workspace
+    /// folder, budget row, desk memberships and inbox.
+    ///
+    /// The three levels are asserted separately on purpose: `requested` proves
+    /// the scope was stored, `effective` proves it reached the function the
+    /// harness builds the agent with, and the untouched company `allow` proves
+    /// the narrowing is per-teammate rather than a company-wide edit.
+    #[tokio::test]
+    async fn an_overlay_teammate_can_be_scoped_after_creation() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (_, before) = get_agent(&state, &jamie).await;
+        assert!(
+            strings(&before["tools"]["requested"]).is_empty(),
+            "unscoped to begin with: {before}"
+        );
+        assert_eq!(
+            strings(&before["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "which resolves to everything the company allows: {before}"
+        );
+
+        let (status, scoped) = patch_agent(&state, &jamie, json!({"tools": ["workspace"]})).await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(
+            strings(&scoped["tools"]["requested"]),
+            vec!["workspace"],
+            "{scoped}"
+        );
+        assert_eq!(
+            strings(&scoped["tools"]["effective"]),
+            vec!["workspace"],
+            "and it is narrower than the company grant, which is the point: {scoped}"
+        );
+        assert_eq!(
+            strings(&scoped["tools"]["companyAllow"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "the company ceiling is untouched — this scoped one teammate: {scoped}"
+        );
+
+        // Read back through a fresh request, so this is the stored record and
+        // not the handler's own answer.
+        let (_, reread) = get_agent(&state, &jamie).await;
+        assert_eq!(
+            strings(&reread["tools"]["requested"]),
+            vec!["workspace"],
+            "{reread}"
+        );
+
+        // An empty list is the deliberate way back to the standard grant, and
+        // must read as "inherits everything" rather than "holds nothing".
+        let (status, cleared) = patch_agent(&state, &jamie, json!({"tools": []})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(
+            strings(&cleared["tools"]["requested"]).is_empty(),
+            "{cleared}"
+        );
+        assert_eq!(
+            strings(&cleared["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "{cleared}"
+        );
+    }
+
+    /// A blank glob is refused rather than stored: `""` matches nothing an
+    /// operator meant, so it would read as a scope that grants nothing while
+    /// looking like a scope that was set.
+    #[tokio::test]
+    async fn a_blank_tool_glob_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) =
+            patch_agent(&state, &jamie, json!({"tools": ["workspace", "  "]})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert!(
+            strings(&unchanged["tools"]["requested"]).is_empty(),
+            "and nothing was written: {unchanged}"
+        );
+    }
+
+    /// A manifest teammate's tool line lives in the version-controlled
+    /// blueprint, and #619 did not move it: the overlay half became editable,
+    /// the manifest half stayed a `409`.
+    #[tokio::test]
+    async fn a_manifest_teammates_tools_are_still_not_editable_here() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refusal) = patch_agent(&state, "ceo", json!({"tools": ["workspace"]})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
     }
 
     /// A blank name would render a card with no way back to it, so it is a
