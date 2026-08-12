@@ -761,6 +761,35 @@ pub(crate) fn composio_action_slug(args: &serde_json::Value) -> Result<&str, Act
 /// the first place — `without_the_catalogue_every_composio_action_is_a_send`
 /// pins that — so there is no scoped grant there for `None` to widen.
 ///
+/// # No live caller, and retained on purpose (issue #610)
+///
+/// **Nothing in any current tier routes a Composio call to this.** Since #559 a
+/// catalogue read no longer parks under `supervised`, so the tier allows it well
+/// above the grant checks; under `readonly` the #243 emergency brake denies
+/// every external effect *above* them; under `full` everything is allowed. The
+/// scope is minted and stored, and no tier spends it.
+///
+/// That is dormancy, not death, and the distinction is written here because a
+/// mechanism with no caller and no note is indistinguishable from dead code —
+/// and this one is a reviewed security boundary. It is what any future durable
+/// allowlist would consult, and rebuilding it later would mean re-deriving the
+/// same decision: that consent attaches to a *provider*, that a slug the
+/// catalogue cannot place resolves to `None`, and that a scoped grant refuses
+/// `None` rather than guessing permissively. #563 proposed one such feature and
+/// was closed because its **card-promotion** shape cannot work under `auto`: a
+/// tool parks under `auto` exactly when it is not [`Standing::Grantable`], and
+/// the standing-grant control is offered only for `Grantable` tools, so no card
+/// under `auto` can ever offer "don't ask again" — exact complements on the
+/// parked set, a partition rather than a gap. A console- or manifest-managed
+/// allowlist consulted **before** the tier check has no such problem, and would
+/// use this.
+///
+/// Deleting it is therefore a decision to re-derive it later, and should be made
+/// as one. `the_minted_scope_is_the_scope_a_grant_admits` pins this function
+/// against [`StandingGrant::admits_scope`] directly, so the pairing keeps its
+/// coverage while no caller connects them.
+///
+/// [`Standing::Grantable`]: crate::policy::consequence::Standing::Grantable
 /// [`StandingGrant::admits_scope`]: crate::runtime::grants::StandingGrant::admits_scope
 pub fn standing_scope_of(tool: &str, args: &serde_json::Value) -> Option<String> {
     if !tool.eq_ignore_ascii_case(COMPOSIO_EXECUTE) {
@@ -1427,6 +1456,87 @@ mod tests {
             .standing,
             Standing::Grantable,
             "the curated lookup is case-insensitive on the slug too"
+        );
+    }
+
+    /// The two halves of #457's scoping, exercised **together and directly**
+    /// (issue #610).
+    ///
+    /// [`standing_scope_of`] mints the scope and
+    /// [`StandingGrant::admits_scope`] spends it, and since #559 no tier routes
+    /// a Composio read through both — see the retention note on
+    /// `standing_scope_of`. Each half is pinned on its own elsewhere, and each
+    /// of those tests spells the toolkit as its own `"github"` literal. Two
+    /// literals in two files are not an agreement: change what
+    /// `standing_scope_of` returns and both suites can be made green
+    /// separately while the pairing they describe is broken, with no live
+    /// caller left to notice.
+    ///
+    /// So nothing here is written down. Every scope comes out of
+    /// `standing_scope_of` and goes straight into a grant or into
+    /// `admits_scope`, which makes this a test of whether the two functions
+    /// still agree rather than of what either one says.
+    #[test]
+    #[cfg(feature = "openhuman")]
+    fn the_minted_scope_is_the_scope_a_grant_admits() {
+        use crate::runtime::grants::{GrantId, StandingGrant};
+
+        let scope_of = |slug: &str| standing_scope_of(COMPOSIO_EXECUTE, &json!({ "tool": slug }));
+
+        let minted = scope_of("GITHUB_LIST_BRANCHES");
+        assert!(
+            minted.is_some(),
+            "a catalogued action must resolve a toolkit, or this test proves nothing"
+        );
+        // Minted the way the cycle mints one: from the parked effect's payload.
+        let grant = StandingGrant {
+            id: GrantId::new("g610"),
+            agent: "ops".to_string(),
+            tool: COMPOSIO_EXECUTE.to_string(),
+            granted_by: crate::ports::types::Actor {
+                kind: crate::ports::types::ActorKind::User,
+                id: "user-1".to_string(),
+            },
+            approval_id: crate::ports::types::ApprovalId::new("a610"),
+            at_millis: 1_000,
+            expires_at_millis: u64::MAX,
+            origin_thread: None,
+            origin_parent: None,
+            scope: minted,
+        };
+
+        // A second read from the provider the operator named. Scoped by
+        // toolkit and not by slug, so a *different* GitHub action passes.
+        assert!(
+            grant.admits_scope(scope_of("GITHUB_LIST_PULL_REQUESTS").as_deref()),
+            "the operator consented to a provider, not to one action slug"
+        );
+        // Another provider's read: every other dimension matches and the scope
+        // is the one thing that says no.
+        assert!(
+            !grant.admits_scope(scope_of("GMAIL_FETCH_EMAILS").as_deref()),
+            "'read from GitHub' is not consent to read the company's mail"
+        );
+        // An action the catalogue cannot place resolves to `None`, and a scoped
+        // grant refuses `None` rather than guessing permissively.
+        assert_eq!(
+            scope_of("NOT_A_REAL_TOOLKIT_DO_SOMETHING"),
+            None,
+            "an unplaceable action must not resolve a toolkit"
+        );
+        assert!(
+            !grant.admits_scope(scope_of("NOT_A_REAL_TOOLKIT_DO_SOMETHING").as_deref()),
+            "unknown is a send here too"
+        );
+        // And the unscoped grant a pre-#457 journal line replays into still
+        // admits whatever its `(agent, tool)` pair already admitted.
+        let unscoped = StandingGrant {
+            scope: None,
+            ..grant
+        };
+        assert!(
+            unscoped.admits_scope(scope_of("GMAIL_FETCH_EMAILS").as_deref()),
+            "an unscoped grant must keep behaving as it did before scopes existed"
         );
     }
 
