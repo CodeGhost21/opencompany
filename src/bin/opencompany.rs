@@ -283,6 +283,11 @@ fn company_builder(
     .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
     .with_workspace_quota(state.config().workspace_quota)
+    // Issue #752: the backend that serves this host's secrets, which the
+    // repository-credential gates refuse on. Threaded through `company_builder`
+    // rather than read from the environment further down, so a rebuild gets the
+    // same answer boot got.
+    .with_storage_kind(state.storage_kind())
     // Issue #661 / M8: the deployment's standing bootstrap admin, normalized,
     // so a fresh tenant's `owner` report reaches its creator before that first
     // sign-in mints a user record. `None` (self-hosted, no injected address) is

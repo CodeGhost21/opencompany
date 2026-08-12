@@ -62,6 +62,61 @@ impl StorageKind {
             Self::Mongodb => "mongodb",
         }
     }
+
+    /// Whether this backend keeps [`SecretStore`] material as **plaintext on
+    /// the container's own filesystem** (issue #752).
+    ///
+    /// `fs` writes one plaintext file per secret under
+    /// `<data-dir>/companies/<slug>/secrets/` — [`FsSecretStore`] says so in its
+    /// own doc comment, and `sqlite` puts the same bytes in a database file on
+    /// the same disk. `mongodb` is the only backend that keeps them out of the
+    /// container, in the tenant database.
+    ///
+    /// This matters because of who else is on that filesystem. An agent holding
+    /// `shell` runs as the same uid as the server process, in the same
+    /// container, so "plaintext on disk" means "readable by a prompt-injected
+    /// agent" — there is no boundary in between, and
+    /// `docs/spec/security/agent-isolation.md` is explicit that none is planned
+    /// inside a tenant. A repository credential parked there is a credential the
+    /// agent can read and use directly, without going through any tool the host
+    /// gates.
+    ///
+    /// New backends default to the safe answer by being added to the `true` arm
+    /// unless they demonstrably keep secrets off the local disk.
+    ///
+    /// [`FsSecretStore`]: crate::store::FsSecretStore
+    /// [`SecretStore`]: crate::ports::SecretStore
+    pub fn secrets_are_plaintext_on_disk(self) -> bool {
+        match self {
+            Self::Fs | Self::Sqlite => true,
+            Self::Mongodb => false,
+        }
+    }
+}
+
+/// The refusal every repository-credential gate raises on a backend that keeps
+/// secrets as plaintext on the container's disk (issue #752).
+///
+/// One function rather than a message per call site: the bind route, the boot
+/// check and the agent-build gate all refuse the *same* deployment condition,
+/// and an operator who reads it in the console then reads it again in the boot
+/// log should not have to work out whether they are two problems.
+///
+/// Written to be self-service — it names the condition, the risk in one clause,
+/// and both ways out — because the operator hitting it is mid-task with a token
+/// in their clipboard, and "storage backend not supported" would send them to
+/// the issue tracker instead of to a fix.
+pub fn plaintext_secret_refusal(kind: StorageKind) -> String {
+    format!(
+        "this host keeps secrets on its own filesystem (OPENCOMPANY_STORAGE={}), so a \
+         repository credential would sit there in plaintext — readable by the same uid the \
+         agent shell runs as, which is not a boundary this deployment has. Repository \
+         credentials are refused here. Either point this host at MongoDB \
+         (OPENCOMPANY_STORAGE=mongodb plus OPENCOMPANY_MONGODB_URI, which keeps secrets in \
+         the tenant database), or drop the `repo` grant from the company's [tools] allow \
+         list and from every agent that names it. See docs/spec/runtime/storage.md.",
+        kind.as_str()
+    )
 }
 
 impl std::str::FromStr for StorageKind {
@@ -505,6 +560,34 @@ mod test {
             StorageKind::Mongodb
         );
         assert!("postgres".parse::<StorageKind>().is_err());
+    }
+
+    /// Issue #752: only MongoDB keeps secret material off the container's own
+    /// disk, so only MongoDB clears the repository-credential gates.
+    #[test]
+    fn only_mongodb_keeps_secrets_off_the_local_disk() {
+        assert!(StorageKind::Fs.secrets_are_plaintext_on_disk());
+        assert!(StorageKind::Sqlite.secrets_are_plaintext_on_disk());
+        assert!(!StorageKind::Mongodb.secrets_are_plaintext_on_disk());
+        // The default is the refusing side: a host that never resolved a
+        // backend must not be treated as one that keeps secrets safely.
+        assert!(StorageKind::default().secrets_are_plaintext_on_disk());
+    }
+
+    /// The refusal has to be actionable on its own — an operator reading it in
+    /// a console toast has nothing else to go on.
+    #[test]
+    fn the_refusal_names_the_condition_and_both_remedies() {
+        let message = plaintext_secret_refusal(StorageKind::Fs);
+        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
+        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
+        assert!(message.contains("OPENCOMPANY_MONGODB_URI"), "{message}");
+        assert!(message.contains("`repo` grant"), "{message}");
+        assert!(message.contains("plaintext"), "{message}");
+        // The named kind is the one actually in force, not a hard-coded "fs".
+        assert!(
+            plaintext_secret_refusal(StorageKind::Sqlite).contains("OPENCOMPANY_STORAGE=sqlite"),
+        );
     }
 
     #[tokio::test]

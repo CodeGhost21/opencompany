@@ -457,8 +457,8 @@ pub fn build_agent(
     }
 
     // Bound repositories (issue #245, agent half) — `repo_checkout` / `repo_pr`
-    // over the company's own mirrored source. THREE hard gates, and the third is
-    // not redundant:
+    // over the company's own mirrored source. FOUR hard gates, and none of them
+    // is redundant:
     //
     //  1. an **EXPLICIT** `repo` grant (`grants_repo_explicit`) — the catch-all
     //     `*` does NOT confer it, following `media` / `composio` / `search`.
@@ -472,6 +472,16 @@ pub fn build_agent(
     //     refusal listing an empty set. Wiring nothing and warning is the
     //     honest state, and it is what the console's "granted but nothing
     //     bound" notice is telling the operator to fix.
+    //  4. a secret backend that does **not** keep the credential as plaintext on
+    //     this container's disk (issue #752). `RuntimeBuilder::build` refuses to
+    //     bring a repo-granted company up at all on `fs`/`sqlite`, so in a
+    //     normal boot this arm is unreachable — and it is here for the case that
+    //     is not a boot. A teammate added through the console lands in
+    //     `overlay_agents` on a **live** runtime; `HarnessPool::ensure` rebuilds
+    //     that agent's belt on the next turn without going back through
+    //     `build`, so the boot check never sees it. Without this arm, adding an
+    //     agent that names `repo` would hand it a checkout tool over a
+    //     credential sitting in a file the same agent can `cat`.
     //
     // NOT feature-gated, like `search` and unlike `media` / `composio`: the
     // mirror and the git runner are always compiled, and with no forge client
@@ -481,6 +491,16 @@ pub fn build_agent(
     // how #288 / #281 / #297 each happened.
     if crate::company::grants_repo_explicit(grants) {
         match (&deps.repos, deps.repo_bindings.is_empty()) {
+            // Gate 4 first: on a plaintext backend there is no shape of this
+            // that is safe to wire, so the binding count does not get a vote.
+            (Some(repos), _) if repos.secrets_are_plaintext_on_disk() => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo` but this host keeps secrets on its own \
+                 filesystem, where the credential is readable by the shell; repo tools NOT wired \
+                 (fail-closed, issue #752) — set OPENCOMPANY_STORAGE=mongodb or drop the `repo` \
+                 grant"
+            ),
             (Some(repos), false) => {
                 tools.extend(crate::harness::repo::repo_tools(
                     crate::harness::repo::RepoToolContext {
@@ -1588,14 +1608,30 @@ mod tests {
     /// `deps.repo_bindings` — so the difference between the two is exactly
     /// "the operator bound something", which is two of the four gate states.
     fn built_tool_names_with_repos(grants: &[&str], bindings: usize) -> Vec<String> {
+        built_tool_names_with_repos_on(grants, bindings, crate::store::StorageKind::Mongodb)
+    }
+
+    /// [`built_tool_names_with_repos`], with the secret backend spelled out —
+    /// the fourth gate (issue #752). Mongodb is what the plain helper passes,
+    /// because a host that cannot hold a repository credential safely cannot
+    /// reach the other three gates at all, and every assertion about them would
+    /// otherwise be passing for the #752 reason instead of its own.
+    fn built_tool_names_with_repos_on(
+        grants: &[&str],
+        bindings: usize,
+        storage_kind: crate::store::StorageKind,
+    ) -> Vec<String> {
         use crate::runtime::repo_manager::types::RepoBinding;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut deps = pin_deps(dir.path().to_path_buf());
-        deps.repos = Some(std::sync::Arc::new(crate::runtime::RepoManager::new(
-            CompanyId::new("acme"),
-            dir.path().join("repos"),
-            std::sync::Arc::new(crate::store::FsSecretStore::new(dir.path())),
-        )));
+        deps.repos = Some(std::sync::Arc::new(
+            crate::runtime::RepoManager::new(
+                CompanyId::new("acme"),
+                dir.path().join("repos"),
+                std::sync::Arc::new(crate::store::FsSecretStore::new(dir.path())),
+            )
+            .with_storage_kind(storage_kind),
+        ));
         deps.repo_bindings = (0..bindings)
             .map(|n| RepoBinding {
                 key: format!("acme-widgets-{n:012}"),
@@ -1703,6 +1739,31 @@ mod tests {
             built_tool_names(&["repo"], false),
             "the unbound state must differ from the unwired state by nothing"
         );
+
+        // Gate 4 (issue #752): explicit `repo` + manager + binding, on a host
+        // whose secrets are plaintext on its own disk → absent. This is the
+        // console-added-teammate path, which never goes back through the boot
+        // check. The binding exists, so nothing but the backend is refusing.
+        for kind in [
+            crate::store::StorageKind::Fs,
+            crate::store::StorageKind::Sqlite,
+        ] {
+            let plaintext = built_tool_names_with_repos_on(&["repo"], 1, kind);
+            for tool in &pair {
+                assert!(
+                    !plaintext.contains(tool),
+                    "a repo grant on {} must wire nothing: {plaintext:?}",
+                    kind.as_str()
+                );
+            }
+            // Again, a withheld family and not a broken agent.
+            assert_eq!(
+                plaintext,
+                built_tool_names(&["repo"], false),
+                "the {} state must differ from the unwired state by nothing",
+                kind.as_str()
+            );
+        }
     }
 
     /// Granting `repo` must not quietly hand over anything *else*: the bound

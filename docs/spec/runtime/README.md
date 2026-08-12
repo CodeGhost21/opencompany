@@ -68,6 +68,10 @@ Supporting docs:
   credential reaches git without entering argv, the environment or any file, the
   alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
   of same-user confinement
+- [../security/agent-isolation.md](../security/agent-isolation.md) — the threat
+  model behind that limit: what confines an agent today, what does not, and what
+  a prompt-injected agent with `shell` can still do after every planned control
+  lands
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
 

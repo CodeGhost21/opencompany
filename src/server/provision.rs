@@ -252,6 +252,10 @@ async fn provision(
         .with_id(id.clone())
         .with_tinyplace_api_url(state.config().tinyplace_api_url.clone())
         .with_host_base_url(state.config().host_base_url())
+        // Issue #752: a provisioned tenant is a company like any other, so it
+        // inherits the same repository-credential gates — which need to know
+        // which backend is holding this host's secrets.
+        .with_storage_kind(state.storage_kind())
         .with_skills_registry(skills_registry);
     if let Some(stores) = state.stores() {
         builder = builder.with_stores(stores);
