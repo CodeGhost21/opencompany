@@ -1476,6 +1476,54 @@ async fn state_refusing_mail_to(
     (state_with(home, connections).await, accepted)
 }
 
+/// A transport that revokes the invite it is delivering, mid-send.
+///
+/// The race being modelled is an admin pressing Revoke while the SMTP round
+/// trip is still in flight — the exact window the route's post-send stamp sits
+/// in. Revoking from inside `send` reproduces that window deterministically:
+/// no sleep, no second task, and the route is provably still holding its
+/// pre-send copy of the record when the revocation lands.
+#[derive(Clone)]
+struct RevokingMailSender {
+    /// Filled once the state exists, since the runtime this revokes through is
+    /// the one the state owns — and the state cannot be built until the sender
+    /// it borrows is already wired into its connections.
+    runtime: Arc<std::sync::OnceLock<Arc<crate::runtime::CompanyRuntime>>>,
+    revoke_for: String,
+    accepted: RecordingMailSender,
+}
+
+#[async_trait::async_trait]
+impl crate::server::ops::mailer::MailSender for RevokingMailSender {
+    async fn send(
+        &self,
+        creds: &MailCredentials,
+        email: &crate::server::ops::mailer::OutboundEmail,
+    ) -> Result<(), crate::error::OpenCompanyError> {
+        if email.to == self.revoke_for {
+            let runtime = self
+                .runtime
+                .get()
+                .expect("the runtime is wired before any invite is sent");
+            let invite = runtime
+                .users()
+                .find_invite_by_email(runtime.id(), &self.revoke_for)
+                .await
+                .unwrap()
+                .expect("the grant lands before the mail goes out");
+            assert!(
+                runtime
+                    .users()
+                    .delete_invite(runtime.id(), &invite.id)
+                    .await
+                    .unwrap(),
+                "the revocation this models must actually remove the invite"
+            );
+        }
+        self.accepted.send(creds, email).await
+    }
+}
+
 /// Signs an admin in on a host with no mail transport, via the dev echo.
 async fn login_via_dev_code(state: &AppState, email: &str) -> String {
     let code = request_dev_code(state, email)
@@ -1681,6 +1729,70 @@ async fn a_failing_transport_is_reported_and_never_rolls_back_the_invite() {
             .iter()
             .any(|i| i["email"] == "bob@example.com"),
         "the invite must survive a failed send: {invites}"
+    );
+}
+
+#[tokio::test]
+async fn an_invite_revoked_while_its_mail_is_in_flight_stays_revoked() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let accepted = RecordingMailSender::new();
+    let runtime_cell = Arc::new(std::sync::OnceLock::new());
+    let connections = ConnectionsRuntime::new()
+        .with_mail(Arc::new(RevokingMailSender {
+            runtime: runtime_cell.clone(),
+            revoke_for: "bob@example.com".to_string(),
+            accepted: accepted.clone(),
+        }))
+        .with_mail_credentials(MailCredentials::Smtp(SmtpCredentials {
+            host: "smtp.test".into(),
+            port: 587,
+            security: SmtpSecurity::Starttls,
+            username: "u".into(),
+            password: "p".into(),
+            from_name: "Acme".into(),
+            from_email: "noreply@acme.test".into(),
+        }));
+    let state = state_with(&home, connections).await;
+    let _ = runtime_cell.set(
+        state
+            .registry()
+            .get(&CompanyId::new("acme"))
+            .expect("the company is registered"),
+    );
+    let admin = login_via_link(&state, &accepted, "ada@example.com").await;
+
+    let (status, body) = invite_as(&state, &admin, "bob@example.com").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["delivery"], "sent",
+        "the message really did leave, and reporting otherwise would be a lie: {body}"
+    );
+    assert!(
+        body["notifiedAtMillis"].is_null(),
+        "an invite revoked mid-send has nothing left to stamp: {body}"
+    );
+
+    // The property this test exists for. The stamp is written from a record
+    // read before the send, so an upsert would put the revoked invite back —
+    // silently returning an address to the allowlist after an admin removed it,
+    // with nothing on screen to say so.
+    let app = router(state.clone());
+    let response = app
+        .oneshot(get_with_cookie(
+            "/api/v1/companies/acme/users/invites",
+            &admin,
+        ))
+        .await
+        .unwrap();
+    let invites = body_json(response).await;
+    assert!(
+        !invites
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["email"] == "bob@example.com"),
+        "the mailed stamp must not restore a revoked invite: {invites}"
     );
 }
 

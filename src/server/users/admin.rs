@@ -356,16 +356,31 @@ async fn invite(
     let inviter = inviter_label(&runtime, &admin.user_id).await;
     let delivery = send_invite_mail(&state, &runtime, &record, &inviter).await;
     if delivery == InviteDelivery::Sent {
-        record.notified_at_millis = Some(now_millis());
-        // Best effort: the mail is already gone, so a failure to record that
-        // must not fail the request. The roster row simply reads as un-mailed,
-        // which understates rather than overstates what happened.
-        if let Err(err) = runtime.users().upsert_invite(runtime.id(), &record).await {
-            tracing::warn!(
+        let at = now_millis();
+        // A stamp, not a re-write of the record: `record` was read before the
+        // send and the send is a network round trip, so an admin who mistyped
+        // the address has a real window to revoke this invite while the mail is
+        // in flight. Writing the stale record back would restore the row they
+        // just revoked — the address would be on the allowlist again with
+        // nothing on screen to say so.
+        match runtime
+            .users()
+            .mark_invite_notified(runtime.id(), &record.id, at)
+            .await
+        {
+            Ok(true) => record.notified_at_millis = Some(at),
+            // Revoked mid-flight. The revocation wins; the mail that already
+            // left is a message about an invitation that no longer exists,
+            // which is the lesser of the two wrongs available here.
+            Ok(false) => {}
+            // Best effort: the mail is already gone, so a failure to record
+            // that must not fail the request. The roster row simply reads as
+            // un-mailed, which understates rather than overstates what
+            // happened.
+            Err(err) => tracing::warn!(
                 company = %runtime.id(),
                 "invite mail sent but the record could not be stamped: {err}"
-            );
-            record.notified_at_millis = None;
+            ),
         }
     }
     Ok(Json(InviteResult {
