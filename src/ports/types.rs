@@ -5128,9 +5128,9 @@ mod test {
         // And a line written before the field existed replays as empty.
         let legacy = serde_json::json!({
             "kind": "WorkflowRunFinished",
-            "workflowId": "digest",
+            "workflow_id": "digest",
             "scheduled": true,
-            "runId": "run-1"
+            "run_id": "run-1"
         });
         let loaded: CompanyEvent =
             serde_json::from_value(legacy).expect("a pre-#661 journal line replays");

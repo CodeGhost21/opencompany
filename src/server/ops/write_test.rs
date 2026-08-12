@@ -8515,7 +8515,7 @@ async fn a_card_opened_by_a_run_projects_its_provenance() {
 
     let (status, body) = send(&state, "GET", "/api/v1/company/tasks", None).await;
     assert_eq!(status, StatusCode::OK);
-    let cards = body["tasks"].as_array().expect("an array of cards");
+    let cards = body.as_array().expect("an array of cards");
 
     let from_run = cards
         .iter()
