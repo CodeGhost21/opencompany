@@ -306,6 +306,38 @@ mod tests {
         }
     }
 
+    /// Hand-seeds a workspace index holding two `Agents` roots — the shape no
+    /// live `create` can make.
+    ///
+    /// [`FsOps`](crate::store::FsOps) refuses a second node at the same
+    /// rendered path (`reject_path_collision`), so the only way a real store
+    /// can carry two `Agents` roots is legacy or damaged data. That is exactly
+    /// the state the sweep must refuse to sweep beneath, so the test writes the
+    /// `.workspace-index.json` directly rather than through `create` — the
+    /// hand-built-input pattern the module docs promise for shapes no backend
+    /// would let a test create.
+    async fn seed_ambiguous_agents(dir: &tempfile::TempDir, company: &CompanyId) {
+        use crate::store::Bundle;
+        use std::collections::HashMap;
+
+        let index: HashMap<String, WorkspaceNode> = [
+            ("dup-a", folder("dup-a", AGENTS_ROOT, None)),
+            ("dup-b", folder("dup-b", AGENTS_ROOT, None)),
+            ("stray", folder("stray", "ceo", Some("dup-a"))),
+        ]
+        .into_iter()
+        .map(|(key, node)| (key.to_string(), node))
+        .collect();
+
+        let path = Bundle::new(dir.path(), company).workspace_index_json();
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent).await.expect("workspace dir");
+        }
+        tokio::fs::write(path, serde_json::to_vec(&index).expect("index json"))
+            .await
+            .expect("workspace index");
+    }
+
     // -- over a real store --------------------------------------------------
 
     /// The whole point, in one tree: the folder that was minted for a teammate
