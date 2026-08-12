@@ -705,6 +705,10 @@ working on):\n{}\n]",
         if outcome == ResolveOutcome::NotParked {
             return Ok(ResolveReceipt::AlreadyResolved);
         }
+        // Issue #796: the approval has left the parked set — drop its pending
+        // mark. On approve the grant minted just below now names the task; on
+        // deny nothing does, so its held checkout becomes sweepable.
+        self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
         if let ResolveOutcome::Approved(effect) = outcome {
             self.settle_approved_effect(id, effect, by.clone(), scope)
@@ -1975,6 +1979,21 @@ impl<'a> CycleHostImpl<'a> {
                 Some(self.cycle_id.clone()),
             )
             .await?;
+        // Issue #796: a parked approval mints no grant until it resolves, so
+        // until then neither grant map names this work unit. Mark it pending on
+        // the shared grant set so an unrelated turn's `sweep_orphans` treats the
+        // checkout this parked step is holding as live rather than orphaned. The
+        // key is derived exactly as `approval_work_key` derives the grant's
+        // `origin_task` (the card, else the sanitised thread), so the pending
+        // mark and the grant it becomes name one unit; cleared when the approval
+        // is settled or expires.
+        if let Some(work) = self
+            .task_id
+            .clone()
+            .or_else(|| self.thread_id.as_deref().and_then(sanitize_work_segment))
+        {
+            self.rt.grants.mark_pending(&approval_id, work);
+        }
         // …and armed on the live counter in the same breath. A turn that parks
         // four calls is blocked on four decisions; the runtime holds its
         // continuation until the last of them lands and then runs it once.

@@ -842,28 +842,95 @@ impl Tool for RepoCheckoutTool {
         }
 
         let dest = self.context.checkout_root().join(&binding.key);
+        // How this call names the ref it wants — reused below for the reuse
+        // notice and for the refusal when the held tree is on a different one. A
+        // `pr` detaches, so it is named first: with `pr` set `reference` still
+        // carries the default branch the clone used, but the tree is on the pull
+        // request, not that branch.
+        let at = match pull_request {
+            Some(number) => format!("pull request #{number}"),
+            None => match reference.as_deref() {
+                Some(name) => format!("branch {name}"),
+                None => "its default branch".to_string(),
+            },
+        };
         // Issue #796: if this task already holds this checkout — reclaimed from
         // an earlier parked step, or materialized earlier in this same turn —
-        // reuse it rather than re-cloning. `materialize` removes the destination
-        // first, which on a resumed step would delete exactly the commits the
-        // pending publish depends on. The guard is the ledger's active list, so a
-        // first checkout still clones and refreshes from the mirror as before.
+        // and it is on the ref this call asks for, reuse it rather than
+        // re-cloning: `materialize` removes the destination first, which on a
+        // resumed step would delete exactly the commits the pending publish
+        // depends on. A resume re-issues the *same* `repo_checkout`, so it always
+        // matches. A second checkout of the same repo at a **different** ref or
+        // pr does not: reusing would hand back the wrong tree and re-cloning
+        // would delete the reclaimed commits, so it is refused rather than
+        // either. The guard is the ledger's active list, so a first checkout
+        // still clones and refreshes from the mirror as before.
         if self.context.ledger.has_active(&dest)
             && dest.is_dir()
             && let Ok(out) = git::run(&dest, &["rev-parse", "HEAD"], None, None).await
             && let Ok(head) = out.require("git rev-parse")
         {
+            let head = head.trim();
             let relative = format!("{CHECKOUT_SUBDIR}/{}", binding.key);
-            tracing::debug!(
-                repo = %binding.key,
-                path = %relative,
-                head = %head,
-                "[repo] reused a checkout held across an approval"
-            );
-            return Ok(ToolResult::success(format!(
-                "You already have {}/{} checked out at commit {head} in `{relative}` — the working \
-                 tree from before the operator approved this step, with your commits intact. \
-                 Continue working there; do not re-clone. It is removed when this task ends.",
+            // The branch the held tree sits on, or "HEAD" when it is detached —
+            // which is how `materialize` leaves a pull-request checkout.
+            let abbrev =
+                match git::run(&dest, &["rev-parse", "--abbrev-ref", "HEAD"], None, None).await {
+                    Ok(out) => out
+                        .require("git rev-parse")
+                        .ok()
+                        .map(|s| s.trim().to_string()),
+                    Err(_) => None,
+                };
+            let on_target = if let Some(number) = pull_request {
+                // A pr checkout is detached at `refs/oc/pr/<n>`; on target iff
+                // HEAD is still that fetched head.
+                match git::run(
+                    &dest,
+                    &["rev-parse", &format!("refs/oc/pr/{number}")],
+                    None,
+                    None,
+                )
+                .await
+                {
+                    Ok(out) => out
+                        .require("git rev-parse")
+                        .map(|s| s.trim() == head)
+                        .unwrap_or(false),
+                    Err(_) => false,
+                }
+            } else {
+                // A branch checkout is on that branch; on target iff it still is.
+                abbrev.as_deref() == reference.as_deref()
+            };
+            if on_target {
+                tracing::debug!(
+                    repo = %binding.key,
+                    path = %relative,
+                    head = %head,
+                    "[repo] reused a checkout held across an approval"
+                );
+                return Ok(ToolResult::success(format!(
+                    "You already have {}/{} checked out at {at} (commit {head}) in `{relative}` — \
+                     the working tree from before the operator approved this step, with your \
+                     commits intact. Continue working there; do not re-clone. It is removed when \
+                     this task ends.",
+                    binding.owner, binding.repo
+                )));
+            }
+            // Held, but on a different ref than this call asked for. Name what it
+            // is on so the agent can tell, and refuse rather than silently return
+            // the wrong tree or clone over its own commits.
+            let held = match &abbrev {
+                Some(b) if b == "HEAD" => format!("a pull request head, detached at commit {head}"),
+                Some(b) => format!("branch {b}"),
+                None => format!("commit {head}"),
+            };
+            return Ok(ToolResult::error(format!(
+                "{}/{} is already checked out at {held} in `{relative}`, carrying this task's work \
+                 in progress. Checking it out again at {at} would either hand you the wrong tree \
+                 or delete those commits, so it is refused — keep working on the current checkout \
+                 and `repo_publish` it, or ask an admin to change the binding.",
                 binding.owner, binding.repo
             )));
         }
@@ -883,13 +950,6 @@ impl Tool for RepoCheckoutTool {
         attribute_checkout(&dest, &self.context.agent).await;
 
         let relative = format!("{CHECKOUT_SUBDIR}/{}", binding.key);
-        let at = match pull_request {
-            Some(number) => format!("pull request #{number}"),
-            None => match reference.as_deref() {
-                Some(name) => format!("branch {name}"),
-                None => "its default branch".to_string(),
-            },
-        };
         tracing::debug!(
             repo = %binding.key,
             path = %relative,

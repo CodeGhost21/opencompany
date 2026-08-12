@@ -427,6 +427,21 @@ struct GrantState {
     /// redemption semantics (remove vs leave). Fusing them would put a branch on
     /// every operation of both.
     standing: HashMap<GrantId, StandingGrant>,
+    /// Work units with an approval **parked but not yet resolved** (issue #796),
+    /// keyed by the approval id so each resolution clears exactly its own entry.
+    ///
+    /// A parked approval mints no grant until the operator decides it, so between
+    /// the park and the decision neither `live` nor `standing` names its task.
+    /// Without this map [`any_for_task`](GrantSet::any_for_task) would read
+    /// `false` in that window and an unrelated turn's
+    /// [`sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
+    /// would delete the checkout the parked step is holding for its own resume —
+    /// the very deadlock #796 exists to prevent, reopened one turn upstream.
+    /// Filled when the effect parks, emptied when it resolves, is denied, or
+    /// expires. In-memory only, like the checkouts it guards: a restart boot-
+    /// sweeps every checkout, so there is nothing left for a rehydrated mark to
+    /// protect.
+    pending: HashMap<ApprovalId, String>,
 }
 
 impl GrantSet {
@@ -510,22 +525,55 @@ impl GrantSet {
         self.inner.lock().expect("grant set poisoned").live.len()
     }
 
-    /// Whether any live grant — single-use or standing — names `task` as its
-    /// origin (issue #796).
+    /// Records that a work unit has an approval **parked and awaiting a
+    /// decision** (issue #796), so [`any_for_task`](Self::any_for_task) treats it
+    /// as live until the approval resolves.
+    ///
+    /// Keyed by the approval id, computed the same way the mint side derives a
+    /// grant's [`GrantedCall::origin_task`], so the pending mark and the grant it
+    /// eventually becomes name one unit. A task parking a second approval simply
+    /// adds a second entry naming the same task; each clears independently.
+    pub fn mark_pending(&self, approval_id: &ApprovalId, task: String) {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .pending
+            .insert(approval_id.clone(), task);
+    }
+
+    /// Drops the pending-approval mark for `approval_id` (issue #796) — whether
+    /// it was approved (a grant now names the task), denied, or expired (nothing
+    /// does, so its checkout is now sweepable). A no-op for an id that never
+    /// parked a task-scoped effect.
+    pub fn clear_pending(&self, approval_id: &ApprovalId) {
+        self.inner
+            .lock()
+            .expect("grant set poisoned")
+            .pending
+            .remove(approval_id);
+    }
+
+    /// Whether a live grant, a standing grant, **or a still-parked approval**
+    /// names `task` as its origin (issue #796).
     ///
     /// The harness asks this to decide whether a task's checkout held across an
-    /// approval park is still awaiting a resume (a live grant names it) or has
-    /// been orphaned by a denied or expired approval (none does), so
+    /// approval park is still awaiting a resume or has been orphaned by a denied
+    /// or expired approval, so
     /// [`CheckoutLedger::sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
-    /// can reclaim the disk. A spent grant is already removed from both maps, so
-    /// this reads `false` the moment the resume is under way — which is safe
-    /// because the resuming turn has reclaimed the tree onto its turn-scoped list
-    /// by then.
+    /// can reclaim the disk. Three states keep it live: a live grant names it (an
+    /// approved step waiting to be re-issued), a standing grant names it, or an
+    /// approval it parked is **still pending** — that last case mints no grant
+    /// yet, so without `pending` the checkout would be swept in the window
+    /// between the park and the operator's decision. A spent grant is already
+    /// removed from every map, so this reads `false` the moment the resume is
+    /// under way — which is safe because the resuming turn has reclaimed the tree
+    /// onto its turn-scoped list by then.
     pub fn any_for_task(&self, task: &str) -> bool {
         let state = self.inner.lock().expect("grant set poisoned");
         let names_task = |t: &Option<String>| t.as_deref() == Some(task);
         state.live.values().any(|g| names_task(&g.origin_task))
             || state.standing.values().any(|g| names_task(&g.origin_task))
+            || state.pending.values().any(|t| t == task)
     }
 
     // -----------------------------------------------------------------------
