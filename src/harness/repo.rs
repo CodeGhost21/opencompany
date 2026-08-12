@@ -1040,6 +1040,10 @@ impl Tool for RepoPublishTool {
                 // pushes THIS commit, so a later re-stage of the same task cannot
                 // change what an approved publish sends.
                 "head": head,
+                // The task/card this publish belongs to (issue #736). Carried so
+                // the runtime can link the opened PR back to it, and post a note
+                // on it if the push lands but the PR does not open.
+                "task": task,
                 "agent": self.context.agent,
                 "message": message,
             }),
