@@ -608,7 +608,32 @@ impl HarnessAgentRunner {
                 workflow_id: self.workflow_id.clone(),
             },
         );
-        self.board.extend(runner.execute_board_writes(staged).await);
+        let rows = runner.execute_board_writes(staged).await;
+        // Issue #661 (M5): a write that did not land is told to the operator, not
+        // only logged and rowed. A run has no conversation to say it in, so the
+        // notice channel is the only surface that reaches somebody — and this is
+        // the one board outcome an operator cannot infer from the board itself,
+        // because the evidence of it is precisely the card that is missing.
+        //
+        // Structural wording only: the card's own title, never the store's error
+        // text. Same split `DeliveryReason` keeps against `DeliveryReport::detail`.
+        for row in &rows {
+            let notice = match row.action {
+                crate::ports::WorkflowBoardAction::SpawnFailed => Some(format!(
+                    "A step in this workflow could not open the card \"{}\" on the board.",
+                    row.title.as_deref().unwrap_or("(untitled)")
+                )),
+                crate::ports::WorkflowBoardAction::AssignFailed => Some(format!(
+                    "A step in this workflow could not set the owner of card {}.",
+                    row.task_id.as_deref().unwrap_or("(unknown)")
+                )),
+                _ => None,
+            };
+            if let Some(notice) = notice {
+                self.notices.push(notice);
+            }
+        }
+        self.board.extend(rows);
     }
 
     /// Parks every approval-gated tool call this node's turn just recorded
@@ -816,15 +841,21 @@ impl AgentRunner for HarnessAgentRunner {
         // was taken once for the whole run (see `build_capabilities`); this only
         // installs its ambient scope for the span of this node's turn.
         //
-        // `Box::pin` because this nests one task-local scope inside another
-        // (`ApprovalScope` inside `DelegationScope`): the composed future is large
-        // enough that leaving it on the stack has blown CI's thread stack before.
+        // **Every layer here is `Box::pin`ed, and that is load-bearing.** This
+        // nests one task-local scope inside another (`ApprovalScope` inside
+        // `DelegationScope`), and `TaskLocalFuture` stores its inner future
+        // *inline* — so without boxing, an openhuman agent turn (already a very
+        // large future) is held by value inside two nested wrappers and the
+        // composed state blows the thread's stack. Verified: it overflows on the
+        // first spawning run without these.
         let turn = Box::pin(async {
             let outcome = claim
-                .scoped(
-                    self.pool
-                        .run_background(&self.company, agent_ref, &message, &self.deps),
-                )
+                .scoped(Box::pin(self.pool.run_background(
+                    &self.company,
+                    agent_ref,
+                    &message,
+                    &self.deps,
+                )))
                 .await;
             // Drained on BOTH arms, deliberately. A turn that errored may still have
             // had a tool call gated before it failed, and that request is just as
@@ -833,12 +864,12 @@ impl AgentRunner for HarnessAgentRunner {
             //
             // Inside the scope, so the drain reads this run's bucket rather than
             // whatever `Unscoped` happens to hold.
-            claim.scoped(self.park_gated_calls()).await;
+            claim.scoped(Box::pin(self.park_gated_calls())).await;
             // Issue #661 (M5): likewise on both arms, and for the same reason. A
             // turn that failed after calling `spawn_task` had already been told the
             // card would be opened; refusing to drain would make that receipt false
             // and destroy the write when the scope ends.
-            self.drain_board_writes().await;
+            Box::pin(self.drain_board_writes()).await;
             outcome
         });
         let outcome = self.board_claim.scoped(turn).await;
