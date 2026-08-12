@@ -1691,7 +1691,7 @@ mod tests {
         ));
         assert_eq!(
             harness
-                .check(&request("payroll.export", serde_json::json!({})))
+                .check(&request("query_payment", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow
         );
