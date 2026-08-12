@@ -13,6 +13,8 @@ import type { StreamHandlers, Transport, TransportResponse } from "./transport";
 import {
   type AgentDetailDto,
   ApiError,
+  type ReadMarker,
+  type ReadStateResponse,
   type ApiErrorBody,
   type AppSpec,
   type ApprovalSummary,
@@ -475,6 +477,35 @@ export class OpenCompanyClient {
       "GET",
       `${this.scope(company)}/chat/history${qs}`,
     );
+  }
+
+  /**
+   * Where the signed-in person has read to, per channel (issue #755).
+   *
+   * A host that predates this route answers 404; the caller treats that as "no
+   * markers" and falls back to the in-browser floor, so an older host degrades
+   * to the previous behaviour rather than throwing on load.
+   */
+  readState(company?: string | null): Promise<ReadStateResponse> {
+    return this.request<ReadStateResponse>("GET", `${this.scope(company)}/chat/read-state`);
+  }
+
+  /**
+   * Moves one channel's read floor forward.
+   *
+   * The host's write is monotonic, and it answers with where the marker
+   * actually stands — which is not always what was sent, because two tabs of
+   * one person race constantly.
+   */
+  markChannelRead(
+    channelId: string,
+    lastReadAt: number,
+    company?: string | null,
+  ): Promise<ReadMarker> {
+    return this.request<ReadMarker>("PUT", `${this.scope(company)}/chat/read-state`, {
+      channelId,
+      lastReadAt,
+    });
   }
 
   /** The approvals awaiting the operator. */

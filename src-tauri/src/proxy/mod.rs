@@ -58,6 +58,18 @@ pub enum Credential {
     Platform(String),
 }
 
+impl Credential {
+    /// Whether a request for this connection carries a secret.
+    ///
+    /// The transport rule below turns on this and nothing else: reading a host
+    /// over plain HTTP exposes what a passer-by could have asked for
+    /// themselves, and attaching a credential to the same request exposes the
+    /// one thing they could not.
+    fn is_present(&self) -> bool {
+        !matches!(self, Credential::None)
+    }
+}
+
 /// One host this client is connected to.
 #[derive(Clone, Debug)]
 pub struct Connection {
@@ -103,6 +115,16 @@ pub enum ProxyError {
     UnknownConnection(ConnectionId),
     #[error("not an absolute host url: {0:?}")]
     UnusableBaseUrl(String),
+    /// A credentialed connection to a plain-HTTP host that is not this machine.
+    ///
+    /// Separate from [`Self::UnusableBaseUrl`] because the two are opposite
+    /// problems wearing one message. That one means the url addresses nothing;
+    /// this one means it addresses a host perfectly well, over a wire anyone on
+    /// the path can read. An operator told "could not be reached" about the
+    /// second goes looking at their network, which is working (#613's
+    /// complaint, one rung up).
+    #[error("this host is not encrypted, so a credential cannot be sent to it: {0:?}")]
+    InsecureBaseUrl(String),
     #[error("{0}")]
     Transport(String),
 }
@@ -180,6 +202,14 @@ impl ProxyRegistry {
             .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.has_host());
         if !addressable {
             return Err(ProxyError::UnusableBaseUrl(connection.base_url));
+        }
+        // Checked here rather than at `request`, for the same reason the
+        // addressability test is: registration is the last moment the caller is
+        // still on the stack and can be told why. A per-request check would
+        // refuse each call individually, and the console renders that as a host
+        // that cannot be reached.
+        if connection.credential.is_present() && !may_carry_a_credential(&connection.base_url) {
+            return Err(ProxyError::InsecureBaseUrl(connection.base_url));
         }
         self.connections.write().await.insert(id, connection);
         Ok(())
@@ -360,6 +390,58 @@ const RESERVED_HEADERS: [&str; 4] = [
     "cookie",
     "proxy-authorization",
 ];
+
+/// Whether a secret may be sent to `base_url`.
+///
+/// **HTTPS, or a host that is this machine.** Plain HTTP to anything else puts
+/// the credential in front of every device on the path — and for the desktop
+/// that credential is a device session, which is a person's standing authority
+/// on a company rather than one request's.
+///
+/// Loopback is the exception and not a grudging one: `http://127.0.0.1:<port>`
+/// is how the embedded host is reached (`embedded.rs` binds `127.0.0.1:0`),
+/// those bytes never reach a network interface, and a certificate for an
+/// ephemeral port is not a thing that can exist. `localhost` is admitted with
+/// it because that is what a developer types into `?api=`; RFC 6761 reserves
+/// the name for exactly this.
+///
+/// Deliberately **not** an allowlist of private ranges. `10.0.0.0/8` and
+/// `192.168.0.0/16` are the networks this is meant to protect against — an
+/// office LAN is precisely where someone else is on the path — so treating
+/// them as trusted would invert the rule while looking like a refinement of it.
+///
+/// Public because the pairing claim in `commands.rs` needs the same answer and
+/// does not go through this registry. Two copies of one rule is how the console
+/// and the core came to disagree about addressability; one function is the fix.
+pub fn may_carry_a_credential(base_url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(base_url) else {
+        return false;
+    };
+    url.scheme() == "https" || addresses_this_machine(&url)
+}
+
+/// Whether this url names the machine it is being requested from.
+///
+/// Reads the host as text rather than matching on `url::Host`, so this module
+/// does not take a direct dependency on `url` for one match arm; the `url`
+/// crate already lowercased and normalised it on the way in.
+fn addresses_this_machine(url: &reqwest::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    // `host_str` brackets an IPv6 literal, as it appears in the url.
+    let bare = host.trim_start_matches('[').trim_end_matches(']');
+    if let Ok(address) = bare.parse::<std::net::IpAddr>() {
+        // Canonicalised so that `::ffff:127.0.0.1` — which routes to loopback —
+        // is not refused for being spelled as IPv6. `to_canonical` leaves an
+        // ordinary v4 address alone.
+        return address.to_canonical().is_loopback();
+    }
+    // A name, not an address. Only the one RFC 6761 guarantees resolves to
+    // loopback, and the subdomains it guarantees with it — anything else is a
+    // DNS answer this process has not seen yet and cannot vouch for.
+    bare == "localhost" || bare.ends_with(".localhost")
+}
 
 /// Attaches whatever this connection authenticates with.
 fn apply_credential(
@@ -587,6 +669,137 @@ mod test {
         }
         // Refused means not registered, rather than registered and broken.
         assert!(registry.ids().await.is_empty());
+    }
+
+    /// A session must not be handed to a host anyone on the path can read.
+    ///
+    /// Every request for a connection carries `apply_credential`'s header, so a
+    /// device session registered against a plain-HTTP LAN address is on the
+    /// wire in the clear on every poll and for the whole life of the event
+    /// stream — and unlike a leaked request body, it is replayable (#731).
+    #[tokio::test]
+    async fn a_credential_is_refused_on_an_unencrypted_remote_host() {
+        let registry = ProxyRegistry::new();
+        for base in [
+            "http://192.168.1.20:8080",
+            "http://acme.example.com",
+            // Not loopback despite the name. A host may call itself whatever it
+            // likes, and only the reserved name resolves here by rule.
+            "http://localhost.acme.example.com",
+            // The private ranges are the ones this exists for, not exceptions
+            // to it: an office LAN is exactly where someone else is on the path.
+            "http://10.0.0.4:8080",
+        ] {
+            for credential in [
+                Credential::Device("acme.the-session".into()),
+                Credential::Platform("a-bearer".into()),
+            ] {
+                let error = registry
+                    .upsert(
+                        "primary".into(),
+                        Connection {
+                            base_url: base.into(),
+                            credential,
+                        },
+                    )
+                    .await
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("this host is not encrypted"),
+                    "{base:?} must be refused for the reason it is refused: {error}"
+                );
+            }
+        }
+        assert!(registry.ids().await.is_empty());
+    }
+
+    /// The three ways a connection stays legitimate under that rule.
+    #[tokio::test]
+    async fn https_loopback_and_anonymous_http_all_still_register() {
+        let registry = ProxyRegistry::new();
+        let cases = [
+            // HTTPS carries a credential anywhere.
+            (
+                "https",
+                "https://acme.example.com",
+                Credential::Device("acme.s".into()),
+            ),
+            // Loopback is how the embedded host is reached, and it is the one
+            // address a certificate cannot be issued for — `embedded.rs` binds
+            // `127.0.0.1:0`, so the port is different every launch.
+            (
+                "v4",
+                "http://127.0.0.1:65364",
+                Credential::Device("acme.s".into()),
+            ),
+            // The rest of `127.0.0.0/8`, which a second local host may bind.
+            (
+                "v4-block",
+                "http://127.0.0.2:8080",
+                Credential::Device("acme.s".into()),
+            ),
+            (
+                "v6",
+                "http://[::1]:8080",
+                Credential::Device("acme.s".into()),
+            ),
+            // What a developer types into `?api=`.
+            (
+                "name",
+                "http://localhost:8080",
+                Credential::Device("acme.s".into()),
+            ),
+            // Anonymous HTTP anywhere: nothing is exposed that a passer-by
+            // could not have asked the host for themselves. This is the case
+            // the narrow rule exists to keep working — a home-lab or staging
+            // box without a certificate stays readable.
+            ("anonymous", "http://192.168.1.20:8080", Credential::None),
+        ];
+        for (id, base, credential) in cases {
+            registry
+                .upsert(
+                    id.into(),
+                    Connection {
+                        base_url: base.into(),
+                        credential,
+                    },
+                )
+                .await
+                .unwrap_or_else(|error| panic!("{base:?} must still register: {error}"));
+        }
+        assert_eq!(registry.ids().await.len(), 6);
+    }
+
+    /// The shorthand spellings of a loopback address, and of everything else.
+    ///
+    /// `Url::parse` normalises `127.1` and `0177.0.0.1` to `127.0.0.1`, so a
+    /// textual comparison cannot be walked past — asserted here because that is
+    /// a property of the parser rather than of this module, and a change to it
+    /// would otherwise turn into a silently widened rule.
+    #[test]
+    fn the_loopback_test_reads_addresses_rather_than_strings() {
+        for allowed in [
+            "http://127.1:8080",
+            "http://0177.0.0.1:8080",
+            "http://[::ffff:127.0.0.1]:8080",
+            "http://sub.localhost:8080",
+            "https://acme.example.com",
+        ] {
+            assert!(may_carry_a_credential(allowed), "{allowed} must be allowed");
+        }
+        for refused in [
+            "http://192.168.1.20:8080",
+            "http://127.0.0.1.acme.example.com",
+            "http://acme.example.com",
+            // Not a url at all, and not addressable either; `upsert` refuses it
+            // first, but this must not answer "yes" on its own.
+            "not-a-url",
+        ] {
+            assert!(
+                !may_carry_a_credential(refused),
+                "{refused} must be refused"
+            );
+        }
     }
 
     #[tokio::test]

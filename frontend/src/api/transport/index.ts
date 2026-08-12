@@ -77,6 +77,71 @@ export function isAddressableBaseUrl(baseUrl: string): boolean {
 }
 
 /**
+ * Whether a secret may be sent to `baseUrl`.
+ *
+ * **HTTPS, or a host that is this machine.** A device session is a person's
+ * standing authority on a company, and plain HTTP puts it in front of every
+ * device on the path — a LAN, a café, an office switch. Reading an unencrypted
+ * host anonymously is not this; the exposure is entirely in the credential, so
+ * that is what this gates and nothing else (issue #731).
+ *
+ * Loopback is exempt because `http://127.0.0.1:<port>` is how the embedded host
+ * is reached and a certificate for an ephemeral port cannot exist. `localhost`
+ * comes with it — RFC 6761 reserves the name, and it is what a developer types.
+ *
+ * ## This is a second copy of a rule that lives in Rust
+ *
+ * Deliberately, and the duplication is the point rather than a smell:
+ * `may_carry_a_credential` in `src-tauri/src/proxy/mod.rs` is the one that
+ * enforces it, because a check up here is bypassed by anything reaching the
+ * proxy directly. This copy exists so the console can say *why* before it asks
+ * — the core's refusal arrives as an opaque IPC rejection that
+ * `client.ts` flattens into "cannot reach the company host", which is the
+ * indistinguishable failure #613 was about.
+ *
+ * Kept beside {@link isAddressableBaseUrl} because they are the transport's two
+ * questions about one url and they answer different things: that one asks
+ * whether the host can be reached, this one whether it can be trusted with a
+ * secret. Neither implies the other, and collapsing them would either forbid
+ * anonymous HTTP or permit credentialed HTTP.
+ */
+export function mayCarryACredential(baseUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(baseUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") return true;
+  // `URL.hostname` brackets nothing and lowercases the host, but an IPv6
+  // literal keeps the brackets it was written with.
+  const host = url.hostname.replace(/^\[|\]$/g, "");
+  return isLoopbackHost(host);
+}
+
+/**
+ * Whether a host names the machine the console is running on.
+ *
+ * Matched as text because the platform offers no IP type. That is safe here
+ * only because `URL` has already normalised what it was given: `127.1` and
+ * `0177.0.0.1` both arrive as `127.0.0.1`, so the shorthand spellings cannot
+ * walk past a literal comparison.
+ *
+ * `127.0.0.0/8` in full rather than `127.0.0.1` alone — the whole block is
+ * loopback, and a second local host on `127.0.0.2` is an ordinary thing to do.
+ */
+function isLoopbackHost(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  // The v6 loopback, and the v4-mapped form — which `URL` rewrites to hex, so
+  // `::ffff:127.0.0.1` is not the string that reaches here.
+  if (host === "::1" || host === "::ffff:7f00:1") return true;
+  const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!v4) return false;
+  const octets = v4.slice(1).map(Number);
+  return octets.every((o) => o <= 255) && octets[0] === 127;
+}
+
+/**
  * The transport for this environment.
  *
  * Selected here so no caller has to learn the difference. A `connectionId` is

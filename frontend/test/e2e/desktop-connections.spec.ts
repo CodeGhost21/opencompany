@@ -45,6 +45,8 @@ interface RegisteredConnection {
 declare global {
   interface Window {
     __ocRegistered?: RegisteredConnection[];
+    /** Base urls `oc_request` was asked to send to, in order. */
+    __ocRequested?: string[];
   }
 }
 
@@ -67,8 +69,10 @@ async function asDesktop(page: Page, config: BridgeConfig) {
     }
 
     const registered: RegisteredConnection[] = [];
+    const requested: string[] = [];
     const hosts = new Map<string, string>();
     window.__ocRegistered = registered;
+    window.__ocRequested = requested;
 
     /** `ProxyRegistry::upsert`'s rule, restated: absolute http(s) or nothing. */
     const isAddressable = (baseUrl: string): boolean => {
@@ -129,6 +133,10 @@ async function asDesktop(page: Page, config: BridgeConfig) {
               // needed here — an unaddressable base never reached this map.
               const base = hosts.get(id);
               if (base === undefined) throw new Error(`no such connection: ${id}`);
+              // Recorded so a test can assert that a host was never *contacted*,
+              // which is a different claim from never being registered — and the
+              // one that matters when what must not travel is a credential.
+              requested.push(base);
               const req = args.request as {
                 method: string;
                 path: string;
@@ -312,6 +320,96 @@ test("a desktop waits for its own host rather than borrowing a remembered one", 
     timeout: 30_000,
   });
   await expect(page.getByTestId("connection-error")).toHaveCount(0);
+});
+
+/**
+ * A remote host on plain HTTP, on the network a laptop is actually on.
+ *
+ * Not loopback, and deliberately unlike `DEAD_REMOTE` above: that one is
+ * `127.0.0.1:9`, which this rule *permits* — being unreachable and being
+ * unencrypted are different failures, and the point of the test below is that
+ * the console now tells them apart.
+ */
+const INSECURE_REMOTE = "http://192.168.1.20:8080";
+
+test("a paired host on plain http is refused, and says why", async ({ page, baseURL }) => {
+  // Issue #731. A device session is a person's standing authority on a company,
+  // and `apply_credential` attaches it to every request and to the whole life of
+  // the event stream — so a connection remembered against an unencrypted remote
+  // address puts it in front of everyone on that network, repeatedly and
+  // replayably. The core refuses to register it; this is what the operator sees.
+  await asDesktop(page, { embedded: new URL(baseURL ?? "http://127.0.0.1:8123").origin });
+  await page.addInitScript((remote: string) => {
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-paired-cleartext",
+          baseUrl: remote,
+          label: "Paired over http",
+          defaultCompany: null,
+          // What a desktop paired before this rule existed wrote down. The ref
+          // is a device id, not the secret — the session it names is in the OS
+          // keychain, and it is what the core would attach.
+          credential: { kind: "device", ref: "dev-1" },
+        },
+      ]),
+    );
+  }, INSECURE_REMOTE);
+  await page.goto("/#/tasks");
+
+  // The embedded host still opens, and the console is usable. Refusing one row
+  // must not cost the others — that is the property the whole multi-connection
+  // slice exists for.
+  await expect(page.getByRole("button", { name: "Add task" })).toHaveCount(1, {
+    timeout: 30_000,
+  });
+
+  const refused = page.getByTestId("connection-row-conn-paired-cleartext");
+  await expect(refused).toHaveAttribute("data-status", "down");
+  // THE assertion. Before this, the row read "cannot reach the company host at
+  // http://192.168.1.20:8080" — indistinguishable from a host that is simply
+  // switched off, and it sends the operator to look at a network that works.
+  await expect(refused).toHaveAttribute("title", /not encrypted/);
+
+  // And nothing was sent there. The status is not a label applied after a round
+  // trip; the round trip is what must not happen.
+  const requested = await page.evaluate(() => window.__ocRequested ?? []);
+  expect(requested).not.toContain(INSECURE_REMOTE);
+});
+
+test("an unencrypted host with no credential still connects", async ({ page, baseURL }) => {
+  // The other half of the rule, and the reason it gates on the credential
+  // rather than on the scheme: a home-lab or staging box without a certificate
+  // stays usable. Nothing is exposed by reading it that a passer-by could not
+  // have asked the host for themselves.
+  //
+  // Registered against the suite's own host so it genuinely answers; what is
+  // under test is that an anonymous connection is not caught by #731's rule,
+  // not that an arbitrary LAN address is reachable from CI.
+  const host = new URL(baseURL ?? "http://127.0.0.1:8123").origin;
+  await asDesktop(page, { embedded: null });
+  await page.addInitScript((remote: string) => {
+    window.localStorage.setItem(
+      "oc.connections.v1",
+      JSON.stringify([
+        {
+          id: "conn-anonymous-http",
+          baseUrl: remote,
+          label: "Anonymous over http",
+          defaultCompany: null,
+          credential: { kind: "cookie" },
+        },
+      ]),
+    );
+  }, host);
+  await page.goto("/#/tasks");
+
+  await expect(page.getByTestId("connection-row-conn-anonymous-http")).toHaveAttribute(
+    "data-status",
+    "live",
+    { timeout: 30_000 },
+  );
 });
 
 test("a desktop whose host did not start says so, and can still add one", async ({ page }) => {

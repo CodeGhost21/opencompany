@@ -96,6 +96,16 @@ pub use crate::company::ORCHESTRATOR_TIER;
 /// told five were opened, find two.
 pub const MAX_DELEGATIONS_PER_TURN: usize = 3;
 
+/// The depth argument passed by the delegations the chain bound does not apply
+/// to (issue #176).
+///
+/// [`DelegationQueue::push_within_cap`] gates on depth only for a
+/// [`Delegation::DelegateToDesk`] — the one delegation that runs another
+/// synchronous turn and can therefore multiply. A board write passes a bound it
+/// can never reach, rather than a plausible-looking real number that would
+/// quietly start mattering if the gate were widened.
+const NO_DEPTH_BOUND: usize = usize::MAX;
+
 /// How many recent events [`QueryCompanyTool`] surfaces.
 const RECENT_EVENTS: usize = 10;
 /// How many facts [`QueryCompanyTool`] surfaces.
@@ -124,6 +134,7 @@ pub const QUERY_COMPANY_TOOL: &str = "query_company";
 // The `spawn_task` / `delegate_to_desk` names are the brain-agnostic canonical
 // constants (issue #176) — re-exported here so the harness path and the hosted
 // path share one definition and cannot drift.
+use crate::runtime::builder::agent_effective_grants;
 use crate::runtime::delegation_tools;
 pub use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
 /// The `run_workflow` tool name (issue #67).
@@ -365,6 +376,27 @@ pub struct DelegationQueue {
     /// wiped by the same [`clear`](Self::clear) that keeps a prior turn from
     /// leaking into this one.
     refused: Arc<Mutex<Vec<String>>>,
+    /// The **scope chain**: the resolved desk ids of the hand-offs currently
+    /// being executed, outermost first (issue #176).
+    ///
+    /// Depth **is** `scope.len()` — there is no counter beside it to fall out of
+    /// step. Empty while the orchestrator's own turn runs (depth 0); one entry
+    /// while a desk lead the orchestrator handed work to runs (depth 1); two
+    /// while that lead's own delegate runs (depth 2).
+    ///
+    /// It lives on the queue for the same reason [`refused`](Self::refused)
+    /// does, and for one more. Belts are cached per roster
+    /// ([`HarnessPool::ensure`](crate::harness::HarnessPool::ensure)) and rebuilt
+    /// rarely, so a member's tools are wired **statically** — the queue handle
+    /// they were constructed with is the only shared state they can reach at
+    /// call time. Putting depth anywhere else (the message context, the task
+    /// record, the runner) would put it somewhere the member's own tool cannot
+    /// see it.
+    ///
+    /// Deliberately **not** touched by [`clear`](Self::clear): clearing runs
+    /// between delegations *inside* a scope, and dropping the chain there would
+    /// reset the depth of a chain that is still running.
+    scope: Arc<Mutex<Vec<String>>>,
 }
 
 impl DelegationQueue {
@@ -432,10 +464,54 @@ impl DelegationQueue {
     /// The shared body of the two claim constructors.
     fn claim_as(&self, state: DrainClaim) -> DelegationClaim {
         self.clear();
+        // Issue #176: a claim opens a fresh chain. The chain outlives an
+        // ordinary `clear`, so it is reset on the two boundaries that really do
+        // end a chain — the claim's acquire and its `Drop` — and nowhere else.
+        // Both halves matter: a panic inside a nested turn unwinds past the
+        // `ScopeGuard`s, and without the exit reset a leftover chain would make
+        // the *next* operator message start at depth 2 and refuse its first
+        // hand-off. Same every-exit-path discipline the claim already applies to
+        // the queue itself.
+        self.reset_scope();
         *self.committed.lock().expect("delegation commitment") = state;
         DelegationClaim {
             queue: self.clone(),
         }
+    }
+
+    /// How deep the delegation chain currently running is: `0` inside the
+    /// orchestrator's own turn, `1` inside a desk lead it handed work to, and so
+    /// on (issue #176).
+    pub fn scope_depth(&self) -> usize {
+        self.scope.lock().expect("delegation scope").len()
+    }
+
+    /// The resolved desk ids currently on the chain, outermost first (issue
+    /// #176) — the set a hand-off target is checked against for a cycle.
+    pub fn scope_chain(&self) -> Vec<String> {
+        self.scope.lock().expect("delegation scope").clone()
+    }
+
+    /// Enters the scope of a hand-off to `desk_id`, for as long as the returned
+    /// [`ScopeGuard`] lives (issue #176).
+    ///
+    /// Pushes on the way in and pops on `Drop`, so every exit path from the
+    /// delegate's turn — an early return, a `?`, a panic — leaves the chain
+    /// exactly as deep as it found it. `desk_id` must be the **resolved** id
+    /// rather than whatever key the model typed, so the cycle check compares
+    /// identities rather than spellings.
+    #[must_use = "the scope pops on drop; dropping it immediately leaves the chain unchanged"]
+    pub fn enter_scope(&self, desk_id: String) -> ScopeGuard {
+        self.scope.lock().expect("delegation scope").push(desk_id);
+        ScopeGuard {
+            queue: self.clone(),
+        }
+    }
+
+    /// Empties the scope chain. Called only where a chain genuinely ends — the
+    /// claim's acquire and release.
+    fn reset_scope(&self) {
+        self.scope.lock().expect("delegation scope").clear();
     }
 
     /// Enqueues a delegation unless nothing will drain it, or `cap` are already
@@ -466,8 +542,22 @@ impl DelegationQueue {
     /// the cap instead would tell the model to try again next turn, and the next
     /// turn on that path drains no better than this one. The two refusals are
     /// therefore distinct [`Staged`] variants and never collapsed.
+    ///
+    /// # Why the depth gate is here too (issue #176)
+    ///
+    /// A desk member that may re-delegate is wired with `delegate_to_desk`
+    /// **statically** — belts are cached per roster, so the tool cannot be
+    /// withheld from the one turn that happens to be running too deep. The bound
+    /// therefore has to be dynamic, and this is the one place every hand-off
+    /// passes through. It applies only to
+    /// [`DelegateToDesk`](Delegation::DelegateToDesk): that is the delegation
+    /// that runs another synchronous turn, and so the only one that can
+    /// multiply. A [`SpawnTask`](Delegation::SpawnTask) opens a To-do card and
+    /// stops — refusing it at depth would push a member that has hit the bound
+    /// into working silently instead of leaving the work tracked, which is the
+    /// opposite of what the bound is for.
     #[must_use = "a refused delegation must be reported to the model, not dropped"]
-    pub fn push_within_cap(&self, delegation: Delegation, cap: usize) -> Staged {
+    pub fn push_within_cap(&self, delegation: Delegation, cap: usize, max_depth: usize) -> Staged {
         match self.claim_state() {
             DrainClaim::Unclaimed => return Staged::NoDrain(NoDrainReason::Unwired),
             // Issue #267: the operator asked a question. A hand-off is how one
@@ -476,6 +566,14 @@ impl DelegationQueue {
                 return Staged::NoDrain(NoDrainReason::Triage);
             }
             DrainClaim::Answering | DrainClaim::Full => {}
+        }
+        // Issue #176: checked after the claim (a context that drains nothing is
+        // still the only fact worth reporting) and before the queue lock, so the
+        // two locks are never held at once.
+        if matches!(delegation, Delegation::DelegateToDesk { .. })
+            && self.scope_depth() >= max_depth
+        {
+            return Staged::NoDrain(NoDrainReason::Depth);
         }
         let mut guard = self.inner.lock().expect("delegation queue");
         if guard.len() >= cap {
@@ -489,6 +587,33 @@ impl DelegationQueue {
     /// to, so the drain can report the attempt (issue #272).
     pub fn push_refusal(&self, desk: String) {
         self.refused.lock().expect("delegation queue").push(desk);
+    }
+
+    /// How many refused desk keys are recorded right now (issue #176).
+    ///
+    /// Sampled either side of a delegate's turn so a **nested** refusal can be
+    /// attributed to the member that made it, rather than swept up with the
+    /// refusals its delegator left behind. Exactly the shape
+    /// [`ApprovalRequestQueue::queued`](crate::harness::policy::ApprovalRequestQueue::queued)
+    /// is used in for parked approvals, and for the same reason: a difference
+    /// across a turn is the only honest way to say *this* turn did it.
+    pub fn refusals_queued(&self) -> usize {
+        self.refused.lock().expect("delegation queue").len()
+    }
+
+    /// Drains up to `cap` refused desk keys recorded **after** the first
+    /// `from` (issue #176), leaving the earlier ones for whoever owns them.
+    ///
+    /// [`drain_refusals`](Self::drain_refusals) also clears the tail; this one
+    /// deliberately does not, because the entries before `from` belong to an
+    /// outer turn that has not read them yet.
+    pub fn drain_refusals_after(&self, from: usize, cap: usize) -> Vec<String> {
+        let mut guard = self.refused.lock().expect("delegation queue");
+        if guard.len() <= from {
+            return Vec::new();
+        }
+        let take = (guard.len() - from).min(cap);
+        guard.drain(from..from + take).collect()
     }
 
     /// Drains up to `cap` refused desk keys (FIFO) and discards the rest, so a
@@ -592,6 +717,17 @@ pub enum NoDrainReason {
     /// operator's message triaged as a question, so board writes are held back
     /// for **this message only** (issue #267).
     Triage,
+    /// The delegation chain is already as deep as
+    /// `[tools].max_delegation_depth` allows (issue #176), so a further
+    /// **hand-off** is refused. Board writes are unaffected — a member at the
+    /// bound may still open a card.
+    ///
+    /// Unlike the two above this is not a property of the context at all: the
+    /// same member, on the same company, delegating from a shallower chain would
+    /// have been staged. So the refusal must not tell the model its context
+    /// cannot do board work (it can) nor that the message was a question (it was
+    /// not) — it must say the chain has run as deep as the company allows.
+    Depth,
 }
 
 impl NoDrainReason {
@@ -606,6 +742,7 @@ impl NoDrainReason {
         match self {
             Self::Unwired => "drain_unwired",
             Self::Triage => "triaged_as_question",
+            Self::Depth => "depth_capped",
         }
     }
 }
@@ -659,6 +796,31 @@ impl Drop for DelegationClaim {
     fn drop(&mut self) {
         *self.queue.committed.lock().expect("delegation commitment") = DrainClaim::Unclaimed;
         self.queue.clear();
+        // Issue #176: the chain ends with the claim. `ScopeGuard` pops its own
+        // entry on every ordinary exit, so this is the belt to that braces — a
+        // panic mid-nested-turn unwinds past the guards, and a chain left
+        // standing would make the next message start at depth 2.
+        self.queue.reset_scope();
+    }
+}
+
+/// One level of the delegation scope chain, held for the span in which a
+/// delegate's turn runs (issue #176).
+///
+/// Pushes its desk id when created and pops on `Drop`. Same reasoning as
+/// [`DelegationClaim`]: the pop has to happen on **every** exit path, including
+/// the ones nobody wrote by hand, or a chain that dies mid-turn leaves the queue
+/// permanently one level deeper than it is.
+///
+/// Deliberately not [`Clone`] — two guards for one level would pop twice and
+/// take a live outer level off the chain with them.
+pub struct ScopeGuard {
+    queue: DelegationQueue,
+}
+
+impl Drop for ScopeGuard {
+    fn drop(&mut self) {
+        self.queue.scope.lock().expect("delegation scope").pop();
     }
 }
 
@@ -1282,6 +1444,7 @@ impl Tool for SpawnTaskTool {
                 assignee,
             },
             MAX_DELEGATIONS_PER_TURN,
+            NO_DEPTH_BOUND,
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
@@ -1307,6 +1470,13 @@ impl Tool for SpawnTaskTool {
 /// [intrinsic tool](crate::harness::steps), so the refusal reaches both the
 /// model (as a failed tool result it can retry from in the same turn) and the
 /// operator's run trail verbatim.
+///
+/// Since issue #176 the same tool is also wired onto a **desk member** the
+/// manifest opted in with `delegates_to`. That copy carries a [`MemberScope`],
+/// which adds two more target checks on top of the grounding above — the
+/// member's allowlist and the cycle guard — and names who is delegating so a
+/// hand-off back to the caller's own desk can be caught. The orchestrator's copy
+/// carries `None` and is unrestricted, exactly as before.
 pub struct DelegateToDeskTool {
     queue: DelegationQueue,
     company: CompanyId,
@@ -1316,39 +1486,150 @@ pub struct DelegateToDeskTool {
     /// stale snapshot would refuse a desk that exists — a worse failure than the
     /// one this grounding fixes.
     store: Arc<dyn CompanyStore>,
+    /// Set when this copy of the tool belongs to a desk member rather than the
+    /// orchestrator (issue #176). `None` is the orchestrator: unrestricted
+    /// target set, no cycle guard, and depth 0 by construction.
+    member: Option<MemberScope>,
+}
+
+/// Who is delegating, when it is a desk member rather than the orchestrator
+/// (issue #176).
+///
+/// Both fields exist for the same reason and travel together: a member's
+/// hand-off has to be checked against something the orchestrator's does not
+/// have — the desks its manifest entry permits, and its own identity, so it
+/// cannot hand work back to the desk it leads.
+#[derive(Clone, Debug)]
+pub struct MemberScope {
+    /// The roster id of the member this tool is wired onto.
+    pub member: String,
+    /// The desks it may hand work to — its manifest
+    /// [`delegates_to`](crate::company::Agent::delegates_to), with `"*"` meaning
+    /// every desk.
+    pub delegates_to: Vec<String>,
+}
+
+/// What one read of the company record decided about a hand-off target: the
+/// refusal to return, if any, and the depth bound in force.
+struct Grounding {
+    /// The refusal to hand back to the model, or `None` when the target is good.
+    refusal: Option<String>,
+    /// `[tools].max_delegation_depth`, or its default. Read from the same record
+    /// load as the refusal so a single store round-trip decides both.
+    max_depth: usize,
 }
 
 impl DelegateToDeskTool {
-    /// Builds the tool over the shared delegation queue and the company store it
-    /// grounds the target against.
+    /// Builds the orchestrator's unrestricted copy of the tool over the shared
+    /// delegation queue and the company store it grounds the target against.
     pub fn new(queue: DelegationQueue, company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
         Self {
             queue,
             company,
             store,
+            member: None,
         }
     }
 
-    /// The refusal for `desk`, or `None` when it names a desk that can take
-    /// work.
+    /// Builds a **desk member's** copy (issue #176): the same tool, narrowed to
+    /// the desks `scope` permits and guarded against handing work back up its
+    /// own chain.
+    pub fn for_member(
+        queue: DelegationQueue,
+        company: CompanyId,
+        store: Arc<dyn CompanyStore>,
+        scope: MemberScope,
+    ) -> Self {
+        Self {
+            queue,
+            company,
+            store,
+            member: Some(scope),
+        }
+    }
+
+    /// Grounds `desk` against the live company record: the refusal for it, if
+    /// any, plus the depth bound this company runs under.
     ///
-    /// **Fails open**: if the record cannot be read the delegation is queued
-    /// exactly as it was before this grounding existed. A store hiccup must not
-    /// take delegation offline; the drain-time fall-through still records what
-    /// happened.
-    async fn refusal(&self, desk: &str) -> Option<String> {
-        match self.store.load(&self.company).await {
-            Ok(Some(record)) => delegation_tools::reject_desk_target(&record, desk),
-            Ok(None) => None,
+    /// **Fails open for the orchestrator, closed for a member** — see
+    /// [`ungrounded`](Self::ungrounded) for why the two halves differ.
+    ///
+    /// Order matters. Grounding (#272) runs first — "there is no such desk"
+    /// outranks "you may not reach that desk", because a model told the latter
+    /// about a desk it invented would go on inventing. Then the allowlist, which
+    /// is retryable in the same turn with a desk from the list the message
+    /// names, and only then the cycle guard, which is not.
+    async fn ground(&self, desk: &str) -> Grounding {
+        let record = match self.store.load(&self.company).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return self.ungrounded(desk, "this company's record is not there"),
             Err(err) => {
                 tracing::warn!(
                     company = %self.company,
                     error = %err,
-                    "[delegate_to_desk] could not read the company record to ground the desk target; \
-                     queuing the hand-off ungrounded"
+                    member = self.member.as_ref().map(|s| s.member.as_str()).unwrap_or("-"),
+                    "[delegate_to_desk] could not read the company record to ground the desk target"
                 );
-                None
+                return self.ungrounded(desk, "this company's record could not be read");
             }
+        };
+        let max_depth = usize::from(
+            record
+                .manifest
+                .tools
+                .max_delegation_depth
+                .unwrap_or(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        );
+        let refusal = delegation_tools::reject_desk_target(&record, desk).or_else(|| {
+            let scope = self.member.as_ref()?;
+            delegation_tools::reject_out_of_allowlist_target(&record, &scope.delegates_to, desk)
+                .or_else(|| {
+                    delegation_tools::reject_cycle_target(
+                        &record,
+                        &self.queue.scope_chain(),
+                        desk,
+                        &scope.member,
+                    )
+                })
+        });
+        Grounding { refusal, max_depth }
+    }
+
+    /// What a hand-off grounds to when the record behind the grounding could
+    /// not be read at all — the two callers above.
+    ///
+    /// The **orchestrator** fails open, exactly as it has since #272: it has
+    /// nothing to authorise (its target set is every desk), so an unreadable
+    /// record costs it only the "there is no such desk" courtesy, and a store
+    /// hiccup must not take delegation offline.
+    ///
+    /// A **member** fails closed. Its allowlist and its cycle guard are checked
+    /// here and nowhere else — `run_delegation` executes what the queue holds
+    /// without re-deriving either — so queuing ungrounded would hand the member
+    /// the orchestrator's reach for the duration of the hiccup, one level below
+    /// where anyone is looking. Refusing costs a retry; queuing costs the bound.
+    fn ungrounded(&self, desk: &str, why: &str) -> Grounding {
+        let Some(scope) = self.member.as_ref() else {
+            return Grounding::open();
+        };
+        Grounding {
+            refusal: Some(format!(
+                "Could not hand `{desk}` off: {why}, so the desks {member} is allowed to reach \
+                 could not be checked. Nothing was queued — try again, or carry the work out \
+                 yourself.",
+                member = scope.member
+            )),
+            max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        }
+    }
+}
+
+impl Grounding {
+    /// The fail-open grounding: nothing refused, default depth.
+    fn open() -> Self {
+        Self {
+            refusal: None,
+            max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
         }
     }
 }
@@ -1390,7 +1671,10 @@ impl Tool for DelegateToDeskTool {
         // Ground the target before queuing anything: an invented desk is
         // refused here, in the model's own turn, rather than surviving as a
         // queued hand-off that the drain silently cannot deliver (issue #272).
-        if let Some(refusal) = self.refusal(&desk).await {
+        // For a desk member (issue #176) this also refuses a target outside its
+        // allowlist and one that would close a loop.
+        let grounding = self.ground(&desk).await;
+        if let Some(refusal) = grounding.refusal {
             tracing::info!(
                 company = %self.company,
                 "[delegate_to_desk] refused an ungrounded delegation target"
@@ -1409,6 +1693,7 @@ impl Tool for DelegateToDeskTool {
                 instruction,
             },
             MAX_DELEGATIONS_PER_TURN,
+            grounding.max_depth,
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
@@ -1495,6 +1780,7 @@ impl Tool for AssignTaskTool {
                 note,
             },
             MAX_DELEGATIONS_PER_TURN,
+            NO_DEPTH_BOUND,
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
@@ -1582,6 +1868,7 @@ impl Tool for ReviewTaskTool {
                 note,
             },
             MAX_DELEGATIONS_PER_TURN,
+            NO_DEPTH_BOUND,
         ) {
             Staged::Queued => {}
             Staged::OverCap => return Ok(ToolResult::error(over_cap(&effect))),
@@ -1679,6 +1966,13 @@ fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
              card as moved. If the operator did mean it as work, say so plainly and ask them to \
              restate it as a direct request."
         ),
+        NoDrainReason::Depth => format!(
+            "Refused: this work has already been handed on as far as this company allows, so \
+             {effect}. You are the last link in the chain — do the part you can do yourself and \
+             say plainly what still needs another desk, or open a task card for it with \
+             `spawn_task`, which still works. Do not retry this call; it will fail the same way, \
+             and do NOT report the hand-off as done."
+        ),
     }
 }
 
@@ -1723,6 +2017,73 @@ pub fn delegation_tools(
     ]
 }
 
+/// The **two** delegation tools a desk member gets when its manifest entry
+/// names a `delegates_to` allowlist (issue #176): `spawn_task` and a
+/// `delegate_to_desk` narrowed to that allowlist.
+///
+/// Deliberately a subset of [`delegation_tools`] rather than the same list.
+/// `assign_task`, `review_task`, `query_company`, `run_workflow`,
+/// `create_workflow` and `add_agent` are the orchestrator's *authority* over the
+/// company — who owns a card, whether work passes review, who is on the roster —
+/// and #176 is about a lead pulling in a specialist, not about every desk lead
+/// becoming a second CEO. A member gets exactly what it needs to pass a slice
+/// on and to leave the rest tracked.
+///
+/// Both names are already covered by
+/// [`is_delegation_tool`], so
+/// [`ApprovalPolicy`](crate::harness::policy::ApprovalPolicy) classifies them as
+/// internal here exactly as it does on the orchestrator — no policy change comes
+/// with this wiring.
+pub fn member_delegation_tools(
+    queue: &DelegationQueue,
+    company: CompanyId,
+    store: Arc<dyn CompanyStore>,
+    scope: MemberScope,
+) -> Vec<Box<dyn Tool>> {
+    vec![
+        Box::new(SpawnTaskTool::new(queue.clone())),
+        Box::new(DelegateToDeskTool::for_member(
+            queue.clone(),
+            company,
+            store,
+            scope,
+        )),
+    ]
+}
+
+/// The persona brief appended for a desk member that may re-delegate (issue
+/// #176).
+///
+/// It exists because a refusal costs a whole turn. A model handed
+/// `delegate_to_desk` with no idea that its reach is narrowed, or that the chain
+/// it is running inside is nearly at its bound, spends turns discovering both
+/// one refusal at a time — and the depth refusal in particular is not
+/// retryable, so a model that has not been told will burn every remaining call
+/// on it. Naming the allowlist and the shape of the bound up front is cheaper
+/// than the refusals it avoids.
+///
+/// The bound is stated qualitatively rather than as a number. The number lives
+/// on the live company record and is read at call time; baking a snapshot of it
+/// into a persona that is cached with the belt would be a claim that goes stale
+/// the moment an operator edits the manifest — and a *confidently wrong* bound
+/// is worse guidance than an honest "there is one".
+pub fn member_delegation_brief(desks: &[String]) -> String {
+    let reach = match desks.iter().any(|d| d.trim() == "*") {
+        true => "any desk in the company".to_string(),
+        false => desks.join(", "),
+    };
+    format!(
+        "\n\n## Handing work on\n\nYou can pass a slice of your work to another desk with \
+`delegate_to_desk`, and open a tracked card for anything that should be followed up later with \
+`spawn_task`. The desks you may hand work to: {reach}.\n\nHand on only the part somebody else is \
+genuinely better placed to do, and do the rest yourself — every hand-off costs another turn. The \
+chain is bounded: if you are told the work has already been handed on as far as this company \
+allows, that is final, so do what you can and say plainly what is left rather than calling the \
+tool again. You cannot hand work back to a desk it already came from, or to a desk you lead \
+yourself.\n"
+    )
+}
+
 // ---------------------------------------------------------------------------
 // add_agent (issue #71)
 // ---------------------------------------------------------------------------
@@ -1752,14 +2113,71 @@ pub fn delegation_tools(
 pub struct AddAgentTool {
     company: CompanyId,
     store: Arc<dyn CompanyStore>,
+    /// The id of the agent this tool is wired onto — the minter. Named in the
+    /// mint log so an operator can see who added a teammate, and with what.
+    minter: String,
+    /// The minter's own `tools` line, verbatim. Empty means the minter itself
+    /// holds the company's standard grant, in which case so does the teammate.
+    minter_tools: Vec<String>,
+    /// The minter's **effective** grant — its line already narrowed by the
+    /// company `allow`. The ceiling an explicit `tools` argument is clamped to.
+    minter_grants: Vec<String>,
 }
 
 impl AddAgentTool {
     /// Builds the tool over the company id and its store handle
-    /// ([`HarnessDeps::store`](crate::harness::HarnessDeps::store)).
-    pub fn new(company: CompanyId, store: Arc<dyn CompanyStore>) -> Self {
-        Self { company, store }
+    /// ([`HarnessDeps::store`](crate::harness::HarnessDeps::store)), plus the
+    /// minting agent's identity and tool scope (issue #619).
+    ///
+    /// # Why the minter's scope is a constructor argument
+    ///
+    /// #661 gave a minted teammate a `tools` list clamped to the **company**
+    /// grant. That leaves the defect #619 was filed about intact: omitting
+    /// `tools` still yields the company's *whole* grant, so an agent scoped to
+    /// a corner of the company can mint a teammate holding everything the
+    /// company holds — and `add_agent` is [`Reach::Nothing`](crate::policy)
+    /// and sits in `INTRINSIC_TOOLS`, so it is always present and never asks.
+    ///
+    /// The ceiling is therefore the **minter**, not the company: a minted
+    /// teammate is never wider than the agent that minted it.
+    pub fn new(
+        company: CompanyId,
+        store: Arc<dyn CompanyStore>,
+        minter: String,
+        minter_tools: Vec<String>,
+        minter_grants: Vec<String>,
+    ) -> Self {
+        Self {
+            company,
+            store,
+            minter,
+            minter_tools,
+            minter_grants,
+        }
     }
+}
+
+/// An `add_agent` tool wired onto an **unscoped** minter: an agent whose own
+/// `tools` line is empty and which therefore holds the whole company grant.
+///
+/// This is the pre-#619 shape of every minter, so a test written before the
+/// minter ceiling existed still describes the same company through it. A test
+/// that cares about narrowing constructs the tool directly with a scoped
+/// minter instead.
+#[cfg(test)]
+pub(crate) fn unscoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgentTool {
+    AddAgentTool::new(
+        company,
+        store,
+        "ceo".to_string(),
+        // No line of its own — the minter inherits the company grant…
+        Vec::new(),
+        // …which for these fixtures is the catch-all, so the minter ceiling is
+        // wide open and a test about *other* behaviour is not accidentally a
+        // test about the #619 clamp. A test that cares about the clamp uses
+        // `scoped_add_agent`.
+        vec!["*".to_string()],
+    )
 }
 
 #[async_trait]
@@ -1818,12 +2236,11 @@ impl Tool for AddAgentTool {
         // Issue #661 / L5: an optional per-teammate tool grant. The globs are
         // INTERSECTED with the company's `[tools].allow` at roster-build time
         // (`agent_effective_grants`), so this can only narrow the new teammate
-        // below the company grant — never widen or escalate it. Omitted, `null`,
-        // or empty means the standard company-wide grant, exactly like a manifest
-        // agent with no `tools` line. A non-string item is a clean argument
-        // error, the same shape as a missing `name`/`role`.
-        let tools = match args.get("tools") {
-            None | Some(Value::Null) => Vec::new(),
+        // below the company grant — never widen or escalate it. A non-string
+        // item is a clean argument error, the same shape as a missing
+        // `name`/`role`.
+        let requested: Option<Vec<String>> = match args.get("tools") {
+            None | Some(Value::Null) => None,
             Some(Value::Array(items)) => {
                 let mut globs = Vec::with_capacity(items.len());
                 for item in items {
@@ -1835,9 +2252,43 @@ impl Tool for AddAgentTool {
                         globs.push(glob.to_string());
                     }
                 }
-                globs
+                Some(globs)
             }
             Some(_) => return Err(anyhow::anyhow!("`tools` must be an array of strings")),
+        };
+        // Issue #619: the company grant is the wrong ceiling. Clamp to the
+        // MINTER's own scope, resolved before the store is touched so a refused
+        // scope never leaves a half-written roster.
+        let tools = match requested {
+            // Nothing asked for: copy the minter's own line. Copying the *line*
+            // rather than its resolved grant is deliberate — an unscoped minter
+            // mints an unscoped teammate that keeps tracking `[tools].allow`,
+            // instead of freezing today's allow-list into the record as an
+            // explicit scope a later company-wide narrowing would not reach.
+            None => self.minter_tools.clone(),
+            // An explicitly empty list is the same request as none at all —
+            // "give them what you have" — not "grant everything".
+            Some(globs) if globs.is_empty() => self.minter_tools.clone(),
+            Some(globs) => {
+                // Narrow against what the minter actually holds. An empty result
+                // means nothing asked for was within reach, and storing that
+                // would read back as "inherit the whole company grant" — the
+                // exact inversion #619 exists to remove, reached through the
+                // most deliberate narrowing an agent can ask for.
+                let narrowed = agent_effective_grants(&self.minter_grants, &globs);
+                if narrowed.is_empty() {
+                    return Ok(ToolResult::error(format!(
+                        "None of the requested tools ({}) are within your own tool grant ({}), so \"{name}\" was not added. Ask for a subset of what you hold, or omit `tools` to give them the same grant you have.",
+                        globs.join(", "),
+                        if self.minter_grants.is_empty() {
+                            "nothing".to_string()
+                        } else {
+                            self.minter_grants.join(", ")
+                        },
+                    )));
+                }
+                narrowed
+            }
         };
 
         // Serialize per-company writes so the orchestrator's add_agent and the
@@ -1882,18 +2333,47 @@ impl Tool for AddAgentTool {
             name: name.clone(),
             role: role.clone(),
             description,
-            tools,
+            tools: tools.clone(),
         };
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
+
+        // Issue #619: the mint is observable — the minter, the teammate, and
+        // the grant it was given. This was the condition attached to sanctioning
+        // the narrowing at all: `add_agent` is `Reach::Nothing` and never asks,
+        // so this log is the only place the decision is visible. A narrowing
+        // that happens silently is the defect being fixed, one layer down.
+        //
+        // An **inherited** grant is the line an operator most needs to see,
+        // because that is the teammate holding everything its minter holds.
+        tracing::info!(
+            company = %self.company,
+            minter = %self.minter,
+            teammate = %id,
+            teammate_name = %name,
+            scope = %if tools.is_empty() {
+                "inherited: the minter's own standard grant".to_string()
+            } else {
+                tools.join(", ")
+            },
+            "[add_agent] minted an overlay teammate"
+        );
 
         // The id is in the result because the orchestrator has to be able to
         // address the teammate it just created — delegating to it, or putting it
         // on a desk, takes the id, not the display name. The console gets the
         // same answer from `TeamMemberDto.id`; before this the agent-facing half
         // had no way to learn it at all.
+        // The scope is in the result for the same reason it is in the log: the
+        // minting agent should see what it handed over, and "the same tools you
+        // hold" is a materially different answer from a named list.
+        let scope = if tools.is_empty() {
+            "They hold the same tools you do.".to_string()
+        } else {
+            format!("Their tools are scoped to: {}.", tools.join(", "))
+        };
         Ok(ToolResult::success(format!(
-            "Added {name} (id `{id}`) as {role} to the team. They'll be reachable as a teammate starting next turn."
+            "Added {name} (id `{id}`) as {role} to the team. {scope} They'll be reachable as a teammate starting next turn."
         )))
     }
 }
@@ -1931,6 +2411,9 @@ pub fn orchestrator_tools(
     store: Arc<dyn CompanyStore>,
     workflow_refs: WorkflowRefQueue,
     run_outputs: RunOutputCache,
+    minter: String,
+    minter_tools: Vec<String>,
+    minter_grants: Vec<String>,
 ) -> Vec<Box<dyn Tool>> {
     let mut tools: Vec<Box<dyn Tool>> = vec![Box::new(QueryCompanyTool::new(
         company.clone(),
@@ -1967,7 +2450,13 @@ pub fn orchestrator_tools(
         events,
         workflow_refs,
     )));
-    tools.push(Box::new(AddAgentTool::new(company, store)));
+    tools.push(Box::new(AddAgentTool::new(
+        company,
+        store,
+        minter,
+        minter_tools,
+        minter_grants,
+    )));
     tools
 }
 
@@ -3367,6 +3856,7 @@ mod tests {
             description: None,
             tier: tier.map(str::to_string),
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         }
     }
@@ -3636,6 +4126,7 @@ mod tests {
                         assignee: None,
                     },
                     MAX_DELEGATIONS_PER_TURN,
+                    NO_DEPTH_BOUND,
                 ),
                 Staged::Queued
             );
@@ -3648,6 +4139,7 @@ mod tests {
                     assignee: None,
                 },
                 MAX_DELEGATIONS_PER_TURN,
+                NO_DEPTH_BOUND,
             ),
             Staged::OverCap
         );
@@ -3672,6 +4164,7 @@ mod tests {
                     assignee: None,
                 },
                 MAX_DELEGATIONS_PER_TURN,
+                NO_DEPTH_BOUND,
             ),
             Staged::NoDrain(NoDrainReason::Unwired),
             "an EMPTY unclaimed queue is still a queue nothing drains"
@@ -3698,6 +4191,7 @@ mod tests {
                         note: None,
                     },
                     MAX_DELEGATIONS_PER_TURN,
+                    NO_DEPTH_BOUND,
                 ),
                 Staged::Queued
             );
@@ -3866,12 +4360,12 @@ mod tests {
             assignee: None,
         };
         assert_eq!(
-            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN),
+            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN, NO_DEPTH_BOUND),
             Staged::NoDrain(NoDrainReason::Unwired)
         );
         let claim = queue.claim_answering();
         assert_eq!(
-            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN),
+            queue.push_within_cap(spawn(), MAX_DELEGATIONS_PER_TURN, NO_DEPTH_BOUND),
             Staged::NoDrain(NoDrainReason::Triage)
         );
         // …and a hand-off is not refused at all under the same claim, because it
@@ -3883,6 +4377,7 @@ mod tests {
                     instruction: "what did you ship?".to_string(),
                 },
                 MAX_DELEGATIONS_PER_TURN,
+                NO_DEPTH_BOUND,
             ),
             Staged::Queued
         );
@@ -4209,6 +4704,449 @@ members = ["nobody"]
                 instruction: "draft a plan".to_string(),
             }]
         );
+    }
+
+    // --- Recursive desk delegation (issue #176) -----------------------------
+
+    /// A three-desk record where two desks have roster leads, so a member of one
+    /// can be given an allowlist that admits one desk and not another.
+    fn nested_desks_record(id: &CompanyId) -> CompanyRecord {
+        let manifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+tier = "orchestrator"
+
+[[agent]]
+id = "writer"
+role = "Writer"
+delegates_to = ["research"]
+
+[[agent]]
+id = "analyst"
+role = "Analyst"
+
+[[group_chat]]
+id = "strategy"
+name = "Strategy desk"
+members = ["writer"]
+
+[[group_chat]]
+id = "research"
+name = "Research desk"
+members = ["analyst"]
+
+[[group_chat]]
+id = "legal"
+name = "Legal desk"
+members = ["ceo"]
+"#,
+        )
+        .expect("valid manifest");
+        CompanyRecord {
+            manifest,
+            ..seeded_record(id)
+        }
+    }
+
+    /// The `writer`'s copy of `delegate_to_desk`: allowed `research` only.
+    fn member_desk_tool(record: CompanyRecord, queue: &DelegationQueue) -> DelegateToDeskTool {
+        let company = record.id.clone();
+        DelegateToDeskTool::for_member(
+            queue.clone(),
+            company,
+            Arc::new(MemStore::seeded(record)) as Arc<dyn CompanyStore>,
+            MemberScope {
+                member: "writer".to_string(),
+                delegates_to: vec!["research".to_string()],
+            },
+        )
+    }
+
+    /// Depth is the length of the scope chain, and it gates **hand-offs only**.
+    ///
+    /// At the bound a `delegate_to_desk` is refused with the new
+    /// [`NoDrainReason::Depth`], while a `spawn_task` still stages — refusing
+    /// that too would push a member that has hit the bound into working silently
+    /// rather than leaving the work tracked.
+    #[test]
+    fn push_within_cap_refuses_a_hand_off_past_the_depth_bound() {
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let hand_off = || Delegation::DelegateToDesk {
+            desk: "research".to_string(),
+            instruction: "dig into it".to_string(),
+        };
+        let card = || Delegation::SpawnTask {
+            title: "follow up".to_string(),
+            note: None,
+            assignee: None,
+        };
+
+        // Depth 0 (the orchestrator's own turn) under a bound of 1: allowed.
+        assert_eq!(queue.scope_depth(), 0);
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 1),
+            Staged::Queued
+        );
+        queue.clear();
+
+        // One level in, under a bound of 1: refused as depth-capped.
+        let scope = queue.enter_scope("strategy".to_string());
+        assert_eq!(queue.scope_depth(), 1);
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 1),
+            Staged::NoDrain(NoDrainReason::Depth)
+        );
+        // …while the board write at the same depth is untouched.
+        assert_eq!(
+            queue.push_within_cap(card(), MAX_DELEGATIONS_PER_TURN, 1),
+            Staged::Queued
+        );
+        queue.clear();
+        // …and the same hand-off under the default bound of 2 stages.
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 2),
+            Staged::Queued
+        );
+        queue.clear();
+
+        // Two levels in, under a bound of 2: refused.
+        let deeper = queue.enter_scope("research".to_string());
+        assert_eq!(queue.scope_depth(), 2);
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 2),
+            Staged::NoDrain(NoDrainReason::Depth)
+        );
+
+        // The guards pop on drop, outermost last.
+        drop(deeper);
+        assert_eq!(queue.scope_depth(), 1);
+        drop(scope);
+        assert_eq!(queue.scope_depth(), 0);
+    }
+
+    /// The refusal has to be countable and distinguishable from the two that
+    /// preceded it, and its text must not claim either of their causes — the
+    /// same message would tell a fully capable company that its context cannot
+    /// do board work.
+    #[test]
+    fn the_depth_refusal_is_its_own_reason_and_its_own_sentence() {
+        assert_eq!(NoDrainReason::Depth.as_str(), "depth_capped");
+        for other in [NoDrainReason::Unwired, NoDrainReason::Triage] {
+            assert_ne!(NoDrainReason::Depth.as_str(), other.as_str());
+        }
+        let text = no_drain(
+            DELEGATE_TO_DESK_TOOL,
+            "nothing was handed to the research desk",
+            NoDrainReason::Depth,
+        );
+        assert!(text.contains("as far as this company allows"), "{text}");
+        assert!(
+            text.contains("`spawn_task`"),
+            "the model must be told what still works: {text}"
+        );
+        assert!(
+            !text.contains("question"),
+            "a depth refusal must not borrow the triage cause: {text}"
+        );
+        assert!(
+            !text.contains("unavailable in this context"),
+            "a depth refusal must not borrow the unwired cause: {text}"
+        );
+    }
+
+    /// The chain ends with the claim, on **both** boundaries.
+    ///
+    /// The exit half is the load-bearing one: a `ScopeGuard` pops on every
+    /// ordinary exit, but a panic inside a nested turn unwinds past it, and a
+    /// chain left standing would make the next operator message start at depth 2
+    /// and refuse its first hand-off. An ordinary `clear()` must NOT reset it —
+    /// clearing happens between delegations inside a live chain.
+    #[test]
+    fn the_scope_chain_resets_with_the_claim_and_survives_a_clear() {
+        let queue = DelegationQueue::default();
+        {
+            let _claim = queue.claim();
+            std::mem::forget(queue.enter_scope("strategy".to_string()));
+            std::mem::forget(queue.enter_scope("research".to_string()));
+            assert_eq!(queue.scope_chain(), ["strategy", "research"]);
+            queue.clear();
+            assert_eq!(
+                queue.scope_chain(),
+                ["strategy", "research"],
+                "clear() runs between delegations inside a live chain and must not reset depth"
+            );
+        }
+        assert_eq!(
+            queue.scope_depth(),
+            0,
+            "the claim's Drop must reset a chain leaked past its guards"
+        );
+        // …and the acquire resets too, for a claim taken after a leak.
+        std::mem::forget(queue.enter_scope("strategy".to_string()));
+        let _claim = queue.claim();
+        assert_eq!(queue.scope_depth(), 0);
+    }
+
+    /// A member may not hand work back up its own chain (A→B→A), and the
+    /// refusal is recorded for the card as well as returned to the model.
+    #[tokio::test]
+    async fn a_member_may_not_hand_work_back_to_a_desk_on_the_chain() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        // The chain the orchestrator's hand-off to `strategy` opened, with the
+        // writer's own turn running inside it.
+        let _scope = queue.enter_scope("strategy".to_string());
+        // `writer` leads `strategy`, so it is BOTH on the chain and self-led;
+        // give it a wildcard allowlist so the allowlist check cannot be what
+        // refuses.
+        let tool = DelegateToDeskTool::for_member(
+            queue.clone(),
+            company.clone(),
+            Arc::new(MemStore::seeded(nested_desks_record(&company))) as Arc<dyn CompanyStore>,
+            MemberScope {
+                member: "writer".to_string(),
+                delegates_to: vec!["*".to_string()],
+            },
+        );
+        let result = tool
+            .execute(json!({ "desk": "strategy", "instruction": "start over" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "a cycle must be refused");
+        let text = result.output_for_llm(true);
+        assert!(text.contains("strategy"), "{text}");
+        assert_eq!(queue.queued(), 0, "nothing may be staged for a cycle");
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            vec!["strategy".to_string()],
+            "the drain must be able to record the attempt on the card"
+        );
+
+        // A desk that is neither on the chain nor led by the caller goes
+        // through.
+        let ok = tool
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(!ok.is_error, "{}", ok.output_for_llm(true));
+    }
+
+    /// A member may only reach the desks its manifest entry names, and the
+    /// refusal lists them — the model has no other way to learn its allowlist.
+    #[tokio::test]
+    async fn a_member_may_only_reach_the_desks_its_manifest_allows() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let tool = member_desk_tool(nested_desks_record(&company), &queue);
+
+        let refused = tool
+            .execute(json!({ "desk": "legal", "instruction": "review it" }))
+            .await
+            .expect("execute");
+        assert!(refused.is_error, "an off-allowlist desk must be refused");
+        let text = refused.output_for_llm(true);
+        assert!(text.contains("legal"), "{text}");
+        assert!(
+            text.contains("research"),
+            "the permitted set must be named so the model can retry in-turn: {text}"
+        );
+        assert_eq!(queue.queued(), 0);
+
+        let allowed = tool
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(!allowed.is_error, "{}", allowed.output_for_llm(true));
+        assert_eq!(queue.queued(), 1);
+    }
+
+    /// The **orchestrator's** copy is unrestricted: no allowlist, no cycle
+    /// guard, and it reaches every desk exactly as it did before #176.
+    #[tokio::test]
+    async fn the_orchestrators_copy_is_unrestricted() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        // Even from inside a chain — which the orchestrator never is, but the
+        // contrast is the point.
+        let _scope = queue.enter_scope("legal".to_string());
+        let tool = desk_tool(nested_desks_record(&company), &queue);
+        for desk in ["strategy", "research", "legal"] {
+            let result = tool
+                .execute(json!({ "desk": desk, "instruction": "go" }))
+                .await
+                .expect("execute");
+            assert!(
+                !result.is_error,
+                "the orchestrator must reach {desk}: {}",
+                result.output_for_llm(true)
+            );
+            queue.clear();
+        }
+    }
+
+    /// A store that cannot answer, so the grounding read has nothing to check
+    /// the target against.
+    struct BrokenStore;
+
+    #[async_trait::async_trait]
+    impl CompanyStore for BrokenStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Err(crate::OpenCompanyError::Store("store is down".to_string()))
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A member's hand-off fails **closed** when the record cannot be read, and
+    /// the orchestrator's still fails open.
+    ///
+    /// The asymmetry is the whole point. The allowlist and the cycle guard are
+    /// enforced at this tool boundary and nowhere else — `run_delegation`
+    /// executes whatever the queue holds without re-deriving either — so a
+    /// member queued ungrounded reaches every desk in the company for as long
+    /// as the store is unhappy. The orchestrator has no allowlist to lose, so
+    /// an unreadable record leaves it exactly where #272 left it.
+    #[tokio::test]
+    async fn a_members_hand_off_is_refused_when_the_record_cannot_be_read() {
+        let company = CompanyId::new("acme");
+        let scope = || MemberScope {
+            member: "writer".to_string(),
+            delegates_to: vec!["research".to_string()],
+        };
+
+        // Ok(None) — no record under that id.
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let missing = DelegateToDeskTool::for_member(
+            queue.clone(),
+            company.clone(),
+            Arc::new(MemStore::default()) as Arc<dyn CompanyStore>,
+            scope(),
+        );
+        let refused = missing
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(
+            refused.is_error,
+            "a member may not be queued against a record nobody could read: {}",
+            refused.output_for_llm(true)
+        );
+        let text = refused.output_for_llm(true);
+        assert!(text.contains("research"), "{text}");
+        assert!(
+            text.contains("writer"),
+            "the refusal must name whose allowlist went unchecked: {text}"
+        );
+        assert_eq!(queue.queued(), 0, "nothing may be staged ungrounded");
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            vec!["research".to_string()],
+            "the drain must be able to record the attempt on the card"
+        );
+
+        // Err(..) — the store is there and unhappy. Same answer.
+        let broken = DelegateToDeskTool::for_member(
+            queue.clone(),
+            company.clone(),
+            Arc::new(BrokenStore) as Arc<dyn CompanyStore>,
+            scope(),
+        );
+        let refused = broken
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(
+            refused.is_error,
+            "a store error must refuse too: {}",
+            refused.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+        queue.clear();
+        let _ = queue.drain_refusals(MAX_DELEGATIONS_PER_TURN);
+
+        // …and the orchestrator's copy over the same broken store still queues.
+        let orchestrator = DelegateToDeskTool::new(
+            queue.clone(),
+            company,
+            Arc::new(BrokenStore) as Arc<dyn CompanyStore>,
+        );
+        let queued = orchestrator
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(
+            !queued.is_error,
+            "a store hiccup must not take the orchestrator's delegation offline: {}",
+            queued.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 1);
+    }
+
+    /// The depth bound comes off the **live company record**, not a build-time
+    /// snapshot — an operator can edit `[tools].max_delegation_depth` without
+    /// the cached belt being rebuilt.
+    #[tokio::test]
+    async fn the_depth_bound_is_read_from_the_manifest_at_call_time() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let mut record = nested_desks_record(&company);
+        record.manifest.tools.max_delegation_depth = Some(1);
+        let tool = member_desk_tool(record, &queue);
+        // One level in, under the manifest's bound of 1.
+        let _scope = queue.enter_scope("strategy".to_string());
+        let result = tool
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "depth 1 must stop a member re-delegating");
+        assert!(
+            result
+                .output_for_llm(true)
+                .contains("as far as this company allows"),
+            "{}",
+            result.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+    }
+
+    /// The member's belt is exactly `spawn_task` + `delegate_to_desk` — never
+    /// the orchestrator's authority tools.
+    #[test]
+    fn a_members_delegation_belt_is_the_two_hand_off_tools() {
+        let company = CompanyId::new("acme");
+        let queue = DelegationQueue::default();
+        let store: Arc<dyn CompanyStore> =
+            Arc::new(MemStore::seeded(nested_desks_record(&company)));
+        let tools = member_delegation_tools(
+            &queue,
+            company,
+            store,
+            MemberScope {
+                member: "writer".to_string(),
+                delegates_to: vec!["research".to_string()],
+            },
+        );
+        let mut names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
+        names.sort();
+        assert_eq!(names, [DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL]);
     }
 
     /// Issue #272: the observed failure — the orchestrator handed work to
@@ -4868,7 +5806,7 @@ name = "Morning"
     async fn add_agent_tool_persists_an_overlay_teammate() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({
@@ -4901,6 +5839,129 @@ name = "Morning"
         );
     }
 
+    /// A minter scoped to part of the company grant, for the #619 tests below.
+    /// `minter_tools` is the line it declares; `minter_grants` is that line
+    /// already narrowed by the company `allow` — what `build_agent` hands the
+    /// tool.
+    fn scoped_add_agent(company: CompanyId, store: Arc<dyn CompanyStore>) -> AddAgentTool {
+        AddAgentTool::new(
+            company,
+            store,
+            "ceo".to_string(),
+            vec!["workspace".to_string()],
+            vec!["workspace".to_string()],
+        )
+    }
+
+    /// Issue #619: a teammate minted by a **scoped** agent inherits that
+    /// agent's line, not the company's whole grant.
+    ///
+    /// #661 clamped an explicit `tools` argument to the company grant, which
+    /// leaves this open: omitting `tools` still yields the company's *entire*
+    /// grant, so a narrowly scoped agent could mint a teammate holding
+    /// everything the company holds. `add_agent` is `Reach::Nothing` and never
+    /// asks, so nothing else in the path would catch it.
+    #[tokio::test]
+    async fn a_minted_teammate_is_bounded_by_its_minter_not_the_company() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = scoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Growth Lead" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["workspace".to_string()],
+            "the minted teammate must be bounded by the agent that minted it, \
+             not by the company"
+        );
+    }
+
+    /// An **unscoped** minter still mints an unscoped teammate — the pre-#619
+    /// behaviour, kept deliberately. Copying the minter's *line* rather than
+    /// its resolved grant is what keeps the teammate tracking `[tools].allow`
+    /// instead of freezing today's copy of it into the record.
+    #[tokio::test]
+    async fn an_unscoped_minter_mints_an_unscoped_teammate() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = unscoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Jamie", "role": "Growth Lead" }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert!(
+            record.overlay_agents[0].tools.is_empty(),
+            "an empty line means the company's standard grant (#264), and a \
+             minter holding that grant hands on exactly it"
+        );
+    }
+
+    /// An explicit `tools` request is narrowed against what the **minter**
+    /// holds, so the tool cannot hand out a grant its caller does not have.
+    #[tokio::test]
+    async fn an_explicit_scope_is_narrowed_to_what_the_minter_holds() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = scoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({
+                "name": "Jamie",
+                "role": "Growth Lead",
+                "tools": ["workspace", "composio"]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["workspace".to_string()],
+            "`composio` is outside the minter's own grant and must be dropped"
+        );
+    }
+
+    /// A request that narrows to **nothing** is a refusal, not a stored empty
+    /// list.
+    ///
+    /// This is the sharp edge: an empty `tools` list means "inherit the
+    /// company's standard grant". Storing the empty result of a narrowing
+    /// would turn the most deliberate narrowing an agent can ask for into the
+    /// widest grant in the company — the exact inversion #619 exists to remove.
+    #[tokio::test]
+    async fn a_scope_entirely_outside_the_minters_grant_is_refused() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = scoped_add_agent(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({
+                "name": "Jamie",
+                "role": "Growth Lead",
+                "tools": ["composio"]
+            }))
+            .await
+            .expect("execute");
+        assert!(result.is_error, "got {:?}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("persisted");
+        assert!(
+            record.overlay_agents.is_empty(),
+            "and no teammate was written at all, scoped or otherwise"
+        );
+    }
+
     /// Issue #661 / L5: `add_agent` carries a per-teammate tool grant onto the
     /// overlay record, trimming and dropping blank globs. The grant is narrowed
     /// against `[tools].allow` later (at roster build); persistence keeps the
@@ -4909,7 +5970,7 @@ name = "Morning"
     async fn add_agent_tool_persists_a_tool_grant() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({
@@ -4935,7 +5996,7 @@ name = "Morning"
     async fn add_agent_tool_empty_tools_is_the_standard_grant() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({ "name": "Ravi", "role": "Researcher", "tools": [] }))
@@ -4954,7 +6015,7 @@ name = "Morning"
     async fn add_agent_tool_rejects_a_non_string_tool() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         assert!(
             tool.execute(json!({ "name": "Ravi", "role": "Researcher", "tools": [123] }))
@@ -4984,7 +6045,7 @@ name = "Morning"
     async fn add_agent_tool_mints_a_readable_id_and_reports_it() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({ "name": "Dana Designer", "role": "Designer" }))
@@ -5009,7 +6070,7 @@ name = "Morning"
     async fn add_agent_tool_still_refuses_a_duplicate_display_name() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         for _ in 0..1 {
             let first = tool
@@ -5051,7 +6112,7 @@ name = "Morning"
         )
         .expect("valid manifest");
         let store = Arc::new(MemStore::seeded(record));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(json!({ "name": "Backend Engineer", "role": "Platform" }))
@@ -5067,7 +6128,7 @@ name = "Morning"
     async fn add_agent_tool_requires_name_and_role() {
         let company = CompanyId::new("acme");
         let store = Arc::new(MemStore::seeded(seeded_record(&company)));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         assert!(
             tool.execute(json!({ "role": "Growth Lead" }))
@@ -5090,7 +6151,7 @@ name = "Morning"
     async fn add_agent_tool_reports_company_not_found() {
         let company = CompanyId::new("ghost");
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::default());
-        let tool = AddAgentTool::new(company, store);
+        let tool = unscoped_add_agent(company, store);
 
         let err = tool
             .execute(json!({ "name": "Jamie", "role": "Growth Lead" }))
@@ -5214,6 +6275,9 @@ name = "Morning"
             Arc::new(MemStore::default()),
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
+            "ceo".to_string(),
+            Vec::new(),
+            vec!["fs:*".to_string()],
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's

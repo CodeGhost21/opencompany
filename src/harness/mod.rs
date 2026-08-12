@@ -2303,6 +2303,10 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         // A non-empty list is intersected with `[tools].allow` by that same
         // function below (narrow-only, never a widen).
         tools: overlay.tools.clone(),
+        // Issue #176: an overlay teammate declares no delegation allowlist in
+        // this slice, so it carries today's behaviour — no hand-off tools wired.
+        // Opting overlays in needs a console write surface; see the follow-up.
+        delegates_to: Vec::new(),
         budget_usd_daily: None,
     }
 }
@@ -2884,7 +2888,7 @@ description = "Builds the product."
     async fn a_tool_added_teammate_colliding_with_a_manifest_id_still_joins_the_roster() {
         use openhuman_core::openhuman::tools::Tool;
 
-        use crate::harness::orchestrator::AddAgentTool;
+        use crate::harness::orchestrator::unscoped_add_agent;
 
         /// A `CompanyStore` that actually holds the record, unlike
         /// `RecordingStore` — `add_agent` has to load what it saves.
@@ -2914,7 +2918,7 @@ description = "Builds the product."
         let fx = fixture();
         let company = CompanyId::new("acme");
         let store = Arc::new(SeededStore(StdMutex::new(record())));
-        let tool = AddAgentTool::new(company.clone(), store.clone());
+        let tool = unscoped_add_agent(company.clone(), store.clone());
 
         let result = tool
             .execute(serde_json::json!({ "name": "Engineer", "role": "Platform" }))
@@ -5273,6 +5277,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let policy = ApprovalPolicy::new(&Policy::default(), None);
@@ -5382,6 +5387,7 @@ budget_usd_daily = 0.0
             description: None,
             tier: None,
             tools: Vec::new(),
+            delegates_to: Vec::new(),
             budget_usd_daily: None,
         };
         let agent = build::build_agent(

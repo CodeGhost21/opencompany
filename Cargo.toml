@@ -1,28 +1,13 @@
-[workspace]
-# The host is the single configurable backend. Business types are data-only
-# definitions under companies/ (a company.toml manifest + docs), loaded at
-# runtime via `opencompany serve --company companies/<name>` — not Cargo crates.
-# The operator console is a Vite/TypeScript app under frontend/.
-members = [".", "frontend/src-tauri"]
-resolver = "3"
-
-[workspace.package]
+# This package deliberately is not a Cargo workspace root. OpenHuman's modular
+# dependencies (TinyBus, TinyMemory, TinyDocs, and TinyWallet) each own nested
+# workspaces, which Cargo cannot resolve beneath another workspace root. The
+# Tauri package under frontend/src-tauri is therefore its own workspace.
+[package]
+name = "opencompany"
 version = "0.1.0"
 edition = "2024"
 license = "GPL-3.0-only"
 repository = "https://github.com/tinyhumansai/opencompany"
-
-# Shared dependency each example harness inherits from the parent crate.
-[workspace.dependencies]
-opencompany = { path = "." }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-
-[package]
-name = "opencompany"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-repository.workspace = true
 description = "Company operating system scaffold built on OpenHuman and TinyHumans Rust modules."
 readme = "README.md"
 keywords = ["company", "agents", "openhuman", "tinyagents", "axum"]
@@ -177,7 +162,7 @@ hmac = { version = "0.12", optional = true }
 # would push `#[cfg]` through StorageHandles, three backends, and the
 # conformance suite to defend nothing.
 sha2 = "0.10"
-getrandom = "0.2"
+getrandom = "0.4"
 
 # Argon2id password hashing. Unconditional for the same reason as sha2: a build
 # that cannot verify a password cannot log a human in. Pure-Rust RustCrypto, no
@@ -417,6 +402,10 @@ tinyagents = { path = "vendor/tinyagents" }
 # `openhuman` feature is on — so they leave the offline build unaffected.
 tinyflows = { path = "vendor/openhuman/vendor/tinyflows" }
 tinycortex = { path = "vendor/openhuman/vendor/tinycortex" }
+# `tinymemory-core` consumes the TinyCortex contract by version while
+# OpenHuman consumes the implementation by path. Keep both on one checkout so
+# their public trait identities remain identical.
+tinycortex-api = { path = "vendor/openhuman/vendor/tinycortex/api" }
 tinyjuice = { path = "vendor/openhuman/vendor/tinyjuice" }
 tinychannels = { path = "vendor/openhuman/vendor/tinychannels" }
 tinyplace = { path = "vendor/openhuman/vendor/tinyplace/sdk/rust" }
@@ -437,3 +426,18 @@ tempfile = "3"
 # real child process. Dev-only: under resolver v2 this feature is not unified
 # into normal builds, so the shipped binary is unchanged.
 tokio = { version = "1", features = ["test-util"] }
+
+# Issue #392: measures what a per-append flush costs, so the per-record-kind
+# durability policy rests on a number rather than an intuition. Default features
+# off — the plotting and rayon extras would be dead weight in every test lane's
+# dependency graph, and this bench reports numbers rather than charts.
+criterion = { version = "0.8", default-features = false, features = [
+  "cargo_bench_support",
+] }
+
+# Opt-in only (`cargo bench --bench journal_append`). Not wired into CI: it is a
+# measurement of the host's storage, and a shared runner's numbers would mean
+# nothing to gate on.
+[[bench]]
+name = "journal_append"
+harness = false

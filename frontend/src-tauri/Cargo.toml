@@ -1,8 +1,11 @@
+[workspace]
+resolver = "3"
+
 [package]
 name = "opencompany-desktop"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
+version = "0.1.0"
+edition = "2024"
+license = "GPL-3.0-only"
 build = "build.rs"
 
 [build-dependencies]

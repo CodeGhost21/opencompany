@@ -20,6 +20,15 @@ Supporting docs:
   - [ports-console.md](ports-console.md) — the WS3 console-surface stores
   - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
     trace, and who writes it
+- [storage.md](storage.md) — how a backend is chosen at boot, the shipped
+  backends, and the conformance suite that pins them to identical answers
+  - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
+    data root: the embedded runtime's root, the agent sandboxes, choosing the
+    root, and migrating a legacy doubled install
+  - [memory-engine.md](memory-engine.md) — the `OPENCOMPANY_MEMORY` overlay and
+    why an ephemeral data root refuses to boot
+  - [data-root.md](data-root.md) — the root itself: resolution order, ownership,
+    and two processes wanting the same directory
 - [events.md](events.md) — the `CompanyEvent` vocabulary those ports carry, and
   the run/task/approval correlation rules a journal reader folds on
   - [workflow-events.md](workflow-events.md) — the workflow-run progress
@@ -45,7 +54,11 @@ Supporting docs:
   at parse and why, and the builder ⊂ parser ⊂ engine nesting
 - [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →
   hand over → swap), so a first-time inference config needs no restart
-- [api.md](api.md) — HTTP routes and auth
+- [api.md](api.md) — the map of the API surface: which planes exist and where
+  each is documented
+  - [api-write-plane.md](api-write-plane.md) — every write the console makes,
+    route by route
+  - [api-graphql.md](api-graphql.md) — the `/graphql` read plane
 - [credentials.md](credentials.md) — the company's own TinyHumans key: the one
   seam a brokered surface resolves through (Composio today), why rotating it
   reaches every surface wired to it, and which surfaces are deliberately outside

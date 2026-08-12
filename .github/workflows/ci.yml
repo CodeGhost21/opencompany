@@ -126,8 +126,9 @@ jobs:
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           # tinycortex declares its own `tinyagents` path dependency, so its
           # manifest must resolve too. Harmless for the default build; required
           # for any `--features openhuman` build.
@@ -356,8 +357,9 @@ jobs:
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
             vendor/tinyagents
 
@@ -431,6 +433,11 @@ jobs:
     name: Rust (openhuman, tinycortex)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # OpenHuman's agent loop requires the same stack its production runtimes
+      # allocate. Apply it to every test invocation in this multi-feature job;
+      # Rust's test harness otherwise creates 2 MiB threads.
+      RUST_MIN_STACK: 16777216
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -438,15 +445,15 @@ jobs:
           submodules: true
 
       # Identical to the `rust` job's init, and for the same reason: `submodules:
-      # true` is not recursive. Keep it targeted — a plain `--recursive` over
-      # `vendor/openhuman` additionally drags in the desktop-only `tauri-cef`
-      # tree, which nothing in this build touches. See that job for why
-      # `tinyhumans-sdk` is in the list despite having no `[patch]` entry.
+      # true` is not recursive. Keep it targeted to the crate submodules named
+      # by OpenHuman's manifest; see the rust job for why `tinyhumans-sdk` is in
+      # the list despite having no `[patch]` entry.
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           # tinycortex declares its own `tinyagents` path dependency, so its
           # manifest must resolve too. Harmless for the default build; required
           # for any `--features openhuman` build.
@@ -990,8 +997,9 @@ jobs:
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
             vendor/tinyagents
 
@@ -1021,7 +1029,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            frontend/src-tauri
 
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -1035,6 +1045,19 @@ jobs:
       # here rather than absorbed — the desktop keeps its own `Cargo.lock`.
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # The console's Tauri wrapper is also an independent workspace. It used
+      # to inherit the root workspace metadata and lockfile, but OpenHuman now
+      # contains nested workspaces of its own, so keeping it independent is
+      # what lets Cargo compose the current vendored graph.
+      - name: Format console desktop wrapper
+        run: cargo fmt --manifest-path frontend/src-tauri/Cargo.toml --all -- --check
+
+      - name: Clippy console desktop wrapper
+        run: cargo clippy --manifest-path frontend/src-tauri/Cargo.toml --locked --all-targets --no-deps -- -D warnings
+
+      - name: Test console desktop wrapper
+        run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
 
       # Everything above proves the desktop crate COMPILES. Nothing above proves
       # it PACKAGES, and those are different claims: the steps above drive
@@ -1080,8 +1103,9 @@ jobs:
       # same cache, everything already built.
       #
       # The CLI finds a project by searching SUBFOLDERS of the working directory
-      # rather than ancestors, so these two are the only directories it can be
-      # invoked from at all.
+      # rather than ancestors, which is also why these two and no others: from
+      # `frontend/` it would find the console wrapper above instead, a different
+      # app that happens to share this one's `productName`.
       - name: Package (from the repository root)
         run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
 
