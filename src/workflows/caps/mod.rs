@@ -65,6 +65,7 @@ use tinyflows::caps::{
 };
 use tinyflows::error::{EngineError, Result as TfResult};
 
+use crate::harness::orchestrator::MAX_DELEGATIONS_PER_TURN;
 use crate::harness::policy::{ApprovalScope, MAX_APPROVAL_REQUESTS_PER_TURN, PolicyMode};
 use crate::harness::{HarnessDeps, HarnessPool, toolbelt};
 use crate::ports::types::{CompanyId, CompanyRecord};
@@ -105,6 +106,8 @@ pub struct RunContext<'a> {
     pub dry_run: bool,
     /// Where an agent node leaves an operator-facing notice (issue #638).
     pub notices: RunNotices,
+    /// Where an agent node's board writes are recorded (issue #661 / M5).
+    pub board: RunBoard,
 }
 
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
@@ -156,6 +159,7 @@ pub async fn build_capabilities(
         run_request,
         dry_run,
         notices,
+        board,
     } = run;
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
@@ -271,16 +275,46 @@ pub async fn build_capabilities(
             }
         };
 
+        // Issue #661 (M5): the run's board claim, taken ONCE here and held for the
+        // whole run rather than per node turn.
+        //
+        // **Per-run is the correctness requirement, not a convenience.** The
+        // engine runs same-superstep nodes concurrently (`with_parallel(true)`),
+        // and `claim_as` CLEARS the scope's bucket on acquire — so a second claim
+        // taken by a sibling node mid-superstep would destroy whatever the first
+        // node had staged and not yet drained. One claim per run, acquired before
+        // any node runs, is what makes the bucket safe for the concurrent nodes
+        // that share it.
+        //
+        // The consequence to know: siblings share one bucket, so node A's
+        // post-turn drain may execute (and report) a write node B staged. Nothing
+        // is lost or duplicated — every staged write is executed exactly once and
+        // contributes exactly one row — but a row is attributed to the RUN rather
+        // than to a node, which is why `WorkflowRunBoardRow` carries no node id.
+        // The per-turn `MAX_DELEGATIONS_PER_TURN` cap likewise becomes a per-drain
+        // bound over the shared bucket, refused honestly at the tool boundary.
+        //
+        // `Arc` because the runner is shared across the engine's node tasks and
+        // `DelegationClaim` is deliberately not `Clone` — one claim, one owner of
+        // the promise. It releases when the capability bundle drops, which on the
+        // hard-abort path is when the engine future is dropped: staged-but-undrained
+        // writes die with the run, exactly as `ApprovalClaim` treats gated calls.
+        let board_claim = Arc::new(deps.delegations.claim_board(run_id.to_string()));
+
         // `deps` moves in last — the borrows above (`deps.capabilities`,
-        // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`)
-        // are all done by here.
+        // `deps.search`, `deps.meter`, `deps.secrets`, `deps.workspace_root`,
+        // `deps.delegations`) are all done by here.
         let agent: Arc<dyn AgentRunner> = Arc::new(HarnessAgentRunner::new(
             pool,
             deps,
+            record.clone(),
             company.clone(),
+            workflow_id.to_string(),
             run_id.to_string(),
             run_request,
             notices,
+            board,
+            board_claim,
         ));
         (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
@@ -350,32 +384,54 @@ fn hex_segment(value: &str) -> String {
 /// through [`HarnessPool::run`], which meters the turn's cost through `deps` — so
 /// a workflow step and a chat turn account identically.
 ///
-/// # It claims neither the publish queue nor the delegation queue — on purpose
+/// # It claims the delegation queue for board writes, and nothing else (issue #661 / M5)
 ///
 /// A node's turn carries the whole toolbelt, so an orchestrator-tier `agent_ref`
 /// can reach `review_task`, `assign_task`, `spawn_task` and `delegate_to_desk`,
-/// and a granted one can reach `publish_artifact`. Nothing here drains either
-/// queue: a workflow run has no board card behind it and no conversation to
-/// surface a delegation's answer into — the same absence that makes
+/// and a granted one can reach `publish_artifact`.
+///
+/// This path now holds a
+/// [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim) claim on the
+/// delegation queue for the whole run and drains it after every node turn, so a
+/// run may **open a card and set who owns it** — which is what makes the shipped
+/// `→ task cards` seed able to produce one, and what M5 was filed for. The card
+/// is a lineage root carrying a run reference
+/// ([`TaskRecord::origin_run_id`](crate::ports::TaskRecord::origin_run_id)):
+/// `parent_task_id` and `origin_chat_id` stay `None` because a run has neither a
+/// card nor a conversation behind it — the same absence that makes
 /// [`park_gated_calls`](HarnessAgentRunner::park_gated_calls) record approvals
 /// explicitly unlinked.
 ///
-/// So this path takes **no claim**, and that is the decision rather than an
-/// omission. What the agent gets is an honest in-turn refusal it can report —
-/// *"the card was NOT reviewed"* — instead of what it got before #453: a
-/// success receipt saying the card had moved to done, followed by the next
-/// turn's `clear()` destroying the delegation. Silent destruction replaced by a
-/// visible refusal.
+/// The two other delegations stay **refused at the tool boundary**, for unrelated
+/// reasons the queue reports separately: `review_task`'s `in_review → done` is the
+/// operator's accept lane, and a hand-off's only value is a synchronous reply a run
+/// has nowhere to land. `assign_task` moves no column either — the arm the drain
+/// reuses leaves it untouched — so **run → card → dispatch → run cycles stay
+/// bounded precisely because every dispatch still requires an operator act**. That
+/// is the loop bound, and relaxing the column rule would take it with it.
 ///
-/// Wiring a drain here would be a real feature (a workflow node that can move
-/// the board), and it is deliberately not this issue: it needs a decision about
-/// which card a node's `spawn_task` parents to and where a hand-off's reply
-/// goes. Until then, refusing is the truthful answer. Mirrors how this path
-/// already takes no [`PublishClaim`](crate::harness::publish::PublishClaim).
+/// The claim also closes a **live** misattribution defect PR #771 identified.
+/// `DelegateToDeskTool` calls `push_refusal` before it consults the claim, so an
+/// ungrounded hand-off from a workflow node landed in the shared bucket and a
+/// concurrent chat turn's `drain_refusals` took it, recorded it on *that* turn's
+/// card, and cleared it. The scoped claim files it into the run's own bucket, and
+/// the drain below surfaces it as this run's notice.
+///
+/// It still takes no [`PublishClaim`](crate::harness::publish::PublishClaim):
+/// `publish_artifact` needs a card to attach a version to, which a run does not
+/// have, so a refusal there remains the truthful answer.
 pub struct HarnessAgentRunner {
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
+    /// The company record, for the board drain's desk/assignee resolution (issue
+    /// #661 / M5) — the same record the rest of this bundle was built from, so a
+    /// node's board write and its tool grants cannot disagree about the roster.
+    record: CompanyRecord,
     company: CompanyId,
+    /// The workflow this run is of (issue #661 / M5): stamped onto every card the
+    /// run opens, and the voice its notes are recorded under
+    /// (`workflow:<workflow_id>`).
+    workflow_id: String,
     /// The run these agent nodes belong to (issue #395), stamped onto every
     /// approval this node's turn parks so the Approvals page can say which
     /// workflow run is waiting on the operator.
@@ -387,6 +443,16 @@ pub struct HarnessAgentRunner {
     run_request: Option<String>,
     /// Where this node leaves an operator-facing notice (issue #638).
     notices: RunNotices,
+    /// Where this node's board writes are recorded (issue #661 / M5).
+    board: RunBoard,
+    /// The run's [`DrainClaim::Board`](crate::harness::orchestrator::DrainClaim)
+    /// claim, taken once by [`build_capabilities`] and held for the whole run.
+    ///
+    /// Shared rather than per-turn because `claim_as` clears the scope's bucket on
+    /// acquire and the engine runs same-superstep nodes concurrently — a per-turn
+    /// claim would let one node destroy a sibling's staged writes. See the
+    /// acquisition site for the full reasoning.
+    board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
 }
 
 /// Where an agent node leaves a notice for the operator (issue #638).
@@ -420,26 +486,129 @@ impl RunNotices {
     }
 }
 
+/// Where an agent node's board writes are recorded (issue #661 / M5).
+///
+/// [`RunNotices`]' shape, beside it and for the same structural reason: a board
+/// row is not node output and must not become one — it would ride a downstream
+/// `=item` binding and land in the run's persisted output snapshot, where a
+/// card id is neither wanted nor meaningful. So the rows go sideways, out to the
+/// runner that owns the run, and land on [`WorkflowRun::board`].
+///
+/// Cheap to clone; every clone appends to the same list, which is what lets a
+/// run's several agent nodes — including concurrent siblings — each contribute.
+#[derive(Clone, Default)]
+pub struct RunBoard {
+    inner: Arc<std::sync::Mutex<Vec<crate::ports::WorkflowRunBoardRow>>>,
+}
+
+impl RunBoard {
+    /// Records the rows one post-turn drain produced, in order.
+    pub fn extend(&self, rows: Vec<crate::ports::WorkflowRunBoardRow>) {
+        if rows.is_empty() {
+            return;
+        }
+        self.inner.lock().expect("run board poisoned").extend(rows);
+    }
+
+    /// Takes everything recorded so far, leaving the collector empty.
+    pub fn take(&self) -> Vec<crate::ports::WorkflowRunBoardRow> {
+        std::mem::take(&mut *self.inner.lock().expect("run board poisoned"))
+    }
+}
+
 impl HarnessAgentRunner {
     /// Builds a runner over an already-populated pool for `company`, carrying
     /// the run's id (issue #395) and the operator's run request (issue #154)
     /// when one was supplied.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: Arc<HarnessPool>,
         deps: HarnessDeps,
+        record: CompanyRecord,
         company: CompanyId,
+        workflow_id: String,
         run_id: String,
         run_request: Option<String>,
         notices: RunNotices,
+        board: RunBoard,
+        board_claim: Arc<crate::harness::orchestrator::DelegationClaim>,
     ) -> Self {
         Self {
             pool,
             deps,
+            record,
             company,
+            workflow_id,
             run_id,
             run_request,
             notices,
+            board,
+            board_claim,
         }
+    }
+
+    /// Drains this run's delegation bucket after a node's turn and records what it
+    /// did (issue #661 / M5).
+    ///
+    /// Runs inside the run's board scope, so both drains read **this run's**
+    /// bucket rather than whatever `Unscoped` happens to hold.
+    ///
+    /// Two drains, in this order and both mandatory:
+    ///
+    /// 1. **Refusals** — desks a `delegate_to_desk` named that the company does not
+    ///    have. This is the live half of the defect PR #771 identified: the tool
+    ///    pushes these *before* consulting the claim, so before the scoped claim
+    ///    they landed in the shared bucket and a concurrent chat turn recorded them
+    ///    on its own card. Surfaced as a run notice — the run's own surface, and the
+    ///    only one it has.
+    /// 2. **Board writes** — executed through
+    ///    [`DelegationRunner::execute_board_writes`](crate::runtime::delegation),
+    ///    which is infallible by signature, so this cannot fail the node.
+    ///
+    /// # Never fails the node
+    ///
+    /// Nothing here returns a `Result`. The turn already happened and its output is
+    /// valid; a store hiccup must not discard it. Same stance
+    /// [`park_gated_calls`](Self::park_gated_calls) takes, arrived at the same way.
+    async fn drain_board_writes(&self) {
+        let queue = &self.deps.delegations;
+
+        // Issue #661: the run's own refusals, on the run's own surface.
+        for desk in queue.drain_refusals(MAX_DELEGATIONS_PER_TURN) {
+            tracing::warn!(
+                company = %self.company,
+                workflow = %self.workflow_id,
+                run_id = %self.run_id,
+                "workflow agent node: a hand-off named a desk this company does not have; nothing \
+                 was handed off"
+            );
+            self.notices.push(format!(
+                "A step in this workflow tried to hand work to the \"{desk}\" desk, which this \
+                 company does not have. Nothing was handed off."
+            ));
+        }
+
+        let staged = queue.drain(MAX_DELEGATIONS_PER_TURN);
+        if staged.is_empty() {
+            return;
+        }
+        let runner = crate::runtime::delegation::DelegationRunner::for_workflow_run(
+            &self.record,
+            self.deps.tasks.as_ref(),
+            // Never touched: the only registration site is the `delegate_to_desk`
+            // arm, which a board claim makes unstageable. Threaded because the
+            // shared runner needs one, and the company's own rather than a fresh
+            // one so a future reachable path would surface in the operator's
+            // in-flight list rather than in a registry nobody can see.
+            &self.deps.steer,
+            &self.company,
+            queue,
+            crate::runtime::delegation::WorkflowRunRef {
+                run_id: self.run_id.clone(),
+                workflow_id: self.workflow_id.clone(),
+            },
+        );
+        self.board.extend(runner.execute_board_writes(staged).await);
     }
 
     /// Parks every approval-gated tool call this node's turn just recorded
@@ -641,20 +810,38 @@ impl AgentRunner for HarnessAgentRunner {
             .deps
             .approval_requests
             .claim(ApprovalScope::Run(self.run_id.clone()));
-        let outcome = claim
-            .scoped(
-                self.pool
-                    .run_background(&self.company, agent_ref, &message, &self.deps),
-            )
-            .await;
-        // Drained on BOTH arms, deliberately. A turn that errored may still have
-        // had a tool call gated before it failed, and that request is just as
-        // real — dropping the claim without parking would discard it, which is
-        // the exact disappearance this issue is about.
+        // Issue #661 (M5): the turn AND its post-turn drains run inside the run's
+        // board scope, so a `spawn_task` the model calls files into this run's
+        // bucket and the drain below reads that same bucket back. The claim itself
+        // was taken once for the whole run (see `build_capabilities`); this only
+        // installs its ambient scope for the span of this node's turn.
         //
-        // Inside the scope, so the drain reads this run's bucket rather than
-        // whatever `Unscoped` happens to hold.
-        claim.scoped(self.park_gated_calls()).await;
+        // `Box::pin` because this nests one task-local scope inside another
+        // (`ApprovalScope` inside `DelegationScope`): the composed future is large
+        // enough that leaving it on the stack has blown CI's thread stack before.
+        let turn = Box::pin(async {
+            let outcome = claim
+                .scoped(
+                    self.pool
+                        .run_background(&self.company, agent_ref, &message, &self.deps),
+                )
+                .await;
+            // Drained on BOTH arms, deliberately. A turn that errored may still have
+            // had a tool call gated before it failed, and that request is just as
+            // real — dropping the claim without parking would discard it, which is
+            // the exact disappearance this issue is about.
+            //
+            // Inside the scope, so the drain reads this run's bucket rather than
+            // whatever `Unscoped` happens to hold.
+            claim.scoped(self.park_gated_calls()).await;
+            // Issue #661 (M5): likewise on both arms, and for the same reason. A
+            // turn that failed after calling `spawn_task` had already been told the
+            // card would be opened; refusing to drain would make that receipt false
+            // and destroy the write when the scope ends.
+            self.drain_board_writes().await;
+            outcome
+        });
+        let outcome = self.board_claim.scoped(turn).await;
         let outcome = outcome
             .map_err(|e| EngineError::Capability(format!("harness agent '{agent_ref}': {e}")))?;
         // Mirror the engine's `{ json, text, raw }` envelope shape: expose the
@@ -992,13 +1179,18 @@ mod tests {
         }
         let queue = deps.approval_requests.clone();
         let notices = RunNotices::default();
+        let board_claim = Arc::new(deps.delegations.claim_board("run-1"));
         let runner = HarnessAgentRunner::new(
             Arc::new(HarnessPool::new()),
             deps,
+            crate::workflows::gated_tool_turn_test::record(),
             CompanyId::new("acme"),
+            "wf-1".to_string(),
             "run-1".to_string(),
             None,
             notices.clone(),
+            RunBoard::default(),
+            board_claim,
         );
 
         // Pushed inside the run's own scope, exactly as its turn would.
@@ -1303,6 +1495,7 @@ mod tests {
                 run_request: None,
                 dry_run: false,
                 notices: RunNotices::default(),
+                board: RunBoard::default(),
             },
         )
         .await
@@ -1346,6 +1539,7 @@ mod tests {
                 run_request: None,
                 dry_run: true,
                 notices: RunNotices::default(),
+                board: RunBoard::default(),
             },
         )
         .await
@@ -1500,6 +1694,7 @@ mod tests {
                 run_request: None,
                 dry_run: false, // live: the workspace mkdir runs
                 notices: RunNotices::default(),
+                board: RunBoard::default(),
             },
         )
         .await
@@ -1550,6 +1745,7 @@ mod tests {
                 run_request: None,
                 dry_run: true, // dry: no workspace mkdir at all
                 notices: RunNotices::default(),
+                board: RunBoard::default(),
             },
         )
         .await
