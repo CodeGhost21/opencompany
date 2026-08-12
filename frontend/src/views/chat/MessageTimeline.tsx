@@ -6,6 +6,7 @@ import { ApprovalRow } from "./ApprovalRow";
 import { Avatar } from "./Avatar";
 import { MessageRow } from "./MessageRow";
 import { StepTimeline } from "./StepTimeline";
+import { WorkingIndicator } from "./WorkingIndicator";
 import { channelTitle, type Channel, type TimelineItem } from "./model";
 
 interface Props {
@@ -225,9 +226,11 @@ function LiveTurnRow({ channel, steps }: { channel: Channel; steps: TurnStep[] }
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9 shrink-0"
       />
-      <div className="min-w-0 flex-1">
+      <div className="min-w-0 flex-1 space-y-1.5">
+        {/* The line names the step actually in flight (#787), above the
+            timeline that details every step. Same source, one phrasing. */}
+        <WorkingIndicator srLabel="Working…" steps={steps} />
         <StepTimeline steps={steps} defaultOpen />
-        <span className="sr-only">Working…</span>
       </div>
     </div>
   );
@@ -242,19 +245,8 @@ function TypingRow({ channel }: { channel: Channel }) {
         company={channel.kind === "channel" && channel.id === "main"}
         className="size-9"
       />
-      <span className="flex items-center gap-1 rounded-full bg-muted px-3 py-2">
-        <Dot />
-        <Dot className="[animation-delay:150ms]" />
-        <Dot className="[animation-delay:300ms]" />
-        <span className="sr-only">Replying…</span>
-      </span>
+      <WorkingIndicator srLabel="Replying…" />
     </div>
-  );
-}
-
-function Dot({ className }: { className?: string }) {
-  return (
-    <span className={cn("size-1.5 animate-bounce rounded-full bg-muted-foreground", className)} />
   );
 }
 
