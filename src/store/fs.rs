@@ -536,6 +536,31 @@ where
     Ok((out, skipped))
 }
 
+/// Splits `path` into lines, decoding each **lossily and separately**. An absent
+/// file reads as no lines.
+///
+/// Bytes, not a `String`, for the reason [`read_jsonl_lenient`] states above: a
+/// torn write can split a multi-byte codepoint, and a whole-file UTF-8 decode
+/// fails on that one bad byte. Decoding per line turns whole-file loss into one
+/// mangled line the caller can quarantine.
+///
+/// Deliberately returns **every** segment the split produced, blank ones
+/// included, and parses nothing. Both are what the runtime journal needs: it
+/// numbers corrupt lines by position, so dropping blanks here would shift every
+/// report after one, and it owns the decision about what a line means (see
+/// [`JournalStore`](crate::ports::journal::JournalStore)).
+pub(crate) async fn read_lines_lossy(path: &Path) -> Result<Vec<String>> {
+    let contents = match tokio::fs::read(path).await {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(path, e)),
+    };
+    Ok(contents
+        .split(|b| *b == b'\n')
+        .map(|raw| String::from_utf8_lossy(raw).into_owned())
+        .collect())
+}
+
 /// Atomically writes `contents` to `path` via a temp file + rename.
 pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -1325,6 +1350,141 @@ impl InboxStore for FsInboxStore {
     }
 }
 
+// ---------------------------------------------------------------------------
+// JournalStore
+// ---------------------------------------------------------------------------
+
+/// The filesystem [`JournalStore`]: the `journal.jsonl` inside each company's
+/// [`Bundle`], which is exactly where the runtime journal has always lived
+/// (issue #726).
+///
+/// So the default backend migrates nothing — same path, same bytes, same
+/// per-path locking. This type is the port surface around behaviour that already
+/// existed, not new behaviour.
+pub struct FsJournalStore {
+    root: JournalRoot,
+}
+
+/// How an [`FsJournalStore`] resolves a company's journal file.
+enum JournalRoot {
+    /// A company-scoped store over an OpenCompany home:
+    /// `<home>/companies/<slug>/journal.jsonl`. The production shape, and the
+    /// only one that upholds the port's per-company isolation contract.
+    Home(PathBuf),
+    /// One fixed file, whatever company is asked for.
+    ///
+    /// Backs [`RuntimeJournal::new`](crate::runtime::journal::RuntimeJournal::new),
+    /// the path-taking convenience constructor the test suite builds journals
+    /// with. Single-company by construction — the caller named the file — so the
+    /// id it is handed is not consulted, and the conformance suite's isolation
+    /// assertions run against [`Home`](JournalRoot::Home) instead.
+    File(PathBuf),
+}
+
+impl FsJournalStore {
+    /// A store over every company bundle under the OpenCompany home `home`.
+    pub fn new(home: impl Into<PathBuf>) -> Self {
+        Self {
+            root: JournalRoot::Home(home.into()),
+        }
+    }
+
+    /// A store pinned to one journal file — see [`JournalRoot::File`].
+    pub(crate) fn at_file(path: impl Into<PathBuf>) -> Self {
+        Self {
+            root: JournalRoot::File(path.into()),
+        }
+    }
+
+    fn path(&self, id: &CompanyId) -> PathBuf {
+        match &self.root {
+            JournalRoot::Home(home) => Bundle::new(home, id).journal_jsonl(),
+            JournalRoot::File(path) => path.clone(),
+        }
+    }
+}
+
+#[async_trait]
+impl crate::ports::journal::JournalStore for FsJournalStore {
+    /// One whole-line `O_APPEND` write, serialised on the process-wide per-path
+    /// lock (issue #386, now reached through [`path_lock`]).
+    ///
+    /// The journal used to keep a `JOURNAL_WRITE_LOCKS` registry of its own,
+    /// which was a second `PathLocks` holding the same kind of key for the same
+    /// reason as [`FS_WRITE_LOCKS`]. One registry keyed on the absolutised path
+    /// is what two independently-constructed stores over one file actually
+    /// share, and there is no file both registries would have contended for —
+    /// `journal.jsonl` is written here and nowhere else.
+    ///
+    /// **Both branches of issue #392 live here now**, moved from
+    /// `RuntimeJournal::append` when the sink became a port (#726), and the
+    /// directory half is the one that is easy to lose in the move:
+    /// [`Durability::Host`] creates the parent chain through
+    /// [`create_dir_all_durable`], which flushes each created directory's own
+    /// parent. Plain `create_dir_all` here would leave a flushed record under
+    /// directory entries that were never written down — lost with them on
+    /// exactly the crash the flush was bought for, with the record's own
+    /// `sync_data` still passing its test.
+    async fn append_journal(
+        &self,
+        id: &CompanyId,
+        line: &str,
+        durability: crate::ports::journal::Durability,
+    ) -> Result<()> {
+        use crate::ports::journal::Durability;
+
+        let path = self.path(id);
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        if let Some(parent) = path.parent() {
+            match durability {
+                Durability::Host => create_dir_all_durable(parent).await?,
+                Durability::Process => tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| io_err(parent, e))?,
+            }
+        }
+        match durability {
+            Durability::Host => append_line_durable(&path, line).await,
+            Durability::Process => append_line(&path, line).await,
+        }
+    }
+
+    /// Every `\n`-separated segment of the file, minus the empty one the final
+    /// terminator produces.
+    ///
+    /// Splitting `"a\nb\n"` yields a third, empty segment that is an artefact of
+    /// the terminator rather than a record. Dropping exactly that one — the last,
+    /// and only when it is empty — is what makes this backend's read agree
+    /// element-for-element with a database backend's, which is what
+    /// `assert_journal_store` holds every backend to. It shifts no line number:
+    /// the discarded segment is past every record in the file, and a genuinely
+    /// blank line in the middle is still returned so a corruption report counts
+    /// it.
+    async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+        let mut lines = read_lines_lossy(&self.path(id)).await?;
+        if lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        Ok(lines)
+    }
+
+    /// Always imported: this store *is* the file an import would copy from.
+    async fn journal_imported(&self, _id: &CompanyId) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Unreachable, and a no-op if reached.
+    ///
+    /// [`journal_imported`](Self::journal_imported) never opens the gate, so the
+    /// builder never calls this. If some future caller does, copying the file's
+    /// own lines back over itself is the identity — so doing nothing is the
+    /// correct answer rather than a swallowed write.
+    async fn complete_import(&self, _id: &CompanyId, _lines: Vec<String>) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
@@ -1336,6 +1496,34 @@ mod test {
             .prefix("opencompany-test-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_store() {
+        let root = tmp_root();
+        conformance::assert_journal_store(Arc::new(FsJournalStore::new(root.path()))).await;
+    }
+
+    /// The fs backend reports itself permanently imported, so
+    /// `assert_journal_import` does not apply to it: its store IS the file an
+    /// import would copy from, and the builder therefore never imports on this
+    /// backend. Asserted here rather than left implicit — a backend that
+    /// answered `false` would have the builder wipe and re-copy a company's
+    /// journal on every single boot.
+    #[tokio::test]
+    async fn the_filesystem_backend_never_needs_an_import() {
+        use crate::ports::journal::JournalStore;
+        let root = tmp_root();
+        let store = FsJournalStore::new(root.path());
+        let id = CompanyId::new("alpha");
+        assert!(store.journal_imported(&id).await.unwrap());
+        store
+            .append_journal(&id, "kept", crate::ports::journal::Durability::Host)
+            .await
+            .unwrap();
+        // And the unreachable import is the identity, not a wipe.
+        store.complete_import(&id, Vec::new()).await.unwrap();
+        assert_eq!(store.read_journal(&id).await.unwrap(), vec!["kept"]);
     }
 
     #[tokio::test]

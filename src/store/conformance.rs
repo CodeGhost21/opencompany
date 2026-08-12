@@ -3571,3 +3571,172 @@ pub async fn assert_schedule_fire_store(
         "exactly one of {N} concurrent claimers may win the key"
     );
 }
+
+/// Every backend's [`JournalStore`](crate::ports::journal::JournalStore) must
+/// keep opaque lines byte-identically, in append order, per company (#726).
+///
+/// The runtime journal carries the at-most-once effect set and the durable
+/// approval queue, and it decides what a line *means* above this port — so all a
+/// backend owes is bytes and order. Both halves are load-bearing:
+///
+/// * **Bytes.** A line the store rewrote, trimmed or re-encoded is a record
+///   `serde_json` no longer parses, which the journal reports as corruption and
+///   skips. A skipped `EffectExecuted` un-commits its key and lets an
+///   at-most-once effect fire a second time.
+/// * **Order.** Replay folds records in sequence. A park read back *after* the
+///   resolution that drains it resurrects a resolved approval.
+///
+/// Isolation is asserted for the same reason it is everywhere else, with a
+/// sharper consequence here: one company reading another's executed keys would
+/// suppress its own effects.
+pub async fn assert_journal_store(journal: Arc<dyn crate::ports::journal::JournalStore>) {
+    use crate::ports::journal::Durability;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    assert!(
+        journal.read_journal(&alpha).await.unwrap().is_empty(),
+        "a company that has never journaled reads back nothing"
+    );
+
+    // Deliberately awkward payloads: a backend that stores these unchanged is not
+    // quietly normalising anything. No `\n` anywhere — the port's contract is one
+    // record per call, and the caller never puts a terminator inside a line.
+    let lines = [
+        r#"{"record":"EffectExecuted","key":"cyc:0"}"#,
+        r#"{"record":"EffectExecuted","key":"cyc:1","effect":{"kind":"payment.send"}}"#,
+        r#"  {"record":"leading and trailing space"}  "#,
+        "{\"record\":\"unicode\",\"memo\":\"caf\u{e9} \u{2014} \u{65e5}\u{672c}\u{8a9e}\t tabbed\"}",
+        "not json at all, and it must survive anyway",
+        "",
+    ];
+    // Both durability levels, alternating: a backend that honours only one of
+    // them (or ignores the parameter) must still store and order every record
+    // identically, and one that errored on the level it does not implement would
+    // fail here rather than in production.
+    for (n, line) in lines.iter().enumerate() {
+        let durability = if n % 2 == 0 {
+            Durability::Host
+        } else {
+            Durability::Process
+        };
+        journal
+            .append_journal(&alpha, line, durability)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        lines,
+        "every line must read back byte-identically and in append order"
+    );
+
+    // Isolation, both ways.
+    journal
+        .append_journal(&beta, "beta-only", Durability::Host)
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.read_journal(&beta).await.unwrap(),
+        vec!["beta-only".to_string()],
+        "one company's journal must hold only its own records"
+    );
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap().len(),
+        lines.len(),
+        "and another company's append must not land in it"
+    );
+
+    // Appending after a read keeps going from the end, not from zero — a backend
+    // whose sequence restarted would overwrite the first record.
+    journal
+        .append_journal(&alpha, "later", Durability::Process)
+        .await
+        .unwrap();
+    let after = journal.read_journal(&alpha).await.unwrap();
+    assert_eq!(after.len(), lines.len() + 1);
+    assert_eq!(after.last().unwrap(), "later", "and it lands at the end");
+}
+
+/// The one-time filesystem import and the receipt that gates it (#726).
+///
+/// Only for backends that can actually *hold* an import — sqlite and mongodb.
+/// The fs backend reports itself permanently imported (its store is the file an
+/// import would copy from), so running this against it would assert nothing.
+///
+/// The receipt is not bookkeeping. `complete_import` **clears** before it copies,
+/// so a second import deletes every record the backend accumulated after the
+/// first one — un-committing effect keys that have already run. And it records
+/// the receipt **last**, so an import interrupted anywhere leaves the gate open
+/// and the next boot re-runs the whole copy rather than resuming into a truncated
+/// prefix. A truncated prefix is the failure this port exists to prevent.
+pub async fn assert_journal_import(journal: Arc<dyn crate::ports::journal::JournalStore>) {
+    use crate::ports::journal::Durability;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    assert!(
+        !journal.journal_imported(&alpha).await.unwrap(),
+        "a company the backend has never seen has not been imported"
+    );
+
+    let source = vec![
+        r#"{"record":"EffectExecuted","key":"cyc:0"}"#.to_string(),
+        r#"{"record":"EffectExecuted","key":"cyc:1"}"#.to_string(),
+        "a corrupt line, migrated byte-for-byte".to_string(),
+    ];
+    journal
+        .complete_import(&alpha, source.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        source,
+        "the import copies verbatim and in file order"
+    );
+    assert!(
+        journal.journal_imported(&alpha).await.unwrap(),
+        "and closes the gate"
+    );
+    assert!(
+        !journal.journal_imported(&beta).await.unwrap(),
+        "the receipt is per company, not per database"
+    );
+
+    // Appends after the import continue the sequence rather than colliding with
+    // (or overwriting) the copied records.
+    journal
+        .append_journal(&alpha, "after-import", Durability::Host)
+        .await
+        .unwrap();
+    let after = journal.read_journal(&alpha).await.unwrap();
+    assert_eq!(
+        after.len(),
+        source.len() + 1,
+        "an append after the import must not collide with a copied record's key"
+    );
+    assert_eq!(after[..source.len()], source[..]);
+    assert_eq!(after.last().unwrap(), "after-import");
+
+    // A retry — the shape of an import interrupted before its receipt — replaces
+    // rather than appends.
+    journal
+        .complete_import(&alpha, source.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        source,
+        "a re-run import clears the partial copy; it must never append a second one"
+    );
+
+    // The empty import is how a company with no prior filesystem journal closes
+    // its gate, and it must be a real (clearing) import, not a skipped no-op.
+    journal.complete_import(&beta, Vec::new()).await.unwrap();
+    assert!(journal.journal_imported(&beta).await.unwrap());
+    assert!(journal.read_journal(&beta).await.unwrap().is_empty());
+}

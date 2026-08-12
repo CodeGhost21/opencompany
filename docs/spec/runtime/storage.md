@@ -27,6 +27,13 @@ records as inspectable TOML/JSONL bundles and the WS3 console-surface stores
 under a sibling `ops/` layout (`src/store/fs_ops.rs`); sqlite and mongodb add
 one collection/table per store.
 
+A fifteenth, `JournalStore`, joined them in issue #726. The runtime journal was
+built on the filesystem unconditionally until then, so on a mongodb tenant the
+at-most-once effect set and the parked-approval queue lived on `/data` —
+ephemeral scratch, discarded on every container replacement. It is now selected
+from the same handles as every other store, with a one-time receipt-gated import
+off the old file: [journal.md](journal.md).
+
 Three of those fourteen — `UserStore`, `SessionStore`, `LoginCodeStore` — back
 [human user authentication](users.md). Sessions and login codes are credential
 material: they hold **hashes only**, and they must never be added to the
@@ -98,9 +105,9 @@ from a `counters` collection via atomic `findOneAndUpdate {$inc}`.
 
 Collections (all uniquely indexed on `company_id` + their key):
 `companies`, `ledger`, `events`, `memory_traces`, `memory_tasks`,
-`context_chunks`, `secrets`, plus `counters` and `owners`; and the WS3
-console-surface collections `tasks`, `workspace`, `facts`, `usage`, `skills`,
-and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
+`context_chunks`, `secrets`, `journal` and `journal_imports`, plus `counters`
+and `owners`; and the WS3 console-surface collections `tasks`, `workspace`,
+`facts`, `usage`, `skills`, and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
 on each `record` (see [`UsageMeter`](ports-console.md#usagemeter)).
 
 ### Multi-tenant isolation (two layers)

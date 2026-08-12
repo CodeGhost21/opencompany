@@ -76,7 +76,8 @@ pub mod tinycortex_engine;
 pub mod conformance;
 
 pub use fs::{
-    FsCompanyStore, FsContextStore, FsEventLog, FsInboxStore, FsMemoryStore, FsSecretStore,
+    FsCompanyStore, FsContextStore, FsEventLog, FsInboxStore, FsJournalStore, FsMemoryStore,
+    FsSecretStore,
 };
 pub use fs_ops::FsOps;
 pub use layout::DataLayout;
