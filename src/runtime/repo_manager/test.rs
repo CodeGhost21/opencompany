@@ -74,11 +74,25 @@ impl MemSecrets {
     }
 }
 
+/// One `create_pull_request` call, recorded so a test can assert what was sent.
+#[derive(Clone, Debug)]
+struct CreatedPr {
+    head: String,
+    base: String,
+    title: String,
+    body: String,
+}
+
 /// A forge that answers from a script, and records the token it was handed.
 struct FakeHost {
     meta: RepoMeta,
     seen_tokens: StdMutex<Vec<String>>,
     fail: bool,
+    /// When set, `create_pull_request` errors — for the honest-degradation test
+    /// where a push succeeds but the PR does not open (issue #736).
+    fail_pr: bool,
+    /// Every `create_pull_request` call, in order.
+    created_prs: StdMutex<Vec<CreatedPr>>,
 }
 
 impl FakeHost {
@@ -93,6 +107,8 @@ impl FakeHost {
             },
             seen_tokens: StdMutex::new(Vec::new()),
             fail: false,
+            fail_pr: false,
+            created_prs: StdMutex::new(Vec::new()),
         }
     }
 
@@ -107,6 +123,12 @@ impl FakeHost {
     /// push-capable.
     fn pushable(mut self) -> Self {
         self.meta.can_push = true;
+        self
+    }
+
+    /// A forge that accepts a push but refuses to open the pull request.
+    fn failing_pr(mut self) -> Self {
+        self.fail_pr = true;
         self
     }
 }
@@ -135,6 +157,33 @@ impl RepoHost for FakeHost {
             head_sha: "cafe".into(),
             base_ref: "main".into(),
             diff: "--- a\n+++ b\n".into(),
+        })
+    }
+
+    async fn create_pull_request(
+        &self,
+        _coords: &RepoCoordinates,
+        token: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PullRequestRef> {
+        self.seen_tokens.lock().unwrap().push(token.to_string());
+        if self.fail_pr {
+            return Err(OpenCompanyError::Store(
+                "the forge refused the pull request".into(),
+            ));
+        }
+        self.created_prs.lock().unwrap().push(CreatedPr {
+            head: head.to_string(),
+            base: base.to_string(),
+            title: title.to_string(),
+            body: body.to_string(),
+        });
+        Ok(PullRequestRef {
+            number: 42,
+            html_url: "https://github.com/acme/fixture/pull/42".into(),
         })
     }
 }
@@ -1222,6 +1271,110 @@ async fn a_publish_pushes_the_approved_commit_even_after_a_restage() {
         remote, head_a,
         "the approved commit reached the remote, not the re-staged one"
     );
+}
+
+// -- pull-request creation (issue #736) --------------------------------------
+
+/// A manager with a push-capable binding: `bind_local` records no capability, so
+/// a `pushable` host + a fetch heals it to `Some(true)`, the state
+/// `open_pull_request` requires.
+async fn pushable_bound(scratch: &Scratch, host: Arc<FakeHost>) -> RepoManager {
+    let url = fixture_remote(scratch);
+    let (mgr, secrets) = manager(scratch);
+    let mgr = mgr.with_host(host);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+    // Heals can_push from None to Some(true) via the pushable host.
+    mgr.fetch("fixture", &[]).await.unwrap();
+    mgr
+}
+
+/// A PR is opened from the published branch into the repository's **default**
+/// branch, carrying the title and body the caller built.
+#[tokio::test]
+async fn open_pull_request_targets_the_default_branch_with_the_given_body() {
+    let scratch = Scratch::new("open-pr");
+    let host = Arc::new(FakeHost::new(1).pushable());
+    let mgr = pushable_bound(&scratch, host.clone()).await;
+
+    let pr = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "the fix", "body with #card-1")
+        .await
+        .unwrap();
+    assert_eq!(pr.number, 42);
+
+    let created = host.created_prs.lock().unwrap();
+    assert_eq!(created.len(), 1);
+    assert_eq!(created[0].head, "oc/acme/card-1");
+    assert_eq!(
+        created[0].base, "main",
+        "the base is the repository's default branch"
+    );
+    assert_eq!(created[0].title, "the fix");
+    assert!(created[0].body.contains("#card-1"));
+}
+
+/// With no forge client wired, opening a PR is honestly unavailable rather than a
+/// silent success — the shape `pull_request` already uses.
+#[tokio::test]
+async fn open_pull_request_without_a_forge_client_says_so() {
+    let scratch = Scratch::new("open-pr-unwired");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    let err = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "t", "b")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OpenCompanyError::Unimplemented(_)), "{err:?}");
+}
+
+/// A read-only binding is refused — PR creation rides the same push-capable
+/// credential the publish did.
+#[tokio::test]
+async fn open_pull_request_refuses_a_read_only_binding() {
+    let scratch = Scratch::new("open-pr-readonly");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+    // A read-only host: bind_local leaves can_push None, and nothing heals it.
+    let mgr = mgr.with_host(Arc::new(FakeHost::new(1)));
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    let err = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "t", "b")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, OpenCompanyError::InvalidRequest(_)),
+        "a read-only binding must be refused: {err:?}"
+    );
+}
+
+/// When the forge accepts the push but refuses the PR, `open_pull_request`
+/// returns the error — the caller (`perform_effect`) is what keeps that from
+/// failing the whole publish, reporting it on the task instead.
+#[tokio::test]
+async fn open_pull_request_surfaces_a_forge_refusal() {
+    let scratch = Scratch::new("open-pr-fail");
+    let host = Arc::new(FakeHost::new(1).pushable().failing_pr());
+    let mgr = pushable_bound(&scratch, host).await;
+    let err = mgr
+        .open_pull_request("fixture", "oc/acme/card-1", "t", "b")
+        .await
+        .unwrap_err();
+    assert!(matches!(err, OpenCompanyError::Store(_)), "{err:?}");
 }
 
 // -- index -------------------------------------------------------------------

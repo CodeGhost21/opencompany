@@ -22,7 +22,9 @@ use async_trait::async_trait;
 use super::*;
 use crate::ports::SecretStore;
 use crate::ports::types::{CompanyId, SecretValue};
-use crate::runtime::repo_manager::types::{PullRequestView, RepoCoordinates, RepoHost, RepoMeta};
+use crate::runtime::repo_manager::types::{
+    PullRequestRef, PullRequestView, RepoCoordinates, RepoHost, RepoMeta,
+};
 
 /// A scratch directory removed when the test ends.
 struct Scratch(PathBuf);
@@ -107,6 +109,21 @@ impl RepoHost for ScriptedHost {
             head_sha: "cafebabe".into(),
             base_ref: "main".into(),
             diff: self.diff.clone(),
+        })
+    }
+
+    async fn create_pull_request(
+        &self,
+        _coords: &RepoCoordinates,
+        _token: &str,
+        _head: &str,
+        _base: &str,
+        _title: &str,
+        _body: &str,
+    ) -> crate::Result<PullRequestRef> {
+        Ok(PullRequestRef {
+            number: 7,
+            html_url: "https://github.com/acme/fixture/pull/7".into(),
         })
     }
 }
