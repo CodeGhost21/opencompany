@@ -1913,6 +1913,8 @@ impl<'a> CycleHostImpl<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -2007,6 +2009,8 @@ impl<'a> CycleHostImpl<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -2510,6 +2514,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -2569,6 +2575,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -5571,6 +5579,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -5641,6 +5651,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await

@@ -410,6 +410,8 @@ fn card(id: &str) -> TaskRecord {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 

@@ -713,6 +713,8 @@ async fn steer_task_validates_statuses_and_journals_acceptance() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -4160,6 +4162,8 @@ async fn task_detail_assembles_timeline_and_lineage() {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
     for t in [
         card("t-parent", "Parent", None),
@@ -4347,6 +4351,8 @@ fn discussion_card(id: &str, title: &str) -> TaskRecord {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 
@@ -5012,6 +5018,8 @@ async fn task_export_serves_a_readable_document_and_alters_nothing() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -5129,6 +5137,8 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -5232,6 +5242,8 @@ async fn dispatched_task(
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -5688,6 +5700,8 @@ async fn a_second_task_in_the_same_window_does_not_absorb_the_first_s_approvals(
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await
@@ -6972,6 +6986,8 @@ async fn seed_proposal_card(state: &AppState, ops: Value) -> String {
             generated_at_millis: 1,
             run_id: "run-build-1".to_string(),
         }),
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
     runtime
         .tasks()
