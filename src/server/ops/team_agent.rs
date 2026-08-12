@@ -62,7 +62,8 @@
 //! save.
 
 use axum::Json;
-use axum::extract::Path;
+use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{self, MethodRouter};
 use serde::{Deserialize, Serialize};
@@ -76,6 +77,7 @@ use crate::server::error::ApiError;
 use crate::server::ops::ScopedCompany;
 use crate::server::ops::language;
 use crate::server::ops::team::{AgentPath, daily_spend_samples, double_option};
+use crate::server::users::admin::require_admin;
 
 /// The `{scope}/team/{agent_id}` fragment: read one agent, edit one agent.
 ///
@@ -100,7 +102,17 @@ pub(super) enum AgentSource {
 
 /// The fields a `PATCH` accepts for an overlay teammate. Sent to the console so
 /// it renders the same rule the host enforces.
-const OVERLAY_EDITABLE: [&str; 3] = ["name", "role", "description"];
+const OVERLAY_EDITABLE: [&str; 4] = ["name", "role", "description", "tools"];
+
+/// The subset a **non-admin** member may `PATCH` (issue #619).
+///
+/// `tools` is admin-only because an empty list means "the company's standard
+/// grant", which makes a `tools` edit a potential *widening* — see
+/// [`edit_agent`]. The list is actor-dependent for the reason the module note
+/// gives: a console renders a field read-only exactly when the host says it is,
+/// so offering `tools` to a member who would meet a `403` on save is precisely
+/// the drift `editable` exists to remove.
+const OVERLAY_EDITABLE_MEMBER: [&str; 3] = ["name", "role", "description"];
 
 /// One agent, in full — everything #264 lists as unreachable.
 #[derive(Debug, Serialize)]
@@ -289,33 +301,88 @@ pub(super) struct EditAgent {
     role: Option<String>,
     #[serde(default, deserialize_with = "double_option")]
     description: Option<Option<String>>,
+    /// The teammate's tool scope (issue #619). Absent leaves it alone; an
+    /// **empty array** is the deliberate way back to the company's standard
+    /// grant, which is why this is a plain `Option` and not a double option —
+    /// `[]` already spells "clear it" without needing `null` to mean something
+    /// different from omission.
+    ///
+    /// #661 made a teammate scopable at *creation* (`POST …/team` and
+    /// `add_agent`). This is the half that was missing: narrowing one that
+    /// already exists, without deleting and recreating it — which would orphan
+    /// its workspace folder, budget row, desk memberships and inbox.
+    #[serde(default)]
+    tools: Option<Vec<String>>,
 }
 
 /// `GET {scope}/team/{agent_id}` — one agent, read.
 async fn agent_detail(
     company: ScopedCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Path(AgentPath { agent_id }): Path<AgentPath>,
 ) -> Result<Json<AgentDetailDto>, ApiError> {
+    // Only to decide what `editable` may claim — the read itself is open to any
+    // member, unchanged. A principal this cannot resolve reads as not-admin,
+    // which is fail-closed in the right direction: it under-claims what the
+    // caller may edit rather than over-claiming it.
+    let is_admin = is_admin_actor(&headers, &state, &company).await;
     let record = company
         .runtime
         .store()
         .load(company.id())
         .await?
         .ok_or_else(|| OpenCompanyError::CompanyNotFound(company.id().to_string()))?;
-    detail(&company, &record, &agent_id).await
+    detail(&company, &record, &agent_id, is_admin).await
 }
 
 /// `PATCH {scope}/team/{agent_id}` — edit an overlay teammate.
 ///
 /// Refuses a manifest teammate with a `409` naming where the edit belongs, and
-/// an unknown id with a `404`. Open to any signed-in member, matching `POST
-/// …/team`: defining a teammate was never admin-only, so correcting one it
-/// defined is not either. Setting a *budget* still is, on its own route.
+/// an unknown id with a `404`. `name`, `role` and `description` are open to any
+/// signed-in member, matching `POST …/team`: defining a teammate was never
+/// admin-only, so correcting one it defined is not either.
+///
+/// # Why `tools` is the exception (issue #619)
+///
+/// That reasoning covers what a teammate *is*. It does not cover what a
+/// teammate may *do*, and a tool grant is the second thing — the
+/// [`AdminScopedCompany`](super::AdminScopedCompany) axis: a write that settles
+/// something *on behalf of* the company rather than one a member makes for
+/// themselves.
+///
+/// The sharp edge is that **an empty `tools` list means "inherit the company's
+/// standard grant"** — the widest grant the company has. So `{"tools": []}` is
+/// not a small edit, it is a *widening*, and left member-open it would let any
+/// signed-in member hand a deliberately-scoped teammate the company's whole
+/// grant back. That is the exact inversion this field was added to prevent, and
+/// `add_agent` already refuses its own version of it (a narrowing that lands
+/// empty is a hard error there, never a stored empty list).
+///
+/// So the admin check is **conditional on the field being present**, in the
+/// same shape and for the same reason as the cap on
+/// [`add_member`](super::team): a member who edits a name or a role keeps
+/// working exactly as before, and adding this field must not quietly take an
+/// existing capability away from members.
+///
+/// Narrow-only-for-members was considered and rejected: it makes the scope a
+/// one-way ratchet, so a teammate scoped too tightly could never be loosened by
+/// anyone, and the only way back would be delete-and-recreate — which orphans
+/// the workspace folder, budget row, desk memberships and inbox this route
+/// exists to preserve.
 async fn edit_agent(
     company: ScopedCompany,
+    State(state): State<AppState>,
+    headers: HeaderMap,
     Path(AgentPath { agent_id }): Path<AgentPath>,
     Json(body): Json<EditAgent>,
 ) -> Result<Json<AgentDetailDto>, Response> {
+    // Authority before the write lock: a refused edit must not hold the lock,
+    // and must not have looked at the record either.
+    if body.tools.is_some() {
+        require_admin(&headers, &state, &company.runtime).await?;
+    }
+
     // Serialize with every other write to `overlay_agents`, so a console edit
     // and a concurrent `add_agent` cannot clobber one another's roster.
     let write_lock = company_write_lock(company.id());
@@ -348,6 +415,11 @@ async fn edit_agent(
 
     let name = trimmed_field(body.name.as_deref(), "name").map_err(|e| e.into_response())?;
     let role = trimmed_field(body.role.as_deref(), "role").map_err(|e| e.into_response())?;
+    let tools = body
+        .tools
+        .map(|globs| trimmed_globs(&globs))
+        .transpose()
+        .map_err(|e| e.into_response())?;
 
     {
         let agent = record
@@ -369,6 +441,15 @@ async fn edit_agent(
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty());
         }
+        // Issue #619: stored verbatim, exactly like a manifest `[[agent]].tools`
+        // line. The company `allow` ceiling is applied at *read* time by
+        // `agent_effective_grants`, so a glob the company does not cover is
+        // surfaced as asked-for-but-not-granted rather than silently dropped
+        // here — and this route can only ever narrow a teammate within a grant
+        // the company already made.
+        if let Some(tools) = tools {
+            agent.tools = tools;
+        }
     }
 
     company
@@ -378,7 +459,11 @@ async fn edit_agent(
         .await
         .map_err(|e| ApiError(e).into_response())?;
 
-    detail(&company, &record, &agent_id)
+    // The caller either passed `require_admin` above or sent no `tools`, so
+    // re-resolve rather than assume: an admin editing only a name must still
+    // read back `tools` as editable.
+    let is_admin = is_admin_actor(&headers, &state, &company).await;
+    detail(&company, &record, &agent_id, is_admin)
         .await
         .map_err(|e| e.into_response())
 }
@@ -408,12 +493,54 @@ fn trimmed_field(value: Option<&str>, field: &str) -> Result<Option<String>, Api
     Ok(Some(trimmed.to_string()))
 }
 
+/// Trims a submitted tool-scope list, refusing a blank entry and dropping
+/// duplicates (issue #619).
+///
+/// A blank glob is a `400` rather than a stored empty string for a sharper
+/// reason than tidiness: `""` matches nothing an operator meant, so it would
+/// read as a scope that grants nothing while looking like a scope that was set.
+/// Duplicates are dropped rather than refused — a repeated glob is harmless and
+/// the resolved grant list is de-duplicated downstream anyway.
+///
+/// Same `ApiError`-not-`Response` return shape as [`trimmed_field`], for the
+/// reason given there.
+fn trimmed_globs(globs: &[String]) -> Result<Vec<String>, ApiError> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::with_capacity(globs.len());
+    for glob in globs {
+        let trimmed = glob.trim();
+        if trimmed.is_empty() {
+            return Err(ApiError(OpenCompanyError::InvalidRequest(
+                "a tool grant can't be empty. Send an empty list to give this teammate the company's standard grant.".to_string(),
+            )));
+        }
+        if seen.insert(trimmed.to_string()) {
+            out.push(trimmed.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Whether the signed-in caller may administer this company — the question
+/// [`OVERLAY_EDITABLE`] keys off, asked without refusing.
+///
+/// [`require_admin`] is the enforcement path and returns a `Response` on
+/// failure, which is right for a write and wrong for a read that must still
+/// succeed for a member. This answers the same question through the same
+/// `may_administer` predicate, so the two cannot drift.
+async fn is_admin_actor(headers: &HeaderMap, state: &AppState, company: &ScopedCompany) -> bool {
+    crate::server::users::routes::current_user(headers, state, company.id())
+        .await
+        .is_some_and(|user| user.may_administer())
+}
+
 /// Builds one agent's detail from the loaded record, or 404s when the id names
 /// nobody on the roster.
 async fn detail(
     company: &ScopedCompany,
     record: &CompanyRecord,
     agent_id: &str,
+    is_admin: bool,
 ) -> Result<Json<AgentDetailDto>, ApiError> {
     let manifest_agent = record.manifest.agents.iter().find(|a| a.id == agent_id);
     let overlay_agent = record.overlay_agents.iter().find(|a| a.id == agent_id);
@@ -466,9 +593,10 @@ async fn detail(
         role,
         description,
         source,
-        editable: match source {
-            AgentSource::Overlay => OVERLAY_EDITABLE.to_vec(),
-            AgentSource::Manifest => Vec::new(),
+        editable: match (source, is_admin) {
+            (AgentSource::Overlay, true) => OVERLAY_EDITABLE.to_vec(),
+            (AgentSource::Overlay, false) => OVERLAY_EDITABLE_MEMBER.to_vec(),
+            (AgentSource::Manifest, _) => Vec::new(),
         },
         tier: declared_tier(record, agent_id),
         is_orchestrator: is_orchestrator(record, agent_id),
@@ -704,6 +832,39 @@ members = ["writer", "ceo"]
             Some(body),
         )
         .await
+    }
+
+    /// Drives the route as a specific principal. The harness signs every other
+    /// request in as an admin, which is exactly why this exists: an
+    /// authority check verified only as an admin passes identically against no
+    /// check at all.
+    async fn send_as(
+        state: &AppState,
+        method: &str,
+        uri: &str,
+        body: Option<Value>,
+        cookie: String,
+    ) -> (StatusCode, Value) {
+        let builder = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("cookie", cookie);
+        let request = match &body {
+            Some(value) => builder
+                .header("content-type", "application/json")
+                .body(Body::from(serde_json::to_vec(value).unwrap()))
+                .unwrap(),
+            None => builder.body(Body::empty()).unwrap(),
+        };
+        let response = router(state.clone()).oneshot(request).await.unwrap();
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let value = if bytes.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_slice(&bytes).unwrap_or(Value::Null)
+        };
+        (status, value)
     }
 
     /// Adds a teammate through the console's own route and returns its id.
@@ -1122,9 +1283,223 @@ members = ["writer", "ceo"]
         let (_, agent) = get_agent(&state, &jamie).await;
         assert_eq!(
             strings(&agent["editable"]),
-            vec!["name", "role", "description"],
+            vec!["name", "role", "description", "tools"],
             "{agent}"
         );
+    }
+
+    /// Issue #619: a teammate can be narrowed **after** it exists, not only at
+    /// creation.
+    ///
+    /// #661 made the scope writable on `POST …/team` and through `add_agent`.
+    /// This is the half that was missing — without it, correcting a teammate's
+    /// grant means deleting and recreating it, which orphans its workspace
+    /// folder, budget row, desk memberships and inbox.
+    ///
+    /// The three levels are asserted separately on purpose: `requested` proves
+    /// the scope was stored, `effective` proves it reached the function the
+    /// harness builds the agent with, and the untouched company `allow` proves
+    /// the narrowing is per-teammate rather than a company-wide edit.
+    #[tokio::test]
+    async fn an_overlay_teammate_can_be_scoped_after_creation() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (_, before) = get_agent(&state, &jamie).await;
+        assert!(
+            strings(&before["tools"]["requested"]).is_empty(),
+            "unscoped to begin with: {before}"
+        );
+        assert_eq!(
+            strings(&before["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "which resolves to everything the company allows: {before}"
+        );
+
+        let (status, scoped) = patch_agent(&state, &jamie, json!({"tools": ["workspace"]})).await;
+        assert_eq!(status, StatusCode::OK, "{scoped}");
+        assert_eq!(
+            strings(&scoped["tools"]["requested"]),
+            vec!["workspace"],
+            "{scoped}"
+        );
+        assert_eq!(
+            strings(&scoped["tools"]["effective"]),
+            vec!["workspace"],
+            "and it is narrower than the company grant, which is the point: {scoped}"
+        );
+        assert_eq!(
+            strings(&scoped["tools"]["companyAllow"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "the company ceiling is untouched — this scoped one teammate: {scoped}"
+        );
+
+        // Read back through a fresh request, so this is the stored record and
+        // not the handler's own answer.
+        let (_, reread) = get_agent(&state, &jamie).await;
+        assert_eq!(
+            strings(&reread["tools"]["requested"]),
+            vec!["workspace"],
+            "{reread}"
+        );
+
+        // An empty list is the deliberate way back to the standard grant, and
+        // must read as "inherits everything" rather than "holds nothing".
+        let (status, cleared) = patch_agent(&state, &jamie, json!({"tools": []})).await;
+        assert_eq!(status, StatusCode::OK, "{cleared}");
+        assert!(
+            strings(&cleared["tools"]["requested"]).is_empty(),
+            "{cleared}"
+        );
+        assert_eq!(
+            strings(&cleared["tools"]["effective"]),
+            vec!["workspace", "workspace.*", "composio"],
+            "{cleared}"
+        );
+    }
+
+    /// **The review finding (#745).** A member must not be able to widen a
+    /// teammate's scope — and because an empty list means "the company's
+    /// standard grant", `{"tools": []}` is the widest possible widening.
+    ///
+    /// This is #619's own defect reachable through the route added to fix it:
+    /// `add_agent` refuses a narrowing that lands empty precisely because an
+    /// empty list inherits everything, and leaving `edit_agent` member-open
+    /// would have let any signed-in member undo any scoping with one call.
+    ///
+    /// The two-account shape is the point: the harness signs every other
+    /// request in as an admin, so a check verified only as an admin passes
+    /// identically against no check at all.
+    #[tokio::test]
+    async fn a_member_cannot_widen_a_teammates_scope() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        // Scoped by an admin.
+        let (status, _) = patch_agent(&state, &jamie, json!({"tools": ["workspace"]})).await;
+        assert_eq!(status, StatusCode::OK);
+
+        let uri = format!("/api/v1/company/team/{jamie}");
+        let member = || crate::server::test_support::member_cookie("acme");
+
+        // The widening a member must not be able to perform.
+        let (status, refusal) =
+            send_as(&state, "PATCH", &uri, Some(json!({"tools": []})), member()).await;
+        assert_eq!(
+            status,
+            StatusCode::FORBIDDEN,
+            "an empty list is the company's whole grant: {refusal}"
+        );
+
+        // …and neither may a member set a different scope at all.
+        let (status, _) = send_as(
+            &state,
+            "PATCH",
+            &uri,
+            Some(json!({"tools": ["composio"]})),
+            member(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+
+        // Nothing was written by either attempt.
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert_eq!(
+            strings(&unchanged["tools"]["requested"]),
+            vec!["workspace"],
+            "the scope an admin set must survive both refusals: {unchanged}"
+        );
+    }
+
+    /// The conditional check must not take an existing capability away: a
+    /// member editing a name or a role keeps working exactly as before, which
+    /// is the same rule `POST …/team` applies to its budget cap.
+    #[tokio::test]
+    async fn a_member_may_still_edit_a_teammates_name_and_role() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, edited) = send_as(
+            &state,
+            "PATCH",
+            &format!("/api/v1/company/team/{jamie}"),
+            Some(json!({"name": "Jamie R", "role": "Head of Growth"})),
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{edited}");
+        assert_eq!(edited["name"], "Jamie R", "{edited}");
+        assert_eq!(edited["role"], "Head of Growth", "{edited}");
+    }
+
+    /// `editable` is the host stating the rule so the console does not
+    /// re-derive it. It therefore has to answer per **actor**, or a member is
+    /// offered a `tools` field whose save is a `403` — the drift this list
+    /// exists to remove.
+    #[tokio::test]
+    async fn editable_names_tools_only_for_an_admin() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        crate::server::test_support::seed_fixed_member(&state, "acme").await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (_, as_admin) = get_agent(&state, &jamie).await;
+        assert_eq!(
+            strings(&as_admin["editable"]),
+            vec!["name", "role", "description", "tools"],
+            "{as_admin}"
+        );
+
+        let (_, as_member) = send_as(
+            &state,
+            "GET",
+            &format!("/api/v1/company/team/{jamie}"),
+            None,
+            crate::server::test_support::member_cookie("acme"),
+        )
+        .await;
+        assert_eq!(
+            strings(&as_member["editable"]),
+            vec!["name", "role", "description"],
+            "a member is not offered a field they cannot save: {as_member}"
+        );
+    }
+
+    /// A blank glob is refused rather than stored: `""` matches nothing an
+    /// operator meant, so it would read as a scope that grants nothing while
+    /// looking like a scope that was set.
+    #[tokio::test]
+    async fn a_blank_tool_glob_is_refused() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+        let jamie = add_overlay(&state, "Jamie", "Growth").await;
+
+        let (status, refusal) =
+            patch_agent(&state, &jamie, json!({"tools": ["workspace", "  "]})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{refusal}");
+
+        let (_, unchanged) = get_agent(&state, &jamie).await;
+        assert!(
+            strings(&unchanged["tools"]["requested"]).is_empty(),
+            "and nothing was written: {unchanged}"
+        );
+    }
+
+    /// A manifest teammate's tool line lives in the version-controlled
+    /// blueprint, and #619 did not move it: the overlay half became editable,
+    /// the manifest half stayed a `409`.
+    #[tokio::test]
+    async fn a_manifest_teammates_tools_are_still_not_editable_here() {
+        let home_dir = home();
+        let state = state_with_manifest(home_dir.path(), ROSTER).await;
+
+        let (status, refusal) = patch_agent(&state, "ceo", json!({"tools": ["workspace"]})).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
     }
 
     /// A blank name would render a card with no way back to it, so it is a

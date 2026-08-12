@@ -1690,6 +1690,50 @@ mod tests {
                 .await,
             ToolPolicyDecision::Allow
         );
+
+        // The fence near-miss, pinned where the answer is stable.
+        //
+        // `payroll.export` is what the shared matcher tests call the near-miss:
+        // sharing `payment`'s first four letters is not the same capability, so
+        // the operator list names it nowhere and must not gate it. All three
+        // statements are asserted because the two paths legitimately differ on
+        // the last of them:
+        //
+        // * the *matcher* — the part both paths actually share — does not gate
+        //   it;
+        // * the gate, effect-level and mode-driven, hands `full` the Allow this
+        //   fence implies;
+        // * the harness instead parks it, because #338's per-call judgement
+        //   fail-closes an undeclared non-read call — a layer the effect gate
+        //   does not have, and the reason the near-miss cannot live inside the
+        //   agreement loop above.
+        let fence_list: Vec<String> = fence.iter().map(|s| s.to_string()).collect();
+        assert!(
+            !crate::policy::always_approve::matches(&fence_list, "payroll.export"),
+            "the operator list must not gate the leading-segment near-miss"
+        );
+        assert!(matches!(
+            harness
+                .check(&request("payroll.export", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        let near_miss_effect = Effect {
+            kind: "payroll.export".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        assert_eq!(
+            gate.evaluate(&CompanyId::new("acme"), &near_miss_effect)
+                .await
+                .unwrap(),
+            PolicyDecision::Allow
+        );
     }
 
     /// Issue #560's contract, stated as the operator reads it: the agent works
