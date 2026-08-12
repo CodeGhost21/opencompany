@@ -20,6 +20,69 @@ The cost is that no root `cargo` invocation reaches the desktop, including
 and tests it; without that lane the crate would be compiled by nothing, which is
 [issue #475](https://github.com/tinyhumansai/opencompany/issues/475)'s shape.
 
+There is a second Tauri crate in the tree — `frontend/src-tauri/`, the console's
+wrapper — and it is an independent workspace with its own `Cargo.lock` for the
+same reason this one is separate: OpenHuman's vendored dependencies own nested
+workspaces, which Cargo cannot resolve beneath another workspace root.
+
+Which one a `tauri` invocation picks up is decided by the working directory, and
+not the way most people expect: **the CLI searches subfolders of the working
+directory, not ancestors.** From `frontend/` it finds the wrapper; from the
+repository root or from `src-tauri/` it finds this one. That is worth knowing
+before reading a build failure, because the two apps share a `productName`.
+
+## Packaging is a claim the lane has to make
+
+Compiling and packaging are different claims. `cargo fmt`, `cargo clippy` and
+`cargo test` drive `cargo` directly; none of them reads `tauri.conf.json`, so a
+lane built from those three can be green over an app that cannot be assembled at
+all. That is what happened: `beforeBuildCommand` named a path that escaped the
+repository, `cargo tauri build` and `cargo tauri dev` failed on their first step
+for every developer, and the `Desktop` lane never noticed because it builds the
+console itself with `working-directory: frontend` and then calls `cargo`.
+
+The `Package` steps close that. They run the real CLI —
+`tauri build --debug --no-bundle` — so the config is executed rather than merely
+committed. `--debug` because the `Test` step already compiled that graph in the
+dev profile and a release build would recompile the host for no extra claim;
+`--no-bundle` because the failure being gated happens at the first step of
+`tauri build`, long before a `.deb` exists.
+
+There are two of them, from the repository root and from `src-tauri/`, because
+one would gate half the failure class — see the table below. Which half depends
+on which directory it ran in, which is the least useful property a gate can
+have.
+
+### The hook's working directory is not where you think
+
+`frontendDist` is resolved relative to `src-tauri/`. `beforeBuildCommand` is
+**not** — Tauri runs it from the app directory, and which directory that is
+depends on where the CLI was invoked:
+
+| invoked from | hook runs in    |
+| ------------ | --------------- |
+| repo root    | `<repo>/frontend` |
+| `src-tauri/` | `<repo>`        |
+
+So no relative prefix is correct for both, and each one passes in exactly the
+directory that hides it:
+
+| hook value      | from repo root | from `src-tauri/` |
+| --------------- | -------------- | ----------------- |
+| `../frontend`   | passes         | **fails** — what shipped |
+| `frontend`      | **fails**      | passes            |
+| resolved below  | passes         | passes            |
+
+The hook therefore resolves its own path and depends on no working directory:
+
+```json
+"beforeBuildCommand": "npm --prefix \"$(git rev-parse --show-toplevel)/frontend\" run build"
+```
+
+The cost is a POSIX shell and a git checkout, which is what every lane and every
+developer has. A Windows `cmd` host would not expand it; when the desktop grows a
+Windows runner, that is the line to revisit.
+
 ## N connections, and no active one
 
 `frontend/src/connections/registry.ts` holds a map of connections and
@@ -103,6 +166,34 @@ The desktop routes through Rust for three reasons, in the order they bite:
 compares, because the console's error handling reads the status, the body and a
 response header — a transport that differed in any of them would produce
 different `ApiError`s on the desktop for the same server behaviour.
+
+### One reader of `window.__TAURI__`
+
+`app.withGlobalTauri` assigns that global the whole `@tauri-apps/api` bundle, and
+**v2 namespaces it by module**: the keys are `app`, `core`, `dpi`, `event`,
+`image`, `menu`, `path`, `tray`, `webview`, `webviewWindow` and `window`, and
+`invoke` and `Channel` are under `core`. The bare `__TAURI__.invoke` is the v1
+shape and reads `undefined`.
+
+`frontend/src/api/transport/bridge.ts` is the only file that touches the global.
+Before [#616](https://github.com/tinyhumansai/opencompany/issues/616) two
+transports read it separately and both read the v1 shape, so `bridge()` resolved
+to `null`, `oc_connect` never ran, no connection was registered and the console
+reported an unreachable host — a network-shaped symptom for a bug that never
+opened a socket.
+
+The unit tests could not catch it, because they asserted the same wrong shape:
+every mock hand-wrote `{ invoke, Channel }` at the top level, and 82 desktop
+tests passed against a fixture the runtime never produces. So
+`test/unit/desktop-bridge.test.ts` now reads the shape off `@tauri-apps/api`
+itself and asserts the v1 form is **refused** — a mock is evidence only if
+something ties it to the real thing.
+
+`isDesktopRuntime()` still probes for presence alone, deliberately: a `__TAURI__`
+whose `core.invoke` does not resolve is a broken desktop rather than a browser,
+and `ProxyTransport` throwing "the desktop bridge is unavailable" names that,
+where falling back to `BrowserTransport` would bury it in a CORS failure against
+every host.
 
 ### Registration precedes traffic
 
