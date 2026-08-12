@@ -64,6 +64,44 @@ impl DataLayout {
         self.companies_dir().join(slug).join("repos")
     }
 
+    /// One agent's shell audit sink (`companies/<slug>/audit/<agent_id>/`).
+    ///
+    /// **Host-owned, not part of the fs bundle**, exactly like
+    /// [`company_repos_dir`](Self::company_repos_dir): it shares the
+    /// `companies/<slug>/` prefix so a company's whole footprint stays in one
+    /// subtree, but nothing in the fs store creates or reads it — and on a
+    /// mongodb tenant the bundle directory has no other reason to exist, so
+    /// whoever opens the sink must create its own parents rather than assume a
+    /// bundle put them there.
+    ///
+    /// It is deliberately **outside** any agent workspace
+    /// (`harness/<company>/<agent>/workspace`), which is also the
+    /// `workspace_only` `SecurityPolicy` root the file tools enforce. While the
+    /// sink lived inside that root, rewriting the record of an agent's own
+    /// commands was a *policy-permitted* write through its ordinary file tools,
+    /// not merely something `shell` could reach (issue #775). Moving it here
+    /// turns those writes from permitted into refused.
+    ///
+    /// **One directory per agent, not one shared directory per company.**
+    /// OpenHuman's `get_or_create_workspace_audit_logger` caches one logger per
+    /// *directory* and the first caller's config wins, so a shared directory
+    /// with per-agent file names would silently hand the second agent the first
+    /// agent's log file.
+    ///
+    /// This is not tamper-evidence. Everything in the tenant is one uid and one
+    /// process, so a deliberate shell command against this path still succeeds;
+    /// see `docs/spec/security/agent-isolation.md`.
+    ///
+    /// Nothing extra is needed to keep it inside the soft quota:
+    /// [`usage_bytes`](Self::usage_bytes) already sums every regular file under
+    /// the root, and this hangs off the root like everything else.
+    pub fn agent_audit_dir(&self, slug: &str, agent_id: &str) -> PathBuf {
+        self.companies_dir()
+            .join(slug)
+            .join("audit")
+            .join(agent_id)
+    }
+
     /// Instance-shared memory artifacts.
     pub fn memory_dir(&self) -> PathBuf {
         self.root.join("memory")
@@ -194,6 +232,35 @@ mod test {
             layout.company_repos_dir("acme"),
             Path::new("/data/companies/acme/repos"),
         );
+        assert_eq!(
+            layout.agent_audit_dir("acme", "ceo"),
+            Path::new("/data/companies/acme/audit/ceo"),
+        );
+    }
+
+    /// The whole point of issue #775: the audit sink must not be reachable from
+    /// the agent workspace subtree, which is the `workspace_only` policy root
+    /// the file tools sandbox to. Pinned as a *path* property here, and proven
+    /// against the real file tools in `crate::harness::audit`'s tests.
+    #[test]
+    fn the_audit_sink_is_outside_every_agent_workspace() {
+        let layout = DataLayout::new("/data");
+        let audit = layout.agent_audit_dir("acme", "ceo");
+        // The harness roots every agent workspace at `<root>/harness/...`.
+        let workspaces = Path::new("/data/harness");
+        assert!(
+            !audit.starts_with(workspaces),
+            "{} must not sit under the agent-workspace tree {}",
+            audit.display(),
+            workspaces.display(),
+        );
+        // Two agents in one company never share a directory — the vendored
+        // logger registry caches per directory with first-config-wins, so a
+        // shared directory would hand agent B agent A's file.
+        assert_ne!(
+            layout.agent_audit_dir("acme", "ceo"),
+            layout.agent_audit_dir("acme", "cto"),
+        );
     }
 
     #[tokio::test]
@@ -284,6 +351,33 @@ mod test {
             layout.usage_bytes().await.unwrap(),
             4096,
             "the repo mirror cache must be inside the measured root"
+        );
+
+        tokio::fs::remove_dir_all(&root).await.ok();
+    }
+
+    /// The shell audit sink joins the soft quota for free, for the same reason
+    /// the repo cache does — it hangs off the measured root. Asserted rather
+    /// than assumed: a sink that measured zero would let a runaway command loop
+    /// fill a tenant volume with the quota check reporting all clear.
+    #[tokio::test]
+    async fn usage_bytes_counts_the_agent_audit_sink() {
+        let root = scratch_root("audit-usage");
+        let layout = DataLayout::new(&root);
+        layout.ensure(true).await.unwrap();
+
+        let audit = layout.agent_audit_dir("acme", "ceo");
+        // `companies/<slug>/` does not exist yet on a mongodb tenant, so the
+        // sink creates its own parents. That is the case measured here.
+        tokio::fs::create_dir_all(&audit).await.unwrap();
+        tokio::fs::write(audit.join("audit.log"), vec![0u8; 2048])
+            .await
+            .unwrap();
+
+        assert_eq!(
+            layout.usage_bytes().await.unwrap(),
+            2048,
+            "the audit sink must be inside the measured root"
         );
 
         tokio::fs::remove_dir_all(&root).await.ok();
