@@ -4,9 +4,50 @@ on:
   push:
   pull_request:
 
+# Issue #770. Cancellation is scoped to NON-DEFAULT refs, and the asymmetry is
+# the whole point: on a PR branch a new push makes the previous run's answer
+# worthless, so killing it is right; on `main` a new merge makes the previous
+# run's answer the ONLY evidence that the merge before it was safe, so killing
+# it destroys the one check standing between a bad merge and every branch cut
+# afterwards.
+#
+# It had already stopped working. Of the last fourteen runs on `main`, twelve
+# were `cancelled` and one succeeded — merges were landing minutes apart against
+# a `Rust (openhuman, tinycortex)` lane that takes ~26 minutes, so each merge
+# killed its predecessor's verification before it could conclude. The honest
+# state of `main` across that stretch was neither known-good nor known-broken.
+# Nothing was red; the signal simply was not there. Verification thinned out
+# precisely when the merge rate made it most valuable, which is the property
+# that makes this worse than a lane that is merely slow.
+#
+# `format('refs/heads/{0}', …default_branch)` rather than a literal
+# `'refs/heads/main'`: the literal silently reverts to cancel-everything the day
+# the default branch is renamed, and it would do so without failing anything —
+# the same class of quietly-vacuous check this file exists to argue against.
+# Both triggers populate `github.event.repository`, so the expression resolves
+# on `push` and `pull_request` alike.
+#
+# PR runs are UNAFFECTED. A `pull_request` run's `github.ref` is
+# `refs/pull/<n>/merge`, never `refs/heads/<default>`, so the expression is true
+# there and stale runs still die on a new push.
+#
+# WHAT THIS DOES NOT BUY, stated plainly. Turning cancellation off does not give
+# every merge its own conclusive run: the group still admits at most one running
+# plus one pending run, and a newer arrival supersedes the older *pending* one.
+# So the tip always eventually gets a full run, but a fast burst of merges loses
+# individual attribution — a red run on the tip covers the union of merges since
+# the last conclusive one, and finding which merge did it is a bisect. That is
+# the deliberate trade: per-merge attribution costs a run per merge (a per-run
+# group keyed on `github.run_id`, roughly 10x the minutes), and the alternative
+# that is cheaper — an hourly scheduled run on `main` — tells you later and
+# attributes the breakage to nothing at all. The structurally correct answer is
+# a MERGE QUEUE, which verifies the exact merged state before it becomes `main`
+# and makes this question moot; it needs a `merge_group` trigger plus a
+# branch-protection change no PR can make, and with a 26–30 minute critical path
+# it either serialises merges to ~2/hour or has to batch. Tracked separately.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
 
 permissions:
   contents: read
