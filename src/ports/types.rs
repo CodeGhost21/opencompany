@@ -5075,6 +5075,71 @@ mod test {
         assert!(!out.contains("cancelled"), "{out}");
     }
 
+    /// Issue #661 (M5): a run's board rows round-trip, and a line written before
+    /// they existed still replays.
+    ///
+    /// Three claims, and the last two are what make this additive rather than a
+    /// migration: the rows survive the round trip in camelCase; a run that touched
+    /// no card serializes with **no `board` key at all**, so every already-written
+    /// journal line stays byte-identical; and a pre-#661 line decodes as empty
+    /// rather than failing to decode.
+    #[test]
+    fn workflow_run_finished_round_trips_board_rows() {
+        use crate::ports::workflow_runner::WorkflowBoardAction;
+
+        let event = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: vec![WorkflowRunBoardRow {
+                action: WorkflowBoardAction::Spawned,
+                task_id: Some("card-1".to_string()),
+                title: Some("Reply to the auditor".to_string()),
+                assignee: None,
+            }],
+        };
+        assert_eq!(round_trip(&event), event);
+        let out = serde_json::to_string(&event).expect("serialize");
+        assert!(out.contains("\"action\":\"spawned\""), "{out}");
+        assert!(out.contains("\"taskId\":\"card-1\""), "{out}");
+        // Absent rather than null on the arm that has nothing to say.
+        assert!(!out.contains("assignee"), "{out}");
+
+        // A run that touched no card is byte-unchanged from pre-#661.
+        let untouched = CompanyEvent::WorkflowRunFinished {
+            workflow_id: "digest".to_string(),
+            scheduled: true,
+            run_id: Some("run-1".to_string()),
+            deliveries: Vec::new(),
+            pending_approvals: Vec::new(),
+            error: None,
+            cancelled: false,
+            notices: Vec::new(),
+            board: Vec::new(),
+        };
+        let out = serde_json::to_string(&untouched).expect("serialize");
+        assert!(!out.contains("board"), "{out}");
+
+        // And a line written before the field existed replays as empty.
+        let legacy = serde_json::json!({
+            "kind": "WorkflowRunFinished",
+            "workflowId": "digest",
+            "scheduled": true,
+            "runId": "run-1"
+        });
+        let loaded: CompanyEvent =
+            serde_json::from_value(legacy).expect("a pre-#661 journal line replays");
+        let CompanyEvent::WorkflowRunFinished { board, .. } = loaded else {
+            panic!("expected a WorkflowRunFinished");
+        };
+        assert!(board.is_empty());
+    }
+
     /// Issue #383: a cancelled run round-trips, and is distinguishable from a
     /// failed one by more than the absence of an error.
     ///

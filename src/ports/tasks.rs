@@ -1315,6 +1315,47 @@ mod test {
         }
     }
 
+    /// Issue #661 (M5): the run reference round-trips as camelCase, and — the
+    /// part that matters — a card written before it existed still loads.
+    ///
+    /// The legacy half is the load-bearing one. All three backends persist a card
+    /// as an opaque JSON blob, so `#[serde(default)]` is the entire migration:
+    /// a board written yesterday must deserialize today with both ids `None`,
+    /// not fail to load. And a card that carries no run reference must serialize
+    /// **without the keys at all**, so every existing card's stored bytes are
+    /// unchanged rather than merely equivalent.
+    #[test]
+    fn a_run_reference_round_trips_and_is_absent_on_a_legacy_card() {
+        let mut card = plain_card();
+        card.origin_run_id = Some("run-9".to_string());
+        card.origin_workflow_id = Some("digest".to_string());
+
+        let json = serde_json::to_string(&card).expect("serialize");
+        assert!(json.contains("\"originRunId\":\"run-9\""), "{json}");
+        assert!(json.contains("\"originWorkflowId\":\"digest\""), "{json}");
+        let back: TaskRecord = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, card);
+
+        // A card with no run reference keeps the pre-#661 wire shape exactly.
+        let plain = plain_card();
+        let json = serde_json::to_string(&plain).expect("serialize");
+        assert!(!json.contains("originRunId"), "{json}");
+        assert!(!json.contains("originWorkflowId"), "{json}");
+
+        // And a payload written before the fields existed still loads.
+        let legacy = serde_json::json!({
+            "id": "t-legacy",
+            "title": "Older card",
+            "column": "todo",
+            "priority": "medium",
+            "assignee": "",
+            "updatedAtMillis": 3
+        });
+        let loaded: TaskRecord = serde_json::from_value(legacy).expect("a pre-#661 card loads");
+        assert_eq!(loaded.origin_run_id, None);
+        assert_eq!(loaded.origin_workflow_id, None);
+    }
+
     /// Issue #339: the whole stamp round-trips as camelCase, and — the part
     /// that matters — a card written before it existed still loads, with
     /// `None`. All three backends persist a card as an opaque JSON blob, so a

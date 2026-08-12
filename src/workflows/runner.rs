@@ -1342,6 +1342,54 @@ to = "done"
         );
     }
 
+    /// Issue #661 (M5): the **hard-abort** arm lists the board writes its nodes
+    /// already performed.
+    ///
+    /// A wedged run's future is dropped, so there is no outcome to read and every
+    /// other field of `cancelled_run` is empty as a claim about the run's
+    /// *result*. Its board rows are not a result — they record a card that is
+    /// already on the operator's board by the time this is reached. Emptying them
+    /// would leave a card that no run admits to opening.
+    ///
+    /// Unit-level rather than a wedged end-to-end run on purpose: reaching this
+    /// arm for real means outlasting `CANCEL_HARD_ABORT_GRACE`, and a five-second
+    /// sleep in the suite buys nothing this does not pin — the arm's whole
+    /// behaviour is what it threads through.
+    ///
+    /// `notices` rides along for the same reason, and that half is a fix: this
+    /// constructor used to hard-code `Vec::new()` for it, so a wedged run silently
+    /// dropped notices its completed nodes had raised.
+    #[test]
+    fn a_hard_aborted_run_still_lists_its_board_writes() {
+        let row = crate::ports::WorkflowRunBoardRow {
+            action: crate::ports::WorkflowBoardAction::Spawned,
+            task_id: Some("card-1".to_string()),
+            title: Some("Reply to the auditor".to_string()),
+            assignee: None,
+        };
+        let run = cancelled_run(
+            vec!["something was discarded".to_string()],
+            vec![row.clone()],
+        );
+
+        assert!(run.cancelled);
+        assert_eq!(
+            run.board,
+            vec![row],
+            "the card is durable, so the stopped run must still list it"
+        );
+        assert_eq!(
+            run.notices,
+            vec!["something was discarded".to_string()],
+            "and the notices its nodes raised are not the run's result either"
+        );
+        // Everything that IS the run's result stays empty, unchanged.
+        assert_eq!(run.output, Value::Null);
+        assert!(run.deliveries.is_empty());
+        assert!(run.pending_approvals.is_empty());
+        assert!(run.nodes.is_empty());
+    }
+
     /// A dry run writes NOTHING durable — no output snapshot, matching its "the
     /// settled response body is the whole record" contract (#542).
     #[tokio::test]
