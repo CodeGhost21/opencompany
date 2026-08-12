@@ -30,7 +30,8 @@ use crate::harness::lifecycle::{self, TaskRunEnd};
 use crate::harness::orchestrator::{self, Delegation, DelegationQueue};
 use crate::harness::policy::ApprovalRequestQueue;
 use crate::harness::run_trace::RunTraceSink;
-use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO};
+use crate::harness::workflow_refs::WorkflowRefQueue;
+use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO, TaskOutputAction, TaskOutputWorkflow};
 use crate::ports::types::{CompanyId, CompanyRecord, OutboundMessage, TurnStep};
 use crate::ports::{TaskRecord, TaskStore, generate_id, now_millis};
 use crate::runtime::assignee;
@@ -424,6 +425,15 @@ pub(crate) struct DelegationRunner<'a> {
     /// that read it fall back to exactly the behaviour they had (no origin stamp,
     /// the orchestrator's voice on a note).
     workflow_run: Option<WorkflowRunRef>,
+    /// Workflows the turn authored in-flight with the inline `create_workflow`
+    /// tool (issues #112, #339), read so an operator turn can settle the card it
+    /// adopted instead of leaving it in To-do (issue #678).
+    ///
+    /// Optional for the same reason [`approvals`](Self::approvals) is: the
+    /// ~dozen `DelegationRunner::new` sites in tests stay untouched, and `None`
+    /// reads as "this runner cannot see staged workflows", which is exactly the
+    /// pre-#678 behaviour.
+    workflow_refs: Option<&'a WorkflowRefQueue>,
 }
 
 impl<'a> DelegationRunner<'a> {
@@ -450,6 +460,7 @@ impl<'a> DelegationRunner<'a> {
             run_sink: None,
             approvals: None,
             workflow_run: None,
+            workflow_refs: None,
         }
     }
 
@@ -494,6 +505,7 @@ impl<'a> DelegationRunner<'a> {
             run_sink: None,
             approvals: None,
             workflow_run: Some(run),
+            workflow_refs: None,
         }
     }
 
@@ -512,6 +524,17 @@ impl<'a> DelegationRunner<'a> {
     /// wired. Differenced across a turn to attribute parks to *that* turn.
     fn approvals_queued(&self) -> usize {
         self.approvals.map_or(0, ApprovalRequestQueue::queued)
+    }
+
+    /// Wires the cycle's workflow-reference queue so an operator turn can settle
+    /// the card for a workflow it authored in-turn (issue #678).
+    ///
+    /// Without it that card is adopted and then abandoned: the bubble links to
+    /// it, the operator gets the workflow, and the card sits in To-do because
+    /// the only drain lives on the dispatched-card path.
+    pub(crate) fn with_workflow_refs(mut self, workflow_refs: &'a WorkflowRefQueue) -> Self {
+        self.workflow_refs = Some(workflow_refs);
+        self
     }
 
     /// Executes a workflow run's drained board writes, reporting one row each
@@ -764,18 +787,21 @@ impl<'a> DelegationRunner<'a> {
         // the caller files a published deliverable onto `spawned_task` rather
         // than minting a second card beside this one (issue #463).
         //
-        // Adoption is NOT a settle, and one path notices (issue #678). When the
-        // orchestrator answers "create a workflow named X" by authoring the
-        // graph in-turn with the inline `create_workflow` tool, this card is
-        // adopted — the bubble links to it — but nothing moves it out of To-do:
-        // `CreateWorkflowTool` stages onto the `WorkflowRefQueue`, which is
-        // drained only by the dispatched-card path in `HarnessBrain::run_task`,
-        // and the publish drain settles from `pending_publishes`, which
-        // `create_workflow` never populates. The operator does get the workflow;
-        // the card is what lags. Fixing it needs a `workflow_refs` handle here
-        // AND a notion of task output without a run row (`TaskOutput.run_id` is
-        // required and a chat turn has no run) — both #183's territory, so it is
-        // tracked rather than bolted on.
+        // Adoption is not on its own a settle. When the orchestrator answers
+        // "create a workflow named X" by authoring the graph in-turn with the
+        // inline `create_workflow` tool, this card used to be adopted — the
+        // bubble linked to it — and then abandoned in To-do: `CreateWorkflowTool`
+        // stages onto the `WorkflowRefQueue`, which was drained only by the
+        // dispatched-card path in `HarnessBrain::run_task`, and the publish drain
+        // settles from `pending_publishes`, which `create_workflow` never
+        // populates. The operator got the workflow; the card lagged (issue #678).
+        //
+        // The drain below closes that. What it does NOT do is give the card an
+        // output link: `TaskOutput.run_id` is required and an operator chat turn
+        // has no run row, so a card settled here names its workflows in the note
+        // and carries no `TaskOutput`. Output-without-a-run remains unbuilt — it
+        // was #183's territory and #183 closed without it — so the note is the
+        // record until it exists.
         let handler_card = match carded_by_handler {
             true => self.chat_handler_card(message).await?,
             false => None,
@@ -790,6 +816,16 @@ impl<'a> DelegationRunner<'a> {
         let mut direct_card = self
             .open_direct_work_card(responder, message, chat_id, ctx)
             .await?;
+        // Same discipline `run_task` keeps on the dispatched-card path: only
+        // what *this* turn stages can be attributed to this turn's card, so
+        // anything a previous turn left staged is dropped before the model runs
+        // (issue #678). Guarded on `task.is_none()` throughout, so a dispatched
+        // card's drain is never touched from here — the two paths cannot race
+        // over one queue because only one of them ever reads it.
+        let operator_turn = self.task.is_none();
+        if operator_turn && let Some(refs) = self.workflow_refs {
+            refs.clear();
+        }
         // Issue #465: sampled either side of the turn so the settle below reads
         // what *this* turn parked, not what the cycle was already holding from
         // an earlier one.
@@ -837,7 +873,10 @@ impl<'a> DelegationRunner<'a> {
         // message (issue #463). Before this it was invisible from here, which is
         // why the operator bubble linked to nothing on a recognised imperative
         // even though the board carried a card for it.
-        let mut spawned_task: Option<String> = handler_card.or(direct_card_id);
+        // Cloned rather than moved: the workflow drain below settles *this*
+        // card, and it has to still be readable after `spawned_task` takes it
+        // (issue #678).
+        let mut spawned_task: Option<String> = handler_card.clone().or(direct_card_id);
         let drained = self.drain_and_execute(chat_id, ctx, HandOffs::Run).await?;
         if let Some(id) = drained.spawned_task {
             spawned_task.get_or_insert(id);
@@ -916,12 +955,115 @@ impl<'a> DelegationRunner<'a> {
             operator_reply = relay.reply;
             operator_steps.extend(relay.steps);
         }
+        // Drained after the relay, not before it: a relay turn carries the same
+        // inline `create_workflow` tool, so draining at the responder's turn
+        // would settle the card without the workflow the relay went on to author
+        // (issue #678).
+        if operator_turn && let Some(refs) = self.workflow_refs {
+            let authored = refs.drain();
+            if !authored.is_empty() {
+                self.settle_authored_workflow_card(
+                    handler_card.as_deref(),
+                    responder,
+                    parked,
+                    &authored,
+                )
+                .await;
+            }
+        }
         Ok(OperatorTurn {
             reply: operator_reply,
             steps: operator_steps,
             bubbles,
             spawned_task,
         })
+    }
+
+    /// Settles the adopted handler card for workflows this turn authored inline
+    /// (issue #678).
+    ///
+    /// # Best-effort on purpose
+    ///
+    /// Returns `()`, never `Result`. The operator's reply is already written and
+    /// the workflow is already saved; a task-store hiccup here must not sink
+    /// either, the same call the chat handler makes when its own card write
+    /// fails. A card left in To-do is the pre-#678 behaviour, so the failure
+    /// mode of this function is exactly the bug it fixes — never something
+    /// worse.
+    ///
+    /// # No `TaskOutput`
+    ///
+    /// The card names its workflows in the note and gets no output link.
+    /// `TaskOutput.run_id` is required and an operator chat turn has no run row;
+    /// see the note at the adoption site.
+    async fn settle_authored_workflow_card(
+        &self,
+        handler_card: Option<&str>,
+        responder: &str,
+        parked: usize,
+        authored: &[TaskOutputWorkflow],
+    ) {
+        let Some(task_id) = handler_card else {
+            // The turn authored a workflow with no card in scope to record it
+            // on — the operator asked conversationally rather than in the shape
+            // #463 cards. Nothing to settle, and the workflow is saved either
+            // way; logged because a *missing* card here is the only signal that
+            // the two heuristics disagreed about the same message.
+            tracing::debug!(
+                company = %self.company,
+                authored = authored.len(),
+                "[delegation] a chat turn authored workflows with no handler card to settle"
+            );
+            return;
+        };
+        let body = authored
+            .iter()
+            .map(|w| match (&w.action, w.run_id.as_deref()) {
+                (TaskOutputAction::Ran, Some(run)) => {
+                    format!("Ran workflow `{}` (run {run}).", w.workflow_id)
+                }
+                (TaskOutputAction::Ran, None) => format!("Ran workflow `{}`.", w.workflow_id),
+                (TaskOutputAction::Created, _) => {
+                    format!("Created workflow `{}`.", w.workflow_id)
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let loaded = match self.load_card(task_id).await {
+            Ok(Some(loaded)) => Some(loaded),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(
+                    company = %self.company,
+                    task_id = %task_id,
+                    error = %err,
+                    "[delegation] could not read the card for a workflow this turn authored; it \
+                     stays where it is"
+                );
+                return;
+            }
+        };
+        let Some((_, mut card)) = loaded else {
+            tracing::warn!(
+                company = %self.company,
+                task_id = %task_id,
+                "[delegation] the card adopted for this turn is no longer on the board; the \
+                 workflows it authored are recorded nowhere but here"
+            );
+            return;
+        };
+        if let Err(err) = self
+            .settle_work_card(&mut card, responder, TaskRunEnd::Completed, parked, &body)
+            .await
+        {
+            tracing::warn!(
+                company = %self.company,
+                task_id = %task_id,
+                error = %err,
+                "[delegation] could not settle the card for a workflow this turn authored; it \
+                 stays in its current column"
+            );
+        }
     }
 
     /// Drains the queue (capped, discarded past the cap) and executes every
@@ -2441,12 +2583,28 @@ investor update for the quarter\n]"
         /// attempt. A refusal never becomes a `Delegation`, so this is the only
         /// way a fixture can stand in for one.
         refuses: Vec<String>,
+        /// Workflows this turn authors inline with `create_workflow`, staged onto
+        /// the shared [`WorkflowRefQueue`] *while the turn runs* — which is the
+        /// only honest place for it (issue #678). A fixture that staged before
+        /// the call would be wiped by the pre-turn clear, and one that staged
+        /// after would skip the boundary the drain reads.
+        authors: Vec<TaskOutputWorkflow>,
     }
 
     impl Turn {
         fn reply(reply: &str) -> Self {
             Self {
                 reply: reply.to_string(),
+                ..Self::default()
+            }
+        }
+
+        /// A turn that authors workflows inline, the way an operator asking
+        /// "create a workflow named X" is answered (issue #678).
+        fn authoring(reply: &str, authors: Vec<TaskOutputWorkflow>) -> Self {
+            Self {
+                reply: reply.to_string(),
+                authors,
                 ..Self::default()
             }
         }
@@ -2531,6 +2689,9 @@ investor update for the quarter\n]"
         staged: Mutex<Vec<orchestrator::Staged>>,
         tasks: Arc<dyn TaskStore>,
         company: CompanyId,
+        /// The same shared handle the runner drains, so a scripted turn stages a
+        /// workflow exactly where `CreateWorkflowTool` does (issue #678).
+        workflow_refs: WorkflowRefQueue,
     }
 
     impl ScriptedTurns {
@@ -2545,6 +2706,7 @@ investor update for the quarter\n]"
                 staged: Mutex::new(Vec::new()),
                 tasks: fx.tasks.clone(),
                 company: fx.record.id.clone(),
+                workflow_refs: fx.workflow_refs.clone(),
                 max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
             }
         }
@@ -2632,6 +2794,10 @@ investor update for the quarter\n]"
             // `Delegation` at all (issues #272, #176).
             for desk in turn.refuses {
                 self.queue.push_refusal(desk);
+            }
+            // Staged mid-turn, like the inline `create_workflow` tool (#678).
+            for authored in turn.authors {
+                self.workflow_refs.push(authored);
             }
             for tool in turn.parks {
                 self.approvals
@@ -2811,6 +2977,9 @@ members = ["designer"]
         /// is exercised by the whole existing suite rather than only by the
         /// tests that park something.
         approvals: ApprovalRequestQueue,
+        /// Workflows a turn authored inline (issue #678). Empty in every test
+        /// that does not stage one, which is what keeps this a pure addition.
+        workflow_refs: WorkflowRefQueue,
     }
 
     impl Fixture {
@@ -2833,6 +3002,7 @@ members = ["designer"]
                 queue: DelegationQueue::default(),
                 steer: InflightRegistry::default(),
                 approvals: ApprovalRequestQueue::default(),
+                workflow_refs: WorkflowRefQueue::default(),
             }
         }
 
@@ -2847,6 +3017,7 @@ members = ["designer"]
                 orchestrator::MAX_DELEGATIONS_PER_TURN,
             )
             .with_approvals(&self.approvals)
+            .with_workflow_refs(&self.workflow_refs)
         }
 
         async fn cards(&self) -> Vec<TaskRecord> {
@@ -3287,6 +3458,229 @@ members = ["designer"]
             "the chat handler's card is the card; this path opens none"
         );
         assert!(turn.spawned_task.is_none());
+    }
+
+    // ── Issue #678: a workflow authored in-turn settles its card ────────────
+
+    /// Stages what `CreateWorkflowTool` would stage, so these tests exercise the
+    /// drain rather than the tool.
+    /// A card standing in for the one the REST chat handler opened (#463), in
+    /// the column it landed in — To-do for a machine's card, Planning for a
+    /// person's (issue #576).
+    fn handler_card_in(title: String, column: &str) -> TaskRecord {
+        TaskRecord {
+            id: "t-handler".to_string(),
+            title,
+            note: None,
+            column: column.to_string(),
+            priority: "medium".to_string(),
+            assignee: String::new(),
+            updated_at_millis: now_millis(),
+            origin_chat_id: None,
+            parent_task_id: None,
+            output: None,
+            plan: None,
+            deliverable: crate::ports::tasks::TaskDeliverable::Once,
+            workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
+        }
+    }
+
+    fn authored(workflow_id: &str) -> TaskOutputWorkflow {
+        TaskOutputWorkflow {
+            workflow_id: workflow_id.to_string(),
+            run_id: None,
+            action: TaskOutputAction::Created,
+        }
+    }
+
+    /// The bug this slice fixes. The orchestrator answers "create a workflow
+    /// named X" by authoring the graph in its own turn; the handler's card was
+    /// adopted (the bubble links to it) and then left in To-do forever, because
+    /// the only `WorkflowRefQueue` drain lived on the dispatched-card path.
+    #[tokio::test]
+    async fn a_workflow_authored_in_a_chat_turn_settles_the_card_it_adopted() {
+        let imperative = "create a workflow named nightly digest";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        // The card the REST handler already opened for this message (#463).
+        let handler = handler_card_in(title, COLUMN_TODO);
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::authoring(
+                "authored it",
+                vec![authored("nightly-digest")],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card");
+        // The exact landing, not merely "moved". Issue #576 gave the handler a
+        // second landing column, so `!= todo` would pass without this fix on
+        // every card that started in Planning — the commonest of the two.
+        assert_eq!(
+            cards[0].column,
+            lifecycle::settled_landing_column(TaskRunEnd::Completed, 0),
+            "a completed turn's card lands in the success terminal"
+        );
+        let note = cards[0].note.clone().unwrap_or_default();
+        assert!(
+            note.contains("nightly-digest"),
+            "the note is the record of what was authored (there is no TaskOutput              without a run row): {note}"
+        );
+        assert_eq!(
+            fx.workflow_refs.queued(),
+            0,
+            "the drain empties the queue, or the next turn inherits this turn's workflows"
+        );
+    }
+
+    /// The same settle when the handler's card landed in **Planning** rather
+    /// than To-do (issue #576).
+    ///
+    /// This is the commonest of the two: a signed-in person's prompt-box card is
+    /// created directly in Planning, and only a machine's lands in To-do. A test
+    /// that asserted merely "no longer in To-do" would pass here without the fix
+    /// at all, which is why the assertion names the settled landing column.
+    #[tokio::test]
+    async fn a_workflow_authored_for_a_card_that_landed_in_planning_settles_it_too() {
+        let imperative = "create a workflow named nightly digest";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        let handler = handler_card_in(title, COLUMN_PLANNING);
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::authoring(
+                "authored it",
+                vec![authored("nightly-digest")],
+            )],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1, "one message, one card");
+        assert_eq!(
+            cards[0].column,
+            lifecycle::settled_landing_column(TaskRunEnd::Completed, 0),
+            "a Planning card settles exactly like a To-do one"
+        );
+        assert!(
+            cards[0]
+                .note
+                .as_deref()
+                .unwrap_or_default()
+                .contains("nightly-digest"),
+            "the note names what was authored"
+        );
+    }
+
+    /// A workflow authored with no card in scope is not a reason to mint one.
+    /// #267's rule stands: the card doors are the handler's and the model's, and
+    /// a settle is neither.
+    #[tokio::test]
+    async fn a_workflow_authored_with_no_handler_card_opens_none() {
+        let chatter = "thanks, that looks great";
+        assert!(
+            crate::company::task_intent::detect_task_intent(chatter).is_none(),
+            "fixture must be a message the chat handler does NOT card"
+        );
+        let fx = Fixture::new();
+        let turns = ScriptedTurns::new(
+            &fx,
+            vec![Turn::authoring("done", vec![authored("nightly-digest")])],
+        );
+        fx.runner(&turns)
+            .handle_operator_message("chief", chatter, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        assert!(
+            fx.cards().await.is_empty(),
+            "a settle is not a card door; nothing to settle means nothing to open"
+        );
+        assert_eq!(fx.workflow_refs.queued(), 0, "drained either way");
+    }
+
+    /// The unchanged half, pinned so the drain cannot start settling cards for
+    /// turns that authored nothing. A "create a workflow" ask whose turn never
+    /// called the tool has produced nothing, and its card is still to do.
+    #[tokio::test]
+    async fn a_carded_turn_that_authored_no_workflow_leaves_its_card_alone() {
+        let imperative = "create a workflow named nightly digest";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        let handler = handler_card_in(title, COLUMN_TODO);
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("I could not build that")]);
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(cards.len(), 1);
+        assert_eq!(
+            cards[0].column,
+            crate::ports::tasks::COLUMN_TODO,
+            "nothing was authored, so nothing settled"
+        );
+    }
+
+    /// Only what THIS turn staged may be attributed to this turn's card — the
+    /// same discipline `run_task` keeps. Without the pre-turn clear, a workflow
+    /// left staged by an earlier turn would settle the next unrelated card and
+    /// name a workflow that turn never touched.
+    #[tokio::test]
+    async fn a_workflow_left_staged_by_an_earlier_turn_settles_nothing() {
+        let imperative = "create a workflow named nightly digest";
+        let title = crate::company::task_intent::detect_task_intent(imperative)
+            .expect("fixture must be a message the chat handler cards");
+        let fx = Fixture::new();
+        let handler = handler_card_in(title, COLUMN_TODO);
+        TaskStore::upsert(&*fx.tasks, &fx.record.id, &handler)
+            .await
+            .expect("seed the handler card");
+        // Staged before this turn begins, by whatever ran last.
+        fx.workflow_refs.push(authored("someone-elses-workflow"));
+
+        let turns = ScriptedTurns::new(&fx, vec![Turn::reply("I could not build that")]);
+        fx.runner(&turns)
+            .handle_operator_message("chief", imperative, Some("general"))
+            .await
+            .expect("operator message handled");
+
+        let cards = fx.cards().await;
+        assert_eq!(
+            cards[0].column,
+            crate::ports::tasks::COLUMN_TODO,
+            "this turn authored nothing; the stale staging belongs to no card here"
+        );
+        let note = cards[0].note.clone().unwrap_or_default();
+        assert!(
+            !note.contains("someone-elses-workflow"),
+            "a card must never name a workflow its own turn did not author: {note}"
+        );
     }
 
     /// The same stand-down on the **hand-off** path (issue #463). #442 guarded
