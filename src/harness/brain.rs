@@ -2308,6 +2308,7 @@ impl HarnessBrain {
             orchestrator::MAX_DELEGATIONS_PER_TURN,
         )
         .with_approvals(&self.deps.approval_requests)
+        .with_workflow_refs(&self.deps.workflow_refs)
     }
 }
 
