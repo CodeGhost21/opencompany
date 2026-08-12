@@ -35,9 +35,9 @@
 //!
 //! | mode | ~200B p50 | ~200B p99 | ~700B p50 | ~700B p99 |
 //! |---|---|---|---|---|
-//! | `plain` | 16.1µs | 34.9µs | 19.9µs | 72.0µs |
-//! | `sync_data` | 3.98ms | 7.31ms | 3.99ms | 6.03ms |
-//! | `sync_data_and_dir` | 4.01ms | 8.94ms | 7.90ms | 11.30ms |
+//! | `plain` | 20.2µs | 103.2µs | 17.1µs | 31.5µs |
+//! | `sync_data` | 3.90ms | 6.83ms | 3.89ms | 4.80ms |
+//! | `sync_data_and_dir` | 6.91ms | 10.94ms | 3.95ms | 8.35ms |
 //!
 //! Two things fall out, and both are the policy's argument:
 //!
@@ -45,12 +45,16 @@
 //!   on `CycleStarted`, which is written on the front edge of every cycle, and
 //!   entirely invisible in front of an `EffectExecuted`'s 100ms-2s network call.
 //!   Blanket-flushing would have been the expensive answer to a rare problem.
-//! * The cost is **flat in record size** (~4ms at both 200B and 700B): it is the
-//!   flush, not the payload. So "how many appends flush" is the only lever, which
-//!   is exactly the lever a per-record-kind policy pulls.
+//! * The cost is **flat in record size** (~3.9ms at both 200B and 700B): it is
+//!   the flush, not the payload. So "how many appends flush" is the only lever,
+//!   which is exactly the lever a per-record-kind policy pulls.
 //!
-//! The directory flush is charged on every iteration here; in production only a
-//! journal's first-ever append pays it.
+//! Read the `sync_data_and_dir` row as "one flush or two, same order of
+//! magnitude", never as a size effect: *which* of the two sizes comes out slower
+//! swaps between runs — the 700B row on the run before this one, the 200B row on
+//! this one — so the second flush lands somewhere between free and a doubling
+//! depending on what the volume is doing underneath. It is charged on every
+//! iteration here; in production only a journal's first-ever append pays it.
 //!
 //! The three modes are reimplemented here rather than called: `append_line` and
 //! `append_line_durable` are `pub(crate)`, and a bench is an external crate.
@@ -63,7 +67,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 /// How an append is written.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -87,6 +91,27 @@ impl Mode {
             Mode::SyncDataAndDir => "sync_data_and_dir",
         }
     }
+}
+
+/// Returns `path` to a fixed starting state: an existing, empty file.
+///
+/// Every loop below means to measure the cost of **one** append, which is only
+/// what it measures if every sample starts from the same file. Left alone, the
+/// file grows by a record per iteration — hundreds in the percentile loop,
+/// thousands under Criterion — so what the numbers track is the file's size as
+/// much as the append. Truncating rather than deleting is the other half: a
+/// create would fold the `open`'s file creation, and on the durable modes the
+/// parent-directory flush that production pays exactly once per journal, into
+/// whichever sample happened to run first.
+///
+/// Called outside the timed region in both loops.
+fn reset(path: &Path) {
+    OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .open(path)
+        .expect("reset");
 }
 
 /// One append, exactly as `store::fs::append_line_inner` performs it.
@@ -201,6 +226,7 @@ fn print_latency_percentiles() {
 
             let mut samples = Vec::with_capacity(SAMPLES);
             for _ in 0..SAMPLES {
+                reset(&path);
                 let start = Instant::now();
                 append(&path, &line, mode);
                 samples.push(start.elapsed());
@@ -252,7 +278,18 @@ fn journal_append(c: &mut Criterion) {
             group.bench_with_input(
                 BenchmarkId::new(mode.name(), size_label),
                 &line,
-                |b, line| b.iter(|| append(&path, line, mode)),
+                |b, line| {
+                    // `iter_batched` so the reset runs per iteration and stays
+                    // outside the measurement; `PerIteration` is the batch size
+                    // Criterion documents for a benchmark holding a file, and is
+                    // what keeps the file one record long rather than letting a
+                    // whole batch accumulate before the next setup.
+                    b.iter_batched(
+                        || reset(&path),
+                        |()| append(&path, line, mode),
+                        BatchSize::PerIteration,
+                    )
+                },
             );
         }
     }
