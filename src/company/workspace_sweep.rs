@@ -331,7 +331,9 @@ mod tests {
 
         let path = Bundle::new(dir.path(), company).workspace_index_json();
         if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent).await.expect("workspace dir");
+            tokio::fs::create_dir_all(parent)
+                .await
+                .expect("workspace dir");
         }
         tokio::fs::write(path, serde_json::to_vec(&index).expect("index json"))
             .await
