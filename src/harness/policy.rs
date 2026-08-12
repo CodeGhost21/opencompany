@@ -1717,6 +1717,53 @@ mod tests {
         );
     }
 
+    /// What string a per-call **tool** gate actually puts in front of an
+    /// operator (issue #701).
+    ///
+    /// The issue could not answer this from the frontend, and declined to
+    /// invent labels without it — rightly: a card whose job is informed consent
+    /// is worse off with a label naming the wrong action than with a vague one.
+    /// The answer is that a tool gate parks under the tool's own raw name.
+    /// [`ApprovalPolicy::require_approval`] is the only construction site for a
+    /// `RequireApproval` decision, it builds its request through
+    /// [`ApprovalPolicy::effect_for`], and that sets `kind` to `tool_name`
+    /// verbatim; `CompanyRuntime::pending_approvals` — the only projection
+    /// point for an `ApprovalSummary` — copies it through unchanged.
+    ///
+    /// Two of the seven invite the opposite guess, so both are pinned here
+    /// rather than argued in prose:
+    ///
+    /// * `publish_artifact` does **not** park as `external.publish`. That kind
+    ///   exists only as a native workflow-gate class and a `DEFAULT_ALWAYS_APPROVE`
+    ///   entry; `harness::publish` builds no effect and touches no gate.
+    /// * `run_workflow` does **not** park as `workflow.approve`. That kind is a
+    ///   workflow *resuming* mid-run (issue #395, `WORKFLOW_APPROVE_KIND`),
+    ///   which is a different event from an agent asking to start one.
+    ///
+    /// So all seven need entries in the console's tool-label table, and this
+    /// test is what stops that answer decaying back into a guess.
+    #[test]
+    fn parked_kind_is_the_tool_name() {
+        let p = policy("supervised", &[], None);
+        for tool in [
+            "curl",
+            "git_operations",
+            "http_request",
+            "mcp_call_tool",
+            "publish_artifact",
+            "read_workspace_state",
+            "run_workflow",
+        ] {
+            assert_eq!(
+                p.effect_for(tool, &serde_json::json!({})).kind,
+                tool,
+                "`{tool}` parks under a kind the console's tool-label table does \
+                 not key on; the label added for it in `language.ts` is now \
+                 unreachable"
+            );
+        }
+    }
+
     /// Per-tenant Composio (issue #110): the read tools are read-only (allowed
     /// even under supervised/readonly), while `composio_authorize` /
     /// `composio_execute` are external — parked under supervised, denied under

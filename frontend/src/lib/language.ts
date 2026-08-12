@@ -173,6 +173,72 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   memory_recall: "Look something up in its memory",
   web_fetch: "Fetch a web page",
   query_company: "Look up something about the company",
+  // Issue #701 — the rest of the gated surface, found the way #671 was: by
+  // cross-checking every `Reach::Consequence` declaration in
+  // `src/policy/consequence.rs` against the keys of both tables here, rather
+  // than by anyone noticing a card. `every_consequence_tool_has_a_console_label`
+  // in that file is now what keeps the two in step.
+  //
+  // All of these park under their own raw tool name. That was the issue's open
+  // question and it is pinned as a test (`parked_kind_is_the_tool_name` in
+  // `src/harness/policy.rs`) rather than left to prose, because two of them
+  // invite the opposite guess: `publish_artifact` does NOT park as
+  // `external.publish` (a native workflow-gate class the tool never builds), and
+  // `run_workflow` does NOT park as `workflow.approve` (that is a workflow
+  // resuming mid-run, #395 — a different event from an agent asking to start
+  // one). A label filed under a kind nothing parks with is a label nobody sees.
+  //
+  // They belong here rather than in EFFECT_LABELS for the reason stated above:
+  // none is self-describing without the payload block underneath it — `curl`
+  // without its address says nothing — and EFFECT_LABELS' `satisfies` mirror
+  // would additionally demand a past-tense twin for a retry dialog these kinds
+  // never reach as native effects.
+  curl: "Download a file from the internet",
+  http_request: "Make a request to a web address",
+  // Three network tools, three sentences, and the differences are read off what
+  // the tools actually take rather than off their names. `curl` is not the
+  // arbitrary-method one its name suggests — it accepts a `url` and streams the
+  // body to a file in the workspace — while `http_request` carries any of GET,
+  // POST, PUT, DELETE, PATCH, HEAD, OPTIONS with headers and a body, and
+  // `web_fetch` above returns a page inline. Two labels an operator cannot tell
+  // apart are the #374 defect in a different costume.
+  git_operations: "Run a git command in its workspace",
+  read_workspace_state: "Check its workspace's git status",
+  // Both name git, which reads like a runtime internal and is not one here: it
+  // is what these tools literally run, the console already says so to an
+  // operator (`denial_reason` in `consequence.rs` explains a readonly refusal in
+  // exactly those words), and the alternative — "check its version control" over
+  // a payload block reading `git log` — is the vaguer of the two, not the
+  // plainer. `read_workspace_state` is gated *because* it shells out to git in a
+  // directory the agent can write git's own config into (#459); the operator is
+  // told what it does, and the reason it is gated stays the classifier's
+  // business.
+  mcp_call_tool: "Use a tool on a connected server",
+  // Distinct wording from `mcp_registry_tool_call`'s "Use a connected tool"
+  // below on purpose — the two are separate gates and an operator seeing both in
+  // the Standing permissions list has to be able to tell which is which.
+  publish_artifact: "Publish a file it produced",
+  // Not "…publicly", though the declaration's own comment calls publishing
+  // "externally visible": the tool's description is the narrower and more
+  // careful claim — an agent's sandbox is private, and publishing is the only
+  // thing that hands a finished file over. A card that says "publicly" over a
+  // hand-off to the operator is the misleading-label failure this issue refused
+  // to risk, so the label states what is true under either reading.
+  run_workflow: "Run one of its saved workflows",
+  // The four tools an operator may grant standing on (#444). They are not in the
+  // catch-all `Other` group by accident — they are the low-consequence writes
+  // the standing-grant feature exists to apply to, which means they are the
+  // entries most likely to sit next to each other in the #374 Standing
+  // permissions list, where no payload block exists to tell them apart. Four
+  // rows all reading "Use one of its tools" is precisely the state that list was
+  // added to end.
+  file_write: "Write a file in its workspace",
+  edit: "Edit a file in its workspace",
+  // `apply_patch` is a batch of exact-string edits applied atomically across one
+  // or more files — "a patch" in the diff sense is what it is *not*, and the
+  // count is the whole difference between it and `edit` above.
+  apply_patch: "Edit several files in its workspace at once",
+  csv_export: "Save data as a spreadsheet file in its workspace",
   // `mcp_registry_tool_call` is deliberately absent: EFFECT_LABELS already
   // names it and is consulted first, so an entry here would be unreachable.
 };
@@ -273,6 +339,20 @@ export function payloadLines(a: ApprovalSummary): PayloadLine[] {
 const PAYLOAD_KEY_ORDER: Readonly<Record<string, string[]>> = {
   shell: ["command", "cwd", "timeout"],
   glob: ["pattern", "path"],
+  // The #701 labels lean on this block harder than the two above do. "Download a
+  // file from the internet" is only half a question until the operator can see
+  // *which* address, and both network payloads carry headers and a body that
+  // will happily push the url off the first line. Same for the git operation,
+  // which is the entire difference between reading a log and committing.
+  //
+  // Key names are the tools' own, not guesses: `curl` takes `url`/`dest_path`
+  // and no method (it streams a download to disk), `http_request` takes
+  // `url`/`method`, and `git_operations` takes `operation` — an enum, not a
+  // command line. Nothing is hidden here; this promotes, and every unlisted
+  // argument still follows.
+  curl: ["url", "dest_path"],
+  http_request: ["url", "method"],
+  git_operations: ["operation"],
 };
 
 function renderValue(value: unknown): string {
