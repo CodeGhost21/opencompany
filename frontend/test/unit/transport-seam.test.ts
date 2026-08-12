@@ -242,7 +242,7 @@ describe("picking a transport", () => {
   it("stays on the browser transport when only the internals global is present", () => {
     // The two globals answer different questions. `__TAURI_INTERNALS__` is
     // injected by the runtime unconditionally; `__TAURI__` exists only under
-    // `app.withGlobalTauri`, and it is the one `ProxyTransport.bridge()` calls.
+    // `app.withGlobalTauri`, and it is the one `tauriCore()` reads.
     // Probing the former selected a proxy transport whose every request then
     // threw "the desktop bridge is unavailable" — a desktop that could not
     // complete a single call.
@@ -254,7 +254,7 @@ describe("picking a transport", () => {
   it("uses the proxy transport when the bridge it calls is really there", () => {
     (globalThis as { window?: unknown }).window = {
       __TAURI_INTERNALS__: {},
-      __TAURI__: { invoke: () => Promise.resolve(), Channel: class {} },
+      __TAURI__: { core: { invoke: () => Promise.resolve(), Channel: class {} } },
     };
     expect(isDesktopRuntime()).toBe(true);
     expect(defaultTransport("conn-1")).toBeInstanceOf(ProxyTransport);
@@ -281,7 +281,7 @@ describe("picking a transport", () => {
 
   it("holds the desktop to an absolute http(s) host", () => {
     (globalThis as { window?: unknown }).window = {
-      __TAURI__: { invoke: () => Promise.resolve(), Channel: class {} },
+      __TAURI__: { core: { invoke: () => Promise.resolve(), Channel: class {} } },
     };
 
     expect(isAddressableBaseUrl("http://127.0.0.1:65364")).toBe(true);

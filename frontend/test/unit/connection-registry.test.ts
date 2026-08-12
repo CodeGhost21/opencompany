@@ -406,8 +406,14 @@ describe("the embedded host", () => {
  */
 describe("a same-origin profile", () => {
   const desktop = (present: boolean) => {
-    if (present) (window as unknown as { __TAURI__: unknown }).__TAURI__ = {};
-    else delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
+    // `isDesktopRuntime()` asks only whether the global is there, so presence is
+    // all this needs — but it is spelled the way Tauri v2 injects it anyway, so
+    // that no fixture in this tree teaches the v1 shape (#616).
+    if (present) {
+      (window as unknown as { __TAURI__: unknown }).__TAURI__ = {
+        core: { invoke: () => Promise.resolve(), Channel: class {} },
+      };
+    } else delete (window as unknown as { __TAURI__?: unknown }).__TAURI__;
   };
 
   // The registry is module state, so a runtime marker left set would follow the

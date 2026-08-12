@@ -81,76 +81,83 @@ async function asDesktop(page: Page, config: BridgeConfig) {
     };
 
     (window as unknown as { __TAURI__: unknown }).__TAURI__ = {
-      Channel: class {
-        onmessage: ((message: string) => void) | null = null;
-      },
-      async invoke(command: string, args: Record<string, unknown>): Promise<unknown> {
-        switch (command) {
-          case "oc_connect": {
-            const id = args.connectionId as string;
-            const baseUrl = args.baseUrl as string;
-            // Recorded before it is judged, and deliberately: this array is the
-            // test's window onto what the console *tried* to register. Keeping
-            // only what was accepted would let the stub filter out the very row
-            // #613 is about, and the assertion would then pass on a build that
-            // still adds it.
-            registered.push({ connectionId: id, baseUrl });
-            // Rejected at registration, where `ProxyRegistry::upsert` rejects
-            // it, rather than at the first request. The console swallows this
-            // into a resolved promise and the request that follows fails with
-            // `no such connection` — which is exactly what the desktop does.
-            if (!isAddressable(baseUrl)) {
-              throw new Error(`not an absolute host url: "${baseUrl}"`);
+      // Tauri v2 namespaces the API: `withGlobalTauri` injects the whole
+      // `@tauri-apps/api` bundle, and `invoke`/`Channel` live under `core`. A shim
+      // that puts them at the top level is the v1 shape — the one the console
+      // itself used to read (#616) — so a spec built on it would drive a bridge
+      // the real app can never resolve.
+      core: {
+        Channel: class {
+          onmessage: ((message: string) => void) | null = null;
+        },
+        async invoke(command: string, args: Record<string, unknown>): Promise<unknown> {
+          switch (command) {
+            case "oc_connect": {
+              const id = args.connectionId as string;
+              const baseUrl = args.baseUrl as string;
+              // Recorded before it is judged, and deliberately: this array is the
+              // test's window onto what the console *tried* to register. Keeping
+              // only what was accepted would let the stub filter out the very row
+              // #613 is about, and the assertion would then pass on a build that
+              // still adds it.
+              registered.push({ connectionId: id, baseUrl });
+              // Rejected at registration, where `ProxyRegistry::upsert` rejects
+              // it, rather than at the first request. The console swallows this
+              // into a resolved promise and the request that follows fails with
+              // `no such connection` — which is exactly what the desktop does.
+              if (!isAddressable(baseUrl)) {
+                throw new Error(`not an absolute host url: "${baseUrl}"`);
+              }
+              hosts.set(id, baseUrl);
+              return undefined;
             }
-            hosts.set(id, baseUrl);
-            return undefined;
-          }
-          case "oc_disconnect": {
-            hosts.delete(args.connectionId as string);
-            return undefined;
-          }
-          case "oc_embedded": {
-            if (cfg.discoveryDelayMs) {
-              await new Promise((resolve) => setTimeout(resolve, cfg.discoveryDelayMs));
+            case "oc_disconnect": {
+              hosts.delete(args.connectionId as string);
+              return undefined;
             }
-            return cfg.embedded === null
-              ? null
-              : { baseUrl: cfg.embedded, dataDir: "/tmp/e2e-desktop" };
+            case "oc_embedded": {
+              if (cfg.discoveryDelayMs) {
+                await new Promise((resolve) => setTimeout(resolve, cfg.discoveryDelayMs));
+              }
+              return cfg.embedded === null
+                ? null
+                : { baseUrl: cfg.embedded, dataDir: "/tmp/e2e-desktop" };
+            }
+            case "oc_request": {
+              const id = args.connectionId as string;
+              // Only ever a host `oc_connect` accepted, so no second check is
+              // needed here — an unaddressable base never reached this map.
+              const base = hosts.get(id);
+              if (base === undefined) throw new Error(`no such connection: ${id}`);
+              const req = args.request as {
+                method: string;
+                path: string;
+                headers: Record<string, string>;
+                body?: string;
+              };
+              const response = await fetch(base + req.path, {
+                method: req.method,
+                headers: req.headers,
+                body: req.body ?? undefined,
+                credentials: "include",
+              });
+              const text = await response.text();
+              const headers: Record<string, string> = {};
+              response.headers.forEach((value, name) => {
+                headers[name.toLowerCase()] = value;
+              });
+              return {
+                status: response.status,
+                statusText: response.statusText,
+                url: response.url,
+                text,
+                headers,
+              };
+            }
+            default:
+              return null;
           }
-          case "oc_request": {
-            const id = args.connectionId as string;
-            // Only ever a host `oc_connect` accepted, so no second check is
-            // needed here — an unaddressable base never reached this map.
-            const base = hosts.get(id);
-            if (base === undefined) throw new Error(`no such connection: ${id}`);
-            const req = args.request as {
-              method: string;
-              path: string;
-              headers: Record<string, string>;
-              body?: string;
-            };
-            const response = await fetch(base + req.path, {
-              method: req.method,
-              headers: req.headers,
-              body: req.body ?? undefined,
-              credentials: "include",
-            });
-            const text = await response.text();
-            const headers: Record<string, string> = {};
-            response.headers.forEach((value, name) => {
-              headers[name.toLowerCase()] = value;
-            });
-            return {
-              status: response.status,
-              statusText: response.statusText,
-              url: response.url,
-              text,
-              headers,
-            };
-          }
-          default:
-            return null;
-        }
+        },
       },
     };
   }, config);
