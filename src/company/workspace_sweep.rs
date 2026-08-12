@@ -572,18 +572,16 @@ mod tests {
     /// Fail closed, exactly as the scaffold does: two roots named `Agents` make
     /// "under `Agents/`" undecidable, so the sweep refuses instead of picking
     /// one and deleting beneath it.
+    ///
+    /// The two `Agents` roots are seeded straight into the index rather than
+    /// built with `create`: the store's `reject_path_collision` now stops a
+    /// second node at the same rendered path, so this ambiguity can only arrive
+    /// as legacy or damaged data — see [`seed_ambiguous_agents`].
     #[tokio::test]
     async fn an_ambiguous_root_is_refused_and_removes_nothing() {
-        let (_dir, ws) = store().await;
+        let (dir, ws) = store().await;
         let company = CompanyId::new("odd");
-        for id in ["dup-a", "dup-b"] {
-            ws.create(&company, &folder(id, AGENTS_ROOT, None), None)
-                .await
-                .unwrap();
-        }
-        ws.create(&company, &folder("stray", "ceo", Some("dup-a")), None)
-            .await
-            .unwrap();
+        seed_ambiguous_agents(&dir, &company).await;
 
         let err = sweep_empty_agent_folders(ws.as_ref(), &company, false)
             .await
