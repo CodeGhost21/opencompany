@@ -331,8 +331,15 @@ invited) must mail nobody — and a failed send never rolls the grant back, sinc
 a mail outage should not become a silent refusal to add people. A sent invite
 stamps `notifiedAtMillis` on the record, which the console reads to say whether
 the person was actually told; absent means nobody was, and the operator owes
-them a message. Issue #584: the route previously wrote the record and mailed
-nobody while the console reported unconditional success.
+them a message. That stamp is an **update, never an insert**: an admin who
+spots a mistyped address and revokes the invite while its mail is still in
+flight wins, and the stamp quietly does nothing rather than putting the revoked
+address back on the roster. Issue #584: the route previously wrote the record
+and mailed nobody while the console reported unconditional success.
+
+Sending is bounded (30s) in the SMTP adapter, so a relay that accepts a
+connection and then stalls reports a failed delivery instead of holding the
+admin's request open.
 
 ## Abuse and exposure
 

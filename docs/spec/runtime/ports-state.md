@@ -213,6 +213,10 @@ pub trait UserStore: Send + Sync {
     async fn find_invite_by_email(&self, company: &CompanyId, email: &str)
         -> Result<Option<InviteRecord>>;
     async fn upsert_invite(&self, company: &CompanyId, invite: &InviteRecord) -> Result<()>;
+    /// Stamps `notified_at_millis` on an invite that still exists, leaving
+    /// every other field alone. Returns whether one was updated.
+    async fn mark_invite_notified(&self, company: &CompanyId, id: &str, at_millis: u64)
+        -> Result<bool>;
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool>;
 }
 
@@ -249,6 +253,11 @@ Normative requirements beyond the usual per-company isolation:
 - Email lookup is **exact**. Stores never normalize on the caller's behalf, so
   a caller that skips `normalize_email` misses rather than silently matching an
   address it did not ask for.
+- `UserStore::mark_invite_notified` MUST NOT insert. It is called after an
+  invite mail is sent, from a record read before the send, so a revocation that
+  lands during delivery must leave it nothing to update — a backend that
+  upserted here would restore an address the admin had just removed from the
+  allowlist.
 - `LoginCodeStore::consume` MUST make its check-and-mark a **single atomic
   step**. It is the only place single-use is enforced; a read-then-write in a
   handler would be a check-time/use-time gap.
