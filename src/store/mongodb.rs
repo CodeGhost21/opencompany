@@ -110,6 +110,50 @@ fn get_i64(doc: &Document, key: &str) -> Result<i64> {
         .map_err(|e| mongo_err(format!("missing field {key}: {e}")))
 }
 
+/// A unique index restricted to the documents that carry `present` at all
+/// (issue #697).
+///
+/// MongoDB is the one backend with no transaction to decide a first publish
+/// under, so the uniqueness of a file's path has to be the database's own
+/// invariant rather than a read followed by a write.
+///
+/// PARTIAL, and that is what makes it safe to add to a live tenant. A plain
+/// unique index is built over every existing document, so a company that
+/// already lost this race — carrying the duplicate pair issue #697 is about —
+/// would fail index creation, and that failure happens during
+/// [`MongoStore::ensure_indexes`], which means the store's startup goes down
+/// for that tenant. Restricted to documents that *have* the field, the index
+/// covers everything this code writes from now on and ignores history it cannot
+/// repair. Legacy duplicates keep being caught one level up, where
+/// `resolve_file` already answers them with `Conflict`.
+///
+/// # `present` is a runtime value, not a literal
+///
+/// `doc! {present: ...}` uses the **value** of `present`, not the string
+/// `"present"`. The `doc!`/`bson!` key arms end at
+/// `$object.insert::<_, Bson>(($($key)+), $value)` — the accumulated key tokens
+/// are passed to `insert` as an *expression*, and `insert<KT: Into<String>>`
+/// takes this `&str` by value. There is no `stringify!` anywhere on that path;
+/// the macro only treats a key as a literal when one is written literally.
+///
+/// This is worth saying out loud because the failure it would cause is
+/// invisible: a partial filter keyed on a field no document has would match
+/// nothing, the index would be built over an empty set, and it would reject no
+/// insert — silently removing the guarantee this function exists to provide,
+/// while every test that does not actually race still passed.
+/// `the_partial_filter_is_keyed_on_the_field_not_the_parameter_name` pins it.
+fn unique_partial(keys: Document, present: &str) -> IndexModel {
+    IndexModel::builder()
+        .keys(keys)
+        .options(
+            IndexOptions::builder()
+                .unique(true)
+                .partial_filter_expression(doc! {present: {"$exists": true}})
+                .build(),
+        )
+        .build()
+}
+
 /// The uniqueness key for a **file's** path inside one company (issue #697).
 ///
 /// Stored beside the node document so the partial unique index in
@@ -188,30 +232,7 @@ impl MongoStore {
         // Not every index can be unique: a user holds many sessions, and an
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
-        // Unique only over the documents that carry the key at all (issue
-        // #697). MongoDB is the one backend with no transaction to decide a
-        // first publish under, so the uniqueness of a file's path has to be the
-        // database's own invariant rather than a read followed by a write.
-        //
-        // PARTIAL, and that is what makes it safe to add to a live tenant. A
-        // plain unique index is built over every existing document, so a
-        // company that already lost this race — the duplicate pair this issue
-        // is about — would fail index creation and take the store's startup
-        // down with it. Restricted to documents that *have* `file_path_key`,
-        // the index covers everything this code writes from now on and ignores
-        // history it cannot repair. Legacy duplicates keep being caught one
-        // level up, where `resolve_file` already answers them with `Conflict`.
-        let unique_partial = |keys: Document, present: &str| {
-            IndexModel::builder()
-                .keys(keys)
-                .options(
-                    IndexOptions::builder()
-                        .unique(true)
-                        .partial_filter_expression(doc! {present: {"$exists": true}})
-                        .build(),
-                )
-                .build()
-        };
+        // See `unique_partial`.
         let plans: [(&str, IndexModel); 31] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
@@ -2943,6 +2964,58 @@ mod test {
     fn required() -> bool {
         std::env::var("OPENCOMPANY_TEST_MONGODB_REQUIRED")
             .is_ok_and(|value| !value.is_empty() && value != "0")
+    }
+
+    /// Issue #697. The partial filter must be keyed on the **field name passed
+    /// in**, never on the literal `"present"` — the parameter's own name.
+    ///
+    /// Raised in review of #733 as a HIGH finding: that `doc!` stringifies
+    /// identifier keys, so `doc! {present: ...}` would build
+    /// `{"present": {"$exists": true}}`, a filter no document matches. The
+    /// index would then be built over an empty set and reject no insert,
+    /// silently removing the one-file-per-path guarantee on this backend.
+    ///
+    /// It does not: the `bson!` key arms end at
+    /// `insert::<_, Bson>(($($key)+), $value)`, passing the key tokens as an
+    /// expression rather than through `stringify!`. But that is an argument
+    /// about a macro's expansion, and the cost of being wrong is a guard that
+    /// looks present and enforces nothing — so this asserts the built artifact
+    /// instead of the reasoning.
+    ///
+    /// Needs no server: it inspects the `IndexModel` this code constructs, so
+    /// it runs on the `mongodb` feature alone and cannot pass vacuously the way
+    /// the URI-gated tests can.
+    #[test]
+    fn the_partial_filter_is_keyed_on_the_field_not_the_parameter_name() {
+        let model = unique_partial(doc! {"company_id": 1, "file_path_key": 1}, "file_path_key");
+        let filter = model
+            .options
+            .as_ref()
+            .and_then(|options| options.partial_filter_expression.as_ref())
+            .expect("the index is partial");
+
+        assert!(
+            filter.contains_key("file_path_key"),
+            "the filter must name the field it guards: {filter:?}"
+        );
+        assert!(
+            !filter.contains_key("present"),
+            "a filter keyed on the parameter's own name would match no document, so the \
+             index would be built over an empty set and reject nothing: {filter:?}"
+        );
+        assert_eq!(
+            filter.get_document("file_path_key").expect("the condition"),
+            &doc! {"$exists": true},
+            "and the condition is existence of that field: {filter:?}"
+        );
+        assert!(
+            model
+                .options
+                .as_ref()
+                .and_then(|options| options.unique)
+                .unwrap_or(false),
+            "a partial filter without uniqueness would guard nothing at all"
+        );
     }
 
     /// The URI with any `user:password@` replaced by `***@`, for the panic
