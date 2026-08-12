@@ -4271,6 +4271,117 @@ mod tests {
         );
     }
 
+    /// **Issue #673's acceptance, through the real gate, in both tiers.**
+    ///
+    /// Worth stating why this can go through `check()` when #457's Composio twin
+    /// below cannot: a catalogue read stopped parking at the tier in #559, so
+    /// the scope was never reached there. An outward fetch still parks under
+    /// `supervised` *and* under `auto` — that is the whole purpose of
+    /// [`Standing::ScopedGrantable`](crate::policy::Standing::ScopedGrantable) —
+    /// so the grant is genuinely the thing deciding, and the assertion is not
+    /// being satisfied by a tier that waved the call through upstream.
+    ///
+    /// `auto` is in the loop deliberately. The naive fix for #673 declared
+    /// `web_fetch` `Grantable`, which made `parks_under_auto` false and let every
+    /// agent fetch any address unattended for as long as the company sat in
+    /// `auto` — no card, so the host scope was never consulted at all. Running
+    /// both tiers here is what would catch a future edit that re-fuses the two.
+    #[tokio::test]
+    async fn a_fetch_grant_scoped_to_one_host_admits_it_and_re_parks_another() {
+        for tier in ["supervised", "auto"] {
+            let queue = ApprovalRequestQueue::default();
+            let grants = queue.grants();
+            let p = policy(tier, &[], None)
+                .with_requests(queue)
+                .with_agent("ops");
+            grants.grant_standing(scoped_standing(
+                "ops",
+                crate::policy::consequence::WEB_FETCH,
+                "https://docs.rs",
+                far_future(),
+            ));
+
+            // A second fetch of the granted host, at a different path. This is
+            // inside the sentence the operator consented to.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::Allow
+                ),
+                "a second fetch of the granted host must run unattended under `{tier}`"
+            );
+
+            // A different host. Same agent, same tool, same grant, still live —
+            // the scope is the one thing that says no.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://crates.io/crates/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "'fetch from docs.rs' is not consent to fetch anywhere else — `{tier}`"
+            );
+
+            // A subdomain of the granted host is a different host.
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://evil.docs.rs/x" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "a subdomain was never on the card — `{tier}`"
+            );
+
+            // A call whose URL cannot be read is not grantable at all, so the
+            // grant cannot admit it however well it matches on (agent, tool).
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "not-a-url" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "an unreadable URL has no scope for a scoped grant to admit — `{tier}`"
+            );
+        }
+    }
+
+    /// Without a grant an outward fetch still parks in both parking tiers — the
+    /// status quo #673 must not have widened.
+    ///
+    /// This is the assertion that fails if `web_fetch` is ever declared
+    /// `Grantable` outright: under `auto` it would be allowed here with no
+    /// operator in the loop.
+    #[tokio::test]
+    async fn an_ungranted_fetch_still_parks_under_supervised_and_auto() {
+        for tier in ["supervised", "auto"] {
+            let p = policy(tier, &[], None);
+            assert!(
+                matches!(
+                    p.check(&request(
+                        "web_fetch",
+                        serde_json::json!({ "url": "https://docs.rs/serde" })
+                    ))
+                    .await,
+                    ToolPolicyDecision::RequireApproval { .. }
+                ),
+                "an outward fetch with no grant must park under `{tier}`"
+            );
+        }
+    }
+
     /// Issue #457's scope check, pinned **directly** rather than through
     /// `check()`.
     ///

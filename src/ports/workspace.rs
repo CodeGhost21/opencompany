@@ -435,26 +435,43 @@ pub trait WorkspaceStore: Send + Sync {
         name: Option<&str>,
         parent: Option<Option<&str>>,
     ) -> Result<WorkspaceNode>;
-    /// Atomically promotes a staged file over the file it supersedes.
+    /// Atomically installs a staged file at `name`, conditional on what is
+    /// there now. A compare-and-swap on the *occupant of the path*.
     ///
-    /// Both ids must name files under the same parent. `replacement_id` is
-    /// renamed to `name` as part of the swap; `expected_id` is removed. The
-    /// operation is conditional on `expected_id` still naming the node being
-    /// replaced, so concurrent publishers cannot both win the same path.
+    /// `replacement_id` is renamed to `name` as part of the operation, under
+    /// its own existing parent. `expected_id` says what the caller believes
+    /// occupies that name, and is the whole guard:
     ///
-    /// Returns the promoted node on success. If the expected node has already
-    /// gone, returns `None` **and consumes the staged replacement**, including
-    /// any binary payload. That cleanup is part of the port contract: a caller
-    /// losing the compare-and-swap must not leak its private staging node.
+    /// * **`Some(id)`** — expect `id` to be the file at `name`. It is removed
+    ///   and the staged file takes its place. This is a republish (issue #662).
+    /// * **`None`** — assert the name is **unoccupied**, and install only while
+    ///   that holds. This is a first publish (issue #697).
+    ///
+    /// `None` does **not** mean "any occupant will do", and it is not a way to
+    /// skip the check: passing `None` for a path that *is* occupied must fail
+    /// the compare-and-swap rather than overwrite the node that is there. The
+    /// two spellings are one type apart and mean opposite things, so a caller
+    /// that means "replace whatever is at this path" must read the current id
+    /// and pass `Some(it)`. The conformance suite pins the occupied-`None` case
+    /// directly, because nothing else stops that mistake from compiling.
+    ///
+    /// Returns the promoted node on success. When the compare-and-swap loses —
+    /// the expected node has already gone, or the name the caller expected to
+    /// be free has been taken — returns `None` **and consumes the staged
+    /// replacement**, including any binary payload. That cleanup is part of the
+    /// port contract: a caller losing the race must not leak its private
+    /// staging node, which would charge the tenant's quota for bytes nothing
+    /// can reach.
     ///
     /// Backends must make the logical tree transition without an observable
-    /// delete-then-rename gap. This is deliberately a store primitive rather
-    /// than two existing calls: a process-local lock cannot protect MongoDB
-    /// when two server instances publish concurrently.
+    /// delete-then-rename gap, and must decide concurrent callers so that
+    /// exactly one wins. This is deliberately a store primitive rather than two
+    /// existing calls: a process-local lock cannot protect MongoDB when two
+    /// server instances publish concurrently.
     async fn swap_files(
         &self,
         company: &CompanyId,
-        expected_id: &str,
+        expected_id: Option<&str>,
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<WorkspaceNode>>;

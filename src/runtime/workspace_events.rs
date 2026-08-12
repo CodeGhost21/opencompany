@@ -253,7 +253,7 @@ impl WorkspaceStore for WorkspaceAnnouncer {
     async fn swap_files(
         &self,
         company: &CompanyId,
-        expected_id: &str,
+        expected_id: Option<&str>,
         replacement_id: &str,
         name: &str,
     ) -> Result<Option<WorkspaceNode>> {
@@ -263,7 +263,13 @@ impl WorkspaceStore for WorkspaceAnnouncer {
             .await?;
         match &promoted {
             Some(node) => {
-                self.announce(company, expected_id, CHANGE_REMOVED).await;
+                // Only a republish retires a node. A first publish (issue #697)
+                // supersedes nothing, so announcing a removal would name an id
+                // that never existed and close a watcher's handle on a file it
+                // never had open.
+                if let Some(superseded) = expected_id {
+                    self.announce(company, superseded, CHANGE_REMOVED).await;
+                }
                 self.announce(company, &node.id, CHANGE_UPDATED).await;
             }
             None => {
