@@ -531,6 +531,57 @@ export function createWorkflow(
 }
 
 /**
+ * What the create-time copilot drafted from an operator's description (issue
+ * #753).
+ *
+ * Exactly one shape is returned, told apart by `automatable`: a drafted
+ * `workflow` to review, or a `reason` the described work is better done once.
+ * The host answers **200 in both cases** (like {@link previewCron}) — neither is
+ * an error the operator fixes by retrying differently.
+ *
+ * `workflow` is a plain {@link WorkflowGraph}: the host strips the model's
+ * approval gating and mints the id, and the node/edge shape is the same camelCase
+ * the read routes return, so it hydrates the create form with no adapter. It
+ * carries no `version` (nothing is saved yet) — Create persists it for the first
+ * time.
+ */
+export interface WorkflowDraftFromDescription {
+  /** `true` with a `workflow` to review; `false` with a `reason`. */
+  automatable: boolean;
+  /** A one-line gloss of what the drafted workflow does. Present when `automatable`. */
+  summary?: string;
+  /** The drafted graph to hydrate the create form. Present when `automatable`. */
+  workflow?: WorkflowGraph;
+  /** Why the work is better done once. Present when not `automatable`. */
+  reason?: string;
+}
+
+/**
+ * Drafts a workflow graph from a free-text description (issue #753) — the
+ * New-workflow dialog's copilot.
+ *
+ * **Nothing is persisted.** The host validates the draft the same way Create
+ * would, hands it back, and the operator reviews it in the hydrated form before
+ * pressing Create (which is the only call that saves). So this is safe to call
+ * speculatively; a bad draft costs a review, not a rollback.
+ *
+ * A build with no embedded brain answers a capability gap the same way the run
+ * route does — `not_wired` (404), `restart_required` or `inference_required`
+ * (409) — which the caller should surface inline rather than treat as a drafted
+ * answer. An empty description is a `400`.
+ */
+export function draftWorkflowFromDescription(
+  client: OpenCompanyClient,
+  company: string | null,
+  description: string,
+): Promise<WorkflowDraftFromDescription> {
+  return client.post<WorkflowDraftFromDescription>(
+    `${client.scopeFor(company)}/workflows/draft-from-description`,
+    { description },
+  );
+}
+
+/**
  * Replaces a saved workflow graph wholesale (issue #259) — the fix for a
  * workflow being write-once, so a typo'd cron or a node pointed at the wrong
  * teammate can be corrected instead of abandoned.
