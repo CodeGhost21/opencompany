@@ -311,6 +311,7 @@ fn brain_with(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(ops.clone()),
         workspace_root: dir.to_path_buf(),
+        audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: Some(ops.clone()),
         artifacts: with_artifacts.then(|| ops.clone() as Arc<dyn ArtifactStore>),

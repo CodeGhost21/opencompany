@@ -43,6 +43,11 @@
 /// that no lane ran and no route served — see issue #475.
 #[cfg(feature = "acp")]
 pub mod acp_run_turn;
+/// Issue #775: the fail-closed shell audit wrapper — one intent line appended
+/// (and fsynced) *before* a command runs, refusing the command outright when
+/// that append fails. Pairs with the host-owned, per-agent sink
+/// [`toolbelt::shell_audit`] resolves. See [`audit`].
+pub mod audit;
 pub mod brain;
 pub mod build;
 pub mod capability_budget;
@@ -192,6 +197,23 @@ pub struct HarnessDeps {
     /// Root under which per-agent workspace directories are created
     /// (`{root}/{company}/{agent}/workspace`).
     pub workspace_root: PathBuf,
+    /// The **instance data root** the shell audit sink hangs off, resolved
+    /// through [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir)
+    /// to `companies/<slug>/audit/<agent>/` (issue #775).
+    ///
+    /// Carried as its own field rather than derived from
+    /// [`workspace_root`](Self::workspace_root)`.parent()` on purpose. The two
+    /// are siblings under one data root today, and an implicit
+    /// `workspace_root/..` would make a security boundary depend on a directory
+    /// relationship nobody declared — the ambient-context coupling this codebase
+    /// keeps getting bitten by. The audit sink is where it is because a caller
+    /// said so.
+    ///
+    /// It must never be inside `workspace_root`: the agent workspace is also the
+    /// `workspace_only` `SecurityPolicy` root the file tools enforce, so a sink
+    /// under it is a policy-*permitted* write target for the very agent it
+    /// records.
+    pub audit_root: PathBuf,
     /// Optional model/tier applied to every agent, overriding the per-agent
     /// `tier` → model mapping. Set from the resolved hosted-inference model so
     /// the whole roster addresses the configured workload (e.g. `chat-v1`).
@@ -2718,6 +2740,7 @@ description = "Builds the product."
                 store: store.clone(),
                 meter: Some(meter.clone()),
                 workspace_root: dir.path().to_path_buf(),
+                audit_root: dir.path().to_path_buf(),
                 model_override: None,
                 tasks: None,
                 artifacts: None,
@@ -2791,6 +2814,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -3476,6 +3500,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -3653,6 +3678,7 @@ description = "Builds the product."
             store: Arc::new(RecordingStore::default()),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -4170,6 +4196,7 @@ description = "Builds the product."
             store: live_store.clone(),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -4340,6 +4367,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter: Some(meter.clone()),
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -4492,6 +4520,7 @@ description = "Sets direction."
             store: Arc::new(RecordingStore::default()),
             meter,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             skills: None,

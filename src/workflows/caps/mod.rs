@@ -240,9 +240,23 @@ pub async fn build_capabilities(
             agent: format!("workflow:{workflow_id}"),
             meter: deps.meter.clone(),
         };
+        // Issue #775: the host-owned shell audit sink, keyed per WORKFLOW (not
+        // per run) under `companies/<slug>/audit/_workflow-<id>/`. Per-workflow
+        // because the vendored logger registry caches one logger per directory
+        // and every run of one workflow should append to one file — per-run would
+        // mint a directory per execution and shard the trail. Never under
+        // `workflow_ws`: that is the `workspace_only` policy root the node's own
+        // tools are sandboxed to, so a sink there would be a permitted write
+        // target for the `shell` it records.
+        let workflow_audit_dir = crate::harness::build::agent_audit_dir(
+            &deps.audit_root,
+            &company,
+            &format!("_workflow-{}", hex_segment(workflow_id)),
+        );
         let tools = WorkflowToolInvoker::new(
             exec_security.clone(),
             &workflow_ws,
+            &workflow_audit_dir,
             web_allowed_domains.clone(),
             grants,
             &deps.capabilities,

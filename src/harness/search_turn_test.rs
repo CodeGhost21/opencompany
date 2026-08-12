@@ -269,6 +269,7 @@ async fn harness(
         store: Arc::new(FsCompanyStore::new(dir)),
         meter: Some(meter.clone()),
         workspace_root: dir.to_path_buf(),
+        audit_root: dir.to_path_buf(),
         model_override: Some("stub-model".to_string()),
         tasks: None,
         artifacts: None,
