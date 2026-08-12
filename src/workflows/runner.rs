@@ -260,6 +260,10 @@ async fn run_workflow_inner(
     // durable effect around the engine — the started/finished/node journal
     // writes, the delivery dispatch, and gate parking. Read once here.
     let dry_run = ctx.dry_run;
+    // Issue #661 (L2): a failed per-run-workspace mkdir aborts the run here,
+    // BEFORE the WorkflowRunStarted journal append below — so a workspace the
+    // effects cannot be rooted at leaves no orphaned started row, and the caller
+    // sees the real cause instead of a later, further-removed effect failure.
     // Issue #638: where an agent node leaves an operator-facing notice. Owned
     // here, by the run, because that is the only scope that outlives the nodes
     // and reaches `WorkflowRun`.
@@ -276,7 +280,7 @@ async fn run_workflow_inner(
             notices: notices.clone(),
         },
     )
-    .await;
+    .await?;
 
     // The opening bracket, appended BEFORE the engine call so a run killed
     // mid-flight leaves a start with no finish — which is precisely the shape
@@ -2035,6 +2039,65 @@ to = "done"
             run.output.to_string().contains("name"),
             "the continued error item should name the missing property: {}",
             run.output
+        );
+    }
+
+    /// T-output_parser AUTO-FIX (issue #661, M4) — the vendored-engine drift
+    /// catcher. With `auto_fix` DEFAULTED (true) and no roster LLM wired, a
+    /// schema failure sends the engine to the `llm` capability to *repair* the
+    /// value. The unwired `llm` must surface the SCHEMA failure, so the
+    /// `on_error = continue` error item names the missing property — NOT the
+    /// generic "no roster agent" message that used to mask it.
+    ///
+    /// This exercises the real request the engine builds
+    /// (`task = "coerce_to_schema"` with the schema `errors`), so a future
+    /// tinyflows pin that reshapes that request fails here rather than silently
+    /// reverting to the masked message.
+    #[tokio::test]
+    async fn t_output_parser_auto_fix_surfaces_schema_failure_not_no_roster_agent() {
+        // Note: NO `auto_fix = false` — the default (true) is exactly the path
+        // that reaches the `llm` auto-fix capability.
+        let src = r#"
+id = "op_af_wf"
+name = "Parser Auto-fix WF"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "parse"
+kind = "output_parser"
+name = "Parse"
+on_error = "continue"
+[node.config.schema]
+type = "object"
+required = ["name"]
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "parse"
+[[edge]]
+from = "parse"
+to = "done"
+"#;
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_src(dir.path(), src, serde_json::json!({ "other": 1 }))
+            .await
+            .expect("run completes despite the schema failure");
+
+        let message = run.output["nodes"]["parse"]["items"][0]["json"]["error"]["message"]
+            .as_str()
+            .unwrap_or_else(|| panic!("expected a routed error item: {}", run.output));
+        assert!(
+            message.contains("schema validation") && message.contains("name"),
+            "the auto-fix path must surface the schema failure: {message}"
+        );
+        assert!(
+            !message.contains("no roster agent"),
+            "the schema failure must not be masked by the bare-LLM message: {message}"
         );
     }
 
