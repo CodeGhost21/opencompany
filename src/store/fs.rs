@@ -210,12 +210,73 @@ fn sync_parent_dir(path: &Path) -> Result<()> {
     };
     std::fs::File::open(parent)
         .and_then(|dir| dir.sync_all())
-        .map_err(|e| io_err(parent, e))
+        .map_err(|e| io_err(parent, e))?;
+    #[cfg(test)]
+    append_probe::record_dir_sync(parent);
+    Ok(())
 }
 
 #[cfg(not(unix))]
 fn sync_parent_dir(_path: &Path) -> Result<()> {
     Ok(())
+}
+
+/// Creates `dir` and every missing ancestor, and does not return until each
+/// directory entry it created is on **stable storage** (issue #392).
+///
+/// A create is durable only once the block that holds its *name* is, and that
+/// block belongs to the parent. [`sync_parent_dir`] covers the entry naming the
+/// file, which is the whole story for a journal whose directory already existed.
+/// It is not the whole story for the first append into a fresh company data
+/// directory: that append creates a *chain*, and flushing only its innermost
+/// link leaves the outer ones as unflushed writes a host crash can lose
+/// independently. Losing one takes the entire subtree with it — synced record
+/// included — which is precisely the loss the flush was bought to prevent, with
+/// the flush's cost already paid.
+///
+/// Each created directory is made durable by syncing **its** parent, walking
+/// outermost-first so every `mkdir` lands in a directory that exists. The
+/// innermost created directory is deliberately not synced here; it is the
+/// parent of the file the caller is about to create, and [`sync_parent_dir`]
+/// flushes it as part of that create.
+///
+/// POSIX-only on the same terms as [`sync_parent_dir`] — a non-unix build
+/// creates the chain and skips the flushes.
+pub(crate) async fn create_dir_all_durable(dir: &Path) -> Result<()> {
+    // Mirrors `std::fs::create_dir_all`, which treats the empty path as a no-op
+    // rather than an error.
+    if dir.as_os_str().is_empty() {
+        return Ok(());
+    }
+    let owned = dir.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        // Innermost-first while walking up, so the creation loop below reverses
+        // it. A readable ancestor that already exists ends the walk; anything
+        // else is treated as missing and left for `create_dir` to report against
+        // the path that actually failed.
+        let mut missing: Vec<&Path> = Vec::new();
+        let mut cursor = Some(owned.as_path());
+        while let Some(path) = cursor {
+            if matches!(path.try_exists(), Ok(true)) {
+                break;
+            }
+            missing.push(path);
+            cursor = path.parent().filter(|p| !p.as_os_str().is_empty());
+        }
+        for path in missing.iter().rev() {
+            match std::fs::create_dir(path) {
+                Ok(()) => {}
+                // Lost the race to another creator. The entry exists either way,
+                // and the winner owns flushing it.
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => return Err(io_err(path, e)),
+            }
+            sync_parent_dir(path)?;
+        }
+        Ok::<_, OpenCompanyError>(())
+    })
+    .await
+    .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
 }
 
 /// A test-only tally of how each append to a path was performed (issue #392).
@@ -228,7 +289,7 @@ fn sync_parent_dir(_path: &Path) -> Result<()> {
 /// full statement of what a unit test can and cannot establish here.
 #[cfg(test)]
 pub(crate) mod append_probe {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::sync::{LazyLock, Mutex};
 
@@ -260,6 +321,30 @@ pub(crate) mod append_probe {
             .get(&key(path))
             .copied()
             .unwrap_or((0, 0))
+    }
+
+    /// Every directory [`super::sync_parent_dir`] has flushed.
+    ///
+    /// The same argument as the append tally: a flushed directory and an
+    /// unflushed one are identical on disk, so the honest check is to count the
+    /// request where it is made. Never cleared — tests own unique temp paths and
+    /// ask about their own.
+    static DIR_SYNCS: LazyLock<Mutex<HashSet<PathBuf>>> =
+        LazyLock::new(|| Mutex::new(HashSet::new()));
+
+    pub(crate) fn record_dir_sync(path: &Path) {
+        DIR_SYNCS
+            .lock()
+            .expect("append-probe poisoned")
+            .insert(key(path));
+    }
+
+    /// Whether `path`'s directory entry block was flushed.
+    pub(crate) fn dir_synced(path: &Path) -> bool {
+        DIR_SYNCS
+            .lock()
+            .expect("append-probe poisoned")
+            .contains(&key(path))
     }
 }
 
@@ -1274,6 +1359,57 @@ mod test {
             vec![0, 1, 2],
             "durable appends append, never truncate"
         );
+    }
+
+    /// **Issue #392**: creating the journal's parent chain durably flushes
+    /// **every** directory it creates, not only the innermost one.
+    ///
+    /// A create records the new name in its parent's block, so a chain of fresh
+    /// directories is a chain of independent writes and a host crash can lose
+    /// any of them on its own. Flushing only the file's own parent would leave a
+    /// synced record under ancestors that were never written down — unreachable
+    /// after exactly the crash the flush is bought for, with the flush's cost
+    /// already paid.
+    ///
+    /// Starts with the complete nested parent path absent, and asserts the flush
+    /// was requested for each link. As everywhere else in this module, what a
+    /// unit test can prove is that the request was made and its syscall returned
+    /// `Ok`; the platter is the OS contract's half.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_durable_path_flushes_every_directory_it_creates() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        let companies = root.join("companies");
+        let acme = companies.join("acme");
+        let journal_dir = acme.join("journal");
+        let path = journal_dir.join("journal.jsonl");
+
+        assert!(
+            !companies.try_exists().unwrap(),
+            "the whole chain below the temp root must be absent to start"
+        );
+
+        create_dir_all_durable(&journal_dir).await.unwrap();
+        append_line_durable(&path, "{\"i\":0}").await.unwrap();
+
+        // Each created directory's entry lives in its parent, so the parent is
+        // what has to be flushed. `journal_dir` is flushed by the file create.
+        for (dir, why) in [
+            (&root, "holds the entry naming `companies`"),
+            (&companies, "holds the entry naming `acme`"),
+            (&acme, "holds the entry naming `journal`"),
+            (&journal_dir, "holds the entry naming the journal file"),
+        ] {
+            assert!(
+                append_probe::dir_synced(dir),
+                "{} — unflushed, a host crash can lose the subtree under it",
+                why
+            );
+        }
+
+        let rows: Vec<serde_json::Value> = read_jsonl(&path).await.expect("no corrupt lines");
+        assert_eq!(rows.len(), 1, "the record itself still landed");
     }
 
     /// A durable append into a directory that does not exist must surface the

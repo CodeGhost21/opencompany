@@ -28,7 +28,7 @@ use crate::error::OpenCompanyError;
 use crate::ports::types::{Actor, ApprovalId, Effect, EventSeq};
 use crate::runtime::grants::{GrantId, GrantedCall, StandingGrant};
 pub use crate::runtime::types::TaskLink;
-use crate::store::fs::{PathLocks, append_line, append_line_durable};
+use crate::store::fs::{PathLocks, append_line, append_line_durable, create_dir_all_durable};
 
 /// Journal append locks, keyed by path, shared by every [`RuntimeJournal`] in
 /// the process (issue #386).
@@ -1748,9 +1748,16 @@ impl RuntimeJournal {
         let durability = record.durability();
         let _guard = self.write_lock.lock().await;
         if let Some(parent) = self.path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| self.io_err_at(parent, e))?;
+            match durability {
+                // The directories are part of what makes the flushed record
+                // findable. A journal's first append into a fresh data directory
+                // creates the whole chain, and a record flushed under ancestors
+                // that were never written down is lost with them.
+                Durability::Host => create_dir_all_durable(parent).await?,
+                Durability::Process => tokio::fs::create_dir_all(parent)
+                    .await
+                    .map_err(|e| self.io_err_at(parent, e))?,
+            }
         }
         match durability {
             Durability::Host => append_line_durable(&self.path, &line).await,
@@ -3535,6 +3542,39 @@ mod test {
         let reloaded = RuntimeJournal::new(&path);
         reloaded.load().await.unwrap();
         assert!(reloaded.is_executed("k-1"), "the flushed commit replays");
+    }
+
+    /// **Issue #392**: a host-durable record creates its journal's parent chain
+    /// durably too.
+    ///
+    /// The wiring half of `create_dir_all_durable`. A journal's *first* append
+    /// is the one that creates the directories, and it is also the one most
+    /// likely to be an `EffectExecuted` commit. Reaching for the plain
+    /// `create_dir_all` there would flush the record under ancestors that were
+    /// not flushed, and a host crash takes the subtree — and the record with it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_host_record_flushes_the_directories_its_journal_creates() {
+        use crate::store::fs::append_probe;
+
+        let dir = tmp_dir();
+        let companies = dir.path().join("companies");
+        let home = companies.join("acme");
+        let journal = RuntimeJournal::new(&home.join("journal.jsonl"));
+
+        journal.record_executed("k-1", executed(1)).await.unwrap();
+
+        for (created, holder) in [("companies", dir.path()), ("acme", &companies)] {
+            assert!(
+                append_probe::dir_synced(holder),
+                "the directory holding the entry naming `{created}` must be flushed \
+                 before a host-durable record is reported durable"
+            );
+        }
+        assert!(
+            append_probe::dir_synced(&home),
+            "the journal file's own directory entry must be flushed"
+        );
     }
 
     /// **Issue #392**: a commit whose append fails must release its key, so the
