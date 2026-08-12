@@ -560,6 +560,19 @@ pub fn build_agent(
             .iter()
             .any(|binding| binding.can_push == Some(true));
         match (&deps.repos, deps.repo_bindings.is_empty(), push_capable) {
+            // Gate 4 (issue #752), first and unconditional as in the read tier
+            // above: on a plaintext backend the credential is readable by the
+            // agent shell, and `repo_publish` uses it host-side to push, so no
+            // shape of it is safe to wire — the write path is if anything more
+            // exposed than the read one, never less.
+            (Some(repos), _, _) if repos.secrets_are_plaintext_on_disk() => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but this host keeps secrets on its \
+                 own filesystem, where the credential is readable by the shell; repo_publish NOT \
+                 wired (fail-closed, issue #752) — set OPENCOMPANY_STORAGE=mongodb or drop the \
+                 `repo.write` grant"
+            ),
             (Some(repos), false, true) => {
                 tools.push(crate::harness::repo::repo_publish_tool(
                     crate::harness::repo::RepoToolContext {
@@ -1709,8 +1722,10 @@ mod tests {
     }
 
     /// [`built_tool_names_with_repos`], with control over whether the bound
-    /// credentials read as push-capable (issue #735) — the fourth gate the write
-    /// tier adds. `false` matches every read-tier caller (`can_push: None`).
+    /// credentials read as push-capable (issue #735) — one of the two gates the
+    /// write tier adds beyond #245's three. `false` matches every read-tier
+    /// caller (`can_push: None`); the secret backend stays the safe Mongodb, so a
+    /// push-capability assertion never passes for the #752 reason instead.
     fn built_tool_names_with_repos_cap(
         grants: &[&str],
         bindings: usize,
@@ -1725,9 +1740,9 @@ mod tests {
     }
 
     /// [`built_tool_names_with_repos`], with the secret backend spelled out —
-    /// the fourth gate (issue #752). Mongodb is what the plain helper passes,
-    /// because a host that cannot hold a repository credential safely cannot
-    /// reach the other three gates at all, and every assertion about them would
+    /// the other added gate (issue #752). Mongodb is what the plain helper
+    /// passes, because a host that cannot hold a repository credential safely
+    /// cannot reach the other gates at all, and every assertion about them would
     /// otherwise be passing for the #752 reason instead of its own.
     fn built_tool_names_with_repos_on(
         grants: &[&str],
@@ -1737,11 +1752,9 @@ mod tests {
         built_tool_names_with_repos_on_cap(grants, bindings, false, storage_kind)
     }
 
-    /// Both gates at once. #735 added the push-capability of the bound
-    /// credential and #752 added the secret backend holding it, independently
-    /// and to the same helper; a caller that fixes one still has to be able to
-    /// vary the other, so the two thin wrappers above each pin their own
-    /// default and this carries the full shape.
+    /// The full repository-wiring fixture: both the push-capability (#735) and
+    /// the secret-backend (#752) gates spelled out. The three wrappers above each
+    /// default the axis they do not vary.
     fn built_tool_names_with_repos_on_cap(
         grants: &[&str],
         bindings: usize,
@@ -1963,6 +1976,21 @@ mod tests {
             !bare.contains(&publish),
             "bare `repo` (the read tier) must never wire repo_publish: {bare:?}"
         );
+
+        // Gate 4 (issue #752): even a push-capable `repo.write` wires nothing on a
+        // plaintext secret backend — repo_publish uses the credential host-side, so
+        // it is refused exactly like the read tools are on such a host.
+        for kind in [
+            crate::store::StorageKind::Fs,
+            crate::store::StorageKind::Sqlite,
+        ] {
+            let plaintext = built_tool_names_with_repos_on_cap(&["repo.write"], 1, true, kind);
+            assert!(
+                !plaintext.contains(&publish),
+                "a push-capable `repo.write` on {} must not wire repo_publish: {plaintext:?}",
+                kind.as_str()
+            );
+        }
     }
 
     /// Granting `search` must not quietly hand over anything *else*: the
