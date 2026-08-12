@@ -265,7 +265,14 @@ async fn ensure_member_folder(
 }
 
 /// What a lookup for one named node under one parent found.
-enum Found {
+///
+/// `pub(crate)` alongside [`find`], for the one other module that has to resolve
+/// a system root: [`workspace_sweep`](crate::company::workspace_sweep). A sweep
+/// that removes folders *under* `Agents/` has to agree with the scaffold about
+/// which node that root is, and about when there isn't one — a second lookup
+/// with its own idea of "the `Agents` folder" could adopt a node this module
+/// refuses to touch, and then delete beneath it.
+pub(crate) enum Found {
     /// Exactly one folder carries the name — adopt it, by id.
     Folder(String),
     /// Nothing carries the name; it is free to create.
@@ -277,7 +284,10 @@ enum Found {
 
 /// Look for a node named `name` whose parent is `parent` (`None` = the
 /// workspace root).
-fn find(nodes: &[WorkspaceNode], parent: Option<&str>, name: &str) -> Found {
+///
+/// `pub(crate)` so the fail-closed adoption rule above has exactly one
+/// implementation. See [`Found`].
+pub(crate) fn find(nodes: &[WorkspaceNode], parent: Option<&str>, name: &str) -> Found {
     let matches: Vec<&WorkspaceNode> = nodes
         .iter()
         .filter(|node| node.parent_id.as_deref() == parent && node.name == name)

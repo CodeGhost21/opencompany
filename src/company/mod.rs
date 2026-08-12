@@ -66,6 +66,11 @@ pub mod workspace_search;
 // default build, and it touches nothing but the `WorkspaceStore` port.
 pub mod workspace_scaffold;
 pub mod workspace_seed;
+// Issue #700: the operator-triggered removal of the empty `Agents/<id>/` folders
+// a pre-#570 company still carries. Always compiled and openhuman-free, like the
+// scaffold whose fail-closed root lookup it shares: its only caller is the
+// console's REST route, and it touches nothing but the `WorkspaceStore` port.
+pub mod workspace_sweep;
 
 use std::path::Path;
 

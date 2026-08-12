@@ -2962,6 +2962,98 @@ mod test {
         conformance::assert_workspace_binary_store(store()).await;
     }
 
+    /// Issue #700's emptiness predicate, against the backend that can actually
+    /// hold the shape it has to survive.
+    ///
+    /// The sweep refuses a folder holding an unaddressable child — a name
+    /// carrying a path separator, which every path-shaped index drops and the
+    /// port's recursive `delete` would still take (issue #671). Its own module
+    /// tests pin that on a hand-built node list, because `FsOps` rejects such a
+    /// name at creation (`reject_unsafe_name`) and cannot produce one.
+    ///
+    /// This backend does not reject it, and hosted tenants run this backend — so
+    /// the shape is reachable data rather than a thought experiment, and that is
+    /// what this asserts: sqlite stores `q/r.md` under `Agents/ghost/`, and the
+    /// sweep leaves `ghost` alone. It lives here because
+    /// `cargo test --features sqlite --lib store::sqlite` is the only lane that
+    /// runs it.
+    #[tokio::test]
+    async fn workspace_sweep_keeps_a_folder_whose_only_child_has_no_renderable_path() {
+        use crate::company::workspace_sweep::sweep_empty_agent_folders;
+        use crate::ports::workspace::{NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore};
+
+        let store = store();
+        let company = CompanyId::new("acme");
+        let node = |id: &str, name: &str, kind, parent: Option<&str>| WorkspaceNode {
+            id: id.to_string(),
+            name: name.to_string(),
+            kind,
+            parent_id: parent.map(str::to_string),
+            updated_at_millis: 1,
+            created_by: WorkspaceOrigin::Seed,
+            updated_by: WorkspaceOrigin::Seed,
+            mime: None,
+            size: None,
+            sha256: None,
+        };
+
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("root", "Agents", NodeKind::Folder, None),
+            None,
+        )
+        .await
+        .unwrap();
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("ghost", "ceo", NodeKind::Folder, Some("root")),
+            None,
+        )
+        .await
+        .unwrap();
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("empty", "cto", NodeKind::Folder, Some("root")),
+            None,
+        )
+        .await
+        .unwrap();
+        // The name `fs` would have refused. If this create ever starts failing,
+        // the premise of the whole guard has changed and this test should say so
+        // rather than the guard quietly becoming untested.
+        WorkspaceStore::create(
+            store.as_ref(),
+            &company,
+            &node("hidden", "q/r.md", NodeKind::File, Some("ghost")),
+            Some("# quarterly"),
+        )
+        .await
+        .expect("sqlite accepts a separator-carrying name — that is why the guard exists");
+
+        let removed = sweep_empty_agent_folders(store.as_ref(), &company, false)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            removed.iter().map(|f| f.id.as_str()).collect::<Vec<_>>(),
+            vec!["empty"],
+            "only the genuinely empty folder may go"
+        );
+        let ids: Vec<String> = WorkspaceStore::tree(store.as_ref(), &company)
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|n| n.id)
+            .collect();
+        assert!(
+            ids.contains(&"ghost".to_string()) && ids.contains(&"hidden".to_string()),
+            "the folder and its unaddressable child must both survive, got {ids:?}"
+        );
+    }
+
     #[tokio::test]
     async fn one_store_serves_every_port_through_arc() {
         // A single Arc<SqliteStore> satisfies all five port trait objects — the

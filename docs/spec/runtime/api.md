@@ -141,6 +141,7 @@ POST   …/workspace                          create a folder/file (or upload)
 PUT    …/workspace/file/{nodeId}             write file content
 PATCH  …/workspace/{nodeId}                  rename / move
 DELETE …/workspace/{nodeId}                  delete a node
+POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays (#700)
 POST   …/skills                             add a custom skill
 GET    …/skills/registry                     browse the shared skill library
 POST   …/skills/{slug}/install              install a registry/company skill
@@ -201,6 +202,22 @@ cleared search box into a full-tree fetch. `limit=0` is a `400` for the same
 reason — it is never read as "no limit". A **binary** node matches on its name
 only: a text read of a payload is empty by the port's definition, and its bytes
 are never scanned or excerpted.
+
+`POST …/workspace/sweep-empty-agent-folders` (#700) removes the empty
+`Agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
+rather than automatic — the affected tenants are hosted, so a subcommand would
+be unreachable for the operators who need it, and a boot sweep would change a
+tree on an upgrade nobody asked for. `?dry_run=true` answers
+`{"wouldRemove":[{id,name}…]}` and touches nothing, so the console can name
+every folder on a confirm dialog; the real call answers `{"removed":[…]}`, and
+which field carries the list is what actually happened. A node qualifies only
+when it is a direct child of the `Agents` root **by id**, is a folder, and has
+**no children counted structurally** — over every node in the tree, before any
+path is rendered, because a folder whose only child carries a path separator
+reads as empty to anything path-shaped while the recursive delete would still
+take it (#671), and sqlite and mongodb both accept such a name. An ambiguous
+root is a `409`, not a guess. Each removal announces its own
+`WorkspaceChanged{removed}` (#327); a second run removes nothing.
 
 Both workspace `GET`s — and the `POST` / `PATCH` node bodies — carry
 `createdBy` and `updatedBy` (#326), each `{"kind":"seed"|"operator"|"agent",

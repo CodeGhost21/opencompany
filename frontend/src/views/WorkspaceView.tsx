@@ -7,6 +7,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderX,
   Link2,
   Loader2,
   MoreHorizontal,
@@ -34,11 +35,13 @@ import {
   originLabel,
   renameMoveNode,
   searchWorkspace,
+  sweepEmptyAgentFolders,
   uploadFile,
   writeFile,
   OPERATOR_ORIGIN,
   type SearchHit,
   type SearchResults as SearchResultsPage,
+  type SweptFolder,
   type WorkspaceFile,
   type WorkspaceOrigin,
 } from "@/api/workspace";
@@ -358,6 +361,11 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   const [showExplorer, setShowExplorer] = useState(true);
   const [legacy, setLegacy] = useState<FsNode[]>([]);
   const [importing, setImporting] = useState(false);
+  // The empty-agent-folder tidy (issue #700), in its two stages: `preview` is
+  // what the host says *would* go, `done` is what actually went. Both name every
+  // folder — a count is not something an operator who disagrees can check.
+  const [sweep, setSweep] = useState<SweepState | null>(null);
+  const [sweeping, setSweeping] = useState(false);
   // The pending scratchpad partitioned by kind, once, for every surface that
   // describes or imports it: the banner's sentence, the import loops, and the
   // receipt. #500 partitioned inside `importLegacy` so the loops and the
@@ -965,6 +973,53 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     }
   }
 
+  /**
+   * Ask the host which `Agents/<id>/` folders are empty, and show them
+   * (issue #700).
+   *
+   * A preview, always — the deletion is a second call the operator makes from
+   * the dialog. Nothing about emptiness is decided here: the host counts
+   * children structurally, over every node in the tree, and this only renders
+   * the answer.
+   */
+  async function previewSweep() {
+    setSweeping(true);
+    try {
+      const folders = await sweepEmptyAgentFolders(client, company, true);
+      if (folders.length === 0) {
+        toast.success("No empty agent folders to tidy.");
+        return;
+      }
+      setSweep({ stage: "preview", folders });
+    } catch (e) {
+      toast.error(message(e, "could not check for empty agent folders"));
+    } finally {
+      setSweeping(false);
+    }
+  }
+
+  /**
+   * Remove them, then report what actually went.
+   *
+   * The result list is the host's, not the preview echoed back: a folder that
+   * gained a deliverable between the two calls is left standing and is absent
+   * here, so the receipt describes the tree rather than the operator's intent.
+   */
+  async function confirmSweep() {
+    setSweeping(true);
+    try {
+      const removed = await sweepEmptyAgentFolders(client, company, false);
+      const gone = new Set(removed.map((f) => f.id));
+      setNodes((all) => all.filter((n) => !gone.has(n.id)));
+      setSweep({ stage: "done", folders: removed });
+    } catch (e) {
+      toast.error(message(e, "could not tidy the empty agent folders"));
+      setSweep(null);
+    } finally {
+      setSweeping(false);
+    }
+  }
+
   async function onWiki(target: string) {
     const existing = fileByTitle(nodes, target);
     if (existing) {
@@ -1027,6 +1082,19 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
           </IconBtn>
           <IconBtn label="Upload" onClick={() => uploadRef.current?.click()}>
             <Upload className="size-4" />
+          </IconBtn>
+          {/* Issue #700. A company provisioned before the tree went lazy carries
+              one empty folder per teammate, and nothing else will ever remove
+              them. Deliberately a button rather than something boot does: the
+              operator's click is the opt-in, and the dialog names every folder
+              before any of them goes. */}
+          <IconBtn
+            label="Tidy empty agent folders"
+            disabled={sweeping}
+            onClick={() => void previewSweep()}
+            data-testid="workspace-sweep"
+          >
+            <FolderX className="size-4" />
           </IconBtn>
           <input
             ref={uploadRef}
@@ -1298,6 +1366,12 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
           if (moving) void move(moving, destId);
           setMoving(null);
         }}
+      />
+      <SweepDialog
+        state={sweep}
+        busy={sweeping}
+        onClose={() => setSweep(null)}
+        onConfirm={() => void confirmSweep()}
       />
     </div>
   );
@@ -1769,6 +1843,81 @@ function MoveDialog({
             <DestRow key={f.id} label={f.name} disabled={moving?.parentId === f.id} onClick={() => onMove(f.id)} />
           ))}
         </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The empty-agent-folder tidy, in its two stages (issue #700).
+ *
+ * `preview` asks; `done` reports. Both list the folders by name, which is the
+ * point of the dialog rather than a nicety: an operator who disagrees with the
+ * sweep can only say so if they can see what it means to take, and can only
+ * check it afterwards if they are told what it took. "17 empty folders" is a
+ * number nobody can verify.
+ */
+interface SweepState {
+  stage: "preview" | "done";
+  folders: SweptFolder[];
+}
+
+function SweepDialog({
+  state,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  state: SweepState | null;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const done = state?.stage === "done";
+  const count = state?.folders.length ?? 0;
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{done ? "Tidied" : "Tidy empty agent folders"}</DialogTitle>
+          <DialogDescription>
+            {done
+              ? count === 0
+                ? "Nothing was removed — every folder had gained something by the time the tidy ran."
+                : `Removed ${count} empty folder${count === 1 ? "" : "s"} from Agents/.`
+              : `${count} folder${count === 1 ? "" : "s"} under Agents/ hold nothing at all. Removing them cannot take anything with them — a folder holding any file, note or subfolder is left alone.`}
+          </DialogDescription>
+        </DialogHeader>
+        <ul
+          className="max-h-64 space-y-1 overflow-y-auto"
+          data-testid="workspace-sweep-folders"
+        >
+          {state?.folders.map((folder) => (
+            <li
+              key={folder.id}
+              className="flex items-center gap-2 rounded-lg px-2.5 py-1.5 text-sm"
+            >
+              <Folder className="size-4 shrink-0 text-tone-2" />
+              <span className="truncate">{folder.name}</span>
+            </li>
+          ))}
+        </ul>
+        <DialogFooter>
+          {done ? (
+            <Button onClick={onClose}>Done</Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button variant="destructive" disabled={busy} onClick={onConfirm}>
+                {busy && <Loader2 className="mr-1 size-4 animate-spin" />}
+                Remove {count}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
       </DialogContent>
     </Dialog>
   );
