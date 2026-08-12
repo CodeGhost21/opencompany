@@ -167,7 +167,7 @@ hmac = { version = "0.12", optional = true }
 # would push `#[cfg]` through StorageHandles, three backends, and the
 # conformance suite to defend nothing.
 sha2 = "0.10"
-getrandom = "0.2"
+getrandom = "0.4"
 
 # Argon2id password hashing. Unconditional for the same reason as sha2: a build
 # that cannot verify a password cannot log a human in. Pure-Rust RustCrypto, no
