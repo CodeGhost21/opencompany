@@ -87,11 +87,38 @@ pub struct CreateInvoiceArgs {
     /// Free-text note stored on the invoice.
     #[serde(default)]
     pub invoice_note: Option<String>,
+    /// Whether Chargebee should immediately charge the customer's stored card.
+    /// `"off"` (the default here) raises an unpaid invoice to be settled later;
+    /// `"on"` attempts collection at once. See [`default_auto_collection`].
+    #[serde(default = "default_auto_collection")]
+    pub auto_collection: String,
     /// Optional `chargebee-idempotency-key`. A retried agent turn that reuses
     /// this key gets the original invoice back instead of billing twice.
     #[serde(default)]
     pub idempotency_key: Option<String>,
 }
+
+/// `"off"` — invoices are raised unpaid unless the caller says otherwise.
+///
+/// This deliberately departs from Chargebee, whose default follows the
+/// customer's `auto_collection` and therefore charges a stored card the moment
+/// the invoice exists. Two reasons to override it here:
+///
+/// - **"Create an invoice" is not "take a payment."** An agent acting on a
+///   natural-language billing instruction should not move money as a side
+///   effect of a word the user did not say. Charging a card is the kind of
+///   action that has to be asked for.
+/// - **Otherwise `chargebee_record_payment` is unreachable.** Issue #788 scopes
+///   both operations; an invoice that auto-collects on creation is already paid,
+///   so the tool that records a payment against it could never apply.
+///
+/// A caller who does want immediate collection passes `auto_collection: "on"`.
+fn default_auto_collection() -> String {
+    "off".to_string()
+}
+
+/// The values Chargebee accepts for `auto_collection`.
+pub const AUTO_COLLECTION: &[&str] = &["on", "off"];
 
 /// Arguments for `chargebee_list_invoices`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

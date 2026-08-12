@@ -66,6 +66,23 @@ the naming carries the weight.
 `idempotency_key`, forwarded as `chargebee-idempotency-key`. A retried agent turn
 that reuses the key gets the original invoice back instead of billing twice.
 
+### Creating an invoice does not charge a card
+
+`auto_collection` defaults to `off` here, which is **not** Chargebee's default —
+theirs follows the customer record and attempts collection the moment the invoice
+exists. Overridden for two reasons:
+
+- "Create an invoice" is not "take a payment". An agent acting on a
+  natural-language billing instruction should not move money as a side effect of
+  a word the user did not say.
+- Otherwise `chargebee_record_payment` is unreachable. Issue #788 scopes both
+  operations, and an invoice that auto-collects on creation is already paid.
+
+This was found in live testing, not in review: against a real site the first
+invoice attempt came back `payment_method_not_present` — Chargebee had tried to
+charge a card that did not exist. A caller who genuinely wants immediate
+collection passes `auto_collection: "on"`.
+
 ## Credentials
 
 The Chargebee API key is read from `CHARGEBEE_API_KEY` at startup and never
@@ -173,6 +190,21 @@ hanging. CI runs it on the default lane via
 `scripts/ci/run-scoped-suite.sh "chargebee mcp" chargebee chargebee`, classified
 `partial` in `scripts/ci/feature-lanes.txt`.
 
-Not covered: a live round trip against a real Chargebee site. It needs sandbox
-credentials, so it stays a manual step rather than an `#[ignore]`d test that
-looks like coverage.
+Not covered automatically: a live round trip against a real Chargebee site. It
+needs sandbox credentials, so it stays a manual step rather than an `#[ignore]`d
+test that looks like coverage.
+
+That manual run has been done once, against the `tinyhumans-test` site, and all
+five tools were exercised end to end: customer created, unpaid invoice raised
+(500.00, one "Pro plan" line item), the invoice listed back, a `bank_transfer`
+payment recorded taking it to `paid` with `amount_due` 0, and a subscription
+lookup returning a clean `resource_not_found`. Idempotency was verified both
+ways — a replayed key with an identical body returned the original invoice
+rather than creating a second, and a replayed key with a *changed* body was
+rejected by Chargebee.
+
+Two findings from that run are site configuration rather than code, and will
+bite anyone setting up a demo site: `net_term_days` is refused unless payment
+terms are configured, and a currency must be enabled on the site before it is
+accepted (`tinyhumans-test` is INR-only, so a USD invoice fails
+`param_wrong_value`).

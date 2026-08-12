@@ -12,8 +12,8 @@ use serde_json::{Value, json};
 
 use super::client::{ChargebeeClient, Form};
 use super::types::{
-    CreateInvoiceArgs, GetSubscriptionArgs, ListInvoicesArgs, PAYMENT_METHODS, RecordPaymentArgs,
-    UpsertCustomerArgs,
+    AUTO_COLLECTION, CreateInvoiceArgs, GetSubscriptionArgs, ListInvoicesArgs, PAYMENT_METHODS,
+    RecordPaymentArgs, UpsertCustomerArgs,
 };
 
 /// One tool as advertised over `tools/list`.
@@ -33,7 +33,8 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
             name: "chargebee_create_invoice",
             description: "Create a Chargebee invoice for an existing customer with one or more ad-hoc \
                  line items. Amounts are in the currency's MINOR unit: $500.00 USD is 50000, \
-                 not 500. Returns the created invoice including its id, total, and status.",
+                 not 500. Raises an UNPAID invoice by default — it does not charge the \
+                 customer's card. Returns the created invoice including its id, total, and status.",
             input_schema: json!({
                 "type": "object",
                 "required": ["customer_id", "currency_code", "charges"],
@@ -67,6 +68,11 @@ pub fn descriptors() -> Vec<ToolDescriptor> {
                     },
                     "net_term_days": {"type": "integer", "minimum": 0, "description": "Days until due."},
                     "invoice_note": {"type": "string"},
+                    "auto_collection": {
+                        "type": "string",
+                        "enum": AUTO_COLLECTION,
+                        "description": "Defaults to `off`, raising an unpaid invoice to be settled later. Pass `on` ONLY if the user explicitly asked to charge the customer's stored card now."
+                    },
                     "idempotency_key": {
                         "type": "string",
                         "description": "Reuse on retry to avoid creating a duplicate invoice."
@@ -197,9 +203,17 @@ async fn create_invoice(client: &ChargebeeClient, args: CreateInvoiceArgs) -> Re
         }
     }
 
+    if !AUTO_COLLECTION.contains(&args.auto_collection.as_str()) {
+        return Err(invalid(format!(
+            "`auto_collection` must be one of: {}",
+            AUTO_COLLECTION.join(", ")
+        )));
+    }
+
     let mut form = Form::new();
     form.push("customer_id", args.customer_id);
     form.push("currency_code", args.currency_code.trim().to_uppercase());
+    form.push("auto_collection", args.auto_collection);
     form.push_opt("net_term_days", args.net_term_days);
     form.push_opt("invoice_note", args.invoice_note);
     for (i, charge) in args.charges.iter().enumerate() {
@@ -533,9 +547,65 @@ mod tests {
             body.contains("charges%5Bamount%5D%5B1%5D=2500"),
             "body: {body}"
         );
+        // Unasked-for, and load-bearing: without it Chargebee follows the
+        // customer's own setting and charges a stored card the moment the
+        // invoice exists. Live-tested — a real site answered
+        // `payment_method_not_present` before this was sent.
+        assert!(body.contains("auto_collection=off"), "body: {body}");
         // An omitted optional must be absent, not blank — Chargebee reads a
         // blank value as "clear this field".
         assert!(!body.contains("invoice_note"), "body: {body}");
+    }
+
+    #[tokio::test]
+    async fn creating_an_invoice_never_charges_a_card_unless_asked() {
+        // The default is not Chargebee's: theirs follows the customer record and
+        // collects immediately. "Create an invoice" must not move money.
+        let args: CreateInvoiceArgs = serde_json::from_value(json!({
+            "customer_id": "acme",
+            "currency_code": "USD",
+            "charges": [{"description": "Pro plan", "amount_in_minor_units": 50_000}]
+        }))
+        .expect("args parse");
+        assert_eq!(args.auto_collection, "off");
+
+        // And an explicit request is still honoured.
+        let (_, captured) = stub(200, r#"{"invoice":{"id":"inv_1"}}"#, async |client| {
+            create_invoice(
+                &client,
+                serde_json::from_value(json!({
+                    "customer_id": "acme",
+                    "currency_code": "USD",
+                    "charges": [{"description": "Pro plan", "amount_in_minor_units": 50_000}],
+                    "auto_collection": "on"
+                }))
+                .expect("args parse"),
+            )
+            .await
+        })
+        .await;
+        assert!(
+            captured.body.contains("auto_collection=on"),
+            "body: {}",
+            captured.body
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_auto_collection_names_the_valid_set() {
+        let err = create_invoice(
+            &client(),
+            serde_json::from_value(json!({
+                "customer_id": "acme",
+                "currency_code": "USD",
+                "charges": [{"description": "Pro plan", "amount_in_minor_units": 50_000}],
+                "auto_collection": "yes"
+            }))
+            .expect("args parse"),
+        )
+        .await
+        .expect_err("an unsupported value is rejected");
+        assert!(err.to_string().contains("on, off"), "got: {err}");
     }
 
     #[tokio::test]
