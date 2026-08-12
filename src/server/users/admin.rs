@@ -29,7 +29,10 @@ use crate::ports::{
 };
 use crate::server::error::ApiError;
 use crate::server::graphql::auth::UserPrincipal;
-use crate::server::users::routes::{current_user, manifest_admin_invites};
+use crate::server::ops::mailer::OutboundEmail;
+use crate::server::users::routes::{
+    current_user, load_manifest, mail_transport_wired, manifest_admin_invites,
+};
 use crate::server::users::scope::{PublicCompany, public_scoped};
 use crate::server::users::{password, token};
 
@@ -192,13 +195,122 @@ struct InviteBody {
     role: UserRole,
 }
 
+/// What actually happened to the invite mail (issue #584).
+///
+/// The invite record is written either way — this reports delivery, it does not
+/// gate the grant. It is reported to the caller rather than swallowed because
+/// this route, unlike `auth/request`, has no enumeration oracle to protect: it
+/// is admin-authenticated and the caller typed the address in themselves, so
+/// there is nothing here they could learn that they did not already supply.
+/// A success toast over a mail that never left is the entire bug in the issue.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum InviteDelivery {
+    /// The transport accepted the message.
+    Sent,
+    /// This host has no mail transport wired, so nothing was attempted.
+    NoTransport,
+    /// A transport was wired and refused the message.
+    Failed,
+}
+
+/// The invite, plus what happened to the mail.
+///
+/// `flatten` keeps every existing [`InviteRecord`] field at the top level, so
+/// this is additive on the wire — an older client reading `id` / `email` /
+/// `role` sees exactly what it saw before.
+#[derive(Debug, Serialize)]
+struct InviteResult {
+    #[serde(flatten)]
+    invite: InviteRecord,
+    delivery: InviteDelivery,
+}
+
+/// Mails an invited address, returning what happened.
+///
+/// The mail carries **no credential** — no code, no token, not even the invite
+/// id. The recipient still goes through `auth/request` like anyone else, so the
+/// roster remains the only gate and this stays a notification. That is why it
+/// is safe to send to an address a human typed, possibly wrongly: the worst
+/// case is a stranger learning that a company they cannot enter exists.
+///
+/// The transport is the **host-level** one — the same seam the magic link uses,
+/// asked through the same predicate. Falling back to the company's own `__smtp`
+/// secret was considered and rejected: it would mail an invite from a host that
+/// cannot then mail the sign-in link, inviting someone into a dead flow.
+async fn send_invite_mail(
+    state: &AppState,
+    runtime: &CompanyRuntime,
+    invite: &InviteRecord,
+    inviter: &str,
+) -> InviteDelivery {
+    if !mail_transport_wired(state) {
+        return InviteDelivery::NoTransport;
+    }
+    let connections = state.connections();
+    let (Some(sender), Some(creds)) = (&connections.mail, &connections.mail_credentials) else {
+        return InviteDelivery::NoTransport;
+    };
+    let company_name = load_manifest(runtime)
+        .await
+        .ok()
+        .flatten()
+        .map(|m| m.company.name)
+        .unwrap_or_else(|| runtime.id().as_ref().to_string());
+    let base = state.config().host_base_url();
+    let link = format!("{base}/login?company={}", runtime.id().as_ref());
+    let days = INVITE_TTL_MILLIS / (24 * 60 * 60 * 1000);
+    let mail = OutboundEmail {
+        to: invite.email.clone(),
+        subject: format!("You're invited to {company_name}"),
+        body: format!(
+            "{inviter} invited you to {company_name}.\n\n\
+             To get in, sign in with this email address at:\n\n{link}\n\n\
+             You'll be sent a sign-in link by email — this message isn't one, \
+             and there's nothing in it to keep. The invitation is good for {days} days.\n\n\
+             If you weren't expecting this, you can ignore it. Nothing has been \
+             created for you and no one can act as you.\n"
+        ),
+    };
+    match sender.send(creds, &mail).await {
+        Ok(()) => InviteDelivery::Sent,
+        Err(err) => {
+            // The error, never the message: a body echoed into a log or into
+            // telemetry carries the recipient's address off this host.
+            tracing::warn!(company = %runtime.id(), "invite mail failed: {err}");
+            InviteDelivery::Failed
+        }
+    }
+}
+
+/// How to name the person who sent an invite, in mail the invitee reads.
+///
+/// A display name if they set one, otherwise the **local part** of their
+/// address — never the full address. Same rule as chat attribution (see
+/// `docs/spec/runtime/users.md`): being invited somewhere should not hand you
+/// an admin's mailbox. Falls back to a role noun if the inviter cannot be
+/// resolved, which is what a manifest- or platform-bootstrapped id looks like.
+async fn inviter_label(runtime: &CompanyRuntime, user_id: &str) -> String {
+    let found = runtime.users().get_user(runtime.id(), user_id).await.ok();
+    let Some(user) = found.flatten() else {
+        return "An admin".to_string();
+    };
+    if let Some(name) = user.display_name.filter(|n| !n.trim().is_empty()) {
+        return name;
+    }
+    match user.email.split('@').next() {
+        Some(local) if !local.is_empty() => local.to_string(),
+        _ => "An admin".to_string(),
+    }
+}
+
 /// `POST …/users/invites` — invite an address.
 async fn invite(
     company: PublicCompany,
     State(state): State<AppState>,
     headers: HeaderMap,
     Json(body): Json<InviteBody>,
-) -> Result<Json<InviteRecord>, Response> {
+) -> Result<Json<InviteResult>, Response> {
     let runtime = company.runtime.clone();
     let admin = require_admin(&headers, &state, &runtime).await?;
     let email = normalize_email(&body.email);
@@ -221,7 +333,7 @@ async fn invite(
         )))
         .into_response());
     }
-    let record = InviteRecord {
+    let mut record = InviteRecord {
         id: generate_id(),
         email,
         role: body.role,
@@ -229,6 +341,7 @@ async fn invite(
         created_at_millis: now,
         expires_at_millis: now + INVITE_TTL_MILLIS,
         accepted_at_millis: None,
+        notified_at_millis: None,
     };
     // The store enforces one invite per address; a clash surfaces as 409.
     runtime
@@ -236,7 +349,29 @@ async fn invite(
         .upsert_invite(runtime.id(), &record)
         .await
         .map_err(|e| ApiError(e).into_response())?;
-    Ok(Json(record))
+
+    // Strictly after the grant lands. Mailing first would tell someone they
+    // were invited by a request that then 409'd on a duplicate or failed in the
+    // store — an invitation to a company that never invited them.
+    let inviter = inviter_label(&runtime, &admin.user_id).await;
+    let delivery = send_invite_mail(&state, &runtime, &record, &inviter).await;
+    if delivery == InviteDelivery::Sent {
+        record.notified_at_millis = Some(now_millis());
+        // Best effort: the mail is already gone, so a failure to record that
+        // must not fail the request. The roster row simply reads as un-mailed,
+        // which understates rather than overstates what happened.
+        if let Err(err) = runtime.users().upsert_invite(runtime.id(), &record).await {
+            tracing::warn!(
+                company = %runtime.id(),
+                "invite mail sent but the record could not be stamped: {err}"
+            );
+            record.notified_at_millis = None;
+        }
+    }
+    Ok(Json(InviteResult {
+        invite: record,
+        delivery,
+    }))
 }
 
 /// `DELETE …/users/invites/{invite_id}` — revoke an invite.
