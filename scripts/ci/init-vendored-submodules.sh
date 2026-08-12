@@ -74,7 +74,8 @@ if [ ! -f vendor/openhuman/.gitmodules ]; then
 fi
 
 git -C vendor/openhuman submodule update --init --depth 1 \
-  vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-  vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+  vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+  vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+  vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
 git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
   vendor/tinyagents
