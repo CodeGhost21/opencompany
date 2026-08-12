@@ -36,6 +36,8 @@ use crate::error::OpenCompanyError;
 use crate::harness::mcp_probe::{
     McpFailure, McpFailureQueue, classify_mcp_error, operator_message, scrub, strip_endpoint,
 };
+use crate::ports::types::CompanyId;
+use crate::ports::usage::UsageMeter;
 use crate::runtime::tools::{grant_matches, grants_cover_server};
 
 /// Builds a registry from a set of decls, keeping only the enabled ones.
@@ -316,6 +318,35 @@ impl Tool for OcMcpListServersTool {
 /// against the granted servers' known credentials, rewrites the agent-facing
 /// text into a "don't retry blindly, tell the operator" directive, and pushes an
 /// [`McpFailure`] so the operator sees a warning after the turn.
+/// What `mcp_call_tool` needs to record an `OauthCall` usage sample.
+///
+/// Mirrors [`ComposioMetering`](crate::harness::composio::ComposioMetering):
+/// the company and agent the sample is scoped to, and a meter that may be
+/// absent because the harness wires none in some embeddings — in which case the
+/// tool still works and simply is not metered.
+#[derive(Clone)]
+pub struct McpMetering {
+    /// The company the sample is scoped to.
+    pub company: CompanyId,
+    /// The agent whose turn made the call.
+    pub agent: String,
+    /// The usage meter. `None` leaves metering off entirely.
+    pub meter: Option<Arc<dyn UsageMeter>>,
+}
+
+impl McpMetering {
+    /// A handle that records nothing — for embeddings and tests that wire no
+    /// meter. Named rather than spelled out at each call site so "unmetered" is
+    /// a visible decision instead of a `None` a reader has to interpret.
+    pub fn off() -> Self {
+        Self {
+            company: CompanyId::new("unmetered"),
+            agent: String::new(),
+            meter: None,
+        }
+    }
+}
+
 pub struct OcMcpCallTool {
     registry: Arc<McpServerRegistry>,
     security: Arc<SecurityPolicy>,
@@ -324,23 +355,28 @@ pub struct OcMcpCallTool {
     secrets: Vec<String>,
     /// The shared failure queue the brain drains after the turn.
     failures: McpFailureQueue,
+    /// Where a completed call is counted (issue #698). See
+    /// [`McpMetering`].
+    metering: McpMetering,
 }
 
 impl OcMcpCallTool {
     /// Builds the decorator over the agent's registry, the (permissive) MCP
-    /// security policy, the granted servers' credential substrings, and the
-    /// shared failure queue.
+    /// security policy, the granted servers' credential substrings, the shared
+    /// failure queue, and the metering handle.
     pub fn new(
         registry: Arc<McpServerRegistry>,
         security: Arc<SecurityPolicy>,
         secrets: Vec<String>,
         failures: McpFailureQueue,
+        metering: McpMetering,
     ) -> Self {
         Self {
             registry,
             security,
             secrets,
             failures,
+            metering,
         }
     }
 
@@ -437,6 +473,23 @@ impl Tool for OcMcpCallTool {
 
         match self.registry.call_tool(&server, &tool, arguments).await {
             Ok(result) => {
+                // Metered on success only, mirroring `composio_execute`: a call
+                // that actually reached the server. `connections` in the read
+                // model is the count of providers seen, so counting a failed
+                // call would mint a connection row for a server that never
+                // answered (issue #698). One line by design — see the module
+                // docs on `crate::metering::oauth` for why the shape and the
+                // swallow live there rather than here.
+                if let Some(meter) = &self.metering.meter {
+                    crate::metering::record_oauth_call(
+                        meter.as_ref(),
+                        &self.metering.company,
+                        &self.metering.agent,
+                        &crate::metering::mcp_provider(&server),
+                        crate::ports::now_millis(),
+                    )
+                    .await;
+                }
                 let mut result = result.rendered;
                 if options.prefer_markdown && result.markdown_formatted.is_none() {
                     result.markdown_formatted = Some(result.output());
@@ -876,6 +929,7 @@ mod tests {
             Arc::new(SecurityPolicy::default()),
             secrets,
             queue.clone(),
+            McpMetering::off(),
         );
 
         let result = tool
