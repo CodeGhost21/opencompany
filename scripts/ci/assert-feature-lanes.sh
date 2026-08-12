@@ -96,7 +96,12 @@ fi
 
 # --- The table --------------------------------------------------------------
 # Strip comments and blank lines, trim each field, keep `feature|status|features|detail`.
-sed -e 's/#.*$//' "${TABLE}" \
+#
+# WHOLE-LINE comments only — `^[[:space:]]*#` rather than a bare `#`. An `owed`
+# row's reason must name a tracking issue, and `#800` is a `#`: stripping
+# inline would silently empty the one field that row is required to fill, and
+# the check would then fail for a reason that is not the truth.
+sed -e 's/^[[:space:]]*#.*$//' "${TABLE}" \
   | awk -F'|' 'NF >= 4 {
       for (i = 1; i <= 4; i++) { gsub(/^[ \t]+|[ \t]+$/, "", $i) }
       if ($1 != "") { print $1 "|" $2 "|" $3 "|" $4 }
@@ -202,6 +207,7 @@ gated_tests_for() {
 
 lanes_checked=0
 compile_only_checked=0
+owed_checked=0
 
 while IFS='|' read -r feature status features detail; do
   [ -n "${feature}" ] || continue
@@ -267,8 +273,42 @@ while IFS='|' read -r feature status features detail; do
       compile_only_checked=$((compile_only_checked + 1))
       ;;
 
+    owed)
+      # A lane is OWED: gated tests exist, they run nowhere, and the reason is
+      # that the suite is currently RED rather than that anyone chose this.
+      #
+      # This status exists so a known-red gated suite is ENUMERABLE instead of
+      # silent, which is the entire complaint of #770. It is deliberately the
+      # least comfortable row in the table: it requires a tracking issue, and the
+      # two checks below stop it becoming a place to park things.
+      #
+      #   * It must name an issue. "Owed" without a ticket is just silence with
+      #     extra steps.
+      #   * It must actually HAVE gated tests. A feature with none belongs in
+      #     compile-only with a reason, so `owed` cannot be used to skip the
+      #     harder question of why a feature has no tests at all.
+      #
+      # What it does NOT do is let a red lane sit in ci.yml. There is no lane —
+      # that is the point. A lane permitted to be red is the state #428 was filed
+      # about, at more expense.
+      case "${detail}" in
+        *'#'[0-9]*) : ;;
+        *)
+          echo "::error title=Owed lane without a tracking issue::\`${feature}\` is classified owed, but its detail names no issue (expected a \`#NNN\` reference). An owed lane with nowhere to read why is indistinguishable from the silence this table exists to end." >&2
+          failed=1
+          ;;
+      esac
+
+      if [ -z "$(gated_tests_for "${feature}")" ]; then
+        echo "::error title=Owed lane has no gated tests::\`${feature}\` is classified owed, but no feature-gated test was found under it. A feature with no gated tests is compile-only — say so, with a reason, rather than recording a debt that does not exist." >&2
+        failed=1
+      fi
+
+      owed_checked=$((owed_checked + 1))
+      ;;
+
     *)
-      echo "::error title=Unknown status::\`${feature}\` has status \`${status}\`; expected tested, partial or compile-only." >&2
+      echo "::error title=Unknown status::\`${feature}\` has status \`${status}\`; expected tested, partial, compile-only or owed." >&2
       failed=1
       ;;
   esac
@@ -311,4 +351,4 @@ EOF
   exit 1
 fi
 
-echo "Feature lanes: $(wc -l < "${WORK}/features" | tr -d ' ') features — ${lanes_checked} with a lane, ${compile_only_checked} compile-only and verified to have no gated tests."
+echo "Feature lanes: $(wc -l < "${WORK}/features" | tr -d ' ') features — ${lanes_checked} with a lane, ${compile_only_checked} compile-only and verified to have no gated tests, ${owed_checked} owed a lane (tracked)."
