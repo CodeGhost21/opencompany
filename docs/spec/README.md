@@ -54,6 +54,8 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 - **Runtime engineering**: [runtime/](runtime/README.md) →
   [company-brain/](company-brain/README.md) →
   [integrations/](integrations/README.md)
+- **Security**: [security/agent-isolation.md](security/agent-isolation.md) —
+  read this before assuming any agent capability is contained
 - **Where this is going**: [roadmap.md](roadmap.md) →
   [feature audit](feature-audit/README.md) →
   [vision/](vision/README.md)
@@ -94,6 +96,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
+| [security/agent-isolation.md](security/agent-isolation.md) | What confines an agent and what does not — enforced controls, the gaps, and the capability that survives every planned control |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |
 | [company-as-agent/identity.md](company-as-agent/identity.md) | Wallet, handle, Agent Card |
 | [company-as-agent/commerce.md](company-as-agent/commerce.md) | Selling, hiring, delegated signers, ledger |
