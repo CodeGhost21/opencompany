@@ -150,7 +150,10 @@ pub enum DeliveryStatus {
 pub enum DeliveryReason {
     /// This build wired no delivery ports at all, so nothing could be sent.
     NotWired,
-    /// An `owner` report reached the company's admin mailbox.
+    /// An `owner` report reached one of the company's admin mailboxes — an
+    /// active admin from the user store, or a standing admin invite (a manifest
+    /// `[users] admins` entry or the deployment's bootstrap admin) not yet signed
+    /// in (issue #661 / M8).
     OwnerEmailed,
     /// An `email` report reached the named recipient on an established thread.
     RecipientEmailed,
@@ -160,8 +163,10 @@ pub enum DeliveryReason {
     /// `owner` had no mailbox to send from, so the report went to the operator
     /// channel instead.
     OwnerFellBackNoMailbox,
-    /// `owner` had a mailbox but no active admin with an address, so the report
-    /// went to the operator channel instead.
+    /// `owner` had a mailbox but no admin address to send to — no active admin
+    /// in the user store and no standing admin invite (manifest `[users] admins`
+    /// or the deployment's bootstrap admin) either (issue #661 / M8) — so the
+    /// report went to the operator channel instead.
     OwnerFellBackNoAdminAddress,
     /// `owner`'s operator-channel fallback itself failed, so nothing was sent.
     OwnerFallbackFailed,

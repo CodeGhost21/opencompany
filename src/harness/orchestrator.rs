@@ -1769,7 +1769,7 @@ impl Tool for AddAgentTool {
     }
 
     fn description(&self) -> &str {
-        "Add a new teammate to the company. Provide a `name`, a `role` (job title), and an optional `description` of their mandate. The teammate becomes a real, addressable member of the roster starting next turn."
+        "Add a new teammate to the company. Provide a `name`, a `role` (job title), an optional `description` of their mandate, and an optional `tools` grant. The teammate becomes a real, addressable member of the roster starting next turn."
     }
 
     fn parameters_schema(&self) -> Value {
@@ -1778,7 +1778,12 @@ impl Tool for AddAgentTool {
             "properties": {
                 "name": { "type": "string", "description": "The new teammate's display name." },
                 "role": { "type": "string", "description": "The new teammate's job title." },
-                "description": { "type": "string", "description": "An optional description of the teammate's mandate." }
+                "description": { "type": "string", "description": "An optional description of the teammate's mandate." },
+                "tools": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional per-teammate tool grant, as a list of tool-namespace globs (e.g. \"docs.*\", \"email\"). These are INTERSECTED with the company's allowed tools: the grant can only NARROW this teammate below the company-wide allow-list, never widen or escalate it past what the company already permits. Omit or leave empty to give the standard company-wide grant."
+                }
             },
             "required": ["name", "role"],
             "additionalProperties": false
@@ -1810,6 +1815,30 @@ impl Tool for AddAgentTool {
             .map(str::trim)
             .filter(|d| !d.is_empty())
             .map(str::to_string);
+        // Issue #661 / L5: an optional per-teammate tool grant. The globs are
+        // INTERSECTED with the company's `[tools].allow` at roster-build time
+        // (`agent_effective_grants`), so this can only narrow the new teammate
+        // below the company grant — never widen or escalate it. Omitted, `null`,
+        // or empty means the standard company-wide grant, exactly like a manifest
+        // agent with no `tools` line. A non-string item is a clean argument
+        // error, the same shape as a missing `name`/`role`.
+        let tools = match args.get("tools") {
+            None | Some(Value::Null) => Vec::new(),
+            Some(Value::Array(items)) => {
+                let mut globs = Vec::with_capacity(items.len());
+                for item in items {
+                    let glob = item
+                        .as_str()
+                        .ok_or_else(|| anyhow::anyhow!("`tools` must be an array of strings"))?
+                        .trim();
+                    if !glob.is_empty() {
+                        globs.push(glob.to_string());
+                    }
+                }
+                globs
+            }
+            Some(_) => return Err(anyhow::anyhow!("`tools` must be an array of strings")),
+        };
 
         // Serialize per-company writes so the orchestrator's add_agent and the
         // console `POST .../team` route can never clobber each other's
@@ -1853,6 +1882,7 @@ impl Tool for AddAgentTool {
             name: name.clone(),
             role: role.clone(),
             description,
+            tools,
         };
         record.overlay_agents.push(agent);
         self.store.save(&record).await?;
@@ -4722,6 +4752,7 @@ name = "Morning"
             name: "Fact Fetcher".to_string(),
             role: "Researcher".to_string(),
             description: None,
+            tools: Vec::new(),
         });
         let store: Arc<dyn CompanyStore> = Arc::new(MemStore::seeded(record));
 
@@ -4860,6 +4891,87 @@ name = "Morning"
             Some("Owns acquisition experiments.")
         );
         assert!(!added.id.is_empty(), "a stable id must be minted");
+        // No `tools` given → the standard company-wide grant (empty list).
+        assert!(
+            added.tools.is_empty(),
+            "an add with no `tools` is the standard grant, not an empty shelf"
+        );
+    }
+
+    /// Issue #661 / L5: `add_agent` carries a per-teammate tool grant onto the
+    /// overlay record, trimming and dropping blank globs. The grant is narrowed
+    /// against `[tools].allow` later (at roster build); persistence keeps the
+    /// authored list verbatim so the Team tab and the roster read the same thing.
+    #[tokio::test]
+    async fn add_agent_tool_persists_a_tool_grant() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({
+                "name": "Ravi",
+                "role": "Researcher",
+                "tools": ["docs.*", "   ", "email"]
+            }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert_eq!(
+            record.overlay_agents[0].tools,
+            vec!["docs.*".to_string(), "email".to_string()],
+            "blanks are dropped and globs trimmed"
+        );
+    }
+
+    /// An empty `tools` array is the standard grant, not "no tools" — the same
+    /// as omitting the field entirely.
+    #[tokio::test]
+    async fn add_agent_tool_empty_tools_is_the_standard_grant() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        let result = tool
+            .execute(json!({ "name": "Ravi", "role": "Researcher", "tools": [] }))
+            .await
+            .expect("execute");
+        assert!(!result.is_error, "{}", result.text());
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert!(record.overlay_agents[0].tools.is_empty());
+    }
+
+    /// A non-string `tools` item is a clean argument error, the same shape as a
+    /// missing `name`/`role` — a malformed grant must not persist a half-parsed
+    /// teammate.
+    #[tokio::test]
+    async fn add_agent_tool_rejects_a_non_string_tool() {
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemStore::seeded(seeded_record(&company)));
+        let tool = AddAgentTool::new(company.clone(), store.clone());
+
+        assert!(
+            tool.execute(json!({ "name": "Ravi", "role": "Researcher", "tools": [123] }))
+                .await
+                .is_err(),
+            "a non-string tool glob must be rejected"
+        );
+        // Also rejects a non-array `tools`.
+        assert!(
+            tool.execute(json!({ "name": "Ravi", "role": "Researcher", "tools": "docs.*" }))
+                .await
+                .is_err(),
+            "a non-array `tools` must be rejected"
+        );
+
+        let record = store.load(&company).await.unwrap().expect("record");
+        assert!(
+            record.overlay_agents.is_empty(),
+            "a rejected add must not persist a teammate"
+        );
     }
 
     /// Issue #686 — the tool mints the same readable, name-derived id the

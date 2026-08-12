@@ -1354,6 +1354,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel.clone())],
             // This case delivers to a channel, which never parks.
             parking: None,
@@ -2374,6 +2375,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
             users: Arc::new(crate::store::FsOps::new(dir)),
+            bootstrap_admin: None,
             channels: Vec::new(),
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: gate,
@@ -2666,6 +2668,7 @@ to = "gate"
             }),
             inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
             users,
+            bootstrap_admin: None,
             channels: Vec::new(),
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
@@ -2789,6 +2792,7 @@ to = "gate"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
             users: Arc::new(FsOps::new(dir)),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel)],
             parking: None,
             events,
@@ -3876,6 +3880,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel.clone())],
             parking: None,
             events: events.clone(),
@@ -3935,6 +3940,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel.clone())],
             parking: None,
             events: events.clone(),

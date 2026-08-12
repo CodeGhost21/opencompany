@@ -1975,6 +1975,13 @@ fn overlay_fingerprint(agents: &[OverlayAgent]) -> u64 {
         agent.name.hash(&mut hasher);
         agent.role.hash(&mut hasher);
         agent.description.hash(&mut hasher);
+        // Issue #661 / L5: a grant edit changes the roster the harness must
+        // build, so it has to move this fingerprint — otherwise a re-grant would
+        // persist and be silently ignored until the next process restart, the
+        // same staleness the tier/skill fingerprints exist to prevent. Hashed in
+        // order (an operator's own list), length folded in first via the slice
+        // length above so `["a","b"]` cannot collide with `["ab"]`.
+        agent.tools.hash(&mut hasher);
     }
     hasher.finish()
 }
@@ -2290,7 +2297,12 @@ fn overlay_agent_to_manifest(overlay: &OverlayAgent) -> ManifestAgent {
         role: overlay.role.clone(),
         description: overlay.description.clone(),
         tier: None,
-        tools: Vec::new(),
+        // Issue #661 / L5: carry the overlay's own per-teammate grant. An empty
+        // list here is unchanged behaviour — `agent_effective_grants` reads it as
+        // the standard company-wide grant, exactly as the hardcoded empty did.
+        // A non-empty list is intersected with `[tools].allow` by that same
+        // function below (narrow-only, never a widen).
+        tools: overlay.tools.clone(),
         budget_usd_daily: None,
     }
 }
@@ -2383,6 +2395,89 @@ mod tests {
         let split = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["a", "b"]))));
         let joined = policy_fingerprint(Some(&fp_entry(Some("auto"), Some(vec!["ab"]))));
         assert_ne!(split, joined);
+    }
+
+    /// Issue #661 / L5: an overlay teammate's own `tools` grant flows into the
+    /// manifest shape `build_agent` consumes, and is INTERSECTED with the company
+    /// allow-list — narrow-only, never a widen. An empty grant is the standard
+    /// company-wide grant, exactly as the pre-L5 hardcoded empty was.
+    #[test]
+    fn overlay_agent_to_manifest_carries_the_tool_grant() {
+        let allow = vec!["docs.*".to_string(), "web".to_string()];
+
+        // A scoped overlay teammate: the grant is carried, then narrowed to what
+        // the company already allows. `payment.send` is NOT in `allow`, so the
+        // overlay cannot escalate to it — the security invariant.
+        let scoped = OverlayAgent {
+            id: "scoped".into(),
+            name: "Scoped".into(),
+            role: "Researcher".into(),
+            description: None,
+            tools: vec!["docs.*".into(), "payment.send".into()],
+        };
+        let manifest = overlay_agent_to_manifest(&scoped);
+        assert_eq!(
+            manifest.tools,
+            vec!["docs.*".to_string(), "payment.send".to_string()],
+            "the overlay's own grant must reach the manifest shape"
+        );
+        assert_eq!(
+            agent_effective_grants(&allow, &manifest.tools),
+            vec!["docs.*".to_string()],
+            "narrow-only: the un-allowed `payment.send` is intersected out"
+        );
+
+        // An empty overlay grant is the standard company-wide grant, unchanged.
+        let standard = OverlayAgent {
+            id: "std".into(),
+            name: "Std".into(),
+            role: "Generalist".into(),
+            description: None,
+            tools: Vec::new(),
+        };
+        let manifest = overlay_agent_to_manifest(&standard);
+        assert!(manifest.tools.is_empty());
+        assert_eq!(
+            agent_effective_grants(&allow, &manifest.tools),
+            allow,
+            "an empty grant falls back to the full company allow-list"
+        );
+    }
+
+    /// Issue #661 / L5: a grant edit changes the roster the harness must build, so
+    /// it has to move the overlay fingerprint — otherwise a re-grant would
+    /// persist, render as applied, and be silently ignored until the process
+    /// restarted, the same staleness the tier/skill fingerprints guard against.
+    #[test]
+    fn overlay_fingerprint_moves_on_a_tools_only_edit() {
+        let one = |tools: Vec<String>| {
+            vec![OverlayAgent {
+                id: "a".into(),
+                name: "A".into(),
+                role: "r".into(),
+                description: None,
+                tools,
+            }]
+        };
+        let standard = one(Vec::new());
+        let scoped = one(vec!["docs.*".into()]);
+        let scoped_more = one(vec!["docs.*".into(), "email".into()]);
+
+        assert_ne!(
+            overlay_fingerprint(&standard),
+            overlay_fingerprint(&scoped),
+            "adding a grant must move the fingerprint or the re-grant is ignored until restart"
+        );
+        assert_ne!(
+            overlay_fingerprint(&scoped),
+            overlay_fingerprint(&scoped_more),
+            "widening the grant list must move it too"
+        );
+        // Identical grants → identical fingerprint (no spurious rebuild).
+        assert_eq!(
+            overlay_fingerprint(&scoped),
+            overlay_fingerprint(&one(vec!["docs.*".into()]))
+        );
     }
 
     /// Attribution is deliberately NOT hashed.
@@ -2735,6 +2830,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: Some("Owns acquisition experiments.".into()),
+            tools: Vec::new(),
         });
 
         let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
@@ -2758,6 +2854,7 @@ description = "Builds the product."
             name: "Impostor".into(),
             role: "Shadow CEO".into(),
             description: None,
+            tools: Vec::new(),
         });
 
         let roster = build_roster(&rec, &fx.deps, &[]).expect("roster builds");
@@ -2881,6 +2978,7 @@ description = "Builds the product."
             name: "Dana".into(),
             role: "Designer".into(),
             description: None,
+            tools: Vec::new(),
         });
         pool.ensure(&rec, &fx.deps).await.expect("second ensure");
 
@@ -4102,6 +4200,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: None,
+            tools: Vec::new(),
         });
         live_store.save(&updated).await.unwrap();
 
@@ -4938,6 +5037,7 @@ description = "Builds the product."
             name: "Jamie".into(),
             role: "Growth Lead".into(),
             description: None,
+            tools: Vec::new(),
         });
         let live_store = Arc::new(LiveStore::default());
         live_store.save(&rec).await.unwrap();

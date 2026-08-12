@@ -283,6 +283,11 @@ fn company_builder(
     .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
     .with_workspace_quota(state.config().workspace_quota)
+    // Issue #661 / M8: the deployment's standing bootstrap admin, normalized,
+    // so a fresh tenant's `owner` report reaches its creator before that first
+    // sign-in mints a user record. `None` (self-hosted, no injected address) is
+    // a no-op. BootRebuilder reuses this builder, so the grant survives rebuild.
+    .with_bootstrap_admin(state.config().bootstrap_admin())
     .with_skills_registry(state.shared_skill_registry()?)
     .with_id(company_id.clone());
     if let Some(source_dir) = source_dir {
