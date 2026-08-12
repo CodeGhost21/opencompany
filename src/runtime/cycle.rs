@@ -62,6 +62,17 @@ const HISTORY_LIMIT: usize = 32;
 /// park cards that silently do nothing when approved.
 pub(crate) const EMAIL_SEND_KIND: &str = "email.send";
 
+/// The effect kind a `repo_publish` approval performs (issue #735) — the
+/// host-side push to the real remote.
+///
+/// `pub(crate)` and defined here, in the always-compiled runtime, rather than in
+/// the `openhuman`-gated `harness::repo` that builds it: `perform_effect` below
+/// matches on it in the default build, where `crate::harness` does not exist. The
+/// tool references it through `crate::runtime::cycle::REPO_PUBLISH_EFFECT`, the
+/// same shape `workflows::delivery` uses for [`EMAIL_SEND_KIND`], so the producer
+/// and this consumer key off one literal.
+pub(crate) const REPO_PUBLISH_EFFECT: &str = "repo.publish";
+
 /// The `error` the terminality backstop stamps on an attempt row whose cycle
 /// ended without settling it (issue #242) — a brain that ignored the dispatch,
 /// not a brain that failed at it.
@@ -1237,7 +1248,7 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     // only now that the operator has approved. At-most-once comes free from the
     // `approval:<id>` key the caller holds; a denied or expired approval never
     // reaches here, which is exactly what leaves the remote untouched.
-    if effect.kind == crate::harness::repo::REPO_PUBLISH_EFFECT {
+    if effect.kind == REPO_PUBLISH_EFFECT {
         let repo = effect
             .payload
             .get("repo")
@@ -1248,8 +1259,16 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
             .get("branch")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
+        // The exact commit the approval was bound to at stage time. Pushing this
+        // SHA — not whatever the mirror's branch ref points at now — is what stops
+        // a second publish on the same task from riding in on this approval.
+        let head = effect
+            .payload
+            .get("head")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
         match rt.repos() {
-            Some(repos) => repos.push_published(repo, branch).await?,
+            Some(repos) => repos.push_published(repo, branch, head).await?,
             None => {
                 return Err(crate::error::OpenCompanyError::Unimplemented(
                     "a repository publish was approved but this host has no repository manager \

@@ -94,11 +94,6 @@ pub const REPO_PR_TOOL: &str = "repo_pr";
 /// approval (issue #735).
 pub const REPO_PUBLISH_TOOL: &str = "repo_publish";
 
-/// Effect kind: the host-side push a `repo_publish` approval performs (issue
-/// #735). Carried on a native (`agent: None`) [`Effect`] so the runtime performs
-/// it on approval; matched by the `perform_effect` arm in `runtime::cycle`.
-pub const REPO_PUBLISH_EFFECT: &str = "repo.publish";
-
 /// The workspace subdirectory every checkout and diff spill lands in.
 ///
 /// One directory, named once, because three separate things key off it: the
@@ -968,6 +963,18 @@ impl Tool for RepoPublishTool {
             Ok(binding) => binding.clone(),
             Err(message) => return Ok(ToolResult::error(message)),
         };
+        // The tool is wired when ANY bound credential can push, but the agent may
+        // name a repository whose OWN credential is read-only. Refuse that here —
+        // before staging and before an operator is asked to approve — rather than
+        // letting it surface only when the host tries the push (issue #735).
+        // `None` (unprobed) reads as cannot-push, like everywhere else.
+        if binding.can_push != Some(true) {
+            return Ok(ToolResult::error(format!(
+                "The credential bound for {}/{} is read-only, so it cannot publish. Ask an \
+                 operator to bind a push-capable credential for this repository.",
+                binding.owner, binding.repo
+            )));
+        }
         let message = args
             .get("message")
             .and_then(Value::as_str)
@@ -999,13 +1006,13 @@ impl Tool for RepoPublishTool {
         // exists. This is the reversible half; it makes the work durable so the
         // approved push below does not depend on a checkout that is deleted at
         // turn end.
-        let branch = match self
+        let (branch, head) = match self
             .context
             .repos
             .stage_publish(&binding.key, &checkout, &task)
             .await
         {
-            Ok(branch) => branch,
+            Ok(staged) => staged,
             Err(err) => {
                 return Ok(ToolResult::error(format!(
                     "Could not stage your work to publish: {err}"
@@ -1019,7 +1026,7 @@ impl Tool for RepoPublishTool {
         // turn (which would have lost the checkout). The payload is what the
         // operator's approval card shows and what `perform_effect` reads.
         let effect = Effect {
-            kind: REPO_PUBLISH_EFFECT.to_string(),
+            kind: crate::runtime::cycle::REPO_PUBLISH_EFFECT.to_string(),
             group: EffectGroup::Publish,
             amount_usd: None,
             established_thread: false,
@@ -1029,6 +1036,10 @@ impl Tool for RepoPublishTool {
                 "owner": binding.owner,
                 "name": binding.repo,
                 "branch": branch,
+                // The exact commit this approval is bound to. `perform_effect`
+                // pushes THIS commit, so a later re-stage of the same task cannot
+                // change what an approved publish sends.
+                "head": head,
                 "agent": self.context.agent,
                 "message": message,
             }),
