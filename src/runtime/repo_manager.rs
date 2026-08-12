@@ -735,6 +735,166 @@ impl RepoManager {
         )))
     }
 
+    // -- publish (issue #735) ------------------------------------------------
+    //
+    // The write tier's one git write direction. Split in two on purpose, because
+    // the approval gate sits between them:
+    //
+    //   * `stage_publish` runs while the agent's task-scoped checkout still
+    //     exists — it FETCHES the agent's committed HEAD out of that checkout
+    //     and into the mirror on a host-owned `oc/<company>/<task>` ref. This is
+    //     the step that must survive the checkout being purged at turn end, so it
+    //     happens before anything parks. It is a *fetch*, so — exactly as
+    //     #245's contract depends on — it never invokes the mirror's
+    //     `receive-pack` and the `pre-receive` push-refusal hook is never
+    //     consulted. The agent still holds no credentialed remote and never
+    //     pushes; the host moves the objects.
+    //   * `push_published` runs only after the operator approves — it pushes that
+    //     already-staged ref from the mirror to the real remote, host-side, where
+    //     the credential lives. A denied or expired approval simply never calls
+    //     it, so the remote is untouched.
+    //
+    // Every structural refusal lives here, not in a tool description: the branch
+    // is generated host-side and re-validated on the way out, so a prompt-injected
+    // agent asking for `--force origin main` has no code path to reach one.
+
+    /// The one branch an agent's work is ever pushed to, generated host-side.
+    ///
+    /// `oc/<company>/<task>`, and nothing else: the namespace is owned by us, the
+    /// company is this manager's own id (never agent-supplied), and the task
+    /// segment is validated to a single safe path component before it is placed
+    /// in a ref. Anything an agent could influence is bounded to that one
+    /// segment, and the whole ref is then run through the same validator the bind
+    /// path uses.
+    fn publish_branch(&self, task: &str) -> Result<String> {
+        let segment = validate_task_segment(task)?;
+        let branch = format!("oc/{}/{}", self.company.as_ref() as &str, segment);
+        // Belt-and-braces: the company id is a validated slug and `segment` is
+        // already checked, but the whole ref goes through the shared validator so
+        // there is exactly one shape rule for every branch this crate creates.
+        validate_ref(&branch)?;
+        Ok(branch)
+    }
+
+    /// Refuses any branch that is not a publish branch this manager owns.
+    ///
+    /// Defense in depth: `stage_publish` only ever constructs a good branch via
+    /// [`publish_branch`], but the push is a separate call that could be reached
+    /// with a hand-built argument, so it re-checks rather than trusts. This is
+    /// the single place "never a ref outside `oc/`, never the default branch"
+    /// is enforced — the default branch (and every other real branch) lives
+    /// outside the `oc/<company>/` namespace by construction, so the prefix check
+    /// *is* the default-branch refusal.
+    fn assert_publish_branch(&self, branch: &str) -> Result<()> {
+        let prefix = format!("oc/{}/", self.company.as_ref() as &str);
+        if !branch.starts_with(&prefix) || branch.len() <= prefix.len() {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "{branch:?} is not a publish branch — the write tier only ever pushes to \
+                 {prefix}<task>, never to the default branch or any ref outside that namespace"
+            )));
+        }
+        validate_ref(branch)?;
+        Ok(())
+    }
+
+    /// Stages the agent's committed work onto the mirror's `oc/<company>/<task>`
+    /// ref, host-side, and returns that branch name.
+    ///
+    /// `checkout` is the agent's task-scoped clone (`workspace/repos/<key>`),
+    /// resolved host-side from the workspace and the binding key — never a path
+    /// the agent typed. Its committed `HEAD` is fetched into the mirror over the
+    /// `file://` transport; a fetch writes the ref without ever running
+    /// `receive-pack`, so the mirror's unconditional push-refusal hook (and
+    /// #245's contract test asserting it) is untouched.
+    pub async fn stage_publish(&self, key: &str, checkout: &Path, task: &str) -> Result<String> {
+        // Ensures the repository is actually bound to this company before any git
+        // runs — an unbound key resolves to no mirror and no credential.
+        let _binding = self.get(key).await?;
+        let branch = self.publish_branch(task)?;
+
+        let mirror = self.mirror_path(key);
+        if !mirror.is_dir() {
+            return Err(OpenCompanyError::NotFound(format!(
+                "the mirror for {key} is missing from the cache — revoke and rebind"
+            )));
+        }
+        if !checkout.is_dir() {
+            return Err(OpenCompanyError::InvalidRequest(
+                "there is nothing to publish: check out the repository and commit your work \
+                 before publishing"
+                    .to_string(),
+            ));
+        }
+
+        // Fetch the checkout's committed HEAD into the mirror as the host-owned
+        // branch. No credential: the source is a local `file://` path. The `+`
+        // forces only the *local* (mirror) ref, so re-staging a publish is clean;
+        // it says nothing about the remote, which the push below never forces.
+        let url = file_url(checkout);
+        let refspec = format!("+HEAD:refs/heads/{branch}");
+        let out = git::run(
+            &mirror,
+            &["fetch", "--quiet", "--no-tags", &url, &refspec],
+            None,
+            None,
+        )
+        .await?;
+        if !out.ok {
+            return Err(OpenCompanyError::Store(format!(
+                "could not stage the publish: {}",
+                first_line(&out.stderr)
+            )));
+        }
+        Ok(branch)
+    }
+
+    /// Pushes an already-staged `oc/<company>/<task>` branch from the mirror to
+    /// the real remote, host-side, where the credential lives.
+    ///
+    /// Called only after the operator approves — a denied or expired approval
+    /// never reaches here, so the remote stays untouched. **Never a force push
+    /// and never a `+` refspec:** a non-fast-forward is reported as a failure,
+    /// not overwritten. The branch is re-validated as a publish branch this
+    /// manager owns before a single byte leaves the container.
+    pub async fn push_published(&self, key: &str, branch: &str) -> Result<()> {
+        let binding = self.get(key).await?;
+        self.assert_publish_branch(branch)?;
+
+        let token = self.token_for(&binding).await?.ok_or_else(|| {
+            OpenCompanyError::InvalidRequest(format!(
+                "no credential is stored for {key}; rebind it before publishing"
+            ))
+        })?;
+
+        let mirror = self.mirror_path(key);
+        if !mirror.is_dir() {
+            return Err(OpenCompanyError::NotFound(format!(
+                "the mirror for {key} is missing from the cache — revoke and rebind"
+            )));
+        }
+
+        // A plain, non-forced push of exactly the one ref. The refspec has no
+        // leading `+`, and there is no `--force` anywhere on this surface, so a
+        // branch that already exists on the remote and would not fast-forward is
+        // refused by the remote rather than clobbered.
+        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        let askpass = git::AskpassDir::create(&self.root)?;
+        let out = git::run(
+            &mirror,
+            &["push", "--quiet", "origin", &refspec],
+            Some(&token),
+            Some(&askpass),
+        )
+        .await?;
+        if !out.ok {
+            return Err(OpenCompanyError::Store(format!(
+                "could not push {branch}: {}",
+                first_line(&out.stderr)
+            )));
+        }
+        Ok(())
+    }
+
     // -- pull requests -------------------------------------------------------
 
     /// A pull request's metadata and unified diff, fetched host-side.
@@ -918,6 +1078,58 @@ pub(crate) fn validate_ref(raw: &str) -> Result<String> {
         return refuse("only letters, digits, '-', '_', '.' and '/' are accepted");
     }
     Ok(name.to_string())
+}
+
+/// Validates the task-id component of a publish branch to a single safe path
+/// segment (issue #735).
+///
+/// The task id is the one part of `oc/<company>/<task>` that originates outside
+/// this manager, so it is held tighter than a whole ref: no `/` — it may not add
+/// path segments — no `..`, no leading `-`, and only the same character class the
+/// ref validator accepts. `<company>` is this manager's own validated id.
+fn validate_task_segment(task: &str) -> Result<String> {
+    let name = task.trim();
+    let refuse = |why: &str| {
+        Err(OpenCompanyError::InvalidRequest(format!(
+            "{name:?} is not a usable task id for a publish branch — {why}"
+        )))
+    };
+    if name.is_empty() {
+        return refuse("it is empty");
+    }
+    if name.len() > 128 {
+        return refuse("it is too long");
+    }
+    if name.starts_with('-') {
+        return refuse("a leading '-' would be read as a command-line option");
+    }
+    if name.contains('/') || name.contains("..") {
+        return refuse("it must be a single path segment");
+    }
+    if !name
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.'))
+    {
+        return refuse("only letters, digits, '-', '_' and '.' are accepted");
+    }
+    Ok(name.to_string())
+}
+
+/// A `file://` URL for a local repository path — the transport host-side fetches
+/// between the mirror and a checkout use, matching the checkout tier.
+fn file_url(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
+/// git's first non-empty stderr line, for an error that names what went wrong
+/// without pasting a whole transcript into an API response.
+fn first_line(stderr: &str) -> String {
+    stderr
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("git wrote nothing to stderr")
+        .to_string()
 }
 
 /// The `pre-receive` hook every mirror carries: a receiving end that refuses
