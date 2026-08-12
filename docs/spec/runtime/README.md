@@ -20,6 +20,10 @@ Supporting docs:
   - [ports-console.md](ports-console.md) — the WS3 console-surface stores
   - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
     trace, and who writes it
+  - [journal.md](journal.md) — `JournalStore`: the runtime journal's durable
+    sink (at-most-once effect keys, parked approvals, grants, cycle brackets),
+    the per-backend shapes, and the one-time receipt-gated import off the old
+    `journal.jsonl` (issue #726)
 - [storage.md](storage.md) — how a backend is chosen at boot, the shipped
   backends, and the conformance suite that pins them to identical answers
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the

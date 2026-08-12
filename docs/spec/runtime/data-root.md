@@ -47,6 +47,15 @@ on `<root>/.lock` (`flock`/`LockFileEx` via `fs2`) and hold it for the life of
 the process. A second instance is refused immediately with a message naming the
 directory and `OPENCOMPANY_DATA_DIR`.
 
+Since issue #726 the journal's *bytes* may live in the storage backend rather
+than under this root (see [journal.md](journal.md)), and that changes nothing
+here: single-writer-per-company is still the contract. Two live hosts on one
+tenant database no longer corrupt each other's records — sequences are allocated
+server-side, so appends interleave without collision — but each keeps its own
+in-memory replay of the executed-key set, so neither sees the other's commits
+until it reloads. That gap is pre-existing and unchanged; the root lock above is
+still what a single-node deployment relies on.
+
 An OS advisory lock rather than a pid file: the lock belongs to the open file
 description, so the kernel drops it when the process exits for any reason —
 clean exit, panic, `SIGKILL`, power loss. There is no stale state to detect and
