@@ -536,6 +536,31 @@ where
     Ok((out, skipped))
 }
 
+/// Splits `path` into lines, decoding each **lossily and separately**. An absent
+/// file reads as no lines.
+///
+/// Bytes, not a `String`, for the reason [`read_jsonl_lenient`] states above: a
+/// torn write can split a multi-byte codepoint, and a whole-file UTF-8 decode
+/// fails on that one bad byte. Decoding per line turns whole-file loss into one
+/// mangled line the caller can quarantine.
+///
+/// Deliberately returns **every** segment the split produced, blank ones
+/// included, and parses nothing. Both are what the runtime journal needs: it
+/// numbers corrupt lines by position, so dropping blanks here would shift every
+/// report after one, and it owns the decision about what a line means (see
+/// [`JournalStore`](crate::ports::journal::JournalStore)).
+pub(crate) async fn read_lines_lossy(path: &Path) -> Result<Vec<String>> {
+    let contents = match tokio::fs::read(path).await {
+        Ok(contents) => contents,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(io_err(path, e)),
+    };
+    Ok(contents
+        .split(|b| *b == b'\n')
+        .map(|raw| String::from_utf8_lossy(raw).into_owned())
+        .collect())
+}
+
 /// Atomically writes `contents` to `path` via a temp file + rename.
 pub(crate) async fn write_atomic(path: &Path, contents: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
@@ -1322,6 +1347,75 @@ impl InboxStore for FsInboxStore {
         };
         write_atomic(&path, &body).await?;
         Ok(unread)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JournalStore
+// ---------------------------------------------------------------------------
+
+/// The filesystem [`JournalStore`]: the `journal.jsonl` inside each company's
+/// [`Bundle`], which is exactly where the runtime journal has always lived
+/// (issue #726).
+///
+/// So the default backend migrates nothing — same path, same bytes, same
+/// per-path locking. This type is the port surface around behaviour that already
+/// existed, not new behaviour.
+pub struct FsJournalStore {
+    home: PathBuf,
+}
+
+impl FsJournalStore {
+    /// A store over every company bundle under the OpenCompany home `home`.
+    pub fn new(home: impl Into<PathBuf>) -> Self {
+        Self { home: home.into() }
+    }
+
+    fn path(&self, id: &CompanyId) -> PathBuf {
+        Bundle::new(&self.home, id).journal_jsonl()
+    }
+}
+
+#[async_trait]
+impl crate::ports::journal::JournalStore for FsJournalStore {
+    /// One whole-line `O_APPEND` write, serialised on the process-wide per-path
+    /// lock (issue #386, now reached through [`path_lock`]).
+    ///
+    /// The journal used to keep a `JOURNAL_WRITE_LOCKS` registry of its own,
+    /// which was a second `PathLocks` holding the same kind of key for the same
+    /// reason as [`FS_WRITE_LOCKS`]. One registry keyed on the absolutised path
+    /// is what two independently-constructed stores over one file actually
+    /// share, and there is no file both registries would have contended for —
+    /// `journal.jsonl` is written here and nowhere else.
+    async fn append_journal(&self, id: &CompanyId, line: &str) -> Result<()> {
+        let path = self.path(id);
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        if let Some(parent) = path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| io_err(parent, e))?;
+        }
+        append_line(&path, line).await
+    }
+
+    async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
+        read_lines_lossy(&self.path(id)).await
+    }
+
+    /// Always imported: this store *is* the file an import would copy from.
+    async fn journal_imported(&self, _id: &CompanyId) -> Result<bool> {
+        Ok(true)
+    }
+
+    /// Unreachable, and a no-op if reached.
+    ///
+    /// [`journal_imported`](Self::journal_imported) never opens the gate, so the
+    /// builder never calls this. If some future caller does, copying the file's
+    /// own lines back over itself is the identity — so doing nothing is the
+    /// correct answer rather than a swallowed write.
+    async fn complete_import(&self, _id: &CompanyId, _lines: Vec<String>) -> Result<()> {
+        Ok(())
     }
 }
 
