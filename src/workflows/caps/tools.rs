@@ -58,6 +58,37 @@ use crate::harness::toolbelt::{self, CapabilityFilter};
 /// slug the run would always fail to look up — keep the two in lockstep.
 pub(crate) const WORKFLOW_TOOL_NAMESPACES: [&str; 4] = ["shell", "code", "web", "search"];
 
+/// The wired workflow-tool slugs, paired with the grant namespace each maps to —
+/// the reverse of [`toolbelt::namespace_of`], restricted to the families
+/// [`WorkflowToolInvoker::new`] actually builds ([`WORKFLOW_TOOL_NAMESPACES`]).
+///
+/// [`namespace_of`](toolbelt::namespace_of) answers "which namespace gates this
+/// slug", but nothing enumerates the slugs a namespace contains — and the
+/// create-time copilot (issue #753) needs exactly that, so it can ground the
+/// model in the real tool names a company's `[tools].allow` reaches rather than
+/// bare namespace words. This is that enumeration, and it is a **strict
+/// derivative** of `namespace_of`, not a second source of truth: every entry's
+/// namespace is asserted to match `namespace_of(slug)` by
+/// [`the_slug_table_agrees_with_namespace_of`], so a tool added to the toolbelt
+/// (and its `namespace_of` arm) without a row here fails the test rather than
+/// silently narrowing what the copilot can propose.
+///
+/// `media` / `composio` / `repo` slugs are deliberately absent — they map to a
+/// namespace but are agent-turn families the workflow invoker never wires (the
+/// same reason they are excluded from [`WORKFLOW_TOOL_NAMESPACES`]).
+pub(crate) const WORKFLOW_TOOL_SLUGS: &[(&str, &str)] = &[
+    ("shell", "shell"),
+    ("read_workspace_state", "shell"),
+    ("apply_patch", "code"),
+    ("git_operations", "code"),
+    ("csv_export", "code"),
+    ("web_fetch", "web"),
+    ("http_request", "web"),
+    ("curl", "web"),
+    ("image_info", "web"),
+    ("web_search", "search"),
+];
+
 /// A [`ToolInvoker`] over the Cell A toolbelt (plus the metered `search` family),
 /// scoped to a per-company workflow workspace and gated by the company's
 /// `[tools].allow` grants.
@@ -206,6 +237,28 @@ fn tool_result_to_value(slug: &str, result: ToolResult) -> TfResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// [`WORKFLOW_TOOL_SLUGS`] is a derivative of
+    /// [`toolbelt::namespace_of`](crate::harness::toolbelt::namespace_of), not a
+    /// second source of truth: every row's namespace must be what `namespace_of`
+    /// returns for that slug, and must be one the invoker actually wires
+    /// ([`WORKFLOW_TOOL_NAMESPACES`]). A toolbelt tool added or re-namespaced
+    /// without updating this table fails here rather than silently changing what
+    /// the create-time copilot (issue #753) can ground the model in.
+    #[test]
+    fn the_slug_table_agrees_with_namespace_of() {
+        for (slug, namespace) in WORKFLOW_TOOL_SLUGS {
+            assert_eq!(
+                toolbelt::namespace_of(slug),
+                Some(*namespace),
+                "slug `{slug}` is listed under `{namespace}` but namespace_of disagrees"
+            );
+            assert!(
+                WORKFLOW_TOOL_NAMESPACES.contains(namespace),
+                "slug `{slug}`'s namespace `{namespace}` is not a wired workflow namespace"
+            );
+        }
+    }
 
     #[test]
     fn json_text_block_passes_through_else_wrapped() {

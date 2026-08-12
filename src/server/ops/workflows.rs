@@ -114,6 +114,16 @@ pub fn router() -> Router<AppState> {
         // Same static-before-dynamic ordering as `/workflows/runs` above, for
         // the same reason: `cron` is a syntactically valid `wid`.
         .merge(scoped("/workflows/cron/preview", post(preview_cron)))
+        // Issue #753: the create-time copilot. Drafts a graph from a free-text
+        // description and hands it back for the New-workflow dialog to hydrate —
+        // it never persists (Create still does). A static prefix registered here
+        // with the others and BEFORE the dynamic `/workflows/{wid}`, for the
+        // reason the comment above gives: `draft-from-description` is a
+        // syntactically valid `wid`.
+        .merge(scoped(
+            "/workflows/draft-from-description",
+            post(draft_from_description),
+        ))
         // Issue #383: stop a run that is still walking its graph. Registered
         // here, with the other static `/workflows/...` prefixes and BEFORE the
         // dynamic `/workflows/{wid}` below, for the reason the comment above
@@ -1514,6 +1524,132 @@ fn now_millis() -> u64 {
 }
 
 // ---------------------------------------------------------------------------
+// Create-time copilot (issue #753)
+// ---------------------------------------------------------------------------
+
+/// The cap on a create-time copilot description (issue #753), in codepoints —
+/// applied to the request body before it reaches the metered draft path. Gated
+/// with the handler arm that reads it: the default build's `not_wired` arm never
+/// drafts, so it never caps.
+#[cfg(feature = "openhuman")]
+const MAX_DRAFT_DESCRIPTION_CHARS: usize = 4_000;
+
+/// The `POST …/workflows/draft-from-description` body: a free-text description of
+/// the workflow the operator wants built.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DraftFromDescriptionBody {
+    description: String,
+}
+
+/// The draft-from-description answer (issue #753).
+///
+/// Like the cron preview, it answers **200 in both model-answer cases** — a
+/// drafted graph, or an honest "this is better done once" — because neither is
+/// an error the operator fixes by retrying differently; the console renders
+/// whichever came back and keys on `automatable`. Only a request problem (an
+/// empty description → 400) or a capability gap (no brain wired → 404/409) is a
+/// non-2xx.
+#[derive(Debug, Serialize)]
+#[serde(untagged)]
+// The default build's `not_wired` arm returns this type but constructs neither
+// variant — only the `openhuman` arm answers 200. The variants are live under
+// the feature CI actually builds and tests, so this is a cfg artefact, not a
+// dead type.
+#[cfg_attr(not(feature = "openhuman"), allow(dead_code))]
+enum DraftFromDescriptionResponse {
+    /// A drafted graph for the New-workflow dialog to hydrate its form from.
+    /// `workflow` is a `WorkflowGraphSpec` — the same camelCase node/edge shape
+    /// the read routes return, so the console loads it with no adapter.
+    Drafted {
+        automatable: bool,
+        summary: String,
+        workflow: Value,
+    },
+    /// The described work is not worth a reusable workflow — or could not be
+    /// drafted into one that would survive Create; `reason` says why.
+    NotAutomatable { automatable: bool, reason: String },
+}
+
+/// `POST …/workflows/draft-from-description` (both scope forms) — the New-workflow
+/// dialog's copilot (issue #753). Drafts a graph from the operator's description
+/// and hands it back for review; it never persists, so the ordinary Create path
+/// (`POST …/workflows`) stays the only way a graph reaches the workflow list.
+#[cfg(feature = "openhuman")]
+async fn draft_from_description(
+    company: ScopedCompany,
+    Json(body): Json<DraftFromDescriptionBody>,
+) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+    let description = body.description.trim();
+    if description.is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "describe the workflow you want in a sentence or two.".to_string(),
+        ))
+        .into_response());
+    }
+    // Char-safe cap on the request body before it reaches the metered path.
+    let description: String = description
+        .chars()
+        .take(MAX_DRAFT_DESCRIPTION_CHARS)
+        .collect();
+
+    // No builder wired: classify WHY exactly as the run route does (issues #266,
+    // #514), so the console points the operator at the same next step — restart,
+    // configure inference, or "not in this deployment" — instead of a bare fail.
+    if company.runtime.builder().is_none() {
+        use super::inference::RunnerGap;
+        return Err(
+            match super::inference::runner_gap_for(company.runtime.as_ref()).await {
+                RunnerGap::RestartPending => super::restart_required("the workflow copilot"),
+                RunnerGap::InferenceRequired => super::inference_required("the workflow copilot"),
+                RunnerGap::NotWired => super::not_wired("the workflow copilot"),
+            },
+        );
+    }
+
+    use crate::harness::workflow_build::{
+        DescriptionDraftOutcome, draft_workflow_from_description,
+    };
+    match draft_workflow_from_description(&company.runtime, &description).await {
+        Ok(DescriptionDraftOutcome::Graph { summary, spec }) => {
+            Ok(Json(DraftFromDescriptionResponse::Drafted {
+                automatable: true,
+                summary,
+                workflow: serde_json::to_value(&spec).unwrap_or(Value::Null),
+            }))
+        }
+        Ok(DescriptionDraftOutcome::NotAutomatable(reason)) => {
+            Ok(Json(DraftFromDescriptionResponse::NotAutomatable {
+                automatable: false,
+                reason,
+            }))
+        }
+        // A read the drafter could not proceed without (the company record) — a
+        // genuine 500, not a model answer.
+        Err(err) => Err(ApiError(err).into_response()),
+    }
+}
+
+/// `POST …/workflows/draft-from-description` on a build with no harness. The
+/// copilot needs the embedded brain, so it answers `not_wired` — the same 404
+/// the run route's default-build arm gives. The empty-description 400 still runs
+/// first, so the contract's shape is identical across builds.
+#[cfg(not(feature = "openhuman"))]
+async fn draft_from_description(
+    company: ScopedCompany,
+    Json(body): Json<DraftFromDescriptionBody>,
+) -> Result<Json<DraftFromDescriptionResponse>, Response> {
+    let _ = &company;
+    if body.description.trim().is_empty() {
+        return Err(ApiError(OpenCompanyError::InvalidRequest(
+            "describe the workflow you want in a sentence or two.".to_string(),
+        ))
+        .into_response());
+    }
+    Err(super::not_wired("the workflow copilot"))
+}
+
+// ---------------------------------------------------------------------------
 // Run history (issue #228)
 // ---------------------------------------------------------------------------
 
@@ -2691,6 +2827,74 @@ mod tests {
                 .await
                 .unwrap();
             assert_eq!(second.status(), StatusCode::CONFLICT);
+        }
+
+        /// Issue #753: an empty description is a `400` on **both** scope forms —
+        /// which also proves the route is wired under each (a route-miss would be
+        /// a `404`, not the `400` the handler returns before it ever looks for a
+        /// builder). The empty check runs ahead of the capability gate, so this
+        /// holds on every build.
+        #[tokio::test]
+        async fn draft_from_description_rejects_empty_on_both_scope_forms() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            for uri in [
+                "/api/v1/company/workflows/draft-from-description",
+                "/api/v1/companies/acme/workflows/draft-from-description",
+            ] {
+                let response = router(state.clone())
+                    .oneshot(request(
+                        "POST",
+                        uri,
+                        Some(serde_json::json!({ "description": "   " })),
+                    ))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    response.status(),
+                    StatusCode::BAD_REQUEST,
+                    "empty description must 400 on {uri}"
+                );
+            }
+        }
+
+        /// Issue #753: with a real description but no builder wired on the running
+        /// runtime, the copilot classifies the gap exactly as the run route does —
+        /// a `not_wired` 404 or a `restart_required` / `inference_required` 409,
+        /// each carrying its `code` — rather than a bare failure. The hosted test
+        /// runtime wires no harness, so this is the gap path.
+        #[tokio::test]
+        async fn draft_from_description_reports_a_builder_gap() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            let response = router(state)
+                .oneshot(request(
+                    "POST",
+                    "/api/v1/company/workflows/draft-from-description",
+                    Some(serde_json::json!({
+                        "description": "email the weekly digest every Monday"
+                    })),
+                ))
+                .await
+                .unwrap();
+            let status = response.status();
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::CONFLICT,
+                "a builder gap is a 404/409, got {status}"
+            );
+            let body = json_body(response).await;
+            let code = body["code"].as_str().unwrap_or_default();
+            assert!(
+                matches!(
+                    code,
+                    "not_wired" | "restart_required" | "inference_required"
+                ),
+                "gap response carries a known code, got: {body}"
+            );
         }
 
         /// A create body whose trigger carries a cron.
