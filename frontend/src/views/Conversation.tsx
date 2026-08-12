@@ -33,6 +33,7 @@ import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { type ChatMessage, makeMessage, titleFromMessage } from "@/lib/chat";
+import { WorkingIndicator } from "@/views/chat/WorkingIndicator";
 import type { Thread, ThreadContact } from "@/lib/threads";
 
 interface Props {
@@ -888,11 +889,13 @@ function TypingIndicator({ contact }: { contact: ThreadContact }) {
   return (
     <div className="mt-2 flex gap-2.5">
       <ContactAvatar contact={contact} className="mt-0.5 size-8" />
-      <div className="flex items-center gap-1 rounded-2xl rounded-bl-md border bg-card px-3.5 py-3">
-        <Dot />
-        <Dot className="[animation-delay:150ms]" />
-        <Dot className="[animation-delay:300ms]" />
-      </div>
+      {/* Same indicator the Chat tab uses (#787), so the two surfaces cannot
+          drift into one whimsical and one silent. The bubble shape here is
+          this surface's own — only the contents are shared. */}
+      <WorkingIndicator
+        srLabel="Replying…"
+        className="rounded-2xl rounded-bl-md border bg-card px-3.5 py-3"
+      />
     </div>
   );
 }
@@ -919,10 +922,6 @@ function EmptyConversation({ contact }: { contact: ThreadContact }) {
       </div>
     </div>
   );
-}
-
-function Dot({ className }: { className?: string }) {
-  return <span className={cn("size-1.5 animate-bounce rounded-full bg-muted-foreground", className)} />;
 }
 
 /* ---- grouping + formatting ---- */
