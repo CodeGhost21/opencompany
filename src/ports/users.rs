@@ -199,6 +199,24 @@ pub trait UserStore: Send + Sync {
     ) -> Result<Option<InviteRecord>>;
     /// Inserts or replaces an invite by id.
     async fn upsert_invite(&self, company: &CompanyId, invite: &InviteRecord) -> Result<()>;
+    /// Stamps [`InviteRecord::notified_at_millis`] on an invite that still
+    /// exists, leaving every other field alone. Returns whether one was
+    /// updated.
+    ///
+    /// Deliberately narrower than [`UserStore::upsert_invite`], and the
+    /// narrowness is the point. The stamp is written *after* the invite mail
+    /// leaves, which is a network round trip — long enough for an admin who
+    /// mistyped the address to revoke the invite in the meantime. Writing the
+    /// pre-send record back through an upsert would recreate the row they just
+    /// revoked, silently restoring an address to the allowlist. A no-op is the
+    /// correct outcome there: the revocation stands, and nothing claims a mail
+    /// landed for a grant that no longer exists.
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool>;
     /// Deletes an invite by id; returns whether one was removed.
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool>;
 }

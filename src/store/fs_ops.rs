@@ -218,6 +218,27 @@ impl UserStore for FsOps {
         write_atomic(&path, &serde_json::to_string(&invites)?).await
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let path = self.bundle(company).user_invites_json();
+        // The same lock `delete_invite` takes, which is what makes the
+        // read-modify-write atomic against a concurrent revocation rather than
+        // merely unlikely to race with one.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut invites = load_json_vec::<InviteRecord>(&path).await?;
+        let Some(existing) = invites.iter_mut().find(|i| i.id == id) else {
+            return Ok(false);
+        };
+        existing.notified_at_millis = Some(at_millis);
+        write_atomic(&path, &serde_json::to_string(&invites)?).await?;
+        Ok(true)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).user_invites_json();
         let lock = path_lock(&path);

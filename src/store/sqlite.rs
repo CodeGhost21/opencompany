@@ -1257,6 +1257,44 @@ impl crate::ports::users::UserStore for SqliteStore {
         Ok(())
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let conn = self.conn();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT invite_json FROM user_invites WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let mut invite: InviteRecord = serde_json::from_str(&current)?;
+        invite.notified_at_millis = Some(at_millis);
+        // UPDATE, never INSERT, and matched against the row we just read: a
+        // revocation that lands between the two statements leaves nothing to
+        // match, so the stamp becomes a no-op instead of resurrecting the row.
+        let n = conn
+            .execute(
+                "UPDATE user_invites SET invite_json = ?3 \
+                 WHERE company_id = ?1 AND id = ?2 AND invite_json = ?4",
+                params![
+                    company.as_ref(),
+                    id,
+                    serde_json::to_string(&invite)?,
+                    current
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let conn = self.conn();
         let n = conn

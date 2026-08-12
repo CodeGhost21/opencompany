@@ -1235,9 +1235,37 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         "clearing notified_at_millis must persist as cleared"
     );
 
+    // Stamping is an update, never an upsert. Mail delivery is a network round
+    // trip, and the record the route holds across it goes stale the moment an
+    // admin revokes the invite — so a backend that implemented the stamp as a
+    // full-record write would restore an address the admin had just removed
+    // from the allowlist.
+    assert!(
+        users.mark_invite_notified(&alpha, "i1", 12).await.unwrap(),
+        "stamping an outstanding invite must report that it landed"
+    );
+    let stamped = users
+        .find_invite_by_email(&alpha, "carol@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stamped.notified_at_millis, Some(12));
+    assert_eq!(
+        stamped.email, "carol@example.com",
+        "stamping must leave every other field alone"
+    );
+    assert_eq!(stamped.created_at_millis, 1);
+
     assert!(users.delete_invite(&alpha, "i1").await.unwrap());
     assert!(!users.delete_invite(&alpha, "i1").await.unwrap());
-    assert!(users.list_invites(&alpha).await.unwrap().is_empty());
+    assert!(
+        !users.mark_invite_notified(&alpha, "i1", 13).await.unwrap(),
+        "stamping a revoked invite must report that nothing was updated"
+    );
+    assert!(
+        users.list_invites(&alpha).await.unwrap().is_empty(),
+        "stamping must never recreate a revoked invite"
+    );
 }
 
 /// Asserts the [`SessionStore`] contract: per-company isolation, token-hash

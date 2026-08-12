@@ -1223,6 +1223,41 @@ impl crate::ports::users::UserStore for MongoStore {
         Ok(())
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let found = self
+            .collection("user_invites")
+            .find_one(doc! {"company_id": company.as_ref(), "invite_id": id})
+            .await
+            .map_err(mongo_err)?;
+        let Some(found) = found else {
+            return Ok(false);
+        };
+        let current = get_str(&found, "invite_json")?;
+        let mut invite: InviteRecord = serde_json::from_str(&current)?;
+        invite.notified_at_millis = Some(at_millis);
+        // No `upsert` option, and the filter pins the document we just read: a
+        // revocation that lands between the two calls leaves nothing to match,
+        // so the stamp becomes a no-op instead of resurrecting the row.
+        let res = self
+            .collection("user_invites")
+            .update_one(
+                doc! {
+                    "company_id": company.as_ref(),
+                    "invite_id": id,
+                    "invite_json": &current,
+                },
+                doc! {"$set": {"invite_json": serde_json::to_string(&invite)?}},
+            )
+            .await
+            .map_err(mongo_err)?;
+        Ok(res.matched_count > 0)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let res = self
             .collection("user_invites")
