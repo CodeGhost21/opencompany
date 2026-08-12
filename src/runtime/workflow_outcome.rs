@@ -44,7 +44,7 @@ use std::sync::Arc;
 
 use crate::ports::EventLog;
 use crate::ports::types::{CompanyEvent, CompanyId, EventSeq};
-use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun};
+use crate::ports::workflow_runner::{DeliveryReport, WorkflowRun, WorkflowRunBoardRow};
 use crate::runtime::workflow_resume::DeliveredReport;
 
 /// The error stamped on a run the host never got to finish (issue #371).
@@ -91,12 +91,20 @@ pub async fn record_run_finished(
     // Issue #638: `notices` rides the Ok arm for the same reason `cancelled`
     // does — a run that never returned produced no notices, and an `Err` is
     // already fully described by `error`.
-    let (deliveries, pending_approvals, error, cancelled, notices): (
+    // Issue #661 (M5): `board` rides the Ok arm too, and here the limitation is
+    // worth stating rather than inheriting. A card is durable the moment the
+    // drain writes it, so a run that opened two cards and then failed at a later
+    // node leaves both cards on the board — but returns no `WorkflowRun`, so this
+    // event lists neither. The work survives; the listing does not. The board
+    // itself is the record in that case, which is the same trade `notices`
+    // already makes.
+    let (deliveries, pending_approvals, error, cancelled, notices, board): (
         Vec<DeliveryReport>,
         Vec<String>,
         Option<String>,
         bool,
         Vec<String>,
+        Vec<WorkflowRunBoardRow>,
     ) = match outcome {
         Ok(run) => (
             run.deliveries.clone(),
@@ -104,12 +112,14 @@ pub async fn record_run_finished(
             None,
             run.cancelled,
             run.notices.clone(),
+            run.board.clone(),
         ),
         Err(err) => (
             Vec::new(),
             Vec::new(),
             Some(err.to_string()),
             false,
+            Vec::new(),
             Vec::new(),
         ),
     };
@@ -126,6 +136,7 @@ pub async fn record_run_finished(
         error,
         cancelled,
         notices,
+        board,
     };
 
     if let Err(err) = events.append(company, event).await {
@@ -382,6 +393,7 @@ mod test {
             cancelled: false,
             nodes: Vec::new(),
             notices: Vec::new(),
+            board: Vec::new(),
         }
     }
 
@@ -747,6 +759,7 @@ mod test {
                     error: None,
                     cancelled: false,
                     notices: Vec::new(),
+                    board: Vec::new(),
                 },
             )
             .await
