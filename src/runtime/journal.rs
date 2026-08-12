@@ -3560,7 +3560,7 @@ mod test {
         let dir = tmp_dir();
         let companies = dir.path().join("companies");
         let home = companies.join("acme");
-        let journal = RuntimeJournal::new(&home.join("journal.jsonl"));
+        let journal = RuntimeJournal::new(home.join("journal.jsonl"));
 
         journal.record_executed("k-1", executed(1)).await.unwrap();
 
