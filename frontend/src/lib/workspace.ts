@@ -15,7 +15,7 @@ export type { FsNode } from "@/api/workspace";
 
 import { type LocalScope, scopedKeyAdoptingLegacy } from "@/connections/types";
 
-import type { FsNode } from "@/api/workspace";
+import type { FsNode, RepairOutcome } from "@/api/workspace";
 
 /* ---- queries ---- */
 
@@ -76,6 +76,38 @@ export function subtreeIds(nodes: FsNode[], id: string): Set<string> {
     }
   }
   return ids;
+}
+
+/**
+ * The tree as it stands after a duplicate-folder repair (issue #759).
+ *
+ * The host's answer is a list of *changes*, not a new tree, so this replays them
+ * onto the copy the tab already has — the same thing the delete and move
+ * handlers do, and for the same reason: a full refetch would discard the open
+ * note's unsaved draft.
+ *
+ * Order matters. Relocations are applied first, then a removed folder takes
+ * whatever is still filed under it. That is not defensive padding: the host only
+ * ever deletes a folder it has just proved empty, but *this* copy of the tree can
+ * be stale — an agent may have created a note in it since the last fetch — and
+ * dropping the folder while keeping the phantom child would leave a row hanging
+ * off a parent that no longer exists.
+ */
+export function applyRepair(nodes: FsNode[], outcome: RepairOutcome): FsNode[] {
+  const relocated = new Map<string, string>();
+  for (const folder of outcome.folders) {
+    for (const child of folder.moved) relocated.set(child.id, folder.intoId);
+  }
+  const moved = nodes.map((node) => {
+    const parentId = relocated.get(node.id);
+    return parentId === undefined ? node : { ...node, parentId };
+  });
+
+  const gone = new Set<string>();
+  for (const folder of outcome.folders) {
+    if (folder.removed) for (const id of subtreeIds(moved, folder.id)) gone.add(id);
+  }
+  return moved.filter((node) => !gone.has(node.id));
 }
 
 /** Notes get a markdown extension unless they already carry a known one. */
