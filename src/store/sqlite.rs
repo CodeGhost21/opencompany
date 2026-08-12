@@ -2686,6 +2686,67 @@ impl crate::ports::workspace::WorkspaceStore for SqliteStore {
         Ok(())
     }
 
+    /// Read-siblings then adopt-or-`INSERT`, inside an **immediate**
+    /// transaction (issue #759).
+    ///
+    /// The same device this backend's [`swap_files`] already uses, and for the
+    /// same reason: two `SqliteStore` instances can point at one database file,
+    /// so the write reservation has to be taken *before* the read or both
+    /// callers see the name free and both insert. Nothing else here would stop
+    /// them — plain [`create`] checks only that the node **id** is fresh and has
+    /// never had a sibling-name guard at all.
+    ///
+    /// [`swap_files`]: crate::ports::workspace::WorkspaceStore::swap_files
+    /// [`create`]: crate::ports::workspace::WorkspaceStore::create
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        use crate::ports::workspace::{FolderClaim, NodeKind, existing_folder_claim, new_folder};
+        let mut conn = self.conn();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(sql_err)?;
+        let nodes = self.workspace_nodes(&tx, company)?;
+        if let Some(parent) = parent {
+            match nodes.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        // Adoption commits nothing: the transaction is dropped, which rolls back
+        // a reservation that never wrote.
+        if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+            return Ok(FolderClaim::Adopted(existing));
+        }
+        let node = new_folder(name, parent, origin);
+        tx.execute(
+            "INSERT INTO workspace_nodes (company_id, id, node_json, content, updated_ms) \
+             VALUES (?1, ?2, ?3, '', ?4)",
+            params![
+                company.as_ref(),
+                node.id,
+                serde_json::to_string(&node)?,
+                node.updated_at_millis as i64
+            ],
+        )
+        .map_err(sql_err)?;
+        tx.commit().map_err(sql_err)?;
+        Ok(FolderClaim::Created(node))
+    }
+
     /// One `INSERT` carrying the node and its payload together.
     ///
     /// **sqlite cannot orphan a blob**, and that is a property of this statement
@@ -3329,6 +3390,13 @@ mod test {
     #[tokio::test]
     async fn conformance_workspace_binary_store() {
         conformance::assert_workspace_binary_store(store()).await;
+    }
+
+    /// Issue #759: the folder-claim primitive, including the eight-way
+    /// contention case an immediate transaction is what decides here.
+    #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        conformance::assert_workspace_folder_claims(store()).await;
     }
 
     /// Issue #700's emptiness predicate, against the backend that can actually

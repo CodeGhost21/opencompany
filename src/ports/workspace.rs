@@ -133,6 +133,121 @@ pub enum WorkspaceOrigin {
     },
 }
 
+/// What [`WorkspaceStore::adopt_or_create_folder`] did to satisfy a caller's
+/// claim on `(parent, name)` (issue #759).
+///
+/// The caller almost always wants the node and not the verb — a publish walking
+/// `Agents/<agent>/<task>/` does the same thing either way. The distinction is
+/// carried anyway because exactly one consumer must be able to tell: the
+/// workspace announcer emits a node-created frame, and a frame for a folder that
+/// was already standing would tell an open console that something appeared when
+/// nothing did. Returning a bare id would make that undecidable at the only
+/// layer that has to decide it.
+#[derive(Clone, Debug, PartialEq)]
+pub enum FolderClaim {
+    /// The name was free and this call minted the folder.
+    Created(WorkspaceNode),
+    /// A folder was already there and is handed back untouched — authorship
+    /// stamp, timestamp and all. See [`WorkspaceStore::adopt_or_create_folder`]
+    /// for why adoption rather than refusal is the right answer for a folder.
+    Adopted(WorkspaceNode),
+}
+
+impl FolderClaim {
+    /// The folder that now answers to `(parent, name)`, however it got there.
+    pub fn node(&self) -> &WorkspaceNode {
+        match self {
+            Self::Created(node) | Self::Adopted(node) => node,
+        }
+    }
+
+    /// The folder's id — the thing nearly every caller actually wants.
+    pub fn id(&self) -> &str {
+        &self.node().id
+    }
+
+    /// Consumes the claim for the node inside it.
+    pub fn into_node(self) -> WorkspaceNode {
+        match self {
+            Self::Created(node) | Self::Adopted(node) => node,
+        }
+    }
+
+    /// Whether this call is the one that minted the folder.
+    pub fn was_created(&self) -> bool {
+        matches!(self, Self::Created(_))
+    }
+}
+
+/// The folder node a store is about to insert for a claim.
+///
+/// Shared so all three backends mint the same shape — a fresh ULID, both origin
+/// fields stamped with the caller's `origin`, and no blob metadata — rather than
+/// three chances to stamp `created_by` differently.
+pub fn new_folder(name: &str, parent_id: Option<&str>, origin: WorkspaceOrigin) -> WorkspaceNode {
+    WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: name.to_string(),
+        kind: NodeKind::Folder,
+        parent_id: parent_id.map(str::to_string),
+        updated_at_millis: crate::ports::now_millis(),
+        created_by: origin.clone(),
+        updated_by: origin,
+        mime: None,
+        size: None,
+        sha256: None,
+    }
+}
+
+/// The folder already answering to `(parent, name)`, or `None` when the name is
+/// free — refusing anything a claim must not resolve.
+///
+/// The read half of [`WorkspaceStore::adopt_or_create_folder`], shared so the
+/// fail-closed rule has one implementation and all three backends refuse with
+/// the same sentence. The conformance suite asserts on those sentences, which is
+/// only worth anything if they cannot drift.
+///
+/// A *file* holding the name, or several nodes holding it, is a
+/// [`Conflict`](crate::error::OpenCompanyError::Conflict): the first because a
+/// folder and a note at one path is the ambiguity the tool layer already
+/// refuses, and the second because a tree that lost this race *before* the guard
+/// existed must stay refused rather than have a third node added to it.
+pub fn existing_folder_claim<'a>(
+    nodes: impl Iterator<Item = &'a WorkspaceNode>,
+    parent: Option<&str>,
+    name: &str,
+) -> Result<Option<WorkspaceNode>> {
+    use crate::error::OpenCompanyError;
+    let matches: Vec<&WorkspaceNode> = nodes
+        .filter(|node| node.parent_id.as_deref() == parent && node.name == name)
+        .collect();
+    match matches.as_slice() {
+        [one] if one.kind == NodeKind::Folder => Ok(Some((*one).clone())),
+        [_] => Err(OpenCompanyError::Conflict(folder_claim_file_refusal(name))),
+        [] => Ok(None),
+        many => Err(OpenCompanyError::Conflict(folder_claim_ambiguous_refusal(
+            name,
+            many.len(),
+        ))),
+    }
+}
+
+/// The refusal every backend gives when a *file* already carries the name a
+/// folder claim asked for.
+pub fn folder_claim_file_refusal(name: &str) -> String {
+    format!(
+        "`{name}` already exists as a note, not a folder, so a folder cannot be claimed at that \
+         path"
+    )
+}
+
+/// The refusal every backend gives when the name a folder claim asked for is
+/// already carried by more than one node — a tree that lost this race before the
+/// guard existed.
+pub fn folder_claim_ambiguous_refusal(name: &str, count: usize) -> String {
+    format!("{count} nodes under this folder are named `{name}`, so the path is ambiguous")
+}
+
 /// One node in the workspace tree. `id` is a stable ULID; `parent_id` is `None`
 /// at the workspace root.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -355,6 +470,54 @@ pub trait WorkspaceStore: Send + Sync {
         node: &WorkspaceNode,
         content: Option<&str>,
     ) -> Result<()>;
+    /// Claims the folder `name` under `parent`, minting it or adopting the one
+    /// already there — atomically, against every other caller of this method
+    /// (issue #759).
+    ///
+    /// **The contract**: when this returns `Ok`, exactly one folder answers to
+    /// `(parent, name)` among the nodes this primitive governs, and the returned
+    /// node is it. `parent` of `None` is the workspace root, which is why it is
+    /// an `Option` rather than a `&str` — the `Agents/` and `Desks/` roots are
+    /// claimed by the same call as everything beneath them.
+    ///
+    /// Adoption **preserves the original authorship stamp**: `origin` is used
+    /// only when this call is the one that creates the folder. A second
+    /// publisher does not get to rewrite whose folder it is.
+    ///
+    /// Fail-closed on anything that is not a single folder: a *file* holding the
+    /// name is a [`Conflict`](crate::error::OpenCompanyError::Conflict), and so
+    /// is a name already carried by several nodes — a tree that lost this race
+    /// before the guard existed stays refused rather than gaining a third node.
+    /// Both refusals come from [`existing_folder_claim`], so they read the same
+    /// on every backend.
+    ///
+    /// # Why adoption, and not [`swap_files`](Self::swap_files)'s compare-and-swap
+    ///
+    /// `swap_files` stages a payload and makes the loser **fail**, which is
+    /// right for a file: its bytes are a content claim with one legitimate
+    /// winner. A folder is a payload-free **container** claim — two publishers
+    /// that both want `Agents/cmo/task-42/` want the same thing, so the loser
+    /// must adopt and carry on rather than report a publish failure the operator
+    /// can do nothing about. Forcing folders through that CAS would need a
+    /// re-read-and-adopt retry loop wrapped around it, and `swap_files` rejects
+    /// non-file replacements outright for fs-rename and GridFS reasons that do
+    /// not apply here.
+    ///
+    /// It also dissolves loser cleanup: a loser never owns a folder, so nothing
+    /// was ever written beneath one that gets discarded.
+    ///
+    /// # No default implementation, deliberately
+    ///
+    /// A read-then-create default would compile everywhere and silently
+    /// reintroduce the exact race this exists to close on any backend that
+    /// forgot to override it. Required, so the compiler names every implementor.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: WorkspaceOrigin,
+    ) -> Result<FolderClaim>;
     /// Creates a **binary** file node holding `bytes`.
     ///
     /// The binary twin of [`create`](Self::create), with the same freshness and

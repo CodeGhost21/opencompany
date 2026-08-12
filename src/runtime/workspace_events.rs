@@ -175,6 +175,32 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         Ok(())
     }
 
+    /// Claims through, and announces `opened` **only when the folder was
+    /// actually minted** (issue #759).
+    ///
+    /// An adoption changed nothing: the folder was already standing, already in
+    /// the tree the console last read, already announced when whoever created it
+    /// created it. Announcing it again would tell an open Workspace tab that
+    /// something appeared, on a publish that only walked past it — and the
+    /// publish walk adopts on nearly every publish a company ever makes, so the
+    /// noise would be the common case rather than an edge one.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        let claim = self
+            .inner
+            .adopt_or_create_folder(company, parent, name, origin)
+            .await?;
+        if let crate::ports::workspace::FolderClaim::Created(node) = &claim {
+            self.announce(company, &node.id, CHANGE_OPENED).await;
+        }
+        Ok(claim)
+    }
+
     /// A binary node appearing in the tree is the same event as a note
     /// appearing: something the operator did not type is now there to look at.
     /// An uploaded image or a published chart therefore reaches an open
@@ -413,6 +439,41 @@ mod test {
         assert_eq!(
             changes(&log),
             vec![("n-1".to_string(), "opened".to_string())]
+        );
+    }
+
+    /// Issue #759: a folder claim announces `opened` when it **mints** the
+    /// folder and says nothing when it adopts one.
+    ///
+    /// Both halves are load-bearing. Without the first, a published deliverable
+    /// would appear in a tab that never learned its folder existed. Without the
+    /// second, every publish into an established folder — which is nearly every
+    /// publish a company ever makes — would put an `opened` frame on the feed
+    /// for a node that has been sitting there for weeks.
+    #[tokio::test]
+    async fn a_folder_claim_announces_only_when_it_mints_the_folder() {
+        let (_dir, store, log, co) = wired();
+
+        let claim = store
+            .adopt_or_create_folder(&co, None, "Agents", WorkspaceOrigin::Seed)
+            .await
+            .unwrap();
+        assert!(claim.was_created());
+        assert_eq!(
+            changes(&log),
+            vec![(claim.node().id.clone(), "opened".to_string())]
+        );
+        log.appended.lock().unwrap().clear();
+
+        let adopted = store
+            .adopt_or_create_folder(&co, None, "Agents", WorkspaceOrigin::Seed)
+            .await
+            .unwrap();
+        assert!(!adopted.was_created());
+        assert_eq!(adopted.node().id, claim.node().id);
+        assert!(
+            changes(&log).is_empty(),
+            "adopting a folder that was already standing changed nothing"
         );
     }
 

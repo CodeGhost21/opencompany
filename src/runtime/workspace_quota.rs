@@ -319,6 +319,22 @@ impl WorkspaceStore for QuotaEnforcedWorkspace {
         self.inner.create(company, node, content).await
     }
 
+    /// Unmetered, like every other folder write: quota counts binary payloads,
+    /// and a folder carries none. Delegated rather than defaulted because the
+    /// port has no default — a wrapper that silently read-then-created would
+    /// reintroduce the race (issue #759) from inside the decorator stack.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        self.inner
+            .adopt_or_create_folder(company, parent, name, origin)
+            .await
+    }
+
     async fn create_binary(
         &self,
         company: &CompanyId,
