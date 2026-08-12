@@ -14,12 +14,13 @@
 // second one would drift the moment either side grew a field.
 
 import { useEffect, useId, useState } from "react";
-import { History, Plus, RotateCcw, Trash2 } from "lucide-react";
+import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 
 import {
   CREATABLE_NODE_KINDS,
   DESTINATION_KINDS,
   createWorkflow,
+  draftWorkflowFromDescription,
   listWorkflowRevisions,
   listWorkflows,
   restoreWorkflowRevision,
@@ -31,6 +32,7 @@ import {
   type WorkflowRevision,
   type WorkflowSummary,
 } from "@/api/workflows";
+import { getInferenceStatus, type CognitionPath } from "@/api/inference";
 import {
   blankConfigDraft,
   configDraftFrom,
@@ -401,6 +403,18 @@ export function WorkflowCreateDialog({
   /** The revision currently being restored, so its row can show a spinner and
    * every Restore button disables while one restore is in flight. */
   const [restoringId, setRestoringId] = useState<string | null>(null);
+  // Issue #753: the create-time copilot. Create mode only — an edit already has
+  // a graph to change. `cognition` gates the composer the same way CopilotPanel
+  // does: on the offline `echo` brain there is no model to draft with, so Draft
+  // is disabled rather than failing on click. `null` until the check settles
+  // (and on a host without the route), which leaves it enabled — refusing to
+  // draft because we could not confirm would break it on hosts where it works.
+  const [copilotPrompt, setCopilotPrompt] = useState("");
+  const [drafting, setDrafting] = useState(false);
+  const [draftError, setDraftError] = useState<string | null>(null);
+  const [draftSummary, setDraftSummary] = useState<string | null>(null);
+  const [draftReason, setDraftReason] = useState<string | null>(null);
+  const [cognition, setCognition] = useState<CognitionPath | null>(null);
   const formId = useId();
 
   // Reload the roster (for the agent-node picker) and reset the draft each
@@ -432,6 +446,11 @@ export function WorkflowCreateDialog({
     setRevisionsLoaded(false);
     setRevisionsError(null);
     setRestoringId(null);
+    // Issue #753: a fresh open never carries a prior draft's prompt or result.
+    setCopilotPrompt("");
+    setDraftError(null);
+    setDraftSummary(null);
+    setDraftReason(null);
     let live = true;
     (async () => {
       try {
@@ -458,6 +477,30 @@ export function WorkflowCreateDialog({
       live = false;
     };
   }, [open, client, company, workflow]);
+
+  // Issue #753: check the company's cognition path when the copilot is on screen
+  // (create mode). On the offline `echo` brain there is nothing to draft with, so
+  // Draft disables; the check runs separately from the reset above so a slow
+  // `/inference` read never delays clearing the form. Mirrors CopilotPanel:331.
+  useEffect(() => {
+    if (!open || editing) return;
+    let live = true;
+    setCognition(null);
+    (async () => {
+      try {
+        const status = await getInferenceStatus(client, company);
+        if (live) setCognition(status.cognition);
+      } catch {
+        // A host without the route tells us nothing either way — leave it enabled
+        // rather than blocking a copilot that works. (`cognition` stays null,
+        // which is not `echo`, so Draft is enabled.)
+        if (live) setCognition(null);
+      }
+    })();
+    return () => {
+      live = false;
+    };
+  }, [open, editing, client, company]);
 
   function addNode() {
     setNodes((rows) => [...rows, blankNode()]);
@@ -702,6 +745,85 @@ export function WorkflowCreateDialog({
     }
   }
 
+  // Issue #753: `echo` is the offline brain — there is no model to draft with, so
+  // the copilot composer is disabled until the check settles onto a real path.
+  const echoing = cognition === "echo";
+
+  /** Whether the form holds anything a copilot draft would overwrite. The blank
+   * starter — no id/name/description, no edges, one untouched `start` trigger —
+   * is NOT dirty, so the first draft hydrates without a confirm; anything the
+   * operator has already typed is, so it asks first. */
+  function isDraftDirty(): boolean {
+    if (id.trim() || name.trim() || description.trim()) return true;
+    if (edges.length > 0) return true;
+    if (nodes.length !== 1) return true;
+    const only = nodes[0];
+    return !(
+      only.kind === "trigger" &&
+      only.id === "start" &&
+      only.name === "Start" &&
+      !only.summary.trim() &&
+      !only.agent.trim() &&
+      !only.schedule.trim()
+    );
+  }
+
+  /** Draft a graph from the description and hydrate the form with it (issue
+   * #753). The hydrated, editable form IS the review surface — there is no
+   * read-only diff — so on success the operator lands in the ordinary create
+   * form with everything filled in, tweaks if needed, and presses Create. */
+  async function runDraft() {
+    const description = copilotPrompt.trim();
+    if (!description || drafting || echoing) return;
+    // Overwriting work the operator has already started is a confirm, not a
+    // silent clobber — the same courtesy the History restore extends.
+    if (
+      isDraftDirty() &&
+      !window.confirm(
+        "Replace what you've started with the drafted workflow? You can still edit it before creating.",
+      )
+    ) {
+      return;
+    }
+    setDrafting(true);
+    setDraftError(null);
+    setDraftSummary(null);
+    setDraftReason(null);
+    try {
+      const drafted = await draftWorkflowFromDescription(client, company, description);
+      if (drafted.automatable && drafted.workflow) {
+        const graph = drafted.workflow;
+        // Hydrate via the same helpers edit mode uses, so a drafted graph and a
+        // saved one populate the form identically.
+        setId(graph.id);
+        setName(graph.name);
+        setDescription(graph.description ?? "");
+        setNodes(draftNodes(graph));
+        setEdges(draftEdges(graph));
+        // A fresh draft clears both the submit banner and the per-field blur
+        // errors — they belonged to whatever was on screen before.
+        setError(null);
+        setFieldErrors({});
+        setDraftSummary(
+          drafted.summary
+            ? `Drafted: ${drafted.summary} — review below, then Create.`
+            : "Drafted — review below, then Create.",
+        );
+      } else {
+        // Not automatable: the form is left untouched, with the model's reason.
+        setDraftReason(
+          drafted.reason ?? "This is better done once than built into a workflow.",
+        );
+      }
+    } catch (e) {
+      // A capability gap (404/409) or a network failure — surface it inline; the
+      // operator can still author by hand.
+      setDraftError(e instanceof Error ? e.message : "could not draft a workflow");
+    } finally {
+      setDrafting(false);
+    }
+  }
+
   async function submit() {
     const problem = validate();
     if (problem) {
@@ -808,9 +930,63 @@ export function WorkflowCreateDialog({
           <DialogDescription>
             {editing
               ? "Change the nodes, how they connect, or when it runs. Saving replaces the whole graph."
-              : "Define the graph by hand — nodes, then how they connect."}
+              : "Describe it and let the copilot draft it, or define the graph by hand — nodes, then how they connect."}
           </DialogDescription>
         </DialogHeader>
+
+        {/* Issue #753: the create-time copilot. Create mode only — an edit
+            already has a graph. It drafts a graph from a sentence and hydrates
+            the form below with it; the operator reviews and edits in that form,
+            then presses Create as usual. Nothing is saved by drafting. */}
+        {!editing && (
+          <div className="space-y-2 rounded-lg border bg-muted/30 p-3">
+            <Label htmlFor={`${formId}-copilot`} className="flex items-center gap-2">
+              <Sparkles className="size-4" />
+              Describe the workflow
+            </Label>
+            <Textarea
+              id={`${formId}-copilot`}
+              rows={2}
+              value={copilotPrompt}
+              onChange={(e) => setCopilotPrompt(e.target.value)}
+              placeholder="e.g. Every Monday morning, have the writer draft the weekly digest and email it to the team."
+              disabled={drafting || echoing}
+            />
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-2xs leading-snug text-muted-foreground">
+                {echoing
+                  ? "This company has no model configured, so the copilot can't draft yet — set one in Settings → Inference, or build the graph by hand below."
+                  : "The copilot fills in the form below — review and edit it, then Create."}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={() => void runDraft()}
+                disabled={drafting || echoing || !copilotPrompt.trim()}
+                data-testid="workflow-copilot-draft"
+              >
+                <Sparkles className="mr-1 size-3.5" />
+                {drafting ? "Drafting…" : "Draft it"}
+              </Button>
+            </div>
+            {draftSummary && (
+              <Alert>
+                <AlertDescription>{draftSummary}</AlertDescription>
+              </Alert>
+            )}
+            {draftReason && (
+              <Alert>
+                <AlertDescription>{draftReason}</AlertDescription>
+              </Alert>
+            )}
+            {draftError && (
+              <Alert variant="destructive">
+                <AlertDescription>{draftError}</AlertDescription>
+              </Alert>
+            )}
+          </div>
+        )}
 
         <div className="grid gap-3 sm:grid-cols-2">
           <div className="grid gap-2">
