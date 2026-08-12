@@ -103,11 +103,48 @@ describe("residualReason", () => {
 });
 
 describe("applyRepair", () => {
+  // A raced tree is one an agent's publish walk made, so the fixtures carry an
+  // agent origin rather than the operator default. `applyRepair` never reads it —
+  // it is here because `FsNode` requires it, and a faithful fixture beats a
+  // convenient one.
+  const BY_AGENT = { kind: "agent", id: "cmo" } as const;
   const tree: FsNode[] = [
-    { id: "keep", name: "reports", kind: "folder", parentId: null, updatedAt: 1 },
-    { id: "dupe", name: "reports", kind: "folder", parentId: null, updatedAt: 2 },
-    { id: "note", name: "q2.md", kind: "file", parentId: "dupe", updatedAt: 3 },
-    { id: "rival", name: "summary.md", kind: "file", parentId: "dupe", updatedAt: 4 },
+    {
+      id: "keep",
+      name: "reports",
+      kind: "folder",
+      parentId: null,
+      updatedAt: 1,
+      createdBy: BY_AGENT,
+      updatedBy: BY_AGENT,
+    },
+    {
+      id: "dupe",
+      name: "reports",
+      kind: "folder",
+      parentId: null,
+      updatedAt: 2,
+      createdBy: BY_AGENT,
+      updatedBy: BY_AGENT,
+    },
+    {
+      id: "note",
+      name: "q2.md",
+      kind: "file",
+      parentId: "dupe",
+      updatedAt: 3,
+      createdBy: BY_AGENT,
+      updatedBy: BY_AGENT,
+    },
+    {
+      id: "rival",
+      name: "summary.md",
+      kind: "file",
+      parentId: "dupe",
+      updatedAt: 4,
+      createdBy: BY_AGENT,
+      updatedBy: BY_AGENT,
+    },
   ];
 
   it("relocates what moved and drops the folder that went", () => {
@@ -144,7 +181,15 @@ describe("applyRepair", () => {
     // that no longer exists renders nowhere and is impossible to delete.
     const stale: FsNode[] = [
       ...tree,
-      { id: "ghost", name: "old.md", kind: "file", parentId: "dupe", updatedAt: 5 },
+      {
+        id: "ghost",
+        name: "old.md",
+        kind: "file",
+        parentId: "dupe",
+        updatedAt: 5,
+        createdBy: BY_AGENT,
+        updatedBy: BY_AGENT,
+      },
     ];
     const outcome: RepairOutcome = {
       folders: [{ ...fold, moved: [{ id: "note", name: "q2.md" }], removed: true }],
