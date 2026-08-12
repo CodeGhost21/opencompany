@@ -45,7 +45,7 @@ Each of these is real. None of them is a sandbox.
 | One container per tenant | The `opencompany-manager` control plane builds and runs a per-tenant container | superproject, not this repo |
 | Database per tenant | `OPENCOMPANY_MONGODB_URI` is scoped to that tenant's database | [storage.md](../runtime/storage.md) |
 | Tool grants are per agent, and `repo` needs naming | `grants_repo_explicit` — the catch-all `*` does **not** confer `repo`, `media`, `composio` or `search` | `src/company/types.rs` |
-| Repo tools need a grant, a wired manager **and** a binding | Three gates in `build_agent`, each fail-closed with a warning | `src/harness/build.rs` |
+| Repo tools need a grant, a wired manager **and** a binding | Three of the four gates in `build_agent`, each fail-closed with a warning (the fourth is the row below) | `src/harness/build.rs` |
 | Repo credentials refused on a plaintext secret backend | Issue #752 C3 — bind, company boot and agent build all refuse unless `OPENCOMPANY_STORAGE=mongodb` | `src/store/select.rs`, `src/runtime/repo_manager.rs`, `src/runtime/builder.rs`, `src/harness/build.rs` |
 | Classic PATs refused at intake | `ghp_…` reads every repository the account can reach; the route refuses it and says how to make a fine-grained one | `src/server/ops/repos.rs` |
 | The credential never reaches argv, the environment or a file | A git credential helper on stdin, with an emptied environment | [repos.md](../runtime/repos.md) |
@@ -115,10 +115,11 @@ its own. This is why C4 is secondary and why closing it would not close #752.
 readable by the uid the shell runs as.
 
 Since #752 C3 this specific exposure is refused rather than documented: binding
-a repository credential, and booting a company that grants `repo`, both fail
-closed unless `OPENCOMPANY_STORAGE=mongodb`. That closes the *repository*
-credential on that path. It does not make the filesystem safe — every other
-secret on an `fs` host is still plaintext next to it.
+a repository credential, booting a company whose roster grants `repo`, and
+wiring the repo tools for an agent all fail closed unless
+`OPENCOMPANY_STORAGE=mongodb`. That closes the *repository* credential on that
+path. It does not make the filesystem safe — every other secret on an `fs` host
+is still plaintext next to it, and nothing here touches the shell.
 
 ### 4. There is no egress policy.
 
