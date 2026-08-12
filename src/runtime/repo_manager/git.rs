@@ -285,12 +285,21 @@ pub(crate) async fn run(
     token: Option<&str>,
     askpass: Option<&AskpassDir>,
 ) -> Result<GitOutput> {
-    run_bounded(cwd, args, token, askpass, GIT_TIMEOUT).await
+    run_bounded(Path::new("git"), cwd, args, token, askpass, GIT_TIMEOUT).await
 }
 
-/// [`run`], with the deadline supplied. Separate only so the timeout path is
-/// reachable from a test without one taking [`GIT_TIMEOUT`] to run.
+/// [`run`], with the program and the deadline supplied. Separate only so the
+/// timeout path is reachable from a test without one taking [`GIT_TIMEOUT`] to
+/// run, and against a program that blocks on purpose.
+///
+/// `program` is `git` for every caller but that test. It is a parameter rather
+/// than something the test arranges on `PATH`, because `PATH` is process-global:
+/// `std::env::set_var` races every other test in the binary reading the
+/// environment (which is why edition 2024 marks it `unsafe`), and a panic
+/// between the set and the restore would leave the fake in place for whatever
+/// ran next.
 async fn run_bounded(
+    program: &Path,
     cwd: &Path,
     args: &[&str],
     token: Option<&str>,
@@ -298,7 +307,7 @@ async fn run_bounded(
     limit: std::time::Duration,
 ) -> Result<GitOutput> {
     let plan = SpawnPlan::build(args, askpass);
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = tokio::process::Command::new(program);
     cmd.current_dir(cwd);
     cmd.args(&plan.args);
     // Start from nothing, then add back only what git needs. Building the
@@ -523,55 +532,30 @@ mod test {
         // clock does not help while the runtime is still waiting on a real
         // child's I/O, so the deadline never reached the timeout arm reliably.
         //
-        // So this test puts a fake `git` on `PATH` whose only special case is to
-        // block, checks that the deadline arm fires, and relies on `kill_on_drop`
-        // to reap the child instead of leaking it. The fake delegates everything
-        // else to the real git, so its presence on `PATH` cannot perturb sibling
-        // tests running concurrently in the same binary.
+        // So this test hands `run_bounded` a program whose whole job is to
+        // block, and checks that the deadline arm fires. The program is passed
+        // in rather than arranged on `PATH`: `PATH` is process-global, every
+        // sibling test in this binary reads the environment while this one runs,
+        // and a panic before the restore would leave the fake in place for
+        // whatever ran next.
         let base = std::env::temp_dir().join(format!("oc-gittimeout-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
 
-        let real_git = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("command -v git")
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .expect("real git must be on PATH");
-        let bin = base.join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let fake_git = bin.join("git");
-        std::fs::write(
-            &fake_git,
-            format!(
-                // `exec sleep`, not `sleep`: `kill_on_drop` stops the direct
-                // child and nothing below it, so a plain `sleep` outlives the
-                // shell that spawned it and keeps running for its full minute
-                // after the deadline arm has fired. Replacing the shell makes
-                // the blocking process the one Tokio holds.
-                "#!/bin/sh\ncase \" $* \" in\n  *\" __deadline__ \"*) exec sleep 60;;\nesac\nexec {real_git} \"$@\"\n"
-            ),
-        )
-        .unwrap();
+        // `exec sleep`, not `sleep`: `kill_on_drop` stops the direct child and
+        // nothing below it, so a shell-spawned `sleep` outlives the deadline arm
+        // and keeps running for its full minute. Replacing the shell makes the
+        // blocking process the one Tokio holds.
+        let fake_git = base.join("blocking-git");
+        std::fs::write(&fake_git, "#!/bin/sh\nexec sleep 60\n").unwrap();
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
 
-        // `run_bounded` rebuilds the child environment from this process's, so a
-        // test-local `PATH` prepend is enough to route `git` to the fake for the
-        // duration of the run. The marker still reaches the fake's `$*` scan
-        // because `hardening_flags()` prepends its own `-c` arguments ahead of
-        // it in the argv.
-        let original_path = std::env::var("PATH").unwrap_or_default();
-        // SAFETY: a single-threaded test lifetime; we restore the variable on
-        // every exit path below. Edition-2024 marks this unsafe.
-        unsafe { std::env::set_var("PATH", format!("{}:{original_path}", bin.display())) };
-
         // A 500ms deadline against a 60s sleep is a ~120x margin, not a race.
         let err = run_bounded(
+            &fake_git,
             &base,
             &["__deadline__"],
             None,
@@ -584,7 +568,6 @@ mod test {
         assert!(err.contains("did not finish"), "{err}");
         assert!(err.contains("was stopped"), "{err}");
 
-        unsafe { std::env::set_var("PATH", original_path) };
         std::fs::remove_dir_all(&base).ok();
     }
 
