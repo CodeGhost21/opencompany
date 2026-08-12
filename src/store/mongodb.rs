@@ -2103,6 +2103,67 @@ impl crate::ports::skills_state::SkillStateStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for MongoStore {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let mut cursor = self
+            .collection("channel_read_state")
+            .find(doc! {"company_id": company.as_ref(), "user_id": user})
+            .sort(doc! {"channel_id": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(d) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(crate::ports::read_state::ChannelRead {
+                channel_id: get_str(&d, "channel_id")?,
+                last_read_at: d.get_i64("last_read_ms").unwrap_or_default(),
+            });
+        }
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let key = doc! {
+            "company_id": company.as_ref(),
+            "user_id": user,
+            "channel_id": channel_id,
+        };
+        // `$max` rather than `$set`, for the monotonicity the port promises —
+        // and on an upsert it seeds the field, so no `$setOnInsert` twin (which
+        // Mongo would reject as a conflicting path anyway).
+        self.collection("channel_read_state")
+            .update_one(key.clone(), doc! {"$max": {"last_read_ms": at}})
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        let settled = self
+            .collection("channel_read_state")
+            .find_one(key)
+            .await
+            .map_err(mongo_err)?
+            .and_then(|d| d.get_i64("last_read_ms").ok())
+            .unwrap_or(at);
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -3527,6 +3588,13 @@ mod test {
     async fn conformance_skill_state_store() {
         let Some(s) = store().await else { return };
         conformance::assert_skill_state_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_read_state_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_read_state_store(s.clone()).await;
         drop_db(&s).await;
     }
 

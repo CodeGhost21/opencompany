@@ -192,6 +192,13 @@ CREATE TABLE IF NOT EXISTS skill_state (
     state_json TEXT NOT NULL,
     PRIMARY KEY (company_id, slug)
 );
+CREATE TABLE IF NOT EXISTS channel_read_state (
+    company_id   TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    last_read_ms INTEGER NOT NULL,
+    PRIMARY KEY (company_id, user_id, channel_id)
+);
 CREATE TABLE IF NOT EXISTS workspace_nodes (
     company_id TEXT NOT NULL,
     id         TEXT NOT NULL,
@@ -2230,6 +2237,73 @@ impl crate::ports::skills_state::SkillStateStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for SqliteStore {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, last_read_ms FROM channel_read_state \
+                 WHERE company_id = ?1 AND user_id = ?2 ORDER BY channel_id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), user], |r| {
+                Ok(crate::ports::read_state::ChannelRead {
+                    channel_id: r.get::<_, String>(0)?,
+                    last_read_at: r.get::<_, i64>(1)?,
+                })
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let conn = self.conn();
+        // `max(excluded, existing)` in the conflict arm is the monotonicity the
+        // port promises: a late request carrying an earlier instant must not
+        // move the marker back and resurrect messages already read.
+        conn.execute(
+            "INSERT INTO channel_read_state (company_id, user_id, channel_id, last_read_ms) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(company_id, user_id, channel_id) DO UPDATE SET \
+             last_read_ms = max(excluded.last_read_ms, channel_read_state.last_read_ms)",
+            params![company.as_ref(), user, channel_id, at],
+        )
+        .map_err(sql_err)?;
+        let settled: i64 = conn
+            .query_row(
+                "SELECT last_read_ms FROM channel_read_state \
+                 WHERE company_id = ?1 AND user_id = ?2 AND channel_id = ?3",
+                params![company.as_ref(), user, channel_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WorkspaceStore
 // ---------------------------------------------------------------------------
 
@@ -2966,6 +3040,11 @@ mod test {
     #[tokio::test]
     async fn conformance_skill_state_store() {
         conformance::assert_skill_state_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_read_state_store() {
+        conformance::assert_read_state_store(store()).await;
     }
 
     #[tokio::test]

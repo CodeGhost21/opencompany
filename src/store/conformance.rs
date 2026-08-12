@@ -2149,6 +2149,89 @@ pub async fn assert_usage_retention(usage: Arc<dyn UsageMeter>) {
 }
 
 /// Asserts the [`SkillStateStore`] contract: isolation, set/upsert, and remove.
+/// Every [`ReadStateStore`] must agree on these (issue #755).
+///
+/// The two properties worth pinning are the ones a backend can plausibly get
+/// wrong: **monotonicity** (a marker never moves backwards, however requests
+/// interleave) and **isolation** (per person as well as per company — a marker
+/// keyed only by channel would let one operator's reading clear another's
+/// badges).
+pub async fn assert_read_state_store(reads: Arc<dyn crate::ports::read_state::ReadStateStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // A channel never opened has no marker — absent, not zero.
+    assert!(reads.list(&alpha, "ada").await.unwrap().is_empty());
+
+    let first = reads
+        .mark(&alpha, "ada", "engineering", 1_000)
+        .await
+        .unwrap();
+    assert_eq!(first.last_read_at, 1_000);
+    assert_eq!(first.channel_id, "engineering");
+
+    // Forward moves.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 2_000)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+
+    // Backwards does NOT. A late request carrying an earlier instant must not
+    // resurrect messages already read, and the call answers with where the
+    // marker actually stands rather than what was asked for.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 500)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+    // Equal is not a move either, and must not error.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 2_000)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+
+    // Per person: Grace's marker on the same channel is her own, and reading it
+    // to the past does not disturb Ada's.
+    reads
+        .mark(&alpha, "grace", "engineering", 42)
+        .await
+        .unwrap();
+    let ada = reads.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada.len(), 1);
+    assert_eq!(ada[0].last_read_at, 2_000);
+    let grace = reads.list(&alpha, "grace").await.unwrap();
+    assert_eq!(grace.len(), 1);
+    assert_eq!(grace[0].last_read_at, 42);
+
+    // Per company: the same person in another company starts empty.
+    assert!(reads.list(&beta, "ada").await.unwrap().is_empty());
+    reads.mark(&beta, "ada", "engineering", 9).await.unwrap();
+    assert_eq!(
+        reads.list(&alpha, "ada").await.unwrap()[0].last_read_at,
+        2_000
+    );
+
+    // Several channels for one person, ordered by channel id ascending — the
+    // order the trait documents, not each backend's insertion order.
+    // `engineering` was written first and still sorts second.
+    reads.mark(&alpha, "ada", "dm:pm", 7).await.unwrap();
+    let all = reads.list(&alpha, "ada").await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].channel_id, "dm:pm");
+    assert_eq!(all[1].channel_id, "engineering");
+}
+
 pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
