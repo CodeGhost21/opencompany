@@ -39,9 +39,34 @@
 //! had to go back and ask for the same thing again — with the work having
 //! silently dead-ended in between.
 //!
-//! openhuman genuinely cannot be resumed here: it resolves a `RequireApproval`
-//! inline and the blocked call is gone by the time the operator sees it. So the
-//! call is not resumed, it is **re-issued**. Approving a parked harness effect
+//! The call is not resumed, it is **re-issued**, and the reason is narrower than
+//! this comment used to claim. It asserted openhuman "genuinely cannot be
+//! resumed"; that is false as a blanket statement and it is why nobody looked
+//! for years. openhuman never claimed impossibility — its own
+//! `ToolPolicyDecision::RequireApproval` doc says session execution
+//! *"currently"* treats the variant as fail-closed and that "callers that can
+//! prompt for approval may branch on this variant and retry". It even ships
+//! durable approval interrupt-and-resume already, for delegation, on tinyagents'
+//! graph executor. Two separate things are true (issue #561):
+//!
+//! * **Resolving inline is incidental.** openhuman blocks the call in one
+//!   `wrap_tool` middleware, and that hook is `async` and may call `next.run`
+//!   zero or more times — tinyagents' own `wrap_tool_retries_next_until_success`
+//!   pins that. Awaiting a verdict there and *then* dispatching is representable
+//!   today, with no upstream change.
+//! * **Durably suspending is structural.** The agent turn runs on
+//!   `AgentHarness`, which has no checkpointer; its `AgentRun` is not
+//!   `Serialize`; and the turn is a live async task holding the model context,
+//!   bounded by the run's wall-clock deadline.
+//!
+//! Which settles the design: an in-memory await survives neither a long approval
+//! nor a process restart, so against this crate's seven-day standing-grant
+//! ceiling it is a leak rather than a mechanism. Re-issuing is the honest answer
+//! here until the turn is checkpointable — see issue #561 for the full analysis,
+//! including why even the graph executor's `resume` *re-runs* its interrupted
+//! node rather than continuing a suspended call.
+//!
+//! Approving a parked harness effect
 //! mints a single-use [`GrantedCall`](crate::runtime::grants::GrantedCall)
 //! scoped to that agent, that tool and those exact arguments, and the
 //! [`HarnessBrain`](crate::harness::HarnessBrain) re-dispatches the granting
@@ -1689,6 +1714,50 @@ mod tests {
                 .check(&request("workspace_read", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow
+        );
+
+        // The fence near-miss, pinned where the answer is stable.
+        //
+        // `payroll.export` is what the shared matcher tests call the near-miss:
+        // sharing `payment`'s first four letters is not the same capability, so
+        // the operator list names it nowhere and must not gate it. All three
+        // statements are asserted because the two paths legitimately differ on
+        // the last of them:
+        //
+        // * the *matcher* — the part both paths actually share — does not gate
+        //   it;
+        // * the gate, effect-level and mode-driven, hands `full` the Allow this
+        //   fence implies;
+        // * the harness instead parks it, because #338's per-call judgement
+        //   fail-closes an undeclared non-read call — a layer the effect gate
+        //   does not have, and the reason the near-miss cannot live inside the
+        //   agreement loop above.
+        let fence_list: Vec<String> = fence.iter().map(|s| s.to_string()).collect();
+        assert!(
+            !crate::policy::always_approve::matches(&fence_list, "payroll.export"),
+            "the operator list must not gate the leading-segment near-miss"
+        );
+        assert!(matches!(
+            harness
+                .check(&request("payroll.export", serde_json::json!({})))
+                .await,
+            ToolPolicyDecision::RequireApproval { .. }
+        ));
+        let near_miss_effect = Effect {
+            kind: "payroll.export".to_string(),
+            group: EffectGroup::Other,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+        assert_eq!(
+            gate.evaluate(&CompanyId::new("acme"), &near_miss_effect)
+                .await
+                .unwrap(),
+            PolicyDecision::Allow
         );
     }
 

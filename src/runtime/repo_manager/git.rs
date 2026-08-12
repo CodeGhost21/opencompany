@@ -285,12 +285,21 @@ pub(crate) async fn run(
     token: Option<&str>,
     askpass: Option<&AskpassDir>,
 ) -> Result<GitOutput> {
-    run_bounded(cwd, args, token, askpass, GIT_TIMEOUT).await
+    run_bounded(Path::new("git"), cwd, args, token, askpass, GIT_TIMEOUT).await
 }
 
-/// [`run`], with the deadline supplied. Separate only so the timeout path is
-/// reachable from a test without one taking [`GIT_TIMEOUT`] to run.
+/// [`run`], with the program and the deadline supplied. Separate only so the
+/// timeout path is reachable from a test without one taking [`GIT_TIMEOUT`] to
+/// run, and against a program that blocks on purpose.
+///
+/// `program` is `git` for every caller but that test. It is a parameter rather
+/// than something the test arranges on `PATH`, because `PATH` is process-global:
+/// `std::env::set_var` races every other test in the binary reading the
+/// environment (which is why edition 2024 marks it `unsafe`), and a panic
+/// between the set and the restore would leave the fake in place for whatever
+/// ran next.
 async fn run_bounded(
+    program: &Path,
     cwd: &Path,
     args: &[&str],
     token: Option<&str>,
@@ -298,7 +307,7 @@ async fn run_bounded(
     limit: std::time::Duration,
 ) -> Result<GitOutput> {
     let plan = SpawnPlan::build(args, askpass);
-    let mut cmd = tokio::process::Command::new("git");
+    let mut cmd = tokio::process::Command::new(program);
     cmd.current_dir(cwd);
     cmd.args(&plan.args);
     // Start from nothing, then add back only what git needs. Building the
@@ -512,42 +521,59 @@ mod test {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[tokio::test(start_paused = true)]
+    // Unix-only by construction: it hands `run_bounded` a `/bin/sh` script to
+    // execute, which `Command::new` cannot spawn on Windows (no script
+    // interpreter), and marks it executable with a `chmod`. The whole test
+    // carries the gate the script's chmod already did, so a Windows lane does
+    // not build a test that can never pass there.
+    #[cfg(unix)]
+    #[tokio::test]
     async fn a_git_that_overruns_its_deadline_is_stopped_and_reported() {
-        // Virtual time, not a zero deadline racing a real process.
+        // Drive the deadline against a git that deterministically blocks, not a
+        // real `git version` under virtual time. `tokio::time::timeout` polls
+        // its inner future first and only consults the deadline once that future
+        // returns `Pending`; a fast `git version` finished and had its output
+        // buffered before the first `Pending`, so the old `start_paused` version
+        // returned `Ok` — exactly what failed on Linux CI. Auto-advancing the
+        // clock does not help while the runtime is still waiting on a real
+        // child's I/O, so the deadline never reached the timeout arm reliably.
         //
-        // `tokio::time::timeout` polls its inner future first and only consults
-        // the deadline when that future returns `Pending`. `git version` can
-        // finish and have its output buffered before the first `Pending`, so a
-        // `Duration::ZERO` deadline returns `Ok` — which is exactly what
-        // happened on Linux CI while passing locally. The old comment here
-        // claimed determinism the code did not have.
-        //
-        // Under `start_paused` the clock is virtual and auto-advances whenever
-        // the runtime has nothing ready, which is precisely the state it is in
-        // while waiting on a real child's I/O. The deadline therefore fires on
-        // the first idle rather than on a stopwatch, and no wall-clock second
-        // is actually spent.
-        //
-        // What this proves is the shape of the timeout arm — the error an
-        // operator sees, and that the child is dropped (and so reaped, by
-        // `kill_on_drop`) rather than leaked. It does not, and cannot cheaply,
-        // prove the kill against a remote that really hangs; that is what the
-        // deadline exists for.
+        // So this test hands `run_bounded` a program whose whole job is to
+        // block, and checks that the deadline arm fires. The program is passed
+        // in rather than arranged on `PATH`: `PATH` is process-global, every
+        // sibling test in this binary reads the environment while this one runs,
+        // and a panic before the restore would leave the fake in place for
+        // whatever ran next.
         let base = std::env::temp_dir().join(format!("oc-gittimeout-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
+
+        // `exec sleep`, not `sleep`: `kill_on_drop` stops the direct child and
+        // nothing below it, so a shell-spawned `sleep` outlives the deadline arm
+        // and keeps running for its full minute. Replacing the shell makes the
+        // blocking process the one Tokio holds.
+        let fake_git = base.join("blocking-git");
+        std::fs::write(&fake_git, "#!/bin/sh\nexec sleep 60\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // A 500ms deadline against a 60s sleep is a ~120x margin, not a race.
         let err = run_bounded(
+            &fake_git,
             &base,
-            &["version"],
+            &["__deadline__"],
             None,
             None,
-            std::time::Duration::from_secs(300),
+            std::time::Duration::from_millis(500),
         )
         .await
         .unwrap_err()
         .to_string();
         assert!(err.contains("did not finish"), "{err}");
         assert!(err.contains("was stopped"), "{err}");
+
         std::fs::remove_dir_all(&base).ok();
     }
 
