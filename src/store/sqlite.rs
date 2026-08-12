@@ -3392,6 +3392,13 @@ mod test {
         conformance::assert_workspace_binary_store(store()).await;
     }
 
+    /// Issue #759: the folder-claim primitive, including the eight-way
+    /// contention case an immediate transaction is what decides here.
+    #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        conformance::assert_workspace_folder_claims(store()).await;
+    }
+
     /// Issue #700's emptiness predicate, against the backend that can actually
     /// hold the shape it has to survive.
     ///

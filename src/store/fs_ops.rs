@@ -2225,6 +2225,13 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_workspace_folder_claims() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_workspace_folder_claims(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
     async fn workspace_files_land_on_disk_under_folders() {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();

@@ -2967,6 +2967,239 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     );
 }
 
+/// Every backend decides a folder claim the same way — including under
+/// contention (issue #759).
+///
+/// The contention case at the end is the one that matters. A naive
+/// read-then-create passes every sequential assertion above it and fails only
+/// there, which is precisely the shape of the defect: each backend's answer was
+/// correct about the instant it looked and wrong by the time it wrote. It is
+/// also what proves the MongoDB partial unique index is actually deciding, since
+/// nothing else on that backend can.
+pub async fn assert_workspace_folder_claims(ws: Arc<dyn WorkspaceStore>) {
+    use crate::ports::workspace::{
+        FolderClaim, folder_claim_ambiguous_refusal, folder_claim_file_refusal,
+    };
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+    let cmo = WorkspaceOrigin::Agent {
+        id: "cmo".to_string(),
+    };
+    let cto = WorkspaceOrigin::Agent {
+        id: "cto".to_string(),
+    };
+
+    // -- Created when the name is free ------------------------------------
+    let claim = ws
+        .adopt_or_create_folder(&alpha, None, "Agents", cmo.clone())
+        .await
+        .expect("a free root name is claimable");
+    assert!(claim.was_created(), "nothing was there to adopt");
+    let root = claim.node().clone();
+    assert_eq!(root.name, "Agents");
+    assert_eq!(root.kind, NodeKind::Folder);
+    assert_eq!(root.parent_id, None);
+    assert_eq!(
+        root.created_by, cmo,
+        "the creating caller's origin is stamped"
+    );
+    assert_eq!(root.updated_by, cmo);
+    assert!(
+        ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .any(|n| n.id == root.id),
+        "a created folder is in the tree"
+    );
+
+    // -- Adopted, idempotently, keeping the original authorship -----------
+    let again = ws
+        .adopt_or_create_folder(&alpha, None, "Agents", cto.clone())
+        .await
+        .expect("an existing folder is adopted, not refused");
+    assert!(!again.was_created(), "the folder was already there");
+    assert_eq!(again.node().id, root.id, "adoption returns the same folder");
+    assert_eq!(
+        again.node().created_by,
+        cmo,
+        "adoption must not rewrite whose folder it is"
+    );
+    assert_eq!(
+        ws.tree(&alpha)
+            .await
+            .unwrap()
+            .iter()
+            .filter(|n| n.parent_id.is_none() && n.name == "Agents")
+            .count(),
+        1,
+        "and it must not have minted a rival"
+    );
+
+    // -- Nested under a parent, and only under that parent -----------------
+    let nested = ws
+        .adopt_or_create_folder(&alpha, Some(&root.id), "cmo", cmo.clone())
+        .await
+        .expect("a folder under a folder");
+    assert!(nested.was_created());
+    assert_eq!(nested.node().parent_id.as_deref(), Some(root.id.as_str()));
+    // The same name at the root is a different path and must be free there.
+    let sibling_at_root = ws
+        .adopt_or_create_folder(&alpha, None, "cmo", cmo.clone())
+        .await
+        .expect("the root is a different parent");
+    assert!(sibling_at_root.was_created());
+    assert_ne!(sibling_at_root.node().id, nested.node().id);
+
+    // -- A file holding the name is refused, identically on every backend --
+    let note = WorkspaceNode {
+        id: "claim-note".to_string(),
+        name: "notes.md".to_string(),
+        kind: NodeKind::File,
+        parent_id: None,
+        updated_at_millis: now_millis(),
+        created_by: WorkspaceOrigin::Operator,
+        updated_by: WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    ws.create(&alpha, &note, Some("body")).await.unwrap();
+    let refused = ws
+        .adopt_or_create_folder(&alpha, None, "notes.md", cmo.clone())
+        .await
+        .expect_err("a note cannot be adopted as a folder");
+    assert!(
+        refused
+            .to_string()
+            .ends_with(&folder_claim_file_refusal("notes.md")),
+        "the refusal must be the shared one, or it drifts between backends: {refused}"
+    );
+
+    // -- A missing or non-folder parent is refused ------------------------
+    assert!(
+        ws.adopt_or_create_folder(&alpha, Some("no-such-parent"), "x", cmo.clone())
+            .await
+            .is_err(),
+        "a claim under a parent that does not exist is refused"
+    );
+    assert!(
+        ws.adopt_or_create_folder(&alpha, Some("claim-note"), "x", cmo.clone())
+            .await
+            .is_err(),
+        "a claim under a *file* is refused"
+    );
+
+    // -- Pre-existing ambiguity stays fail-closed -------------------------
+    //
+    // Written through `create` rather than through the primitive, because the
+    // primitive is exactly what makes this state unreachable from now on. It is
+    // still reachable from *history*: a tenant that lost this race before the
+    // guard existed carries it, and the answer must be a refusal rather than a
+    // third node piled on top. Ids are supplied, so no backend has to accept a
+    // name it would refuse — only a `create` that skips the sibling check, which
+    // sqlite and mongodb both do.
+    for id in ["dup-a", "dup-b"] {
+        let dup = WorkspaceNode {
+            id: id.to_string(),
+            name: "Legacy".to_string(),
+            kind: NodeKind::Folder,
+            parent_id: Some(root.id.clone()),
+            ..note.clone()
+        };
+        // `fs` refuses the second by design (issue #666); it has never been able
+        // to represent this state, so it simply has nothing to fail closed on.
+        if ws.create(&alpha, &dup, None).await.is_err() {
+            break;
+        }
+    }
+    let legacy: Vec<WorkspaceNode> = ws
+        .tree(&alpha)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|n| n.name == "Legacy")
+        .collect();
+    if legacy.len() > 1 {
+        let refused = ws
+            .adopt_or_create_folder(&alpha, Some(&root.id), "Legacy", cmo.clone())
+            .await
+            .expect_err("an ambiguous path must stay refused");
+        assert!(
+            refused
+                .to_string()
+                .ends_with(&folder_claim_ambiguous_refusal("Legacy", legacy.len())),
+            "the ambiguity refusal must be the shared one: {refused}"
+        );
+    }
+
+    // -- Companies do not see each other's claims -------------------------
+    let elsewhere = ws
+        .adopt_or_create_folder(&beta, None, "Agents", cmo.clone())
+        .await
+        .expect("another company's identical path is free");
+    assert!(
+        elsewhere.was_created(),
+        "company beta must not adopt company alpha's folder"
+    );
+    assert_ne!(elsewhere.node().id, root.id);
+
+    // -- Eight-way contention on one path ---------------------------------
+    //
+    // The assertion the sequential cases cannot make. All eight callers must
+    // succeed, all eight must be holding the SAME folder, and exactly one may
+    // report having created it — that last count is what a duplicated folder
+    // would break even where the ids happened to agree.
+    let contested = Arc::new(root.id.clone());
+    let mut racers = Vec::new();
+    for i in 0..8 {
+        let ws = ws.clone();
+        let alpha = alpha.clone();
+        let parent = contested.clone();
+        let origin = WorkspaceOrigin::Agent {
+            id: format!("racer-{i}"),
+        };
+        racers.push(tokio::spawn(async move {
+            ws.adopt_or_create_folder(&alpha, Some(&parent), "task-42", origin)
+                .await
+        }));
+    }
+    let mut ids = Vec::new();
+    let mut created = 0usize;
+    for racer in racers {
+        let claim = racer
+            .await
+            .expect("the claim task must not panic")
+            .expect("every caller must come away with the folder, winner or not");
+        if matches!(claim, FolderClaim::Created(_)) {
+            created += 1;
+        }
+        ids.push(claim.into_node().id);
+    }
+    assert_eq!(created, 1, "exactly one caller may mint the folder");
+    assert!(
+        ids.windows(2).all(|pair| pair[0] == pair[1]),
+        "every caller must hold the same folder: {ids:?}"
+    );
+    let tree = ws.tree(&alpha).await.unwrap();
+    assert_eq!(
+        tree.iter()
+            .filter(|n| n.parent_id.as_deref() == Some(root.id.as_str()) && n.name == "task-42")
+            .count(),
+        1,
+        "one folder under one name, or every later publish beneath it is refused: {tree:?}"
+    );
+
+    // …and it stays claimable afterwards, which is the no-permanent-outage half.
+    let after = ws
+        .adopt_or_create_folder(&alpha, Some(&root.id), "task-42", cmo)
+        .await
+        .expect("the contested path must still resolve");
+    assert!(!after.was_created());
+    assert_eq!(&after.node().id, &ids[0]);
+}
+
 /// A folder node for the binary suite.
 fn folder_node(id: &str, name: &str) -> WorkspaceNode {
     WorkspaceNode {
