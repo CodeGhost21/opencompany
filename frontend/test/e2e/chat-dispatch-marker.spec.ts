@@ -262,8 +262,15 @@ test("a card raised on the board leaves no channel marker", async ({ page, reque
     .poll(
       async () => {
         const res = await request.get(`${SCOPE}/tasks/${id}`);
+        // A transient read keeps the poll waiting rather than concluding.
         if (!res.ok()) return "in_progress";
-        return ((await res.json()).column as string) ?? "in_progress";
+        // `GET /tasks/{id}` answers with a TaskDetail — the card is under
+        // `task`, as every other board spec reads it. Deliberately not
+        // defaulted: a missing column means the shape moved, and swallowing
+        // that would turn a contract change back into a silent timeout.
+        const column = (await res.json()).task?.column as string | undefined;
+        if (column === undefined) throw new Error("task detail carried no column");
+        return column;
       },
       { timeout: 60_000, intervals: [1_000] },
     )
