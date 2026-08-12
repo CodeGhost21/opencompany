@@ -412,6 +412,11 @@ impl Bundle {
         self.dir.join("skills.json")
     }
 
+    /// Path to the per-person channel read markers (`read-state.json`, #755).
+    pub fn read_state_json(&self) -> PathBuf {
+        self.dir.join("read-state.json")
+    }
+
     /// The workspace subdirectory holding the seeded/edited file tree.
     pub fn workspace_dir(&self) -> PathBuf {
         self.dir.join("workspace")
