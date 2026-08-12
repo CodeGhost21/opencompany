@@ -327,6 +327,28 @@ impl Delegation {
     pub fn answers(&self) -> bool {
         matches!(self, Self::DelegateToDesk { .. })
     }
+
+    /// Whether this delegation is one a **workflow run** may perform
+    /// ([`DrainClaim::Board`], issue #661).
+    ///
+    /// [`SpawnTask`](Self::SpawnTask) and [`AssignTask`](Self::AssignTask) are:
+    /// they open a card in To-do and set who owns one, and neither moves a card
+    /// between columns nor needs anywhere to put a reply.
+    ///
+    /// [`ReviewTask`](Self::ReviewTask) and
+    /// [`DelegateToDesk`](Self::DelegateToDesk) are not, for two unrelated
+    /// reasons that [`no_drain`] states separately rather than collapsing:
+    /// `review_task`'s `in_review → done` is the operator's accept lane, and a
+    /// hand-off's only value is a synchronous reply that a run has nowhere to
+    /// land.
+    ///
+    /// This is [`answers`](Self::answers) inverted, and deliberately not
+    /// written as `!self.answers()`: the two partitions agree today only by
+    /// coincidence of there being four variants, and a fifth would have to be
+    /// classified for each question on its own terms.
+    pub fn writes_board_only(&self) -> bool {
+        matches!(self, Self::SpawnTask { .. } | Self::AssignTask { .. })
+    }
 }
 
 /// Which claimant a queued delegation belongs to (issue #661).
@@ -567,6 +589,21 @@ impl DelegationQueue {
     /// This exists because withholding the claim outright was too blunt: it
     /// took `delegate_to_desk` away too, and that tool is how a question the
     /// orchestrator cannot answer alone gets routed to a desk that can.
+    /// Claims one workflow run's bucket, permitting only the board writes a run
+    /// may perform (issue #661).
+    ///
+    /// The scope is the run id, so concurrent runs — several of which are live
+    /// at once under the #401 in-flight cap — cannot see, take, clear, or be
+    /// cleared by each other, nor by the chat cycle running beside them.
+    ///
+    /// The returned claim only routes calls once the run's turns are executed
+    /// inside [`DelegationClaim::scoped`]; holding it alone claims the bucket
+    /// but leaves the ambient scope unset.
+    #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
+    pub fn claim_board(&self, run_id: impl Into<String>) -> DelegationClaim {
+        self.claim_as(DelegationScope::Run(run_id.into()), DrainClaim::Board)
+    }
+
     #[must_use = "the claim releases on drop; dropping it immediately un-claims the queue"]
     pub fn claim_answering(&self) -> DelegationClaim {
         self.claim_as(Self::current_scope(), DrainClaim::Answering)
@@ -715,7 +752,18 @@ impl DelegationQueue {
             DrainClaim::Answering if !delegation.answers() => {
                 return Staged::NoDrain(NoDrainReason::Triage);
             }
-            DrainClaim::Answering | DrainClaim::Full => {}
+            // Issue #661: a workflow run may open and assign cards, but may not
+            // move one through its lifecycle or hand off for a reply it has
+            // nowhere to put. Two refusals rather than one, because the causes
+            // are unrelated and a model told the wrong one is being told
+            // something false about what it may do next.
+            DrainClaim::Board if !delegation.writes_board_only() => {
+                return Staged::NoDrain(match delegation {
+                    Delegation::DelegateToDesk { .. } => NoDrainReason::WorkflowHandOff,
+                    _ => NoDrainReason::WorkflowLifecycle,
+                });
+            }
+            DrainClaim::Answering | DrainClaim::Full | DrainClaim::Board => {}
         }
         // Issue #176: checked after the claim (a context that drains nothing is
         // still the only fact worth reporting) and before the queue lock, so the
@@ -950,6 +998,26 @@ pub enum NoDrainReason {
     /// cannot do board work (it can) nor that the message was a question (it was
     /// not) — it must say the chain has run as deep as the company allows.
     Depth,
+    /// The queue is claimed by a workflow run ([`DrainClaim::Board`], issue
+    /// #661) and the call would move a card through its lifecycle, which is the
+    /// operator's lane rather than the run's.
+    ///
+    /// Distinct from [`WorkflowHandOff`](Self::WorkflowHandOff) because the
+    /// causes are unrelated: this one is a deliberate authority boundary that no
+    /// amount of wiring will move, and the model's recourse is to leave the card
+    /// for a person. Collapsing the two would tell a model that `review_task`
+    /// failed for want of somewhere to put a reply, which is untrue and points
+    /// it at the wrong alternative.
+    WorkflowLifecycle,
+    /// The queue is claimed by a workflow run ([`DrainClaim::Board`], issue
+    /// #661) and the call is a hand-off, whose only value is a synchronous reply
+    /// that a run has nowhere to land.
+    ///
+    /// A run has no conversation behind it and nobody watching at 3am, so the
+    /// reply would be composed and dropped. The recourse is real and worth
+    /// naming: open a card for the desk instead, which persists and is exactly
+    /// what a run *can* do.
+    WorkflowHandOff,
 }
 
 impl NoDrainReason {
@@ -965,6 +1033,8 @@ impl NoDrainReason {
             Self::Unwired => "drain_unwired",
             Self::Triage => "triaged_as_question",
             Self::Depth => "depth_capped",
+            Self::WorkflowLifecycle => "workflow_lifecycle_operator_only",
+            Self::WorkflowHandOff => "workflow_handoff_no_reply_target",
         }
     }
 }
@@ -995,6 +1065,25 @@ pub enum DrainClaim {
     /// (issue #267). The drain runs exactly as under [`Full`](Self::Full); only
     /// delegations that [`answer`](Delegation::answers) may be staged.
     Answering,
+    /// A workflow run has claimed its own scope's bucket (issue #661). The
+    /// drain runs exactly as under [`Full`](Self::Full); only delegations that
+    /// [`write the board only`](Delegation::writes_board_only) may be staged.
+    ///
+    /// This is [`Answering`](Self::Answering)'s shape inverted, and inverted is
+    /// the right word: that one permits the hand-off and refuses the board
+    /// writes, this one permits the board writes and refuses the hand-off. Both
+    /// exist because withholding the claim outright is too blunt — it says "no
+    /// board work at all", which for a run is false and would leave the
+    /// `→ task cards` seed unable to make a card.
+    ///
+    /// # The refusals are load-bearing for loop safety
+    ///
+    /// A run may open a card and set its owner; it may not move one between
+    /// columns. `todo → planning` is only ever written by an operator drag and
+    /// `planning → in_progress` is the dispatch gate, so run → card → dispatch
+    /// → run cycles stay bounded precisely because every dispatch requires an
+    /// operator act. Relaxing the column rule would take that bound with it.
+    Board,
 }
 
 /// The live claim on a [`DelegationQueue`] — proof that some drain site is
@@ -2239,6 +2328,22 @@ fn no_drain(tool: &str, effect: &str, reason: NoDrainReason) -> String {
              say plainly what still needs another desk, or open a task card for it with \
              `spawn_task`, which still works. Do not retry this call; it will fail the same way, \
              and do NOT report the hand-off as done."
+        ),
+        NoDrainReason::WorkflowLifecycle => format!(
+            "Refused: you are running inside a workflow, which can put work on the board but \
+             cannot move it through review, so {effect}. Deciding a card is done is the \
+             operator's call, not this run's. You CAN open a card with `spawn_task` and set who \
+             owns it with `assign_task` — do that and leave the verdict to a person. Do not retry \
+             this call; it will fail the same way, and do NOT report the card as reviewed, \
+             approved or moved."
+        ),
+        NoDrainReason::WorkflowHandOff => format!(
+            "Refused: you are running inside a workflow, which has no conversation for a desk's \
+             reply to come back to, so {effect}. A hand-off is only worth making when somebody is \
+             waiting on the answer, and here nobody is. Open a card for that desk instead with \
+             `spawn_task` — naming the desk as its assignee — which persists and reaches them. Do \
+             not retry this call; it will fail the same way, and do NOT report the work as handed \
+             over or the desk as having replied."
         ),
     }
 }
