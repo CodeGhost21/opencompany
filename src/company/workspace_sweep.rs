@@ -540,25 +540,25 @@ mod tests {
     /// Fail closed, exactly as the scaffold does: two roots named `Agents` make
     /// "under `Agents/`" undecidable, so the sweep refuses instead of picking
     /// one and deleting beneath it.
-    #[tokio::test]
-    async fn an_ambiguous_root_is_refused_and_removes_nothing() {
-        let (_dir, ws) = store().await;
-        let company = CompanyId::new("odd");
-        for id in ["dup-a", "dup-b"] {
-            ws.create(&company, &folder(id, AGENTS_ROOT, None), None)
-                .await
-                .unwrap();
-        }
-        ws.create(&company, &folder("stray", "ceo", Some("dup-a")), None)
-            .await
-            .unwrap();
+    ///
+    /// Hand-built rather than driven through `FsOps` on purpose: the backend now
+    /// rejects a second `Agents` root at creation (`reject_path_collision`, see
+    /// issue #665), so the ambiguous shape is no longer reachable through it —
+    /// the same reason the #671 shape below is fed straight to the predicate.
+    #[test]
+    fn an_ambiguous_root_is_refused_and_removes_nothing() {
+        let nodes = vec![
+            folder("dup-a", AGENTS_ROOT, None),
+            folder("dup-b", AGENTS_ROOT, None),
+            // A real member beneath the (ambiguous) root: there is content a
+            // naive pick would have deleted, and the refusal exists to protect
+            // exactly that.
+            file("stray", "stray.md", Some("dup-a")),
+        ];
 
-        let err = sweep_empty_agent_folders(ws.as_ref(), &company, false)
-            .await
+        let err = empty_agent_folder_candidates(&nodes)
             .expect_err("an ambiguous root must not be swept beneath");
-
         assert!(err.to_string().contains(AGENTS_ROOT), "{err}");
-        assert_eq!(names(&ws, &company).await, vec!["Agents", "Agents", "ceo"]);
     }
 
     /// A *file* named `Agents` is the other unresolvable shape, and the refusal
