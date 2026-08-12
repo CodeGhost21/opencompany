@@ -30,6 +30,28 @@ use crate::ports::types::CompanyId;
 /// manual-entry column — the `+` button lives here alone — and what
 /// `POST …/tasks` defaults to.
 ///
+/// # What rests here, now that the prompt box does not (issue #576)
+///
+/// A card opened from the prompt box by a person goes straight to
+/// [`COLUMN_PLANNING`], so the busiest intake path no longer stops here. To-do
+/// is not thereby empty, and it is not a legacy column — it is **where work
+/// waits for a person to decide it should start**, which is exactly the set of
+/// cards nobody has yet spent anything on:
+///
+/// * **Entered by hand** — the `+` button, and `POST …/tasks`. Jotting a card
+///   down must not buy a planning call, so intake here stays inert.
+/// * **Opened by something that is not a person** — the chat route also accepts
+///   machine credentials, and a self-promoting agent card would buy a pass whose
+///   own output can open more cards. See `docs/spec/runtime/planning.md`.
+/// * **Returned** — a planning pass that failed or found a hard prerequisite
+///   missing lands the card back here with its reason, as does a rejected
+///   workflow proposal and a cancelled run. This is the largest half in
+///   practice, and it is why the column has to keep a clear meaning: a returned
+///   card is waiting for a person to read the reason and decide.
+///
+/// So the column's meaning is unchanged in kind — not-started work — and
+/// narrowed in membership. The drag out of it is still the human "yes".
+///
 /// Before #301 the returned half lived in a separate `backlog` pool (issue
 /// #206). Epic #183 §3 collapsed the two: the split encoded *why* a card had
 /// not started — never picked vs bounced back — but that is provenance, not

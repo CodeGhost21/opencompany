@@ -2,10 +2,22 @@
 
 *The board's Planning station (issue #337, epic #183 §4).*
 
-A card dragged into **Planning** is turned into a plan and then settled — it
+A card that enters **Planning** is turned into a plan and then settled — it
 does not rest there. This document is the contract for that pass: what triggers
 it, what it is allowed to do, how it decides whether the work can start, and
 what happens when any of it goes wrong.
+
+A card reaches Planning two ways (issue #576):
+
+1. **The prompt box opens it there.** An actionable message typed by a person
+   opens its card directly in Planning, with no drag. This is epic #183's spine
+   — prompt in, deliverable out — and it is the common path.
+2. **A person drags it there**, from To-do. This is how a card that was entered
+   by hand, or returned to To-do by a failed pass or a rejected proposal, gets
+   planned.
+
+Both are the same transition and buy exactly one pass; see
+[the contract table](#the-contract-in-one-table).
 
 Implementation: `src/harness/planning.rs` (the pass), `src/ports/tasks.rs`
 (the `TaskPlan` shape), `src/metering/planning.rs` (what it costs and who pays),
@@ -53,17 +65,26 @@ board; requiring an acceptance click would re-insert the hand-carry the issue
 exists to remove, and would leave every planned card waiting on a person who
 has already said what they want. The operator's levers are all still there:
 
-- the drag into Planning is **opt-in, per card** — nothing routes work through
-  planning automatically;
+- entry into Planning is **per card**, and only ever from a person — either the
+  drag, or an actionable message they typed into the prompt box (issue #576);
 - `todo → in_progress` still dispatches unplanned, so planning is never
   compulsory;
 - a missing prerequisite stops the walk **before** any dispatch spend;
 - the run still stops in In Review, so nothing reaches Done without a person.
 
-The cost this accepts: a drag into Planning can spend the assignee's budget
-without a second confirmation. The drag is informed consent (the console says
-so), the per-agent cap from #304 still gates the dispatch turn, and the run
-still stops for review.
+The cost this accepts: entering Planning can spend the assignee's budget
+without a second confirmation. Entry is informed consent — the drag is a
+deliberate act and the console says what it costs, and the prompt box is a
+person asking the company to do the thing — the per-agent cap from #304 still
+gates the dispatch turn, and the run still stops for review.
+
+**A card opened by anything other than a person still lands in To-do**
+(issue #576). The prompt box is a human surface, but it is not only a human
+surface: the chat route also accepts machine credentials, and an agent whose
+card self-promoted would buy a planning pass, whose pass can open further
+cards, which promote, which plan — a spend loop with no human in it. A person's
+typo costing one planning call is the accepted cost; an agent's is not.
+Widening this later is safe; narrowing it after a loop is not.
 
 **Planning is a spend gate.** Before #337, `in_progress` was the only column
 whose entry cost money. There are now two. `frontend/src/api/tasks.ts` says so

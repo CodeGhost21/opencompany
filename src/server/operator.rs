@@ -1194,11 +1194,40 @@ async fn run_chat(
         // from it, so a one-line ask doesn't duplicate itself.
         let note =
             (title.trim_end_matches('…') != message.text.trim()).then(|| message.text.clone());
+        // Issue #576: the prompt box opens the card **already in Planning**, so
+        // the spine epic #183 draws — prompt in, deliverable out — runs without
+        // a human dragging the first step. The card is created *directly* in
+        // `planning` rather than created in `todo` and then promoted, and that
+        // is the whole of the "fires exactly once" property:
+        // `task_enters_planning` compares the previous column to the next, and
+        // a card that does not exist yet has no previous column, so the single
+        // `upsert_task` below is one transition into Planning and therefore one
+        // pass. A create-then-promote would be two writes, two board events, and
+        // a window in which the card is visible — and actionable — in To-do.
+        //
+        // **Only for a person.** `by` is `Some` only when a signed-in user is
+        // behind this request; a machine credential resolves to `None`. An agent
+        // that could open a self-promoting card would trigger a planning pass,
+        // which can open further cards, which promote, which plan — a spend loop
+        // with no human in it. The issue's own "a typo costs a planning call" is
+        // about a *person's* mistake costing one call. Widening this later is
+        // safe; narrowing it after a spend loop is not. `Agent` and `System` are
+        // named explicitly rather than left to `None` so a future caller that
+        // passes an agent actor is refused by this branch rather than by luck.
+        let opened_by_a_person = matches!(
+            by.as_ref().map(|actor| actor.kind),
+            Some(crate::ports::types::ActorKind::User | crate::ports::types::ActorKind::Operator)
+        );
+        let column = if opened_by_a_person {
+            crate::ports::tasks::COLUMN_PLANNING
+        } else {
+            crate::ports::tasks::COLUMN_TODO
+        };
         let record = crate::ports::tasks::TaskRecord {
             id: crate::ports::generate_id(),
             title,
             note,
-            column: crate::ports::tasks::COLUMN_TODO.to_string(),
+            column: column.to_string(),
             priority: "medium".to_string(),
             assignee: String::new(),
             updated_at_millis: crate::ports::now_millis(),
@@ -2230,12 +2259,21 @@ mod test {
         assert_eq!(value["responses"][0]["channel"], "operator");
     }
 
-    /// An actionable operator chat opens exactly one `todo` task card on the
-    /// dashboard (deterministic, independent of the brain's own `spawn_task`),
-    /// and a greeting opens none. Runs on the default echo brain, so it proves
-    /// the handler-level wiring, not model behaviour.
+    /// An actionable operator chat opens exactly one task card on the dashboard
+    /// (deterministic, independent of the brain's own `spawn_task`), and a
+    /// greeting opens none. Runs on the default echo brain, so it proves the
+    /// handler-level wiring, not model behaviour.
+    ///
+    /// Issue #576: that card now lands in **Planning**, not To-do. The request
+    /// carries `fixed_cookie`, so a signed-in person is behind it — which is
+    /// what the promotion is conditional on.
+    ///
+    /// `tasks.len() == 1` is doing real work here beyond "a card was opened":
+    /// the card is created *directly* in `planning` by a single `upsert_task`,
+    /// so a second card, or a card that arrived via To-do and was promoted,
+    /// would both show up here.
     #[tokio::test]
-    async fn actionable_chat_opens_a_todo_task_card() {
+    async fn actionable_chat_opens_a_planning_task_card() {
         let home_dir = home();
         let home = home_dir.path().to_path_buf();
         let state = state_with_company(&home, "running").await;
@@ -2256,7 +2294,7 @@ mod test {
                 .unwrap()
         };
 
-        // Actionable → one To-do card, titled from the ask.
+        // Actionable → one Planning card, titled from the ask.
         let r = app
             .clone()
             .oneshot(chat("build the landing page"))
@@ -2265,7 +2303,11 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "an actionable ask opens one card");
-        assert_eq!(tasks[0].column, crate::ports::tasks::COLUMN_TODO);
+        assert_eq!(
+            tasks[0].column,
+            crate::ports::tasks::COLUMN_PLANNING,
+            "issue #576: the prompt box promotes its own card, with no drag"
+        );
         assert_eq!(tasks[0].priority, "medium");
         assert_eq!(tasks[0].title, "Build the landing page");
 
@@ -2274,6 +2316,88 @@ mod test {
         assert_eq!(r.status(), StatusCode::OK);
         let tasks = runtime.tasks().list(&id).await.unwrap();
         assert_eq!(tasks.len(), 1, "a greeting must not open a card");
+    }
+
+    /// Issue #576: **who** asked decides whether the card self-promotes.
+    ///
+    /// The promotion buys a planning pass, which is a model call. A person
+    /// spending one on their own typo is the cost the issue accepts; an agent
+    /// doing it is a loop — a card that plans, whose pass opens further cards,
+    /// which promote, which plan, with no human anywhere in it. So the branch is
+    /// on the actor, and this pins both sides of it.
+    ///
+    /// Driven through `run_chat` directly rather than the route, because the
+    /// route's job is to *resolve* the actor and this test's job is to pin what
+    /// each resolved actor does. Going through HTTP would only ever exercise
+    /// whichever principal the test harness happens to authenticate as.
+    #[tokio::test]
+    async fn only_a_person_gets_a_self_promoting_card() {
+        use crate::ports::tasks::{COLUMN_PLANNING, COLUMN_TODO};
+        use crate::ports::types::{Actor, ActorKind};
+
+        let ask = "build the landing page";
+        let person = Actor {
+            kind: ActorKind::User,
+            id: "u-1".to_string(),
+        };
+
+        // Every actor that is not a person must leave the card where it has
+        // always landed. `None` is a machine credential — the platform, or any
+        // caller with no session behind it.
+        for (label, by, expected) in [
+            ("a signed-in user", Some(person.clone()), COLUMN_PLANNING),
+            (
+                "an operator",
+                Some(Actor {
+                    kind: ActorKind::Operator,
+                    id: "op".to_string(),
+                }),
+                COLUMN_PLANNING,
+            ),
+            (
+                "an agent",
+                Some(Actor {
+                    kind: ActorKind::Agent,
+                    id: "ceo".to_string(),
+                }),
+                COLUMN_TODO,
+            ),
+            (
+                "the runtime itself",
+                Some(Actor {
+                    kind: ActorKind::System,
+                    id: "system".to_string(),
+                }),
+                COLUMN_TODO,
+            ),
+            ("a machine credential", None, COLUMN_TODO),
+        ] {
+            let home_dir = home();
+            let state = state_with_company(home_dir.path(), "running").await;
+            let id = CompanyId::new("acme");
+            let runtime = state.registry().get(&id).unwrap();
+
+            run_chat(
+                runtime.clone(),
+                ChatMessage {
+                    text: ask.to_string(),
+                    chat: None,
+                    parent: None,
+                    deliverable: None,
+                },
+                by,
+                None,
+            )
+            .await
+            .expect("the chat cycle runs");
+
+            let tasks = runtime.tasks().list(&id).await.unwrap();
+            assert_eq!(tasks.len(), 1, "{label}: one ask opens one card");
+            assert_eq!(
+                tasks[0].column, expected,
+                "{label}: the card must land in `{expected}`"
+            );
+        }
     }
 
     /// End-to-end proof of the WS4 wire: with a [`HarnessBrain`] as the runtime's
