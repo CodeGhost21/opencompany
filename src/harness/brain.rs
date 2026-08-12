@@ -2978,7 +2978,7 @@ description = "Builds it."
     /// the engineer — the shape `delegate_to_desk` writes into a card's
     /// `assignee` (issue #205).
     fn brain_with_desk_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
-        let (mut brain, tasks) = brain_with_tasks(dir);
+        let (brain, tasks) = brain_with_tasks(dir);
         let group_chats = toml::from_str::<CompanyManifest>(
             r#"
 [company]
