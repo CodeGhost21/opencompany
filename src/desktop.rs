@@ -99,8 +99,19 @@ impl Drop for DesktopRuntime {
     }
 }
 
-/// Starts an offline, loopback-only runtime from a bundled preset.
-pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<DesktopRuntime> {
+/// The manifest a first-run install starts from: a bundled preset, with the
+/// local operator added as a standing admin.
+///
+/// The admin entry is what makes the company signable-into. `eligibility` in
+/// `src/server/users/routes.rs` admits an address only if it is already a user,
+/// is named as a bootstrap admin, or holds a redeemable invite — and a manifest
+/// that names nobody satisfies none of the three, so a company created without
+/// this is a company nobody on this machine can enter (issue #632).
+///
+/// The address is local-only by construction: a desktop install has no mail
+/// transport, so it exists purely for the loopback magic link the shell
+/// redeems. It never leaves the device and grants a network caller nothing.
+fn first_run_manifest(preset_id: &str) -> Result<CompanyManifest> {
     let preset = preset(preset_id).ok_or_else(|| {
         crate::OpenCompanyError::Config(format!("unknown desktop preset `{preset_id}`"))
     })?;
@@ -109,9 +120,6 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
             "bundled desktop preset `{preset_id}` is invalid: {error}"
         ))
     })?;
-    // A desktop install has no mail transport. This local-only address is a
-    // standing invite solely so the shell can redeem a loopback magic link; it
-    // never leaves the device or grant access to a network caller.
     if !manifest
         .users
         .admins
@@ -123,6 +131,111 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
             .admins
             .push(DESKTOP_OPERATOR_EMAIL.to_string());
     }
+    Ok(manifest)
+}
+
+/// Registers every company this data root already holds, seeding the first-run
+/// company when it holds none. Returns the registered ids, in listing order.
+///
+/// ## Why an embedded host has to do this itself
+///
+/// A company reaches the registry one of two ways: `serve --company <dir>`
+/// names one on the command line, or the hosting control plane provisions one
+/// over `POST /api/v1/companies`. A packaged desktop has neither — nobody types
+/// a flag at a double-clicked application, and provisioning demands the
+/// `platform` scope, which `PlatformScope` grants only against a configured
+/// `platform_auth` that a prosumer host deliberately does not have.
+///
+/// So the desktop booted an empty registry, and an empty registry cannot be
+/// signed into: sign-in is per-company (`/api/v1/companies/{id}/auth/login`,
+/// or the sole-company alias), which leaves a fresh install with a login form
+/// addressing a company that does not exist and no way to create one. That is
+/// issue #632, and this function is the missing step.
+///
+/// ## Adoption before seeding
+///
+/// The persisted bundles are read first and the preset is a *fallback*, because
+/// seeding unconditionally would hand the operator a second copy of the starter
+/// company on every launch, and skipping adoption would make the one they
+/// already have unreachable. The bundle is the only authority here: a desktop
+/// company has no source directory to re-read, so what the store wrote at the
+/// last shutdown — including console-created desks, agents and workflows, which
+/// `RuntimeBuilder::build` carries forward from the persisted record — is what
+/// comes back.
+///
+/// An `archived` company is skipped. Archiving removes a company from the
+/// registry on purpose (`src/server/provision.rs`), and re-registering it at
+/// the next launch would undo that quietly.
+pub async fn bootstrap_companies(
+    state: &AppState,
+    preset_id: &str,
+) -> Result<Vec<crate::ports::types::CompanyId>> {
+    let store: std::sync::Arc<dyn crate::ports::CompanyStore> = match state.stores() {
+        Some(handles) => handles.company.clone(),
+        None => std::sync::Arc::new(crate::store::FsCompanyStore::new(
+            state.home().to_path_buf(),
+        )),
+    };
+
+    let mut registered = Vec::new();
+    for summary in store.list().await? {
+        if summary.lifecycle == "archived" {
+            continue;
+        }
+        let Some(record) = store.load(&summary.id).await? else {
+            continue;
+        };
+        // One unreadable bundle must not cost the operator every other company
+        // on the machine, so this warns and moves on rather than failing the
+        // boot. The seed below is what still runs if *nothing* could be adopted.
+        match register(state, summary.id.clone(), record.manifest, None).await {
+            Ok(()) => registered.push(summary.id),
+            Err(error) => {
+                tracing::warn!(company = %summary.id, %error, "could not adopt a stored company");
+            }
+        }
+    }
+    if !registered.is_empty() {
+        return Ok(registered);
+    }
+
+    let manifest = first_run_manifest(preset_id)?;
+    let id = company_id_from_name(&manifest.company.name);
+    // Issue #85: record which template this install started from. Only the
+    // slug, never a host path — there is no source directory on a packaged
+    // install, and provenance is exposed verbatim on the API surfaces.
+    let provenance = crate::ports::types::TemplateProvenance {
+        source_id: preset_id.to_string(),
+        version: None,
+        path: None,
+    };
+    register(state, id.clone(), manifest, Some(provenance)).await?;
+    tracing::info!(company = %id, preset = preset_id, "seeded the first-run company");
+    Ok(vec![id])
+}
+
+/// Builds one company over the instance home and puts it in the registry.
+async fn register(
+    state: &AppState,
+    id: crate::ports::types::CompanyId,
+    manifest: CompanyManifest,
+    provenance: Option<crate::ports::types::TemplateProvenance>,
+) -> Result<()> {
+    let mut builder = RuntimeBuilder::new(state.home().to_path_buf(), manifest).with_id(id.clone());
+    if let Some(stores) = state.stores() {
+        builder = builder.with_stores(stores);
+    }
+    if let Some(provenance) = provenance {
+        builder = builder.with_template_provenance(provenance);
+    }
+    let runtime = builder.build().await?;
+    state.registry().insert(id, std::sync::Arc::new(runtime));
+    Ok(())
+}
+
+/// Starts an offline, loopback-only runtime from a bundled preset.
+pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<DesktopRuntime> {
+    let manifest = first_run_manifest(preset_id)?;
 
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let address: SocketAddr = listener.local_addr()?;
@@ -158,6 +271,8 @@ pub async fn start_local(home: impl Into<PathBuf>, preset_id: &str) -> Result<De
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::ports::CompanyStore;
 
     #[test]
     fn ships_the_full_company_template_catalog() {
@@ -211,5 +326,118 @@ mod tests {
             .unwrap();
         assert!(runtime.config().api_url.starts_with("http://127.0.0.1:"));
         assert_eq!(runtime.config().operator_email, DESKTOP_OPERATOR_EMAIL);
+    }
+
+    /// A state over `home`, as an embedded host builds one.
+    fn state_over(home: &std::path::Path) -> AppState {
+        AppState::new(AppConfig::default()).with_home(home.to_path_buf())
+    }
+
+    fn store_over(home: &std::path::Path) -> crate::store::FsCompanyStore {
+        crate::store::FsCompanyStore::new(home.to_path_buf())
+    }
+
+    /// Issue #632: a fresh install must end up somewhere a person can sign in.
+    ///
+    /// Both halves matter. A company nobody is eligible for is the same dead end
+    /// as no company at all — the login form renders, the 202 comes back, and no
+    /// code is ever minted.
+    #[tokio::test]
+    async fn a_first_run_seeds_a_company_the_local_operator_can_enter() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state_over(directory.path());
+
+        let ids = bootstrap_companies(&state, DEFAULT_PRESET_ID)
+            .await
+            .expect("a fresh root bootstraps");
+
+        assert_eq!(ids.len(), 1, "one starter company, not a fleet");
+        let runtime = state
+            .registry()
+            .sole()
+            .expect("the seeded company is registered, not merely written");
+        let record = runtime
+            .store()
+            .load(runtime.id())
+            .await
+            .unwrap()
+            .expect("the seeded company persists");
+        assert!(
+            record
+                .manifest
+                .users
+                .admins
+                .iter()
+                .any(|email| email == DESKTOP_OPERATOR_EMAIL),
+            "the seeded company must name somebody eligible: {:?}",
+            record.manifest.users.admins
+        );
+        assert_eq!(
+            record.template_provenance.map(|p| p.source_id),
+            Some(DEFAULT_PRESET_ID.to_string()),
+            "the install records which template it started from"
+        );
+    }
+
+    /// The second launch is the one that would go wrong quietly: seeding again
+    /// hands the operator a duplicate starter company, and every launch after
+    /// that another.
+    #[tokio::test]
+    async fn a_later_launch_adopts_what_the_root_already_holds() {
+        let directory = tempfile::tempdir().unwrap();
+        let first = bootstrap_companies(&state_over(directory.path()), DEFAULT_PRESET_ID)
+            .await
+            .unwrap();
+
+        // A wholly fresh state, as a relaunched application has.
+        let relaunched = state_over(directory.path());
+        let second = bootstrap_companies(&relaunched, DEFAULT_PRESET_ID)
+            .await
+            .unwrap();
+
+        assert_eq!(first, second, "the same company comes back");
+        assert_eq!(
+            std::fs::read_dir(directory.path().join("companies"))
+                .unwrap()
+                .count(),
+            1,
+            "and no second bundle was written"
+        );
+        assert!(relaunched.registry().sole().is_some());
+    }
+
+    /// Archiving removes a company from the registry deliberately. A boot that
+    /// re-registered every bundle on disk would undo that at the next launch,
+    /// silently, and the operator would find it back in the picker.
+    #[tokio::test]
+    async fn an_archived_company_is_not_brought_back() {
+        let directory = tempfile::tempdir().unwrap();
+        let state = state_over(directory.path());
+        bootstrap_companies(&state, DEFAULT_PRESET_ID)
+            .await
+            .unwrap();
+        // A second company, so the archived one is skipped rather than merely
+        // replaced by the first-run seed.
+        let kept = first_run_manifest("agentic_law_firm").unwrap();
+        let kept_id = company_id_from_name(&kept.company.name);
+        register(&state, kept_id.clone(), kept, None).await.unwrap();
+
+        let store = store_over(directory.path());
+        let archived_id =
+            company_id_from_name(&first_run_manifest(DEFAULT_PRESET_ID).unwrap().company.name);
+        let mut record = store.load(&archived_id).await.unwrap().unwrap();
+        record.lifecycle = "archived".to_string();
+        store.save(&record).await.unwrap();
+
+        let relaunched = state_over(directory.path());
+        let ids = bootstrap_companies(&relaunched, DEFAULT_PRESET_ID)
+            .await
+            .unwrap();
+
+        assert_eq!(ids, vec![kept_id]);
+        assert!(
+            relaunched.registry().get(&archived_id).is_none(),
+            "an archived company must stay unaddressable"
+        );
     }
 }
