@@ -374,14 +374,18 @@ jobs:
       # one level up. The count is what separates "everything passed" from
       # "nothing ran", exactly as the MongoDB job argues below.
       #
-      # NO `sidecar` LANE HERE, and its absence is deliberate. That feature gates
-      # fourteen tests that had never run; twelve pass and the two offline
-      # end-to-end cases its own documentation advertises FAIL (the inference
-      # callback fires zero times). Issue #800 has the diagnosis. The lane lands
-      # with the fix rather than red, because a lane allowed to be red is the
-      # state #428 was filed about — and until then
-      # `scripts/ci/feature-lanes.txt` records the debt as `owed`, so it is
-      # countable instead of silent.
+      # `sidecar` was OWED a lane rather than merely missing one, and this is
+      # where the debt is paid. The feature gates fourteen tests that had never
+      # run; twelve passed and the two offline end-to-end cases the feature's own
+      # documentation advertises FAILED (the inference callback fired zero
+      # times). Issue #800 has the diagnosis. It lands here rather than red
+      # because a lane permitted to be red is the state #428 was filed about.
+      #
+      # It rides this job for the reason the two above do: `sidecar = []` in
+      # Cargo.toml — no dependency, nothing to fetch, nothing to build that this
+      # job does not already have. Putting it in the gated job instead would add
+      # a feature compile to the ~26-minute lane that is already the repository's
+      # critical path (#793), to buy nothing.
       #
       # `export`: the bundle round-trip. Only `pack_tar`/`unpack_tar` are gated,
       # so nine of the ten tests this selects already run at default features —
@@ -405,6 +409,16 @@ jobs:
       # service container; until then, say so rather than imply otherwise.
       - name: Test the mail surface
         run: scripts/ci/run-scoped-suite.sh "mail (imap)" imap,smtp server::ops::imap
+
+      # `sidecar`: the whole of `src/brain/sidecar/`, which the feature gates at
+      # the `mod` declaration — the idiom that hid these fourteen tests from
+      # every lane and from a casual grep alike. Through the wrapper like its
+      # neighbours, and here the non-zero count is not ceremony: the filter is a
+      # module path, the module is gated, and a `#[cfg]` moved one line would
+      # make this select nothing and still exit 0 — which is the failure mode
+      # that produced #800 in the first place, one level up.
+      - name: Test the sidecar brain
+        run: scripts/ci/run-scoped-suite.sh "sidecar brain" sidecar brain::sidecar
 
       # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
       # binary. Building one over there would mean a second submodule checkout
