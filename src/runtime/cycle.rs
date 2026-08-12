@@ -4810,6 +4810,7 @@ mod test {
                         column: "done".into(),
                         artifact_ids: Vec::new(),
                         output: String::new(),
+                        origin_chat_id: None,
                     },
                 ],
                 approval_task,
@@ -5059,6 +5060,7 @@ mod test {
                 column: "done".into(),
                 artifact_ids: Vec::new(),
                 output: String::new(),
+                origin_chat_id: None,
             },
             CompanyEvent::AgentReply {
                 parent: None,

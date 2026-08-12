@@ -288,6 +288,32 @@ pub fn rebind_binary(
 /// [`WorkspaceNode::is_binary`] and say something better.
 #[async_trait]
 pub trait WorkspaceStore: Send + Sync {
+    /// May a payload of `len` bytes be accepted for storage under `name`,
+    /// whatever it will end up being stored *as* (issue #665)?
+    ///
+    /// # Why this exists next to the write methods that already check
+    ///
+    /// The quota decorator meters binary payloads and deliberately leaves prose
+    /// notes uncounted — see
+    /// [`QuotaEnforcedWorkspace`](crate::runtime::QuotaEnforcedWorkspace), whose
+    /// premise is that "a note is bounded by what a model will emit into a tool
+    /// call". That premise holds for every writer it covers and fails for
+    /// exactly one caller: the multipart upload route, where arbitrary
+    /// operator-supplied bytes enter the tree and are classified as prose purely
+    /// because they happen to decode as UTF-8.
+    ///
+    /// So this is the route **asking the store to judge**, rather than the route
+    /// applying a limit of its own. That distinction is what keeps policy where
+    /// the quota module insists it belongs: a caller cannot know a company's
+    /// configured cap — routers are built once, before any company exists — and
+    /// a limit re-derived at the call site would be the global default, silently
+    /// wrong for any company that raised or lowered its own.
+    ///
+    /// Defaults to admitting everything, so a backend that stores no quota — and
+    /// every test double — is unaffected.
+    async fn admit_upload(&self, _company: &CompanyId, _name: &str, _len: u64) -> Result<()> {
+        Ok(())
+    }
     /// Returns every node in the tree (order unspecified; callers build the
     /// tree from `parent_id`).
     async fn tree(&self, company: &CompanyId) -> Result<Vec<WorkspaceNode>>;

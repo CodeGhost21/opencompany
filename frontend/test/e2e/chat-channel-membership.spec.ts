@@ -257,6 +257,65 @@ test("#370 a broken /desks is a retryable error, not invented channels", async (
   await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({ timeout: 30_000 });
 });
 
+/** The way out to the org chart, added by #485. */
+const manageLink = (page: Page) =>
+  pane(page).getByRole("button", { name: "Manage on the org chart" });
+
+const chart = (page: Page) => page.getByRole("tree", { name: "Company org chart" });
+
+test("#485 a desk channel links out to its own desk on the org chart", async ({ page }) => {
+  await mockApi(page, () => "ok");
+  await openChannel(page, "engineering");
+  await openPane(page);
+
+  await expect(manageLink(page)).toBeVisible();
+  await manageLink(page).click();
+
+  // A desk's channel id *is* its desk id (`deskFromDto`), so the link needs no
+  // mapping — and the address it lands on names the desk, not just the chart.
+  await expect.poll(() => page.url()).toContain("#/company/engineering");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+
+  const desk = chart(page)
+    .locator('[role="treeitem"][aria-level="2"]')
+    .filter({ hasText: "Engineering" });
+  await expect(desk).toBeVisible();
+  // Landed *on the desk*, not merely on the chart: the arrival ring and DOM
+  // focus are what make a link into a nine-desk company useful.
+  await expect(desk).toHaveAttribute("data-desk-focused", "true");
+  await expect(desk).toBeFocused();
+});
+
+test("#485 a DM has no desk to manage", async ({ page }) => {
+  await mockApi(page, () => "ok");
+  await openChannel(page, "engineering");
+  await openPane(page);
+  // The positive control, in the same run: the link is offered here, so its
+  // absence below is about DMs and not about the link never rendering.
+  await expect(manageLink(page)).toBeVisible();
+
+  await pane(page).getByText("Agent 4", { exact: true }).click();
+  await expect(page.getByPlaceholder("Message Agent 4")).toBeVisible();
+
+  // A DM still gets the "In this channel" section — it has a membership of
+  // exactly one — but it is not a desk, so the chart has nothing to open.
+  await expect(pane(page).getByRole("heading", { name: "In this channel" })).toBeVisible();
+  await expect(manageLink(page)).toHaveCount(0);
+});
+
+test("#485 a fallback desk offers no link to a desk the host doesn't have", async ({ page }) => {
+  await mockApi(page, () => "404");
+  await openChannel(page, "general");
+  await openPane(page);
+
+  // No `.../desks` route at all, so these channels come from `lib/desks.ts` and
+  // name desks the org chart cannot draw. Linking to one would land on an empty
+  // chart, so no link is offered — the same reasoning that makes this pane fall
+  // back to the whole roster here.
+  await expect(pane(page).getByRole("heading", { name: "In this channel" })).toHaveCount(0);
+  await expect(manageLink(page)).toHaveCount(0);
+});
+
 test("the send path and the thread id it addresses are undisturbed", async ({ page }) => {
   sentChats.length = 0;
   await mockApi(page, () => "ok");

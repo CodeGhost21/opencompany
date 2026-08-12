@@ -82,6 +82,32 @@ pane renders one plain list. The rest of the company is always one section
 below, so adding a teammate or opening somebody's DM never needs a different
 surface.
 
+### Editing it is somewhere else, on purpose (#485)
+
+The pane **links** to the org chart — "Manage on the org chart" beside "In this
+channel", "Staff it on the org chart" when the desk is empty — and grows no
+membership controls of its own. The link opens `#/company/<deskId>`, which the
+chart scrolls to and focuses. A desk's channel id *is* its desk id
+(`deskFromDto`), so nothing maps between them.
+
+The reason is the pane's own rule. `channelMembers` **drops** a member id that
+resolves to no roster teammate: you cannot message nobody, so no row is drawn
+for one. The chart does the opposite and **badges** it "Not on the roster". A
+membership editor has to show every seat, and that ghost seat is exactly the one
+an operator most needs to remove — so an editor here would either break the drop
+rule this pane is built on or be unable to remove ghosts. Editing lives where
+ghosts are visible. Keep the two behaviours as they are; the divergence is what
+makes the split coherent rather than arbitrary.
+
+The link is offered only for a **host-backed desk channel**. A DM is not a desk,
+and a fallback desk names one the host does not have — the chart would open on
+nothing, so neither gets a link. There is no admin gate, because the chart has
+none either (its controls are gated by provenance).
+
+The channel rail stays flat, and #485 settled that too: it already is the org
+chart's desk level, since no desk can name a parent desk. See
+`views/company/README.md`.
+
 ## Files
 
 | | |

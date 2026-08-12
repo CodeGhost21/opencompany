@@ -177,12 +177,15 @@ pub(super) struct AgentDeskDto {
 
 /// The tool globs an agent *asks* for, resolved identically for every reader.
 ///
-/// A manifest teammate's `[[agent]].tools` line; an **empty** list for an
-/// overlay teammate, which mirrors `harness::overlay_agent_to_manifest` — and
-/// which means "the company's standard grant", not "no tools".
+/// A manifest teammate's `[[agent]].tools` line, or — for an overlay teammate —
+/// its own [`OverlayAgent::tools`](crate::ports::types::OverlayAgent::tools)
+/// grant (issue #661 / L5), which mirrors `harness::overlay_agent_to_manifest`.
+/// An **empty** list from either source means "the company's standard grant",
+/// not "no tools", so the Team tab shows the teammate's real effective grant
+/// rather than the full company allow-list for every overlay member.
 ///
 /// Its callers have already established that `agent_id` is on the roster, so a
-/// miss here can only be the overlay half.
+/// miss in the manifest half can only be the overlay half.
 pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Vec<String> {
     record
         .manifest
@@ -190,6 +193,13 @@ pub(super) fn requested_grants(record: &CompanyRecord, agent_id: &str) -> Vec<St
         .iter()
         .find(|agent| agent.id == agent_id)
         .map(|agent| agent.tools.clone())
+        .or_else(|| {
+            record
+                .overlay_agents
+                .iter()
+                .find(|agent| agent.id == agent_id)
+                .map(|agent| agent.tools.clone())
+        })
         .unwrap_or_default()
 }
 
@@ -562,6 +572,63 @@ members = ["writer", "ceo"]
             .prefix("oc-agent-detail-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    /// Issue #661 / L5: `requested_grants` reads a manifest agent's `tools` line,
+    /// falls back to an overlay teammate's own grant, and reads an empty grant
+    /// (from either source, and for an unknown id) as the standard company-wide
+    /// grant — so the Team tab shows an overlay teammate's real grant instead of
+    /// the full company allow-list.
+    #[test]
+    fn requested_grants_reads_overlay_then_manifest_then_empty() {
+        use crate::ports::types::OverlayAgent;
+
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n\
+             [[agent]]\nid = \"ceo\"\nrole = \"Chief\"\ntools = [\"workspace.read\"]\n",
+        )
+        .unwrap();
+        let mut record = CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents: Vec::new(),
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        };
+        record.overlay_agents.push(OverlayAgent {
+            id: "scoped".to_string(),
+            name: "Scoped".to_string(),
+            role: "Researcher".to_string(),
+            description: None,
+            tools: vec!["docs.*".to_string()],
+        });
+        record.overlay_agents.push(OverlayAgent {
+            id: "standard".to_string(),
+            name: "Standard".to_string(),
+            role: "Generalist".to_string(),
+            description: None,
+            tools: Vec::new(),
+        });
+
+        // A manifest agent's own line.
+        assert_eq!(
+            super::requested_grants(&record, "ceo"),
+            vec!["workspace.read"]
+        );
+        // An overlay teammate's own grant (the L5 read side).
+        assert_eq!(super::requested_grants(&record, "scoped"), vec!["docs.*"]);
+        // An overlay teammate with no grant → empty (the standard grant).
+        assert!(super::requested_grants(&record, "standard").is_empty());
+        // An unknown id → empty, as before.
+        assert!(super::requested_grants(&record, "nobody").is_empty());
     }
 
     async fn state_with_manifest(home: &std::path::Path, manifest_toml: &str) -> AppState {

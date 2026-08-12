@@ -878,6 +878,28 @@ export function ChatView({
               }}
               onAdd={() => setAddOpen(true)}
               onMessage={(m) => selectChannel(dmChannelId(m))}
+              /**
+               * The way from this channel to the desk it is (issue #485).
+               *
+               * Only for a host-backed desk channel. A DM is not a desk, and a
+               * fallback desk (`lib/desks.ts`) carries no `memberIds` because
+               * the host has no desks surface at all — the chart would have
+               * nothing to open. Both simply get no link rather than one that
+               * lands nowhere.
+               *
+               * A desk's channel id **is** its desk id (`deskFromDto`), so
+               * there is no mapping to keep in step. Written to the hash rather
+               * than routed through a callback, as `ArtifactsTab`'s "Open in
+               * workspace" does: this is a cross-view address, and the shell
+               * only hands chat a chat-scoped navigate.
+               */
+              onManageDesk={
+                active.kind === "channel" && active.memberIds
+                  ? () => {
+                      window.location.hash = `/company/${active.id}`;
+                    }
+                  : undefined
+              }
               canEditBudget={isAdmin && fromHost}
               onEditBudget={setBudgetFor}
               onRemoveCap={(m) => void applyBudget(m, null)}

@@ -333,6 +333,15 @@ impl StandingGrant {
     ///   direction. It falls through and parks instead, which is the same answer
     ///   this codebase gives an unrecognised action everywhere else: unknown is
     ///   a send.
+    ///
+    /// # Dormant, deliberately (issue #610)
+    ///
+    /// No current tier routes a Composio call through this: since #559 a
+    /// catalogue read is allowed by the tier before the grant checks, and under
+    /// `readonly` the #243 brake denies above them. The scope this spends is
+    /// still minted, and the reasoning for keeping both halves is recorded once,
+    /// at [`standing_scope_of`](crate::policy::consequence::standing_scope_of) —
+    /// read it before concluding this is unused.
     pub fn admits_scope(&self, scope: Option<&str>) -> bool {
         match self.scope.as_deref() {
             None => true,

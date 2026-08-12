@@ -1380,6 +1380,20 @@ impl HarnessBrain {
                     output: result_text,
                     column: card.column.clone(),
                     artifact_ids,
+                    // Issue #377: the conversation this card was raised from,
+                    // **captured** off the card rather than derived at
+                    // completion. `responder` above is an agent id and a
+                    // channel is a desk id, so the origin cannot be recovered
+                    // from any other field on this event — and re-deriving it
+                    // would put a second rule beside `chat_history`'s, which is
+                    // the drift issue #435 exists to have removed.
+                    //
+                    // This is the one emission point every dispatch ending
+                    // passes through (`run_task`, `refuse_dispatch`), which is
+                    // why capturing it here cannot miss a path. A board-created
+                    // card carries `None` and gets no channel marker: no
+                    // conversation raised it.
+                    origin_chat_id: card.origin_chat_id.clone(),
                 },
             )
             .await
@@ -4673,6 +4687,7 @@ members = ["engineer"]
             name: "Nova".into(),
             role: "Growth".into(),
             description: None,
+            tools: Vec::new(),
         });
         tasks
             .upsert(&CompanyId::new("acme"), &card("t1", "nova"))
@@ -5004,6 +5019,7 @@ members = ["eng1", "eng2"]
                 name: "Cto".to_string(),
                 role: "CTO".to_string(),
                 description: None,
+                tools: Vec::new(),
             }],
             overlay_desk_members: vec![crate::ports::types::OverlayDeskMember {
                 desk_id: "eng".to_string(),

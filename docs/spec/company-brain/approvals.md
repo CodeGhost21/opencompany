@@ -335,6 +335,38 @@ with actor and timestamps, but each admitted call writes no journal record.
 Defensible because a standing grant only ever admits tools declared grantable
 and never a priced call; a per-use record is additive later.
 
+### What an `always_approve` entry names (issue #684)
+
+One namespace, not two. An entry is an **effect kind**, and a **tool name is an
+effect kind** — the harness projects a flagged tool call onto an `Effect` by
+making the tool name the kind verbatim, so `publish_artifact` is the
+single-segment case of the same thing `payment.send` is the two-segment case of.
+Both approval paths — the native-effect gate and the harness tool policy — read
+one matcher, `policy::always_approve::matches`, which matches the exact entry or
+a leading dotted segment (`payment` gates `payment.send`, never
+`payroll.export`). They previously held two matchers with two rules, so one
+operator list meant different things depending on which brain was running.
+
+Operator-authored entries are intentionally not restricted to the declared tool
+table. Native effect kinds are open by specification: the Medulla wire carries
+`kind` as a free string, and a hosted brain may emit one this repository has
+never seen. The gate checks `always_approve` before its `EffectGroup` fallback,
+so even an otherwise-unclassified custom kind can be exactly the one the
+operator meant to stop. Treating the classifier as a registry would turn a
+working fence into a load error.
+
+The **default is empty** because shipped defaults can and should meet a stricter
+standard than open operator input. The old default was `payment.send` /
+`filing.submit` / `external.publish`; none named a tool, so every company using
+the harness path believed payments and publishing were gated and none were. Two
+of the three name capabilities the product does not have; the real name behind
+the third is `publish_artifact`, which must not be defaulted because `full`
+publishing unattended is the ruling on issue #658. Under the default
+`supervised` mode the checkpoint taxonomy parks every `Spend` / `Sign` /
+`Publish` effect anyway, so the empty default costs no protection that was ever
+real. A drift test requires every future default entry to name its intended,
+declared tool target explicitly.
+
 ### Precedence at the tool gate
 
 A tool call is decided in this order:
@@ -355,7 +387,10 @@ A tool call is decided in this order:
    and it re-checks the live arguments, so a grant minted on a Composio read
    cannot admit a Composio send.
 4. `[policy].always_approve` → park.
-5. mode dispatch (`readonly` / `supervised` / `auto` / `full`).
+5. the per-agent daily cap, then `auto_approve_under_usd`.
+6. mode dispatch (`readonly` / `supervised` / `auto` / `full`).
+7. **per-call judgement** (issue #338) → park. Consulted *only* where step 6
+   allowed the call, and its only answers are "stop" and "say nothing".
 
 The grant sits **above** `always_approve` on purpose. A tool on that list still
 parks the first time, which is what the list is for; but once the operator has
@@ -367,6 +402,26 @@ narrow.
 Note this is the *tool* gate (`ApprovalPolicy`), which is a different path from
 the *effect* gate (`ManifestApprovalGate::evaluate`) the taxonomy above
 describes. A harness tool call parks directly and never reaches `evaluate`.
+
+### Per-call judgement (issue #338)
+
+Steps 1–6 are all decided before the run starts, by an operator writing a
+manifest; nothing in them looks at what the run is about to do. Step 7 closes
+that gap: `src/policy/judgement.rs` asks, per candidate call, whether it
+warrants a human on its own merits, and it can **only ever add a stop**.
+
+Step 7 is also the one step scoped by **which path the call arrived on** (issue
+#674): #338's rules govern an agent turn, and #614's position governs a node an
+operator authored into a saved workflow — unless that node's arguments are
+templated from an upstream node's output, which returns it to the agent rule.
+Steps 1–6 decide identically on both paths, so `always_approve` still gates a
+workflow node.
+
+It is documented in full — the placement argument, the three rules, the path
+split and its boundary condition, the acceptance verbs per path, the no-learning
+boundary against #563, why it is not a model call, fail-closed, and the
+`publish_artifact` carve-out #658 ruled correct — in
+[per-call-judgement.md](per-call-judgement.md).
 
 ## Approvals inside a workflow run (issue #395)
 
@@ -449,8 +504,10 @@ Prosumers adjust the fence in plain language, which compiles to policy:
 - "Auto-approve spending under $5" → `auto_approve_under_usd = 5.0`
 - "Never contact my customers directly" → `never_do` → `Deny` on
   `dm.external` matching the customer list
-- "You can post to the blog without asking" → remove `external.publish`
-  from `always_approve` for that channel
+- "You can post to the blog without asking" → remove `publish_artifact` from
+  `always_approve` for that channel. Nothing to remove unless the operator put
+  it there: `always_approve` defaults to empty, and under `supervised` it is
+  the checkpoint taxonomy — not the list — that parks a publish
 
 Standing-rule changes are themselves Charter edits with provenance and audit
 ([charter.md](charter.md)); loosening a rule takes effect for *future*

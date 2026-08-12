@@ -12,17 +12,33 @@
 // OpenCompany's `translate.rs` (which lays a node's `config` over the derived
 // defaults verbatim):
 //
-//   tool_call     { slug, args }
-//   http_request  { method, url, headers, body }
+//   tool_call     { slug, args, connection_ref }
+//   http_request  { method, url, headers, body, connection_ref }
 //   switch        { field | expression }        (cases are EDGE labels, not config)
 //   output_parser { schema, auto_fix }
 //   sub_workflow  { workflow_id }
+//   transform     { set }
 //
 // `condition` is a core palette kind (not one of the withheld five), but the
 // host now REQUIRES `config.field` at author time (#661 M1) — the engine
 // truthiness-tests that expression, and without it a condition always routed
 // `true`. So it carries a form too: `condition { field }` (the `yes`/`no`
 // branches are EDGE labels, not config).
+//
+// `transform` is likewise a core palette kind, but its one engine key —
+// `config.set`, a JSON object of field → literal/`=`-expression the engine lays
+// over each item (`nodes/control_flow/transform.rs`) — had no control, so a
+// console-authored transform lowered to a silent identity node. It carries a
+// form now: `transform { set }`. `set` is OPTIONAL — an absent/empty `set` is a
+// valid engine passthrough (what a plain `output` node lowers to), so it is
+// never required. The engine reads `set` only via `as_object`, so a non-object
+// `set` is silently ignored; the `object` shape gate rejects it at author time.
+//
+// `tool_call` and `http_request` also each read an optional `connection_ref`
+// (`cfg.get("connection_ref").and_then(as_str)` in their integration nodes) —
+// an opaque handle to a connected account / credential the host resolves, never
+// a token or secret. It used to survive an edit only by riding the `extra` bag
+// (so it was unauthorable); it is a first-class field on both kinds now.
 //
 // Keys the host REJECTS inside `config` — `on_error`, `retry`,
 // `requires_approval`, `schedule`, `destination`, `agent_ref` — are first-class
@@ -89,6 +105,13 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       placeholder: '{ "query": "=item.topic" }',
       hint: "A JSON object of arguments. `=`-expressions resolve per input item at run time.",
     },
+    {
+      key: "connection_ref",
+      label: "Connection",
+      control: "line",
+      placeholder: "composio:slack:acct_1",
+      hint: "Optional. An opaque reference to a connected account or credential the host resolves — never a token or secret. Leave empty to use the default connection.",
+    },
   ],
   http_request: [
     {
@@ -127,6 +150,13 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       jsonShape: "object-or-string",
       placeholder: '{ "hello": "world" }',
       hint: "A JSON object sent as the body, or a JSON string like `\"raw text\"`.",
+    },
+    {
+      key: "connection_ref",
+      label: "Connection",
+      control: "line",
+      placeholder: "http:acct_2",
+      hint: "Optional. An opaque reference to a connected account or credential the host resolves — never a token or secret. Leave empty for an unauthenticated request.",
     },
   ],
   switch: [
@@ -173,6 +203,16 @@ export const NODE_CONFIG_FIELDS: Record<string, readonly ConfigFieldSpec[]> = {
       required: true,
       placeholder: "another workflow's id",
       hint: "The id of the workflow to run. It can't be this workflow's own id.",
+    },
+  ],
+  transform: [
+    {
+      key: "set",
+      label: "Set fields",
+      control: "json",
+      jsonShape: "object",
+      placeholder: '{ "greeting": "=item.name" }',
+      hint: "Optional. A JSON object of fields to add or overwrite on each item — each value is a literal or an `=`-expression resolved per item. Leave empty to pass items through unchanged.",
     },
   ],
 };
@@ -233,11 +273,10 @@ function stringifyConfigValue(spec: ConfigFieldSpec, value: unknown): string {
  *
  * Known keys become form strings. **Every other key is preserved verbatim in
  * `extra`** — the anti-data-loss guard: an orchestrator-authored node can carry
- * keys this form has no control for (`connection_ref` on a tool/http node,
- * `execution`/`concurrency`/`inputs` on a sub_workflow), and rebuilding the
- * node from the visible controls alone would silently delete them on the first
- * save. Reserved keys are the one exception — dropped, since the host would
- * reject them anyway.
+ * keys this form has no control for (`execution`/`concurrency`/`inputs` on a
+ * sub_workflow), and rebuilding the node from the visible controls alone would
+ * silently delete them on the first save. Reserved keys are the one exception —
+ * dropped, since the host would reject them anyway.
  */
 export function configDraftFrom(
   kind: string,

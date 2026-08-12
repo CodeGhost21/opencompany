@@ -50,6 +50,7 @@ import { toast } from "sonner";
 
 import {
   type ChatMessage,
+  dispatchMarkerPlacement,
   fromHistory,
   hostMessageId,
   liveReplyIdentity,
@@ -725,6 +726,60 @@ export function AppShell({
     [chatChannelByThread],
   );
 
+  /**
+   * Post the card-linked system marker for a settled dispatch into the channel
+   * the card was raised in (issue #377).
+   *
+   * The gap it closes: a card dispatched from a channel could park in `paused`
+   * or bounce back to `todo`, and the only thing the channel showed was the
+   * agent's relay prose — so a reader, live or arriving fresh, reasonably
+   * concluded the work had finished. The marker is the structural fact the
+   * prose could not carry: the run *stopped*, and here is where the card
+   * landed, with a link to it.
+   *
+   * Every rule about *where* the line goes — a frame with no `chatId` going
+   * nowhere, a thread matching no channel going nowhere rather than to whatever
+   * channel is open (#368's bug), and the `h<seq>` identity that lets the next
+   * reload recognise its own twin (#483/#498) — lives in
+   * `dispatchMarkerPlacement`, so each stays assertable. This callback is only
+   * the write.
+   *
+   * Written into **both** stores for the same reason `injectAgentReply` is: the
+   * parked Conversation reads `threads`, the Chat workspace reads
+   * `transcripts`, and a line written to one alone is invisible on the other
+   * until a reload.
+   */
+  const injectDispatchMarker = useCallback(
+    (event: CompanyStreamEvent) => {
+      if (event.type !== "desk_task_completed") return;
+      const placement = dispatchMarkerPlacement(event, chatChannelByThread);
+      if (!placement) return;
+      const { threadId, channelId, message } = placement;
+
+      setThreads((ts) =>
+        ts.map((t) => {
+          if (t.id !== threadId) return t;
+          // The same id guard hydration runs. A marker cannot arrive twice off
+          // one stream, but a reconnecting `EventSource` can replay a frame,
+          // and the id is what makes that harmless.
+          if (t.messages.some((m) => m.id === message.id)) return t;
+          return { ...t, messages: [...t.messages, message] };
+        }),
+      );
+
+      if (!channelId) return;
+      setTranscripts((t) => {
+        const existing = t[channelId] ?? [];
+        if (existing.some((m) => m.id === message.id)) return t;
+        return { ...t, [channelId]: [...existing, message] };
+      });
+    },
+    // Same reasoning as `injectAgentReply`: `useEvents` holds its callbacks in
+    // refs, so this identity churning as the map lands cannot re-open the
+    // stream.
+    [chatChannelByThread],
+  );
+
   // Mark/unmark a thread's in-flight POST. `onSendStart` also resets its live
   // timeline so a fresh turn starts clean; `onSendEnd` clears it because the
   // final reply now carries the authoritative folded steps.
@@ -872,6 +927,10 @@ export function AppShell({
     pendingApprovals: pending,
     onAgentReply: injectAgentReply,
     onTaskEvent: useCallback(() => setTaskEventTick((n) => n + 1), []),
+    // Issue #377. Beside the board tick above, not instead of it: a settle both
+    // moves a card between columns and needs saying in the conversation the
+    // card came from.
+    onDispatchTerminal: injectDispatchMarker,
     // Issue #327. The payload is carried, not folded into a counter — see
     // `workspaceEvent` above. The view still re-reads the tree from the host
     // rather than patching it from the frame: the frame carries no node name
@@ -984,7 +1043,19 @@ export function AppShell({
           {view === "overview" && (
             <Overview client={client} company={company} />
           )}
-          {view === "company" && <OrgChartView client={client} company={company} />}
+          {view === "company" && (
+            <OrgChartView
+              client={client}
+              company={company}
+              // Issue #485: chat's member pane links in at a desk
+              // (`#/company/<deskId>`), which needs the hash's second segment
+              // to reach this view at all — it was dropped here, so the chart
+              // had no per-desk address to link to. `useHashView` hands the
+              // segment back unvalidated, so the chart resolves an unknown id
+              // itself rather than this shell guessing which desks exist.
+              focusDeskId={sub}
+            />
+          )}
           {view === "chat" && (
             <ChatView
               client={client}

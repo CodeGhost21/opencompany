@@ -50,6 +50,19 @@ interface Props {
   onAdd: () => void;
   onMessage: (member: TeamMember) => void;
   /**
+   * Open this channel's desk on the org chart (issue #485). Absent for a DM and
+   * for a fallback desk — neither is a desk the chart draws.
+   *
+   * A link, deliberately, and not an editor bolted on here. This pane *drops* a
+   * member id that resolves to no roster teammate (see `channelMembers`), which
+   * is right for a chat — you cannot message nobody. But that ghost seat is
+   * precisely the one an operator most needs to remove, and an editor on this
+   * pane could not offer it without breaking the drop rule the pane is built
+   * on. Membership editing therefore stays on the surface that keeps ghost
+   * seats visible and badged: the chart.
+   */
+  onManageDesk?: () => void;
+  /**
    * Whether to offer the daily-budget controls at all (issue #360, ported
    * from the retired Team page): admin-only, and only for a host-backed
    * teammate — a starter-roster row is a local placeholder with no budget
@@ -88,6 +101,7 @@ export function MembersPane({
   onRemove,
   onAdd,
   onMessage,
+  onManageDesk,
   canEditBudget,
   onEditBudget,
   onRemoveCap,
@@ -158,12 +172,28 @@ export function MembersPane({
 
             return (
               <>
-                <SectionLabel className="text-foreground">In this channel</SectionLabel>
+                <div className="flex items-baseline justify-between gap-2">
+                  <SectionLabel className="text-foreground">In this channel</SectionLabel>
+                  {onManageDesk && (
+                    <ManageDeskLink onClick={onManageDesk}>Manage on the org chart</ManageDeskLink>
+                  )}
+                </div>
                 {channelMembers.length > 0 ? (
                   rows(channelMembers)
                 ) : (
+                  // An empty desk is the strongest case for reaching the
+                  // editor, so the copy carries the way there rather than
+                  // leaving the operator to find the header link.
                   <p className="px-2 py-1.5 text-xs text-muted-foreground">
                     Nobody is on this desk yet.
+                    {onManageDesk && (
+                      <>
+                        {" "}
+                        <ManageDeskLink onClick={onManageDesk} inline>
+                          Staff it on the org chart
+                        </ManageDeskLink>
+                      </>
+                    )}
                   </p>
                 )}
 
@@ -179,6 +209,37 @@ export function MembersPane({
         )}
       </div>
     </aside>
+  );
+}
+
+/**
+ * The way out to the org chart (issue #485).
+ *
+ * Quiet by design — a link, not a button. Editing membership is a different
+ * surface's job, and dressing the way there as an action here would suggest
+ * this pane could do it.
+ */
+function ManageDeskLink({
+  onClick,
+  inline,
+  children,
+}: {
+  onClick: () => void;
+  /** Sits inside a sentence rather than beside a heading. */
+  inline?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={cn(
+        "text-xs text-muted-foreground underline-offset-2 hover:text-foreground hover:underline",
+        inline ? "underline" : "shrink-0 px-2 pb-1",
+      )}
+    >
+      {children}
+    </button>
   );
 }
 

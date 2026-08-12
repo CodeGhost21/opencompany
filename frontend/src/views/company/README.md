@@ -60,6 +60,43 @@ handled the opposite way: it stays, badged "Not on the roster". The chat member
 pane drops such an id, which is right for a chat — you cannot message nobody.
 Here it is a fact about the structure that only the operator can fix.
 
+That divergence is **load-bearing**, not incidental: it is the reason membership
+editing lives here and not on the member pane. See below.
+
+## How chat reaches this surface (#485)
+
+`#/company/<deskId>` opens the chart with that desk scrolled to, focused, and
+ringed until the operator's first click or keypress. The chat member pane links
+in at exactly that address — "Manage on the org chart" beside "In this channel",
+or "Staff it on the org chart" when the desk is empty.
+
+Three decisions #485 settled, so they are not re-argued:
+
+**The channel rail stays flat.** It already *is* this tree's desk level. A desk
+cannot name a parent desk, so nesting is unrepresentable (see above), and both
+surfaces render the same `GET {scope}/desks` in the same host order. "A desk
+thread becomes a view of the org chart" is satisfied by the two surfaces being
+the same list with a link between them — not by restructuring the rail into a
+tree it has no data to draw.
+
+**DMs are untouched.** Under a flat rail the question does not arise. Recorded
+for a future attempt: if grouping were ever adopted, DMs would be a separate
+flat section *below* the tree — they are not desks, and hanging them off one
+would invent the same structure `Not on a desk` exists to avoid.
+
+**Membership editing stays here; the pane only links.** The member pane drops an
+id that resolves to no roster teammate. A membership editor must show every
+seat, and the ghost seat is precisely the one an operator most needs to remove —
+so an editor on that pane would either violate the pane's documented drop rule
+or knowingly be unable to remove ghosts. Editing belongs on the surface that
+keeps ghosts visible. No admin gate on the link: this chart has none either,
+because its controls are gated by provenance instead.
+
+An unknown or deleted desk id in the hash is a **silent no-op** — the chart
+renders normally. `useHashView` hands the second segment back unvalidated, and a
+stale bookmark deserves the company, not a banner. The hash is never rewritten:
+`#/company/<deskId>` is a shareable address.
+
 ## Files
 
 | | |
@@ -78,7 +115,7 @@ reload against a stateful stub.
 
 ## Deliberately not here
 
-- **Chat alignment** — whether a desk thread becomes a view of this tree
-  (#311's third open question). Filed as #485.
+- **A nested channel rail** — #485 settled that the rail already is this tree's
+  desk level, and that a fourth level is unrepresentable. See above.
 - **The Overview graph's invented departments** — replacing them with this real
   structure belongs with the replacement, not the foundation. Filed as #486.
