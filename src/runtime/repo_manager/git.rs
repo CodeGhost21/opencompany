@@ -579,7 +579,7 @@ mod test {
         assert!(err.contains("did not finish"), "{err}");
         assert!(err.contains("was stopped"), "{err}");
 
-        std::env::set_var("PATH", original_path);
+        unsafe { std::env::set_var("PATH", original_path) };
         std::fs::remove_dir_all(&base).ok();
     }
 
