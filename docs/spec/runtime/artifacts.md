@@ -156,6 +156,13 @@ hidden (any name starting with `.`), and the runtime's own bookkeeping —
 message journal, on every single run. Counting them would fire the nudge after
 every dispatch, asking an agent whether its own transcript is a deliverable.
 
+`audit.log` is a leftover of that list rather than a live member of it. The shell
+audit sink moved out of the workspace to the host-owned
+`companies/<slug>/audit/<agent>/` in issue #775 — see
+[agent-isolation.md](../security/agent-isolation.md) §6 — so a workspace created
+after that change never contains one. The skip stays for workspaces provisioned
+before it, and because the name is a plausible one for something else to write.
+
 The walk is capped at 5,000 entries. A truncated scan can only miss changes.
 
 ## Storage

@@ -1928,6 +1928,15 @@ impl RuntimeBuilder {
                                 store: store.clone(),
                                 meter: Some(fs_ops.clone()),
                                 workspace_root: home.join("harness"),
+                                // Issue #775: the shell audit sink is HOST-owned
+                                // and hangs off the data root, resolving to
+                                // `companies/<slug>/audit/<agent>/` — a sibling
+                                // of the `harness/` tree above, never inside it.
+                                // Passed explicitly rather than derived from
+                                // `workspace_root`'s parent so the boundary is a
+                                // stated fact rather than a directory
+                                // coincidence.
+                                audit_root: home.clone(),
                                 model_override,
                                 tasks: Some(ops.tasks.clone()),
                                 artifacts: Some(ops.artifacts.clone()),

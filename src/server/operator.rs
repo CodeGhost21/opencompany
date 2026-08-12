@@ -2341,6 +2341,7 @@ mod test {
             store: Arc::new(FsCompanyStore::new(home.to_path_buf())),
             meter: Some(Arc::new(FsOps::new(home.to_path_buf()))),
             workspace_root: home.to_path_buf(),
+            audit_root: home.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
