@@ -1035,3 +1035,56 @@ jobs:
       # here rather than absorbed — the desktop keeps its own `Cargo.lock`.
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # Everything above proves the desktop crate COMPILES. Nothing above proves
+      # it PACKAGES, and those are different claims: the steps above drive
+      # `cargo` directly and build the console themselves with
+      # `working-directory: frontend`, so `tauri.conf.json` — the file that says
+      # how the app is actually assembled — is read by nothing in this lane.
+      #
+      # It was wrong for the whole life of the split. `beforeBuildCommand` named
+      # `../frontend`, which escapes the repository from the working directory
+      # Tauri runs the hook in, so `cargo tauri build` and `cargo tauri dev`
+      # failed on their first step for every developer while this lane stayed
+      # green (issue #616). A lane that never invokes the packaging entry point
+      # makes the first real launch the integration test.
+      #
+      # `--debug`, not a release build: this step exists to execute the config
+      # and link a binary, and the `Test` step above already compiled that graph
+      # in the dev profile. A release build would recompile the host from
+      # scratch — minutes, for no claim this step is making.
+      #
+      # `--no-bundle` for the same reason. Bundling produces a `.deb`/AppImage
+      # this job would only delete; the failure being gated is the one that
+      # happens before any of that, at the first step of `tauri build`.
+      #
+      # The CLI comes from `frontend/node_modules` — `npm ci` above already
+      # installed `@tauri-apps/cli`, so this costs nothing, where
+      # `cargo install tauri-cli` would compile the CLI from source.
+      #
+      # BOTH directories, and that is the whole point of the step rather than a
+      # belt-and-braces second run. Tauri resolves `beforeBuildCommand`'s working
+      # directory from where the CLI was invoked — `<repo>/frontend` from the
+      # repository root, `<repo>` from `src-tauri/` — so a relative prefix is
+      # correct from one and broken from the other, and each invocation is blind
+      # to the other's failure:
+      #
+      #   hook value        from repo root   from src-tauri/
+      #   `../frontend`     passes           FAILS  ← what shipped (#616)
+      #   `frontend`        FAILS            passes ← the obvious "fix"
+      #
+      # A single-directory step would therefore have gated exactly half of this
+      # class, and the half it gated depends on which directory it picked. The
+      # committed hook resolves its own path and passes from both; these two runs
+      # are what keeps it that way. The second is nearly free — same profile,
+      # same cache, everything already built.
+      #
+      # The CLI finds a project by searching SUBFOLDERS of the working directory
+      # rather than ancestors, so these two are the only directories it can be
+      # invoked from at all.
+      - name: Package (from the repository root)
+        run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
+
+      - name: Package (from src-tauri)
+        working-directory: src-tauri
+        run: ../frontend/node_modules/.bin/tauri build --debug --no-bundle
