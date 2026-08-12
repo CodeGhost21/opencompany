@@ -66,6 +66,30 @@ pub struct FsNodeGql {
     pub created_by: WorkspaceOriginGql,
     /// Who last wrote the node's content (a rename or move does not change it).
     pub updated_by: WorkspaceOriginGql,
+    /// The payload's media type — **set only on a binary node** (issue #553),
+    /// and null on a folder or a prose note.
+    ///
+    /// Its presence is the whole test for "this node holds bytes, not text", and
+    /// without it no GraphQL consumer could discover that binaries exist at all:
+    /// a payload's text `read` is an empty body by contract, so a 4 MB PNG and a
+    /// genuinely empty note were the same answer on this surface (issue #669).
+    /// The REST `FsNode` has carried these three since #553; this is the field
+    /// set catching up, not a new concept.
+    pub mime: Option<String>,
+    /// The payload's length in bytes; null unless `mime` is set.
+    ///
+    /// `Float`, not `Int`, because the store's `size` is a `u64` and GraphQL's
+    /// `Int` is 32-bit — the same choice `usage` and `Approval.atMillis` made,
+    /// for the same reason. Today's 64 MiB per-write cap fits in an `Int`; the
+    /// cap is configurable and the field should not be the thing that stops it
+    /// being raised.
+    pub size: Option<f64>,
+    /// The payload's sha256, the same digest the blob route serves as its
+    /// `ETag`; null unless `mime` is set.
+    ///
+    /// This is what makes "the bytes changed" observable to a consumer that
+    /// cannot see the bytes — a re-publish keeps the node id and changes this.
+    pub sha256: Option<String>,
 }
 
 impl From<WorkspaceNode> for FsNodeGql {
@@ -82,6 +106,9 @@ impl From<WorkspaceNode> for FsNodeGql {
             updated_at: iso8601(node.updated_at_millis),
             created_by: node.created_by.into(),
             updated_by: node.updated_by.into(),
+            mime: node.mime,
+            size: node.size.map(|bytes| bytes as f64),
+            sha256: node.sha256,
         }
     }
 }
@@ -109,9 +136,9 @@ pub struct WorkspaceFileGql {
 /// One workspace search hit (issue #607).
 ///
 /// The node is nested rather than flattened: `FsNode` is already the projection
-/// every other workspace read hands back, and re-declaring its seven fields here
-/// would be a second copy to keep in step. What search adds is the two things
-/// only a search knows — where the node sits, and why it came back.
+/// every other workspace read hands back, and re-declaring its fields here would
+/// be a second copy to keep in step. What search adds is the two things only a
+/// search knows — where the node sits, and why it came back.
 #[derive(SimpleObject)]
 #[graphql(name = "WorkspaceSearchHit")]
 pub struct WorkspaceSearchHitGql {
@@ -151,6 +178,24 @@ pub(crate) async fn resolve_tree(
 /// [`file_with_backlinks`](crate::company::workspace_links::file_with_backlinks),
 /// shared with the REST `GET …/workspace/file/{id}` route the console reads, so
 /// the two surfaces can never report different backlinks for the same note.
+///
+/// # A binary node is refused here, exactly as it is over REST (issue #669)
+///
+/// The port's honest answer to a prose-shaped read of a payload is `""`, and
+/// this resolver used to pass that straight through — so a 4 MB PNG and an
+/// empty note were the same response, on a surface whose whole job is to be
+/// unambiguous about what a node contains. The REST twin has always refused,
+/// naming the route that does serve the bytes; `WorkspaceFileBody` and
+/// `WorkspaceFileGql` are documented as differing only in timestamp shape, and
+/// answering differently about a node's *kind* is a much larger divergence than
+/// the one that documentation permits.
+///
+/// Adding `mime` to this type instead was the alternative, and it is the wrong
+/// one: it would make the twins differ in field set rather than in timestamps,
+/// and it would leave `content: ""` sitting in the response for a client to
+/// misread. Discovery belongs on the tree, where [`FsNodeGql`] now carries
+/// `mime`/`size`/`sha256` — so a consumer learns a node is binary *before*
+/// asking for its text, which is the order that avoids the error entirely.
 pub(crate) async fn resolve_file(
     runtime: &Arc<CompanyRuntime>,
     id: &str,
@@ -160,6 +205,14 @@ pub(crate) async fn resolve_file(
     else {
         return Ok(None);
     };
+
+    if let Some(mime) = &node.mime {
+        return Err(async_graphql::Error::new(format!(
+            "`{}` holds {mime} data, not text; fetch it from \
+             `…/workspace/blob/{}` instead",
+            node.name, node.id
+        )));
+    }
 
     Ok(Some(WorkspaceFileGql {
         id: ID(node.id),

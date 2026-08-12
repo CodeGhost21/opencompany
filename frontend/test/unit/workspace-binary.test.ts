@@ -10,7 +10,14 @@
 import { describe, expect, it, vi } from "vitest";
 
 import { OpenCompanyClient } from "@/api/client";
-import { fetchTree, formatBytes, isBinary, uploadFile, type FsNode } from "@/api/workspace";
+import {
+  blobCacheKey,
+  fetchTree,
+  formatBytes,
+  isBinary,
+  uploadFile,
+  type FsNode,
+} from "@/api/workspace";
 
 function client(handler: (req: { method: string; url: string; body?: string }) => unknown) {
   const transport = {
@@ -57,6 +64,39 @@ describe("formatBytes", () => {
 
   it("keeps zero a real answer, not a missing one", () => {
     expect(formatBytes(0)).toBe("0 B");
+  });
+});
+
+describe("blobCacheKey", () => {
+  /**
+   * The defect in #669: a re-publish overwrites a payload in place, keeping the
+   * node id and changing the digest. Keying the viewer's fetch on the id alone
+   * meant the operator kept seeing — and downloading — the old bytes.
+   */
+  it("changes when the bytes change, even though the node id does not", () => {
+    const before = { id: "n-img", sha256: "aaa" };
+    const after = { id: "n-img", sha256: "bbb" };
+    expect(blobCacheKey(after)).not.toBe(blobCacheKey(before));
+  });
+
+  it("is stable when nothing about the payload changed", () => {
+    expect(blobCacheKey({ id: "n-img", sha256: "aaa" })).toBe(
+      blobCacheKey({ id: "n-img", sha256: "aaa" }),
+    );
+  });
+
+  it("still separates two different nodes that happen to hold identical bytes", () => {
+    // Two uploads of the same file share a digest. They are different nodes and
+    // must not share a cache entry, or opening one would show the other's name.
+    expect(blobCacheKey({ id: "n-a", sha256: "same" })).not.toBe(
+      blobCacheKey({ id: "n-b", sha256: "same" }),
+    );
+  });
+
+  it("falls back to the id when the host reported no digest", () => {
+    // Nothing here can detect a change the host did not report, so the honest
+    // answer is the pre-#553 behaviour rather than a key that churns.
+    expect(blobCacheKey({ id: "n-img", sha256: undefined })).toBe("n-img");
   });
 });
 

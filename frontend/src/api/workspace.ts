@@ -413,6 +413,33 @@ export async function fetchBlobUrl(
   return URL.createObjectURL(blob);
 }
 
+/**
+ * Identifies the *bytes* a binary node currently holds (issue #669).
+ *
+ * The viewer fetches a payload once and holds an object URL for it, so it needs
+ * to know when that URL has gone stale. The node id alone cannot say: a
+ * re-publish overwrites a payload **in place** and deliberately keeps the id, so
+ * an operator watching an image while an agent regenerated it kept seeing — and
+ * downloading — the old bytes until they navigated away and back.
+ *
+ * `sha256` is the answer because it *is* "these are different bytes", which is
+ * also why the blob route serves it as the `ETag`. The two obvious alternatives
+ * are both wrong in a way that shows up rarely enough to be nasty: `size` misses
+ * a same-length rewrite, and `updatedAtMillis` moves on a rename that changed no
+ * bytes at all, forcing a needless refetch of a payload that may be 60 MB.
+ *
+ * This exists as a named function rather than as entries in a `useEffect`
+ * dependency array because a dependency array is exactly the kind of thing a
+ * later edit shortens without noticing, and because the rule above is worth
+ * asserting in a test.
+ *
+ * A node with no digest falls back to the id, which is the pre-#553 behaviour
+ * and correct: nothing here can detect a change the host did not report.
+ */
+export function blobCacheKey(node: Pick<FsNode, "id" | "sha256">): string {
+  return node.sha256 ? `${node.id}:${node.sha256}` : node.id;
+}
+
 /** A human-readable size, for the metadata a binary node shows instead of a body. */
 export function formatBytes(bytes: number | undefined): string {
   if (bytes === undefined) return "unknown size";
