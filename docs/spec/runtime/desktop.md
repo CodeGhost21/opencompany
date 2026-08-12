@@ -20,6 +20,81 @@ The cost is that no root `cargo` invocation reaches the desktop, including
 and tests it; without that lane the crate would be compiled by nothing, which is
 [issue #475](https://github.com/tinyhumansai/opencompany/issues/475)'s shape.
 
+There is a second Tauri crate in the tree — `frontend/src-tauri/`, the console's
+wrapper — and it is an independent workspace with its own `Cargo.lock` for the
+same reason this one is separate: OpenHuman's vendored dependencies own nested
+workspaces, which Cargo cannot resolve beneath another workspace root.
+
+Which one a `tauri` invocation picks up is decided by the working directory, and
+not the way most people expect: **the CLI searches subfolders of the working
+directory, not ancestors.** From `frontend/` it finds the wrapper; from the
+repository root or from `src-tauri/` it finds this one. That is worth knowing
+before reading a build failure, because the two apps share a `productName`.
+
+## Packaging is a claim the lane has to make
+
+Compiling and packaging are different claims. `cargo fmt`, `cargo clippy` and
+`cargo test` drive `cargo` directly; none of them reads `tauri.conf.json`, so a
+lane built from those three can be green over an app that cannot be assembled at
+all. That is what happened: `beforeBuildCommand` named a path that escaped the
+repository, `cargo tauri build` and `cargo tauri dev` failed on their first step
+for every developer, and the `Desktop` lane never noticed because it builds the
+console itself with `working-directory: frontend` and then calls `cargo`.
+
+The `Package` steps close that. They run the real CLI —
+`tauri build --debug --no-bundle` — so the config is executed rather than merely
+committed. `--debug` because the `Test` step already compiled that graph in the
+dev profile and a release build would recompile the host for no extra claim;
+`--no-bundle` because the failure being gated happens at the first step of
+`tauri build`, long before a `.deb` exists.
+
+There are two of them, from the repository root and from `src-tauri/`. Every
+other step in this lane runs from the repository root, which is the one place
+the broken hook happened to work — a single-directory packaging step is how #616
+stayed invisible. Nothing working-directory-dependent survives in the config
+today, so what the pair defends now is that none comes back.
+
+### Build the console first: there is no `beforeBuildCommand`
+
+Both hooks are empty, and that is deliberate. **Build `frontend/dist` before you
+package**:
+
+```sh
+npm --prefix frontend run build     # from the repository root
+cargo tauri build                   # or: frontend/node_modules/.bin/tauri build
+```
+
+`frontendDist` is resolved relative to `src-tauri/`, where `tauri.conf.json`
+lives, so it means the same thing from every working directory. A hook does not:
+Tauri runs it from an app directory it *derives*, by scanning for a
+`package.json`, and which one it finds is not stable across machines. The
+committed `../frontend` escaped the repository entirely from `src-tauri/`
+([#616](https://github.com/tinyhumansai/opencompany/issues/616)), and the
+opposite prefix fails from the repository root — each is correct in exactly the
+directory that hides the other:
+
+| hook value    | from repo root | from `src-tauri/` |
+| ------------- | -------------- | ----------------- |
+| `../frontend` | passes         | **fails** — what shipped |
+| `frontend`    | **fails**      | passes            |
+
+Resolving the path inside the hook does not rescue it either. `$(git rev-parse
+--show-toplevel)/frontend` passes from both of those, and still broke in CI: the
+hook landed in `vendor/openhuman/` — another directory with a `package.json`,
+reached first because a Linux runner enumerates directories in a different order
+than a developer's macOS checkout — and `git rev-parse` inside a submodule
+answers with the *submodule's* root. The CLI offers no flag, config key or
+environment variable naming the app directory, so nothing computed from the
+working directory can be trusted.
+
+Deleting the hook removes the whole class. The cost is that `tauri dev` no longer
+starts Vite for you — run `npm --prefix frontend run dev` alongside it; `devUrl`
+already points at `localhost:5173` — and that packaging a stale console is now
+possible locally, where before it was merely likely. The failure mode is at least
+legible: Tauri reports `Unable to find your web assets … frontendDist is set to
+"../frontend/dist"` with the absolute path it resolved, rather than an `npm
+ENOENT` for a directory nobody named.
+
 ## N connections, and no active one
 
 `frontend/src/connections/registry.ts` holds a map of connections and
@@ -107,6 +182,34 @@ The desktop routes through Rust for three reasons, in the order they bite:
 compares, because the console's error handling reads the status, the body and a
 response header — a transport that differed in any of them would produce
 different `ApiError`s on the desktop for the same server behaviour.
+
+### One reader of `window.__TAURI__`
+
+`app.withGlobalTauri` assigns that global the whole `@tauri-apps/api` bundle, and
+**v2 namespaces it by module**: the keys are `app`, `core`, `dpi`, `event`,
+`image`, `menu`, `path`, `tray`, `webview`, `webviewWindow` and `window`, and
+`invoke` and `Channel` are under `core`. The bare `__TAURI__.invoke` is the v1
+shape and reads `undefined`.
+
+`frontend/src/api/transport/bridge.ts` is the only file that touches the global.
+Before [#616](https://github.com/tinyhumansai/opencompany/issues/616) two
+transports read it separately and both read the v1 shape, so `bridge()` resolved
+to `null`, `oc_connect` never ran, no connection was registered and the console
+reported an unreachable host — a network-shaped symptom for a bug that never
+opened a socket.
+
+The unit tests could not catch it, because they asserted the same wrong shape:
+every mock hand-wrote `{ invoke, Channel }` at the top level, and 82 desktop
+tests passed against a fixture the runtime never produces. So
+`test/unit/desktop-bridge.test.ts` now reads the shape off `@tauri-apps/api`
+itself and asserts the v1 form is **refused** — a mock is evidence only if
+something ties it to the real thing.
+
+`isDesktopRuntime()` still probes for presence alone, deliberately: a `__TAURI__`
+whose `core.invoke` does not resolve is a broken desktop rather than a browser,
+and `ProxyTransport` throwing "the desktop bridge is unavailable" names that,
+where falling back to `BrowserTransport` would bury it in a CORS failure against
+every host.
 
 ### Registration precedes traffic
 

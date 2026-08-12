@@ -120,38 +120,45 @@ async function installDesktopShell(page: Page, fixture: Fixture): Promise<void> 
     }
 
     (window as unknown as { __TAURI__: unknown }).__TAURI__ = {
-      invoke(command: string, args: Record<string, string> = {}) {
-        switch (command) {
-          case "oc_embedded":
-            return Promise.resolve({
-              baseUrl,
-              dataDir: "/tmp/e2e-embedded",
-              instanceId: f.instanceId,
-            });
-          case "oc_connect":
-            hosts.set(args.connectionId, args.baseUrl);
-            return Promise.resolve();
-          case "oc_disconnect":
-            hosts.delete(args.connectionId);
-            return Promise.resolve();
-          case "oc_connections":
-            return Promise.resolve([...hosts.keys()]);
-          case "oc_request":
-            return proxy(
-              args.connectionId,
-              args.request as unknown as Parameters<typeof proxy>[1],
-            );
-          // Opens and stays quiet. The console's poll is the safety net, and a
-          // stream that errors would exercise a reconnect path this spec is
-          // not about.
-          case "oc_subscribe":
-            return Promise.resolve();
-          default:
-            return Promise.resolve(undefined);
-        }
-      },
-      Channel: class {
-        onmessage: unknown = null;
+      // Tauri v2 namespaces the API: `withGlobalTauri` injects the whole
+      // `@tauri-apps/api` bundle, and `invoke`/`Channel` live under `core`. A shim
+      // that puts them at the top level is the v1 shape — the one the console
+      // itself used to read (#616) — so a spec built on it would drive a bridge
+      // the real app can never resolve.
+      core: {
+        invoke(command: string, args: Record<string, string> = {}) {
+          switch (command) {
+            case "oc_embedded":
+              return Promise.resolve({
+                baseUrl,
+                dataDir: "/tmp/e2e-embedded",
+                instanceId: f.instanceId,
+              });
+            case "oc_connect":
+              hosts.set(args.connectionId, args.baseUrl);
+              return Promise.resolve();
+            case "oc_disconnect":
+              hosts.delete(args.connectionId);
+              return Promise.resolve();
+            case "oc_connections":
+              return Promise.resolve([...hosts.keys()]);
+            case "oc_request":
+              return proxy(
+                args.connectionId,
+                args.request as unknown as Parameters<typeof proxy>[1],
+              );
+            // Opens and stays quiet. The console's poll is the safety net, and a
+            // stream that errors would exercise a reconnect path this spec is
+            // not about.
+            case "oc_subscribe":
+              return Promise.resolve();
+            default:
+              return Promise.resolve(undefined);
+          }
+        },
+        Channel: class {
+          onmessage: unknown = null;
+        },
       },
     };
   }, fixture);
