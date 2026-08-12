@@ -45,6 +45,17 @@ export interface RepoList {
    * rather than implying a capability that is not there.
    */
   pullRequestsAvailable: boolean;
+  /**
+   * The roster agents whose effective tool grants include `repo` — who can
+   * actually read any of this (issue #245, agent half).
+   *
+   * One list for the company, not one per binding: the grant is namespace-wide,
+   * so it confers every binding or none. Empty means the repositories are bound
+   * and nobody is allowed to open them, which is a silent misconfiguration the
+   * card names rather than leaves for an operator to discover by asking an
+   * agent.
+   */
+  grantedAgents: string[];
 }
 
 /** A mutating route's body. `repo` is absent on revoke. */
@@ -77,6 +88,10 @@ export async function listRepos(
   return {
     repos: expectList<Repo>(record.repos ?? [], "repository list"),
     pullRequestsAvailable: record.pullRequestsAvailable === true,
+    // An older host that predates the field sends nothing, and "nobody" is the
+    // safe reading: it prompts an operator to check the grant rather than
+    // reassuring them that somebody can read the code.
+    grantedAgents: expectList<string>(record.grantedAgents ?? [], "granted agent list"),
   };
 }
 

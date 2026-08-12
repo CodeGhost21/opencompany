@@ -19,16 +19,19 @@
 //! over the network with the operator's credential, and restricted to the
 //! branches the binding names plus any `refs/pull/N/head` asked for by name.
 //!
-//! There is deliberately **no checkout layer here**. Handing an agent a working
-//! tree off this cache is not a line of code, it is a confinement problem — a
-//! checkout made with `git clone --shared` keeps the mirror's path in
-//! `.git/objects/info/alternates` and, if `origin` is left pointing at it, a
-//! plain `git push` writes straight back into the host cache. Neither removing
-//! `origin` nor a same-uid `chmod` closes that: the path is readable in the
-//! checkout and the pushing process runs as the user that owns the mirror. The
-//! answer is an isolated object copy or a real filesystem boundary, and it
-//! belongs with the tier that actually hands out a checkout. See
-//! `docs/spec/runtime/repos.md`, "Not in this tier".
+//! There is still **no checkout layer here**, and that stays true now that one
+//! exists: handing an agent a working tree off this cache is not a line of
+//! code, it is a confinement problem, so it is solved in
+//! [`crate::harness::repo`] — with the code that has to live with it — and this
+//! module keeps its "reaches an account" scope.
+//!
+//! What that tier decided, because it constrains what may change here: a
+//! checkout is a **full object copy**, cloned over the `file://` transport so
+//! git never hardlinks and never writes an `objects/info/alternates`, and every
+//! reference back to this mirror is severed afterwards. The one thing this
+//! module contributes to it is [`install_push_refusal`] — a `pre-receive` hook
+//! in every mirror, so a push aimed at the mirror's explicit path is refused by
+//! the receiving end. See `docs/spec/runtime/repos.md`.
 //!
 //! ## Where this deliberately departs from the issue text
 //!
@@ -47,7 +50,14 @@
 
 /// Hardened host-side `git`, and the credential helper that keeps the token out
 /// of argv, the environment, and every file on disk. See [`git`].
-mod git;
+///
+/// `pub(crate)` since issue #245's agent half: the checkout tier
+/// ([`crate::harness::repo`]) clones out of a mirror and must do it through
+/// **this** runner. A second runner would fork the security surface — the
+/// hooks pin, the cleared environment and the deadline are properties of this
+/// one function, and a clone that skipped any of them would be the hole the
+/// checkout tier exists to close.
+pub(crate) mod git;
 /// The real [`RepoHost`] over GitHub's REST API. Gated behind `github`, so the
 /// default build links no HTTP client here. See [`github`].
 #[cfg(feature = "github")]
@@ -155,6 +165,15 @@ impl RepoManager {
     /// [`pull_request`](Self::pull_request) can answer.
     pub fn has_host(&self) -> bool {
         self.host.is_some()
+    }
+
+    /// The cache cap in bytes, or `None` for unlimited.
+    ///
+    /// Read by the checkout tier, which refuses a clone that would push the
+    /// company past it *before* transferring anything — the same
+    /// refusal-not-eviction rule this module applies to a fetch.
+    pub fn quota_bytes(&self) -> Option<u64> {
+        self.quota_bytes
     }
 
     /// The mirror cache root.
@@ -492,6 +511,32 @@ impl RepoManager {
                 .await?
                 .require("git config")?;
         }
+        install_push_refusal(mirror)?;
+        // Pin the hooks directory to this mirror's own, ABSOLUTELY, and pin it
+        // in the mirror's repository config where a receiving `receive-pack`
+        // will read it.
+        //
+        // Not belt-and-braces: a `core.hooksPath` in the host's global or system
+        // git configuration silently disables every hook in every repository,
+        // and it is a setting real machines carry (several security and
+        // formatting tools install one). Without this line the push refusal
+        // below is a file on disk that nothing ever executes — which is exactly
+        // how it behaved on the first machine it was tested on. Repository
+        // config outranks global, so pinning it here is what makes the hook a
+        // property of the mirror rather than of whoever's home directory the
+        // host happens to run in.
+        //
+        // Absolute because git resolves a relative `core.hooksPath` against the
+        // process's working directory, not the repository.
+        let hooks = mirror.join("hooks");
+        git::run(
+            mirror,
+            &["config", "core.hooksPath", &hooks.to_string_lossy()],
+            None,
+            None,
+        )
+        .await?
+        .require("git config core.hooksPath")?;
         Ok(())
     }
 
@@ -780,7 +825,11 @@ fn normalize_branches(branches: &[String]) -> Result<Vec<String>> {
 }
 
 /// Validates one ref name.
-fn validate_ref(raw: &str) -> Result<String> {
+///
+/// `pub(crate)` because the checkout tier validates an agent-supplied `ref`
+/// through the same function the bind path validates an operator-supplied
+/// branch through — one shape rule, not two.
+pub(crate) fn validate_ref(raw: &str) -> Result<String> {
     let name = raw.trim();
     let refuse = |why: &str| {
         Err(OpenCompanyError::InvalidRequest(format!(
@@ -812,6 +861,51 @@ fn validate_ref(raw: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
+/// The `pre-receive` hook every mirror carries: a receiving end that refuses
+/// every push, whatever it is called with.
+///
+/// This is the **second** line of the checkout tier's confinement, and it is
+/// stated as such rather than sold as the first. The primary defence is that a
+/// checkout made by [`crate::harness::repo`] holds no reference to this mirror
+/// at all — no `origin`, no `objects/info/alternates`, no `FETCH_HEAD` — so the
+/// sanctioned attack (`git push origin HEAD:refs/heads/main` after a commit)
+/// has no address left to aim at. This hook covers the *other* half: an agent
+/// that learns the mirror's path some other way and pushes to it explicitly.
+/// `git push <path>` runs `receive-pack` there, and `pre-receive` is the first
+/// thing `receive-pack` consults, so the push is refused before a ref moves.
+///
+/// **Honest limit, in the same voice as this module's credential note.** The
+/// agent shell and this host run as the same user, so an agent that escapes
+/// shell confinement can edit or delete this file and then push. It raises the
+/// bar; it is not a kernel boundary. A real one is a distinct uid for the agent
+/// shell or a read-only bind mount, and those are the follow-up named in
+/// `docs/spec/runtime/repos.md`, not a claim made here.
+fn install_push_refusal(mirror: &Path) -> Result<()> {
+    let hooks = mirror.join("hooks");
+    std::fs::create_dir_all(&hooks)
+        .map_err(|e| OpenCompanyError::Store(format!("creating {}: {e}", hooks.display())))?;
+    let hook = hooks.join("pre-receive");
+    std::fs::write(&hook, PUSH_REFUSAL_HOOK)
+        .map_err(|e| OpenCompanyError::Store(format!("writing {}: {e}", hook.display())))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).map_err(|e| {
+            OpenCompanyError::Store(format!("making {} executable: {e}", hook.display()))
+        })?;
+    }
+    Ok(())
+}
+
+/// The hook body. Refuses unconditionally — there is no push this cache should
+/// ever accept, so there is no condition to write.
+const PUSH_REFUSAL_HOOK: &str = r#"#!/bin/sh
+# OpenCompany repository mirror: a read-only cache. It is fetched from a forge
+# by the host and never written to by anything else, so every push is refused.
+echo "opencompany: this mirror is read-only; pushes are refused" >&2
+exit 1
+"#;
+
 /// Removes a directory if it exists. Absent is success.
 async fn remove_dir(path: &Path) -> Result<()> {
     match tokio::fs::remove_dir_all(path).await {
@@ -830,7 +924,7 @@ async fn remove_dir(path: &Path) -> Result<()> {
 /// and for the same reasons — iterative so there is no recursion limit, and
 /// symlinks are not followed so a link cannot be counted twice or walked out of
 /// the tree.
-async fn dir_bytes(dir: &Path) -> Result<u64> {
+pub(crate) async fn dir_bytes(dir: &Path) -> Result<u64> {
     let mut total = 0u64;
     let mut stack = vec![dir.to_path_buf()];
     while let Some(path) = stack.pop() {
@@ -863,7 +957,7 @@ async fn dir_bytes(dir: &Path) -> Result<u64> {
 }
 
 /// Renders a byte count for an operator-facing message.
-fn human_bytes(bytes: u64) -> String {
+pub(crate) fn human_bytes(bytes: u64) -> String {
     const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
     let mut value = bytes as f64;
     let mut unit = 0;

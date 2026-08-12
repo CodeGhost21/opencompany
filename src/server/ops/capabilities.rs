@@ -94,6 +94,17 @@ struct CapabilityStatusDto {
     /// (`[tools].search_daily_calls`, else the built-in default). Reaching it
     /// makes the tool refuse loudly rather than return an empty result set.
     search_daily_call_cap: u32,
+    /// Bound repositories (issue #245, agent half): whether this company
+    /// **explicitly** grants the `repo` namespace (a `*` wildcard does NOT
+    /// count).
+    ///
+    /// The grant alone is not the whole story, and the console says so: a
+    /// company can grant `repo` and bind nothing (the tools are not wired), or
+    /// bind repositories and grant nothing (nobody can read them). Both are
+    /// silent misconfigurations that look like a working setup from one page
+    /// each, which is why this flag travels beside the repositories list rather
+    /// than only inside the manifest.
+    repo_granted: bool,
     /// Whether the agent-side MCP bridge is compiled into this build (issue
     /// #567). Unlike media/composio/search this is **not** a grant question: the
     /// `/mcp/servers` management routes ship in every build, so an operator can
@@ -149,6 +160,7 @@ struct OptInFlags {
     composio_token_configured: bool,
     search_granted: bool,
     search_daily_call_cap: u32,
+    repo_granted: bool,
 }
 
 impl OptInFlags {
@@ -160,6 +172,7 @@ impl OptInFlags {
             composio_token_configured: false,
             search_granted: false,
             search_daily_call_cap: crate::company::DEFAULT_SEARCH_DAILY_CALLS,
+            repo_granted: false,
         }
     }
 }
@@ -185,6 +198,7 @@ fn unconfigured(flags: OptInFlags) -> CapabilityStatusDto {
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
+        repo_granted: flags.repo_granted,
         mcp_in_build: cfg!(feature = "mcp"),
     }
 }
@@ -251,6 +265,10 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
             .tools
             .search_daily_calls
             .unwrap_or(crate::company::DEFAULT_SEARCH_DAILY_CALLS),
+        // Issue #245: opt-in per tool grant like the three above, and read from
+        // the same manifest field, so the repositories card can tell an operator
+        // which half of the setup is missing.
+        repo_granted: crate::company::grants_repo_explicit(&record.manifest.tools.allow),
     };
     let manifest_plan = &record.manifest.plan;
     let Some(plan) = CapabilityPlan::from_manifest(manifest_plan) else {
@@ -307,6 +325,7 @@ async fn effective_status(runtime: &CompanyRuntime) -> Result<CapabilityStatusDt
         search_in_build: cfg!(feature = "openhuman"),
         search_credential_configured: search_credential_configured(),
         search_daily_call_cap: flags.search_daily_call_cap,
+        repo_granted: flags.repo_granted,
         mcp_in_build: cfg!(feature = "mcp"),
     })
 }

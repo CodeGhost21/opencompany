@@ -950,6 +950,16 @@ export interface CapabilityStatusDto {
   /** The company's daily `web_search` call ceiling. */
   searchDailyCallCap?: number;
   /**
+   * Bound repositories (issue #245, agent half): whether the company
+   * **explicitly** grants the `repo` namespace (a `*` wildcard does not count).
+   *
+   * The grant is only half the setup — the other half is whether anything is
+   * bound — so the repositories card reads this alongside the bindings list and
+   * names whichever half is missing. `undefined` is an older host that does not
+   * send the field, and must not be rendered as "not granted".
+   */
+  repoGranted?: boolean;
+  /**
    * Whether the agent-side MCP bridge is compiled into this build (issue #567).
    * Not a grant question like the flags above: the `/mcp/servers` management
    * routes ship in every build, so without this an operator can add a server,

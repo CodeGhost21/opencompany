@@ -71,6 +71,51 @@ use crate::ports::types::{
 };
 use crate::ports::{Cognition, TaskRecord, UsageMetering, generate_id, now_millis};
 
+/// Deletes everything this turn's repository tools materialized, however the
+/// turn ends (issue #245).
+///
+/// The lifecycle a checkout needs is *exactly* a turn's, and a turn ends in five
+/// ways — a reply, an error, a steer cancel, redirect exhaustion, and a panic
+/// unwinding through the whole stack. A cleanup call written at the end of the
+/// happy path covers one of those. So the boundary is an RAII guard claimed at
+/// each entry point instead: `Drop` runs on all five, which is what makes "a
+/// checkout does not outlive the task that asked for it" a property of the
+/// control flow rather than a rule every future edit has to remember.
+///
+/// It purges on the way **in** as well, for the reason the publish claim clears
+/// on the way in: several turns share one `HarnessDeps` within a cycle, and a
+/// path that somehow left a checkout behind must not have it attributed — or
+/// silently reused — by the next one.
+///
+/// Best-effort by construction: a path that cannot be removed is logged and
+/// forgotten, and the boot sweep
+/// ([`repo::sweep_orphaned_checkouts`](crate::harness::repo::sweep_orphaned_checkouts))
+/// is the backstop. A janitor that could fail a turn would trade a disk problem
+/// for a lost answer.
+#[must_use = "the janitor deletes on drop; dropping it immediately removes this turn's checkouts"]
+pub struct CheckoutJanitor {
+    ledger: crate::harness::repo::CheckoutLedger,
+}
+
+impl CheckoutJanitor {
+    /// Claims the ledger for the span of one turn.
+    pub fn claim(ledger: &crate::harness::repo::CheckoutLedger) -> Self {
+        ledger.purge();
+        Self {
+            ledger: ledger.clone(),
+        }
+    }
+}
+
+impl Drop for CheckoutJanitor {
+    fn drop(&mut self) {
+        let removed = self.ledger.purge();
+        if removed > 0 {
+            tracing::debug!(removed, "[repo] removed this turn's checkouts");
+        }
+    }
+}
+
 /// A [`Brain`] that answers with a live openhuman agent turn.
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
@@ -253,6 +298,12 @@ impl HarnessBrain {
                     .pending_publishes
                     .claim(publish::PublishDestination::Conversation)
             });
+        // Issue #245: a re-dispatched approval is a full agent turn with the
+        // whole toolbelt, so it can check a repository out — and a checkout must
+        // not outlive the turn that asked for it. Unconditional: the janitor
+        // over an empty ledger is a no-op, which is what every turn that touches
+        // no repository does.
+        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
@@ -483,6 +534,11 @@ impl HarnessBrain {
         // redirected turn's work, which is a different decision from who is
         // entitled to queue.
         let _delegation_claim = self.deps.delegations.claim();
+        // Issue #245: and the checkout ledger, for the same span. A dispatched
+        // card is where a `repo_checkout` is most likely to happen, and the
+        // guard's `Drop` is what deletes the tree on every exit — success,
+        // error, cancel, redirect exhaustion and panic-unwind alike.
+        let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
         // Issue #339, same argument for staged workflow references: an operator
         // chat turn earlier in this cycle may have run a workflow through the
         // orchestrator's tool, and that run belongs to the conversation, not to
@@ -541,6 +597,12 @@ impl HarnessBrain {
             // part of the loop and never clears, so a nudge cannot discard what
             // the turn it is asking about published.
             self.deps.pending_publishes.clear();
+            // Issue #245, same argument for a checkout: a redirect abandons the
+            // previous turn's work, and a working tree that turn cloned is part
+            // of that work. Deleting it here also means a redirect re-runs
+            // against a fresh checkout rather than one the abandoned turn may
+            // have half-patched.
+            self.deps.checkouts.purge();
             // Issue #339: an abandoned redirect's workflow run is abandoned with
             // it, for the same reason — the card's link must name what the turn
             // that actually settled produced, not what a discarded one did.
@@ -2262,6 +2324,11 @@ impl HarnessBrain {
                                 .pending_publishes
                                 .claim(publish::PublishDestination::Conversation)
                         });
+                    // Issue #245: the chat half of the checkout lifecycle. An
+                    // operator conversation runs the same toolbelt a card does,
+                    // so it can clone a repository, and the guard's `Drop`
+                    // removes it when this turn ends.
+                    let _checkout_janitor = CheckoutJanitor::claim(&self.deps.checkouts);
                     // Drive the brain-agnostic delegation seam (issue #176): the
                     // orchestrator turn, its queued delegations, and the CEO-relay
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
@@ -2605,6 +2672,9 @@ description = "Runs Acme."
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -2765,6 +2835,9 @@ description = "Builds it."
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -2875,6 +2948,9 @@ members = ["engineer"]
             delivery: None,
             search: None,
             workspace: with_workspace.then(|| ops.clone() as Arc<dyn crate::ports::WorkspaceStore>),
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_two()),
@@ -4768,6 +4844,9 @@ members = ["engineer"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record),
@@ -5524,6 +5603,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -5659,6 +5741,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         let brain = HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record());
 
@@ -5740,6 +5825,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -6061,6 +6149,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -6423,6 +6514,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record())
     }
@@ -6733,6 +6827,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record()),
@@ -7061,6 +7158,9 @@ members = ["eng1", "eng2"]
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         };
         (
             HarnessBrain::new(Arc::new(HarnessPool::new()), deps, record_with_desk()),

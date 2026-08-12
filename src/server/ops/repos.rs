@@ -57,6 +57,15 @@ struct RepoList {
     /// which needs a forge HTTP client the default build does not link. The
     /// console uses it to say so rather than offering a control that 501s.
     pull_requests_available: bool,
+    /// The roster agents whose **effective** tool grants include `repo` (issue
+    /// #245, agent half) — i.e. who can actually check any of this out.
+    ///
+    /// One list for the whole company rather than one per binding, because the
+    /// grant is namespace-wide: `repo` confers every binding or none, and a
+    /// per-binding copy of one list would imply a per-repository control that
+    /// does not exist. Empty is the misconfiguration the card names: a company
+    /// that bound repositories nobody is allowed to read.
+    granted_agents: Vec<String>,
 }
 
 /// The reminder attached to every mutating response.
@@ -152,7 +161,30 @@ async fn list_repos(company: ScopedCompany) -> Result<Json<RepoList>, Response> 
     Ok(Json(RepoList {
         repos: list,
         pull_requests_available: repos.has_host(),
+        granted_agents: granted_agents(&company.runtime).await,
     }))
+}
+
+/// The roster agents whose effective grants include `repo`.
+///
+/// Read through the **same** [`roster_grants`] the MCP surface uses, which is
+/// itself the roster the harness builds — so what this page says an agent can
+/// reach is what `build_agent` actually wires, rather than a second answer
+/// derived from the manifest by hand.
+///
+/// A store error degrades to an empty list rather than failing the read: the
+/// bindings are what this route is for, and losing the coverage annotation is a
+/// smaller loss than losing the page. Empty then reads as "nobody", which is the
+/// safe direction — it prompts an operator to check rather than reassuring them.
+async fn granted_agents(runtime: &CompanyRuntime) -> Vec<String> {
+    let Ok(Some(record)) = runtime.store().load(runtime.id()).await else {
+        return Vec::new();
+    };
+    super::mcp::roster_grants(&record)
+        .into_iter()
+        .filter(|(_, grants)| crate::company::grants_repo_explicit(grants))
+        .map(|(id, _)| id)
+        .collect()
 }
 
 // -- POST repos/{key}/revoke -------------------------------------------------
@@ -357,6 +389,10 @@ mod test {
         assert_eq!(response.status(), StatusCode::OK);
         let body = body_json(response).await;
         assert_eq!(body["repos"].as_array().unwrap().len(), 0);
+        // A company that grants no `repo` namespace has nobody who could read a
+        // binding, which is what the card's "bound but nobody holds `repo`"
+        // notice is written from.
+        assert_eq!(body["grantedAgents"].as_array().unwrap().len(), 0);
         // Wired exactly when the forge HTTP client is compiled in, so the
         // console can say "this host can't read diffs" instead of offering a
         // control that answers 501.
@@ -416,11 +452,13 @@ mod test {
                 bound_at_millis: 1,
             }],
             pull_requests_available: false,
+            granted_agents: vec!["ceo".to_string()],
         };
         let json = serde_json::to_string(&list).unwrap();
         assert!(!json.contains("SENTINEL"), "{json}");
         assert!(json.contains("tokenFingerprint"), "{json}");
         assert!(json.contains("pullRequestsAvailable"), "{json}");
+        assert!(json.contains("grantedAgents"), "{json}");
     }
 
     #[test]

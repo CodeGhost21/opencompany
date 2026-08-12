@@ -1,14 +1,16 @@
 # Bound repositories
 
-Issue #245, **operator half**. A company's agents carry a full coding toolbelt
-and, until this exists, nothing real to point it at: the sandbox is an empty
-scratch directory that nothing ever populates, so `code-review` and
-`bug-triage` can only work on text pasted into chat.
+Issue #245. A company's agents carry a full coding toolbelt and, until this
+exists, nothing real to point it at: the sandbox is an empty scratch directory
+that nothing ever populates, so `code-review` and `bug-triage` can only work on
+text pasted into chat.
 
-This document specifies the half that ships first: an operator binds a
-repository and a credential, and the host keeps a mirror of it. **There is no
-agent surface here** — no `repo` grant, no `repo_checkout`, no
-`repo_pr` tool, nothing that puts a checkout into a workspace during a turn.
+It shipped in two halves, and this document describes both:
+
+| Half | Ships | Lives in |
+| --- | --- | --- |
+| **Operator** | Bind a repository + credential; the host keeps a bare mirror | `runtime::repo_manager` |
+| **Agent** | `repo_checkout` / `repo_pr` behind an explicit `repo` grant | `harness::repo` |
 
 ## Why the split is here and not somewhere else
 
@@ -23,7 +25,7 @@ A stored token with no revoke, or a mirror with no quota, or a bind whose
 failure leaves a live credential behind, are each a real exposure that lives on
 `main` between two merges.
 
-## The one layer that ships here
+## The one host-owned layer
 
 | | Location | Written by | Network |
 | --- | --- | --- | --- |
@@ -40,10 +42,11 @@ quota walk `DataLayout::usage_bytes` already performs. Nothing in the fs store
 reads or creates it; on a mongodb tenant no other part of that directory exists
 at all, so the cache creates its own parents.
 
-There is **no checkout layer here**, and that is a correction rather than a
-scope note — an earlier draft of this tier shipped a `RepoManager::materialize`
-with no caller. See ["The checkout tier's actual
-problem"](#the-checkout-tiers-actual-problem).
+The **checkout** — a confined working tree inside one agent's workspace — is
+the agent half's, and is specified under ["Confining a
+checkout"](#confining-a-checkout). It is deliberately not in the operator
+module: it is a confinement problem, so it is solved with the code that has to
+live with it.
 
 ## Credential handling
 
@@ -158,7 +161,7 @@ Every invocation is also bounded by a deadline. A git that reaches a network it
 cannot finish talking to does not fail — it waits, and the HTTP request waits
 with it.
 
-## The checkout tier's actual problem
+## Confining a checkout
 
 The issue proposes hardlinking objects from the cache into each checkout: same
 filesystem, near-instant. It is also shared mutable state — a hardlinked object
@@ -166,8 +169,8 @@ file *is the same inode* as the mirror's, so an agent that can write in its
 workspace can `chmod` and rewrite an object every other agent's checkout
 resolves through.
 
-`git clone --shared` is **not** the answer to that, and this document said it
-was. A `--shared` clone records the mirror's path in
+`git clone --shared` is **not** the answer to that, and an earlier draft of this
+document said it was. A `--shared` clone records the mirror's path in
 `.git/objects/info/alternates` and leaves `origin` pointing at it, so a commit
 in the checkout followed by `git push origin HEAD:refs/heads/main` advances the
 host's mirror directly — an agent can poison what every later checkout of that
@@ -177,12 +180,109 @@ removing or replacing `origin` does not either: the mirror's path is still
 sitting in the alternates file, and the pushing process is the same uid that
 owns the mirror, so a `chmod` is not a boundary.
 
-Confining a checkout therefore needs one of: an isolated object copy (a clone
-that shares no objects with the cache), or a real filesystem boundary — a
-read-only bind mount, or a distinct uid for the agent shell. That is a design
-decision about the tier that hands an agent a checkout, so it is made there,
-with the code that has to live with it. **No checkout is materialized in this
-tier**, and the follow-up must resolve this before any clone is wired.
+### What ships: a full object copy, then sever
+
+1. **Refresh the mirror** host-side, through the same hardened, credentialed
+   fetch the bind path uses (plus `refs/pull/N/head` when a pull request is
+   named). This is the only thing in the process that touches the token.
+2. **Clone over the `file://` transport** into
+   `<workspace>/repos/<key>`, `--single-branch`. The URL form is load-bearing
+   and must not be "simplified" to a bare path: a path-shaped source turns on
+   git's local optimization — hardlinks, or an alternates entry under
+   `--shared` — while a `file://` URL forces the ordinary fetch/pack path and
+   produces a genuine object **copy**.
+3. **A pull request** is fetched by refspec into `refs/oc/pr/N` and checked out
+   detached, *before* the sever — the only window in which the checkout is
+   allowed to name the mirror at all.
+4. **Sever.** Remove `origin`; delete `.git/FETCH_HEAD` and `.git/ORIG_HEAD`,
+   both of which record the source URL verbatim; and hard-error if
+   `.git/objects/info/alternates` exists, because if it does, git shared objects
+   and the checkout's isolation is a fiction. Reflogs never exist: the clone
+   sets `core.logAllRefUpdates=false` in the new repository *before* fetching,
+   so `clone: from file:///…` is never written into `.git/logs/HEAD` — a file no
+   `remote remove` touches, and the leak that would make "severed" a claim about
+   one file rather than a property of the directory.
+
+After step 4, **no byte under the checkout's `.git/` names the mirror**, which
+is what the test asserts — by grep, over every file.
+
+### The second line, and its honest limit
+
+Every mirror also carries an always-refusing `pre-receive` hook, so a push aimed
+at the mirror's *explicit path* is refused by the receiving end rather than
+relying on the pusher having no address.
+
+It is the second line, not the first, and the difference matters: the primary
+defence is that the sanctioned attack has no address left to aim at. The agent
+shell and the host run **as the same user**, so an agent that escapes shell
+confinement can edit or delete that hook and then push. This raises the bar; it
+is not a kernel boundary. The real ones — a distinct uid for the agent shell, or
+a read-only bind mount — are the same follow-up named under ["The honest
+limit"](#the-honest-limit), and are not claimed here.
+
+### The lifecycle
+
+A checkout's life is exactly one turn's. Every path the tools create is recorded
+on a per-turn ledger, and an RAII janitor claimed at each turn's entry point
+deletes them on the way out — success, error, steer cancel, redirect exhaustion
+and panic-unwind alike. A mid-loop redirect deletes the abandoned turn's
+checkout too, so a re-run starts from a fresh tree rather than one a discarded
+turn half-patched.
+
+A host killed mid-turn ends no turn, so boot sweeps
+`<harness>/<company>/*/workspace/repos` before the company starts. It is
+tenant-scoped: one company booting can never delete another's bytes.
+
+`workspace/repos` is on the publish scan's skip list. Cloned source and spilled
+diffs are third-party content that appears as thousands of new files the moment
+a checkout runs, and issue #244's nudge must never ask an agent whether somebody
+else's repository is a deliverable.
+
+## The agent surface
+
+Two tools, behind an **explicit** `repo` grant. The catch-all `*` does not
+confer it — the `media` / `composio` / `search` precedent, and sharper here:
+a checkout puts a third party's source inside a sandbox the same agent may hold
+`shell` over, so a wildcard set for file and shell tools must not carry it in.
+
+| Tool | Does | Answers with |
+| --- | --- | --- |
+| `repo_checkout(repo, ref? \| pr?)` | Refresh, clone, sever | A workspace-**relative** path and the head commit — never the mirror's path |
+| `repo_pr(repo, number)` | Metadata + unified diff, host-side | The diff inline, or a workspace file when it is too large to read inline |
+
+Three gates, and the third is not redundant: an explicit grant, a wired manager,
+and **at least one binding**. A granted, wired, unbound company has nothing to
+resolve against, so every call would be a refusal listing an empty set — wiring
+nothing and warning is the honest state, and it is what the console's
+"granted but nothing bound" notice tells the operator to fix.
+
+A `repo` argument is a **lookup** against what the operator bound — by key, by
+canonical URL (through the same strict parser the bind route uses), or by
+`owner/repo` — and an unknown one is refused with the list of what *is* bound.
+Nothing an agent passes is ever interpolated into a path or a URL. An
+agent-supplied `ref` goes through the same validator an operator-supplied branch
+does, and must be one the binding actually mirrors.
+
+Both tools are `Reach::Consequence`, `Standing::PerCall`: **park** under
+`supervised` and `auto`, **denied** under `readonly`, allowed under `full`. Both
+names read like reads and neither is one in the sense the declaration table
+means — each pulls third-party-authored content into the agent's context and
+reaches the forge host-side under the operator's credential, and one of them
+writes a tree.
+
+Neither is feature-gated. The mirror and the git runner are always compiled, and
+without a forge client `repo_pr` degrades through the manager's honest
+"not wired" answer rather than through a build that omits the tool — hiding an
+agent-reachable surface behind a feature no CI job compiles is how three
+previous gaps happened.
+
+### Quota, before the bytes move
+
+A checkout is refused — not evicted — when it would push the company past
+`[workspace].tree_quota_gb`, estimated at `2 ×` the mirror's measured size and
+checked before anything is transferred. Same rule as the fetch path, same
+reason: quietly deleting somebody else's checkout to make room turns a disk
+problem into a mystery.
 
 ## Two deliberate departures from the issue
 
@@ -264,8 +364,15 @@ answers "not wired" rather than an empty diff a caller would read as "no
 changes", and `GET …/repos` reports `pullRequestsAvailable: false` so the
 console can say so instead of offering a control that fails.
 
-Diffs are truncated at 1 MiB with a visible marker. Spilling an oversized diff
-to a file belongs to the tier that has a workspace to spill into.
+Diffs are truncated at 1 MiB with a visible marker, host-side. The agent tier
+adds a second, smaller boundary for a different reason: every tool result is cut
+on its way into the model's context, so an in-band megabyte would be silently
+clipped to a fraction of itself with no way to reach the rest. A diff over the
+inline cap is therefore written whole into `<workspace>/repos/<key>.pr-N.diff`
+and the reply names that path — a file the agent can read, grep and page with
+the tools it already holds. The reply also says which of the two cuts it is
+looking at, because "the host stopped at 1 MiB" and "too big to read inline"
+call for different next moves.
 
 ## Testing
 
@@ -286,14 +393,57 @@ Two binds racing on one key are driven concurrently, because the failure they
 guard against only exists in the interleaving — see
 ["Concurrent binds"](#concurrent-binds).
 
+The checkout tier's headline test is an **attack**, not an inspection. It
+materializes a checkout, commits a poison file, then makes both pushes an agent
+could actually make — `git push origin HEAD:refs/heads/main`, and a push naming
+the mirror's path explicitly — and asserts the mirror's refs *and object list*
+are byte-identical afterwards. Asserting "`origin` is absent" would not catch
+the rejected design at all: `--shared` with `origin` removed still shares
+objects.
+
+Isolation is then proved by **destruction**: the mirror directory is deleted and
+`git fsck --strict` and `git log` still succeed in the checkout. A hardlinked
+clone is caught separately by asserting `st_nlink == 1` on every object file,
+and the sever is checked by grepping every byte under `.git/` for the mirror's
+path.
+
+## Freshness
+
+The roster is rebuilt when the binding set moves, fingerprinted over
+`(key, token_fingerprint, branches)` — so a bind, a credential rotation and a
+revoke each reach the agent on the company's next turn with no restart. All
+three have to move it: a rotation changes nothing about *which* repositories
+exist, and a revoke blanks a credential while the key survives, so a roster
+keyed on the set alone would hand an agent a tool over a binding that can no
+longer fetch. `size_bytes` and `last_fetched_millis` are deliberately excluded —
+both move on every fetch, and a fetch is what the agent's own tool does.
+
+## Console
+
+Grants are **not editable** from the console, for any namespace: a tool grant is
+version-controlled manifest state, and `AgentDetailDto.editable` excludes tools
+for both agent sources. So the repositories card *reports* rather than offers a
+control it could not honour.
+
+It states who can open a checkout — resolved through the same roster-grant walk
+the harness builds agents with, so it says what is wired rather than what the
+manifest looks like it should wire — and names whichever half of the setup is
+missing:
+
+- **granted, nothing bound** → bind one;
+- **bound, nobody holds `repo`** → add `repo` to `[tools].allow`, and a broad
+  `*` deliberately will not do.
+
+Both are otherwise silent: the tools simply are not wired, and the only symptom
+is an agent that says it cannot see the code.
+
 ## Not in this tier
 
-Materializing a checkout at all — see ["The checkout tier's actual
-problem"](#the-checkout-tiers-actual-problem), which the follow-up must answer
-first. Then: the `repo` grant (excluded from `*`, like `composio`),
-`HarnessDeps.repos` with a rebuild fingerprint, `repo_checkout` / `repo_pr`
-tools, clone-into-sandbox lifecycle with deletion at task end, the boot sweep
-for orphaned checkouts, and the grant editor's surfacing of all of it.
+**No push path exists anywhere.** The write tier — PR creation, agent-attributed
+commits, namespaced branches, operator approval — is a separate follow-up, and
+the confinement above is arranged so that adding it is an explicit new capability
+rather than a hole that was already open.
 
-No push path exists anywhere: write tier — PR creation, agent-attributed
-commits, namespaced branches, operator approval — is a separate follow-up.
+Also absent: a distinct uid or read-only bind mount for the agent shell (the real
+filesystem boundary, named under ["The honest limit"](#the-honest-limit)), and
+forges other than GitHub.

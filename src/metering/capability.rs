@@ -192,10 +192,18 @@ impl CapabilityPlan {
 /// * `pro` — `shell` + `code` + `web` at 1M tokens/day.
 /// * `unlimited` — every gateable namespace at `u64::MAX` (effectively
 ///   uncapped), including the real-money `media` tier (issue #109), the
-///   per-tenant `composio` tier (issue #110) and the metered `search` tier
-///   (issue #238). Those three are absent from `free` / `starter` / `pro`, so
-///   those tiers deny them outright unless the manifest opts in with an explicit
-///   `token_budgets = { media = N }` / `{ composio = N }` / `{ search = N }`.
+///   per-tenant `composio` tier (issue #110), the metered `search` tier
+///   (issue #238) and the bound-repository `repo` tier (issue #245). Those four
+///   are absent from `free` / `starter` / `pro`, so those tiers deny them
+///   outright unless the manifest opts in with an explicit
+///   `token_budgets = { media = N }` / `{ composio = N }` / `{ search = N }` /
+///   `{ repo = N }`.
+///
+/// A `repo` token budget behaves like the `search` one below, and for a related
+/// reason: a checkout costs disk and network rather than tokens, so shedding it
+/// on token spend is a blunt cross-subsidy gate. The real ceiling on a checkout
+/// is the company's `[workspace].tree_quota_gb`, enforced as a refusal before
+/// the clone.
 ///
 /// Note what a `search` *token* budget does and does not do: it sheds the tool
 /// once the company's period **token** spend crosses the threshold, which is a
@@ -221,6 +229,7 @@ pub fn plan_named(name: &str) -> Option<CapabilityPlan> {
             ("media", u64::MAX),
             ("composio", u64::MAX),
             ("search", u64::MAX),
+            ("repo", u64::MAX),
         ],
         _ => return None,
     };

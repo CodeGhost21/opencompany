@@ -162,6 +162,13 @@ const TOOL_LABELS: Readonly<Record<string, string>> = {
   workspace_create: "Add a note to its workspace",
   workspace_rename: "Rename a note in its own folder",
   workspace_delete: "Delete a note from its own folder",
+  // Issue #245's pair. Both park per call, so each reaches an operator on the
+  // approval card and again in the Standing permissions list — and both names
+  // read like reads, which is exactly when a label has to say what is actually
+  // happening. "One of the company's repositories" is load-bearing: it tells
+  // the operator the reach is what they bound, not the whole of GitHub.
+  repo_checkout: "Check out one of the company's repositories",
+  repo_pr: "Fetch a pull request from one of the company's repositories",
   memory_store: "Save something to its memory",
   memory_recall: "Look something up in its memory",
   web_fetch: "Fetch a web page",
