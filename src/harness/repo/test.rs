@@ -219,6 +219,8 @@ fn context(
         bindings: bindings.into(),
         workspace,
         ledger: CheckoutLedger::default(),
+        agent: "desk".to_string(),
+        approvals: crate::harness::policy::ApprovalRequestQueue::default(),
     }
 }
 

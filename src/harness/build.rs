@@ -469,6 +469,8 @@ pub fn build_agent(
                         bindings: deps.repo_bindings.clone().into(),
                         workspace: workspace.clone(),
                         ledger: deps.checkouts.clone(),
+                        agent: manifest_agent.id.clone(),
+                        approvals: deps.approval_requests.clone(),
                     },
                 ));
             }
@@ -487,33 +489,58 @@ pub fn build_agent(
         }
     }
 
-    // Repository WRITE tier (issue #734). A distinct, tighter grant than the read
-    // `repo` above: `grants_repo_write_explicit` matches ONLY the exact
+    // Repository WRITE tier (issues #734, #735). A distinct, tighter grant than
+    // the read `repo` above: `grants_repo_write_explicit` matches ONLY the exact
     // `repo.write`, so a bare `repo` (which every read-tier company writes) and
     // the catch-all `*` confer nothing here — a company that asked for agents
     // reading code does not silently get agents pushing it.
     //
-    // #734 only *learns and records* whether a bound credential can push (probed
-    // at bind, re-probed on fetch, stored on `RepoBinding::can_push`); the
-    // `repo_publish` tool that consumes it lands in #735, so this wires NO tool
-    // yet. What it does now is the fail-closed half of #247's requirement: when
-    // `repo.write` is granted but no bound repository has a push-capable
-    // credential, say so and wire nothing, rather than leaving the operator to
-    // discover at publish time that the credential they bound was read-only.
-    // `None` (unknown — unprobed or pre-field) reads as cannot-push here, so only
-    // a proven `Some(true)` clears the warning.
+    // FOUR gates, all fail-closed, and the fourth is the one #734 added: an
+    // explicit `repo.write` grant, a wired manager, at least one binding, AND a
+    // bound credential that can actually push (`can_push == Some(true)`; `None` —
+    // unprobed or pre-field — reads as cannot-push). Missing any one wires
+    // `repo_publish` NOT AT ALL and says which, rather than offering a publish
+    // that would fail at push time on a read-only credential.
+    //
+    // Like the read tier, NOT feature-gated: the mirror and git runner are always
+    // compiled, and `repo_publish`'s push waits on an operator approval the
+    // runtime performs, so there is no forge client to gate the tool behind.
     if crate::company::grants_repo_write_explicit(grants) {
-        let has_push_capable = deps
+        let push_capable = deps
             .repo_bindings
             .iter()
             .any(|binding| binding.can_push == Some(true));
-        if !has_push_capable {
-            tracing::warn!(
+        match (&deps.repos, deps.repo_bindings.is_empty(), push_capable) {
+            (Some(repos), false, true) => {
+                tools.push(crate::harness::repo::repo_publish_tool(
+                    crate::harness::repo::RepoToolContext {
+                        repos: repos.clone(),
+                        bindings: deps.repo_bindings.clone().into(),
+                        workspace: workspace.clone(),
+                        ledger: deps.checkouts.clone(),
+                        agent: manifest_agent.id.clone(),
+                        approvals: deps.approval_requests.clone(),
+                    },
+                ));
+            }
+            (None, _, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but no repository cache is configured \
+                 on this host; repo_publish NOT wired (fail-closed)"
+            ),
+            (Some(_), true, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo.write` but this company has bound no \
+                 repositories; repo_publish NOT wired (fail-closed)"
+            ),
+            (Some(_), false, false) => tracing::warn!(
                 company = %company,
                 agent = %manifest_agent.id,
                 "[build] agent explicitly grants `repo.write` but no bound repository has a \
-                 push-capable credential; write tools NOT wired (fail-closed)"
-            );
+                 push-capable credential; repo_publish NOT wired (fail-closed)"
+            ),
         }
     }
 

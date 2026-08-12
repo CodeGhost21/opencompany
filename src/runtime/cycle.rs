@@ -1231,6 +1231,33 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
     if effect.kind == crate::runtime::WORKFLOW_APPROVE_KIND {
         crate::runtime::workflow_resume::resume_from_effect(rt, effect).await?;
     }
+    // Issue #735: an approved `repo_publish`. `execute` already staged the agent's
+    // commits onto the mirror's `oc/<company>/<task>` ref (the reversible half);
+    // this is the irreversible half — the host-side push to the real remote, done
+    // only now that the operator has approved. At-most-once comes free from the
+    // `approval:<id>` key the caller holds; a denied or expired approval never
+    // reaches here, which is exactly what leaves the remote untouched.
+    if effect.kind == crate::harness::repo::REPO_PUBLISH_EFFECT {
+        let repo = effect
+            .payload
+            .get("repo")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let branch = effect
+            .payload
+            .get("branch")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        match rt.repos() {
+            Some(repos) => repos.push_published(repo, branch).await?,
+            None => {
+                return Err(crate::error::OpenCompanyError::Unimplemented(
+                    "a repository publish was approved but this host has no repository manager \
+                     configured to perform it",
+                ));
+            }
+        }
+    }
     Ok(())
 }
 

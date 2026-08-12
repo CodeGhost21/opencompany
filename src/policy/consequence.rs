@@ -585,6 +585,28 @@ const DECLARED: &[Declared] = &[
     // permission are separate answers (issue #444).
     d("repo_checkout", EffectGroup::Other, Reach::Consequence),
     d("repo_pr", EffectGroup::Other, Reach::Consequence),
+    // `repo_publish` (issue #735) is classified by what the CALL does, which is
+    // deliberately NOT what its approval settles. The call stages the agent's
+    // committed work onto a host-side `oc/<company>/<task>` ref in the mirror and
+    // records an operator approval. It reaches no counterparty, spends nothing,
+    // and the stage is reversible and never leaves the host — so `Nothing` at the
+    // tool layer. The irreversible push to the real remote is a separate native
+    // effect (`repo.publish`, `EffectGroup::Publish`) that the runtime performs
+    // ONLY on the operator's approval, so *that* effect is where the consequence
+    // and its gate live — see the `repo.publish` arm of `perform_effect`.
+    //
+    // `Nothing`, not `Consequence`, is load-bearing rather than a downgrade: a
+    // `Consequence` call PARKS under `supervised`, and a parked call whose
+    // `execute` never ran would have nothing to stage — the checkout it stages
+    // from is deleted at turn end. So the call must run in every mode, and it
+    // does no external harm in any of them: no agent-driven change reaches a
+    // remote without an operator approving the push, which is the property
+    // `readonly` actually promises, kept here by the approval rather than by
+    // refusing a harmless local stage. `EffectGroup::Publish` is the label the
+    // operator's approval card carries; `PerCall` because a standing "publish
+    // whenever" is exactly the grant the `Standing` field refuses to describe,
+    // and every push already parks as its own approval regardless.
+    d("repo_publish", EffectGroup::Publish, Reach::Nothing),
 ];
 
 /// A per-call declaration — the default. `const fn` so [`DECLARED`] stays a
