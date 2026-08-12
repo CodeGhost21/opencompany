@@ -616,11 +616,21 @@ pub fn build_agent(
         // `OcMcpCallTool` replaces upstream's `McpCallTool`: same name/schema,
         // but it classifies + scrubs failures, rewrites the agent-facing text,
         // and records each failure on the shared queue the brain drains.
+        // The metering handle lets `mcp_call_tool` record an `OauthCall` usage
+        // sample per completed call, so a company routing its real work through
+        // MCP stops reading as zero in the Usage view's calls-by-provider chart
+        // and `connections` KPI (issue #698). A `None` meter leaves metering
+        // off, exactly as on the Composio path.
         tools.push(Box::new(OcMcpCallTool::new(
             registry,
             mcp_security,
             secrets,
             deps.mcp_failures.clone(),
+            crate::harness::mcp::McpMetering {
+                company: company.clone(),
+                agent: manifest_agent.id.clone(),
+                meter: deps.meter.clone(),
+            },
         )));
         // Stale-memory mitigation: direct the agent to answer capability
         // questions from a live `mcp_list_servers` call, never from memory.
