@@ -406,6 +406,17 @@ jobs:
       - name: Test the mail surface
         run: scripts/ci/run-scoped-suite.sh "mail (imap)" imap,smtp server::ops::imap
 
+      # `chargebee` (issue #788): the first-party Chargebee MCP server. Rides
+      # this lane rather than earning a job because every test it selects is
+      # offline — the protocol tests drive the axum router through
+      # `ServiceExt::oneshot`, and the tool tests are all rejected by local
+      # validation before a request is built, with the client pointed at port 0
+      # so anything that did reach the network would fail rather than hang.
+      # The only dependency it adds is `reqwest`, which this job already builds
+      # for the default `oauth` feature.
+      - name: Test the Chargebee MCP server
+        run: scripts/ci/run-scoped-suite.sh "chargebee mcp" chargebee chargebee
+
       # Issue #428. The `Console E2E` job drives a REAL host, so it needs a
       # binary. Building one over there would mean a second submodule checkout
       # and a second cold Rust compile — minutes of wall clock to produce a

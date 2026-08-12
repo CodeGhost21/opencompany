@@ -6,6 +6,11 @@
 
 pub mod app;
 pub mod brain;
+/// The first-party Chargebee MCP server (issue #788). A separate deployable, not
+/// part of the tenant workload — see the module docs for why no vendor MCP
+/// server can serve this purpose.
+#[cfg(feature = "chargebee")]
+pub mod chargebee;
 pub mod company;
 /// Local-only runtime host used by the packaged Tauri desktop application.
 /// It embeds the existing operator API and ships the curated company presets;

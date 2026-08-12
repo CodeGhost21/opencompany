@@ -389,6 +389,24 @@ telegram = ["dep:reqwest"]
 # read-only connections catalog compiles without this; only the token-exchanging
 # write routes are gated here (they need the shared `reqwest` client).
 oauth = ["dep:reqwest"]
+# Issue #788: the first-party Chargebee MCP server, built as its own binary
+# (`chargebee_mcp`) and deployed beside the tenant rather than inside it — the
+# tenant workload is an MCP *client* and reaches this over `https://`. The
+# protocol layer needs only `axum` + `serde_json`, both non-optional, so the
+# sole gated dependency is the shared `reqwest` client the Chargebee REST calls
+# use. `src/chargebee/` compiles only under this feature and nothing else in the
+# crate references it, so the default build is byte-for-byte unaffected.
+chargebee = ["dep:reqwest"]
+
+# Declared explicitly, unlike `opencompany`, purely to carry `required-features`:
+# without it `cargo build --all-targets` on a default build would try to compile
+# a binary whose dependencies are not in the graph. The name matches the file
+# stem so Cargo merges this with the auto-discovered target rather than defining
+# a second one.
+[[bin]]
+name = "chargebee_mcp"
+path = "src/bin/chargebee_mcp.rs"
+required-features = ["chargebee"]
 
 [patch.crates-io]
 # opencompany's own vendored tinyagents (2.1.0). Satisfies openhuman's `^2.1`.

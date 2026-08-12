@@ -168,7 +168,25 @@ and **enabled**, so a fresh install has working tools with no user setup
 # endpoint = "https://mcp.deepwiki.com/mcp"
 # description = "Documentation and Q&A for public GitHub repositories."
 # # optional: allowed_tools / disallowed_tools / timeout_secs / enabled
+#
+# [[default_mcp_server]]
+# name = "chargebee"
+# endpoint = "https://<your-deployment>/mcp"
+# description = "Chargebee billing: create invoices, record payments, read subscriptions."
 ```
+
+The `chargebee` row above stays commented for a reason that is not the same as
+deepwiki's: its `endpoint` is **deployment-specific**. The server is this repo's
+own `chargebee_mcp` binary (issue #788, see `docs/modules/chargebee.md`), and
+until somebody deploys it there is no URL to write here. A default whose
+endpoint does not resolve is worse than no default — every agent on the install
+gets a server that fails at its first tool call. Fill it in when the deployment
+exists, not before.
+
+Note what is *absent* from that row: no `auth_secret`, and no token in the URL.
+That is not an omission, it is the design — see the rules below. The Chargebee
+API key lives in the MCP server's own environment (`CHARGEBEE_API_KEY`), which
+is precisely what lets this be a default at all.
 
 **An empty or absent list means "ship no defaults"** — never "fall back to a
 built-in set". There is no compiled-in list to fall back to, which is what makes
