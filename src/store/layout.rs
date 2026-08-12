@@ -96,10 +96,7 @@ impl DataLayout {
     /// [`usage_bytes`](Self::usage_bytes) already sums every regular file under
     /// the root, and this hangs off the root like everything else.
     pub fn agent_audit_dir(&self, slug: &str, agent_id: &str) -> PathBuf {
-        self.companies_dir()
-            .join(slug)
-            .join("audit")
-            .join(agent_id)
+        self.companies_dir().join(slug).join("audit").join(agent_id)
     }
 
     /// Instance-shared memory artifacts.

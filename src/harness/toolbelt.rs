@@ -611,12 +611,7 @@ mod tests {
     fn shell_tools_expose_expected_names() {
         let ws = Path::new("/tmp/oc-toolbelt-shell");
         let security = test_security(ws, PolicyMode::Supervised);
-        let tools = shell_tools(
-            security,
-            native_runtime(),
-            Some(ShellAudit::disabled()),
-            ws,
-        );
+        let tools = shell_tools(security, native_runtime(), Some(ShellAudit::disabled()), ws);
         let got = names(&tools);
         for expected in ["shell", "read_workspace_state"] {
             assert!(got.contains(&expected), "missing {expected}: {got:?}");

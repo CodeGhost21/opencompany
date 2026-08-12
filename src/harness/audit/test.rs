@@ -308,8 +308,7 @@ fn the_audit_sink_never_lands_under_the_workspace_tree() {
     // transcribe the path a second time.
     assert_eq!(
         audit,
-        DataLayout::new(tenant.data_root())
-            .agent_audit_dir(tenant.company.as_ref(), &tenant.agent),
+        DataLayout::new(tenant.data_root()).agent_audit_dir(tenant.company.as_ref(), &tenant.agent),
     );
 }
 
@@ -342,7 +341,11 @@ async fn a_real_shell_call_records_only_into_the_host_owned_sink() {
     );
 
     let result = attempt(&tools, "shell", json!({ "command": "echo audited" })).await;
-    assert!(!result.is_error, "the command must run: {}", result.output());
+    assert!(
+        !result.is_error,
+        "the command must run: {}",
+        result.output()
+    );
 
     let sink = audit_dir.join("audit.log");
     let recorded = String::from_utf8(read(&sink)).expect("utf-8 audit log");
@@ -485,7 +488,11 @@ async fn a_writable_sink_records_intent_before_the_result() {
         .execute(json!({ "command": format!("echo ran > {}", marker.display()) }))
         .await
         .expect("tool answers");
-    assert!(!result.is_error, "the command must run: {}", result.output());
+    assert!(
+        !result.is_error,
+        "the command must run: {}",
+        result.output()
+    );
     assert!(marker.exists(), "the command must have actually run");
 
     let log = String::from_utf8(read(&audit_dir.join("audit.log"))).expect("utf-8");
@@ -613,7 +620,11 @@ fn the_wrapper_delegates_the_whole_advertised_surface() {
     );
 
     assert_eq!(wrapped.name(), bare.name());
-    assert_eq!(wrapped.name(), "shell", "the grant gate keys on this literal");
+    assert_eq!(
+        wrapped.name(),
+        "shell",
+        "the grant gate keys on this literal"
+    );
     assert_eq!(
         crate::harness::toolbelt::namespace_of(wrapped.name()),
         Some("shell"),

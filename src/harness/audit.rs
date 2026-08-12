@@ -52,7 +52,8 @@ use openhuman_core::openhuman as oh;
 use oh::agent::tool_policy::GeneratedToolRuntimeContext;
 use oh::security::{AuditEvent, AuditEventType};
 use oh::tools::{
-    PermissionLevel, ShellTool, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope, ToolSpec,
+    PermissionLevel, ShellTool, Tool, ToolCallOptions, ToolCategory, ToolResult, ToolScope,
+    ToolSpec,
 };
 // Not re-exported from `oh::tools` (upstream's `pub use traits::{…}` list omits
 // it), so it is named through the module it lives in.
