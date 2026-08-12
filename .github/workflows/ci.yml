@@ -433,6 +433,11 @@ jobs:
     name: Rust (openhuman, tinycortex)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # OpenHuman's agent loop requires the same stack its production runtimes
+      # allocate. Apply it to every test invocation in this multi-feature job;
+      # Rust's test harness otherwise creates 2 MiB threads.
+      RUST_MIN_STACK: 16777216
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -524,10 +529,6 @@ jobs:
       # every integration target under `tests/`, present and future.
       - name: Test (openhuman, tinycortex)
         run: cargo test --locked --features openhuman,tinycortex --tests
-        env:
-          # OpenHuman's agent loop requires the same stack its production
-          # runtimes allocate; Rust's test harness otherwise uses 2 MiB.
-          RUST_MIN_STACK: 16777216
 
       # The guard for the next one (issue #475). The step above runs whatever
       # `tests/` holds, but "ran the target" and "the target ran anything" are
