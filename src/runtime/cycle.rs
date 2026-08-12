@@ -867,7 +867,7 @@ working on):\n{}\n]",
             origin_parent: conversation.parent,
             // Issue #796: the task this call was parked from, carried so a
             // standing grant can reclaim the task's checkout across parks.
-            origin_task: self.approval_origin_task(id),
+            origin_task: self.approval_work_key(id),
             // Issue #457: which slice of the tool the card was actually about.
             // Read off the **parked effect's own payload** — the arguments the
             // operator was shown — rather than re-derived from anything live, so
@@ -914,7 +914,7 @@ working on):\n{}\n]",
             origin_parent: conversation.parent,
             // Issue #796: the task this call was parked from, so the
             // re-dispatched turn can reclaim its held-across-park checkout.
-            origin_task: self.approval_origin_task(id),
+            origin_task: self.approval_work_key(id),
         };
         self.rt.journal.record_granted(&grant).await?;
         self.rt.grants.grant(grant);
@@ -926,18 +926,32 @@ working on):\n{}\n]",
         Ok(())
     }
 
-    /// The task a parked approval belonged to, if it was raised from a task turn
-    /// (issue #796).
+    /// The work unit a parked approval belongs to, for stamping a grant's
+    /// `origin_task` (issue #796).
     ///
-    /// The same `approval_task` join [`consumed_grant_effect`](Self::consumed_grant_effect)
-    /// uses, lifted out so both mint paths stamp a grant's `origin_task` from one
-    /// projection. `None` for an approval raised outside a task.
-    fn approval_origin_task(&self, id: &ApprovalId) -> Option<String> {
-        self.rt
+    /// A task card names it directly. A DM/chat has no card, but its conversation
+    /// is just as much a unit of work — the agent checks out, edits, commits and
+    /// publishes across a batch of approvals raised in the same thread — so the
+    /// thread stands in, sanitised to a single safe branch segment. The checkout
+    /// retention and `repo_publish`'s `oc/<company>/<unit>` branch then key on one
+    /// value for both, and the whole task-scoped machinery covers a DM unchanged.
+    ///
+    /// `None` only when there is neither a card nor a usable thread.
+    fn approval_work_key(&self, id: &ApprovalId) -> Option<String> {
+        if let Some(task) = self
+            .rt
             .journal
             .approval_task(id)
             .flatten()
             .and_then(|task| task.task_id().map(str::to_string))
+        {
+            return Some(task);
+        }
+        self.rt
+            .journal
+            .approval_conversation(id)
+            .and_then(|c| c.thread)
+            .and_then(|thread| sanitize_work_segment(&thread))
     }
 
     /// Describes a grant the agent just redeemed, so an operator-approved tool
@@ -967,7 +981,14 @@ working on):\n{}\n]",
         Some(ExecutedEffect {
             kind: effect.kind.clone(),
             amount_usd: effect.amount_usd,
-            task_id: self.approval_origin_task(id),
+            // The card this call was on, for the retry confirmation (#351) — a
+            // real task only, never the #796 DM work key, which is not a card.
+            task_id: self
+                .rt
+                .journal
+                .approval_task(id)
+                .flatten()
+                .and_then(|task| task.task_id().map(str::to_string)),
             at_millis: now_millis(),
             irreversible: self.rt.approval_gate.is_irreversible(&effect),
         })
@@ -1444,6 +1465,35 @@ async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
         .has_inbound_from(rt.id(), &key, to)
         .await
         .unwrap_or(false) // fail closed → parks for approval
+}
+
+/// Maps a conversation thread into a single safe branch segment (issue #796).
+///
+/// The write tier's branch is `oc/<company>/<unit>`, and for a DM the unit is
+/// its thread — which, unlike a card id, can hold anything. Keep the characters
+/// `RepoManager::validate_task_segment` accepts, fold the rest to `-`, and
+/// prefix `dm-` so the result cannot lead with `-`, cannot be empty, cannot
+/// collide with a card id, and reads as "a conversation's branch" in `git log`.
+/// `None` when nothing usable survives.
+fn sanitize_work_segment(thread: &str) -> Option<String> {
+    let cleaned: String = thread
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['-', '.']);
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Bound the body well under `validate_task_segment`'s 128-char cap; the
+    // characters are all ASCII, so a byte take is a char take.
+    let body: String = cleaned.chars().take(100).collect();
+    Some(format!("dm-{body}"))
 }
 
 /// The board task a cycle is working, read off its own trigger events
@@ -2269,6 +2319,27 @@ impl CycleHost for CycleHostImpl<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Issue #796: a DM's thread becomes a safe, `dm-`-prefixed branch segment
+    /// `RepoManager::validate_task_segment` accepts; an empty or all-garbage
+    /// thread yields nothing, so `repo_publish` refuses rather than build a
+    /// broken ref.
+    #[test]
+    fn sanitize_work_segment_makes_a_safe_branch_segment() {
+        assert_eq!(sanitize_work_segment("coder"), Some("dm-coder".into()));
+        // Colons, slashes and spaces fold to '-'.
+        assert_eq!(
+            sanitize_work_segment("dm:coder/main x"),
+            Some("dm-dm-coder-main-x".into())
+        );
+        // Leading/trailing separators are trimmed before the prefix.
+        assert_eq!(sanitize_work_segment("--weird--"), Some("dm-weird".into()));
+        // Dots and underscores are already valid and survive.
+        assert_eq!(sanitize_work_segment("a_b.c"), Some("dm-a_b.c".into()));
+        // Nothing usable.
+        assert_eq!(sanitize_work_segment(""), None);
+        assert_eq!(sanitize_work_segment("///"), None);
+    }
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 

@@ -417,9 +417,6 @@ impl HarnessBrain {
         if let Some(task) = &origin_task {
             self.deps.checkouts.reclaim(task);
         }
-        // Issue #242/#796: where this turn's own approval requests begin, so a
-        // re-park can be told from a queue entry inherited from earlier.
-        let approvals_before = self.deps.approval_requests.queued();
         // Un-streamed, like a dispatched card: this turn is answered by the
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
@@ -433,13 +430,20 @@ impl HarnessBrain {
             )
             .await;
         drop(guard);
-        // Issue #796: if this turn parked again — the resumed step, or a further
-        // one, needs another approval — hold the task's checkout across that park
-        // too. Otherwise the janitor's `Drop` deletes the reclaimed tree, which
-        // is this task's repo work finishing.
-        if let Some(task) = &origin_task
-            && self.deps.approval_requests.queued() > approvals_before
-        {
+        // Issue #796: hold the task's checkout across the turn boundary on EVERY
+        // re-issue, not only one that parks a new approval.
+        //
+        // A write is a chain of separately-approved steps — checkout, edit,
+        // commit, publish — and an operator commonly approves them in a batch, so
+        // the grants exist up front. Re-issuing one grant then need NOT queue a
+        // new approval, yet the checkout it just materialized (or the commit it
+        // just made) must still be there when the next grant is re-issued in its
+        // own turn. Retaining only on a fresh park dropped exactly that tree the
+        // turn it was created. So retain unconditionally here; the checkout is
+        // reclaimed on the next re-issue, and `sweep_orphans` at the next claim
+        // deletes it once no live grant names the task — the flow finished, was
+        // denied, or expired.
+        if let Some(task) = &origin_task {
             self.deps.checkouts.retain_for_task(task);
         }
 
@@ -6589,48 +6593,49 @@ members = ["eng1", "eng2"]
             .all(|e| !matches!(e.event, CompanyEvent::AgentReply { .. }))
     }
 
-    /// Issue #796: an approved grant that carries an origin task reclaims that
-    /// task's checkout held across the park, so the resumed step works on the
-    /// tree — and commit — the parked step left. A redispatch that then ends
-    /// without parking again lets the janitor delete it, the task's repo work
-    /// having finished.
+    /// Issue #796: a task's checkout survives a whole BATCH of re-issues, the way
+    /// a supervised write actually runs — the operator approves `repo_checkout`,
+    /// the edit, the commit and the publish up front, and each grant is re-issued
+    /// in its own turn. The checkout the first re-issue materializes must still be
+    /// there when the next grant is re-issued, and the one after that.
     ///
-    /// This is the deadlock #796 fixes: under `supervised` every step of
-    /// `repo_checkout` → commit → `repo_publish` parks, and a per-turn delete
-    /// wiped the checkout between them. `MockProvider` parks nothing, so the
-    /// assertion is the whole round trip — held before, reclaimed through the
-    /// turn, deleted after — never wiped early, never stranded.
+    /// This is the exact loop the first cut of the fix still had: retaining the
+    /// tree only on a turn that parked a NEW approval dropped it the moment a
+    /// batched re-issue parked nothing, so the next approved step found the tree
+    /// gone. `MockProvider` parks and consumes nothing, so both grants stay live —
+    /// the task is in flight — and the tree must be held across every re-issue.
     #[tokio::test]
-    async fn an_approved_grant_reclaims_the_task_checkout_it_resumes() {
+    async fn a_task_checkout_survives_a_batch_of_re_issues() {
         let dir = tempfile::tempdir().unwrap();
         let log: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path().to_path_buf()));
         let requests = crate::harness::policy::ApprovalRequestQueue::default();
-        requests
-            .grants()
-            .grant(crate::runtime::grants::GrantedCall {
-                approval_id: ApprovalId::new("appr-1"),
-                agent: "ceo".into(),
-                tool: "git_operations".into(),
-                args: serde_json::json!({ "operation": "commit" }),
-                at_millis: now_millis(),
-                origin_thread: None,
-                origin_parent: None,
-                // The link that makes the resume reclaim the right tree.
-                origin_task: Some("t-1".into()),
-            });
+        // Two of the task's steps approved up front (a batch), both under t-1.
+        for (id, tool) in [("appr-1", "repo_checkout"), ("appr-2", "git_operations")] {
+            requests
+                .grants()
+                .grant(crate::runtime::grants::GrantedCall {
+                    approval_id: ApprovalId::new(id),
+                    agent: "ceo".into(),
+                    tool: tool.into(),
+                    args: serde_json::json!({}),
+                    at_millis: now_millis(),
+                    origin_thread: None,
+                    origin_parent: None,
+                    // The link that makes each re-issue reclaim the same tree.
+                    origin_task: Some("t-1".into()),
+                });
+        }
         let brain = brain_with_queue_and_events(dir.path(), requests, log.clone());
 
-        // The checkout the parked commit step left, held under its task.
+        // The checkout the task's first step materialized, held under its task.
         let tree = dir.path().join("held-checkout");
         std::fs::create_dir_all(&tree).unwrap();
         brain.deps.checkouts.record(tree.clone());
         brain.deps.checkouts.retain_for_task("t-1");
-        assert_eq!(
-            brain.deps.checkouts.retained_tasks(),
-            vec!["t-1".to_string()]
-        );
 
+        // Re-issue the first approved step. The tree must survive the turn — the
+        // task is not done, its other step is still granted.
         brain
             .run_cycle(
                 cycle_over(vec![approval_resolved("appr-1", Verdict::Approve)]),
@@ -6638,17 +6643,31 @@ members = ["eng1", "eng2"]
             )
             .await
             .expect("cycle runs");
-
-        // Reclaimed onto the resuming turn, then deleted by its janitor — the
-        // turn parked nothing, so the task's repo work is finished. It must be
-        // neither wiped before the resume nor stranded in `retained` after.
         assert!(
-            !tree.exists(),
-            "the reclaimed checkout outlived its finished task"
+            tree.is_dir(),
+            "the checkout was wiped between two batched re-issues — the loop is back"
         );
+        assert_eq!(
+            brain.deps.checkouts.retained_tasks(),
+            vec!["t-1".to_string()],
+            "the task's checkout must stay held while the task is in flight"
+        );
+
+        // Re-issue the second approved step. Still held.
+        brain
+            .run_cycle(
+                cycle_over(vec![approval_resolved("appr-2", Verdict::Approve)]),
+                &NoopHost,
+            )
+            .await
+            .expect("cycle runs");
         assert!(
-            brain.deps.checkouts.retained_tasks().is_empty(),
-            "the task's checkout was stranded in the retained set"
+            tree.is_dir(),
+            "the checkout did not survive the second re-issue"
+        );
+        assert_eq!(
+            brain.deps.checkouts.retained_tasks(),
+            vec!["t-1".to_string()]
         );
     }
 
