@@ -361,6 +361,32 @@ There is **no payload**. The record is read back onto an operator's screen
 through `GET …/tasks/{task_id}`, which scrubs by construction, so recipients and
 message bodies are never retained in the first place.
 
+**The amount is admin-only** (issue #705). Unlike the payload, the amount *is*
+retained — the whole point of the record is to say what a retry would repeat,
+and "sent a payment" is a materially weaker warning than "sent a payment of
+$2,400". So it is restricted at read time rather than dropped at write time,
+through the *same* predicate that restricts an approval's amount for issue #618
+(`approval_visibility::may_read_approval_contents`). A Member gets the row —
+what a retry would re-do stays visible to whoever is doing the work — without
+the number.
+
+Two consequences worth stating, because both were a defect before:
+
+* **The decision travels, not the role.** `ScopedCompany` deliberately drops the
+  role at the edge, so it carries what the predicate *decided*. Nothing
+  downstream can answer the question differently, because nothing downstream
+  holds the input.
+* **Hidden is not absent.** `amountUsd` is omitted from a Member's response and
+  `amountHidden: true` is set in its place — but only where an amount was
+  actually withheld. Without that flag a withheld payment and a free tool call
+  are the same bytes, and a reader cannot tell "this cost nothing" from "you may
+  not see what this cost". The flag is skipped when false, so an admin's
+  response is byte-identical to before.
+
+The redaction is applied inside `assemble_detail`, which the JSON route and the
+export document (issue #352) both call, so the guarantee covers the exported
+record too rather than depending on two callers remembering.
+
 The task attribution comes from the cycle that ran the effect. Under
 `supervised` an irreversible effect never executes in the cycle that emitted it
 — it parks, and the operator's approval opens a fresh cycle carrying only
