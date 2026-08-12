@@ -58,12 +58,23 @@ sqlite         | partial      | sqlite                          | store::sqlite
 mongodb        | partial      | mongodb                         | store::mongodb store::select
 acp            | partial      | acp                             | server::acp harness::acp_run_turn
 runner         | partial      | runner                          | runner
-mcp            | partial      | openhuman,mcp,telegram          | harness::build::tests app::types
+mcp            | partial      | openhuman,mcp,telegram,media    | harness::build::tests app::types
 media          | partial      | openhuman,mcp,telegram,media    | harness::build::tests harness::toolbelt
-composio       | partial      | openhuman,tinycortex,composio   | composio
-sidecar        | partial      | sidecar                         | brain::sidecar
+composio       | partial      | openhuman,tinycortex,composio   | harness::composio::isolation_tests harness::composio::ops_helper_tests
 export         | partial      | export                          | store::export
 imap           | partial      | imap,smtp                       | server::ops::imap
+
+# --- Owed a lane: gated tests exist, and they are currently RED -------------
+#
+# Not a third kind of "fine". These are debts, listed so they are countable
+# instead of silent — which is the whole complaint of #770. Each names the issue
+# that will close it, and the script rejects an `owed` row that names no issue or
+# that turns out to have no gated tests at all.
+#
+# No lane is added for these on purpose: a lane permitted to be red is the state
+# #428 was filed about, at more expense. The lane lands with the fix.
+
+sidecar        | owed         | -                               | 14 gated tests, 12 green — the two offline end-to-end cases the feature advertises fail (the inference callback fires zero times). Tracked in #800; the lane lands with the fix.
 
 # --- Compile-only, by design ------------------------------------------------
 #
