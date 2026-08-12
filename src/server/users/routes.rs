@@ -534,7 +534,13 @@ async fn request_code(
 ///
 /// Not "will this send succeed" — a wired transport that errors still counts,
 /// because the attempt is what the resend throttle rate-limits.
-fn mail_transport_wired(state: &AppState) -> bool {
+///
+/// Shared with the admin invite route (issue #584) so "can this host mail at
+/// all" keeps one answer. It matters there for a reason beyond tidiness: an
+/// invite mailed through some *other* transport would invite someone into a
+/// dead flow, because the magic link they then ask for is gated on exactly
+/// this predicate. One transport, one truthful answer.
+pub(crate) fn mail_transport_wired(state: &AppState) -> bool {
     let connections = state.connections();
     connections.mail.is_some() && connections.mail_credentials.is_some()
 }
