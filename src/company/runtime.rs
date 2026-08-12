@@ -2076,6 +2076,58 @@ mod tests {
         }
     }
 
+    /// Issue #576: a prompt-box card buys **exactly one** planning pass across
+    /// its whole life — not zero, not two.
+    ///
+    /// The assertions above pin the edge one transition at a time. This walks
+    /// the sequence a self-promoting card actually goes through and *counts*,
+    /// because the two ways to get this wrong are both invisible to a
+    /// single-transition test:
+    ///
+    /// * **Zero** — the card is created directly in `planning` rather than
+    ///   moved there, so if entry required a previous column there would be no
+    ///   transition to observe and the pass would never fire. The card would sit
+    ///   in Planning forever, which is the one column that must never hold a
+    ///   card at rest.
+    /// * **Two** — the pass writes its plan back onto the card *while the card
+    ///   is still in Planning* (`harness::planning`, via `upsert_task`). If
+    ///   resting in the column counted as entering it, that write-back would
+    ///   start a second pass, which would write back, and bill a model call each
+    ///   time.
+    ///
+    /// A test that merely asserted "it planned" would pass in the second case.
+    #[test]
+    fn a_prompt_box_card_buys_exactly_one_planning_pass() {
+        // The life of a card opened from the prompt box: created directly in
+        // Planning, its plan written back while it rests there, then settled
+        // onward by the pass itself.
+        let life = [
+            (None, "planning"),                // the prompt box opens it
+            (Some("planning"), "planning"),    // the pass writes the plan back
+            (Some("planning"), "in_progress"), // the success settle
+        ];
+        let fires = life
+            .iter()
+            .filter(|(prev, next)| task_enters_planning(*prev, next))
+            .count();
+        assert_eq!(
+            fires, 1,
+            "a prompt-box card must buy exactly one planning pass: {life:?}"
+        );
+
+        // And the failure exit, which returns the card to To-do, must not buy a
+        // second one on the way out either.
+        let returned = [(None, "planning"), (Some("planning"), "todo")];
+        assert_eq!(
+            returned
+                .iter()
+                .filter(|(prev, next)| task_enters_planning(*prev, next))
+                .count(),
+            1,
+            "a pass that returned the card must still have cost exactly one"
+        );
+    }
+
     /// The two edges are mutually exclusive by construction: one write names
     /// one target column, so no upsert can both plan and dispatch a card. This
     /// is what makes the "planning happens BEFORE dispatch" ordering structural
