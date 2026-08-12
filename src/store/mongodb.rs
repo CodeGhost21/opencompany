@@ -37,7 +37,10 @@ use async_trait::async_trait;
 use futures::stream::BoxStream;
 use futures::stream::TryStreamExt;
 use mongodb::bson::{Document, doc};
-use mongodb::options::{FindOneAndUpdateOptions, IndexOptions, ReturnDocument, UpdateOptions};
+use mongodb::options::{
+    CollectionOptions, FindOneAndUpdateOptions, IndexOptions, ReturnDocument, UpdateOptions,
+    WriteConcern,
+};
 use mongodb::{Client, Collection, Database, IndexModel};
 use tokio::sync::broadcast;
 
@@ -180,6 +183,13 @@ fn node_path_key(node: &crate::ports::workspace::WorkspaceNode) -> Option<String
     (node.kind == crate::ports::workspace::NodeKind::File)
         .then(|| file_path_key(node.parent_id.as_deref(), &node.name))
 }
+
+/// The runtime journal's collection: one document per record (issue #726).
+const JOURNAL: &str = "journal";
+
+/// One document per company recording that its filesystem journal has been
+/// imported — the gate that makes the import happen exactly once.
+const JOURNAL_IMPORTS: &str = "journal_imports";
 
 /// A single MongoDB database implementing all five storage ports.
 #[derive(Clone)]
@@ -337,11 +347,45 @@ impl MongoStore {
             .create_index(nonunique(doc! {"company_id": 1, "at_ms": -1}))
             .await
             .map_err(mongo_err)?;
+        // Issue #726: the runtime journal. `(company_id, seq)` is unique because
+        // two records sharing a sequence would order arbitrarily on replay, and
+        // an at-most-once key replayed before the resolution that consumed it is
+        // the failure the journal exists to prevent. The import receipt is one
+        // document per company. Created outside the fixed array above so adding
+        // them does not disturb its length.
+        self.collection(JOURNAL)
+            .create_index(unique(doc! {"company_id": 1, "seq": 1}))
+            .await
+            .map_err(mongo_err)?;
+        self.collection(JOURNAL_IMPORTS)
+            .create_index(unique(doc! {"company_id": 1}))
+            .await
+            .map_err(mongo_err)?;
         Ok(())
     }
 
     fn collection(&self, name: &str) -> Collection<Document> {
         self.db.collection::<Document>(name)
+    }
+
+    /// A collection handle whose writes are acknowledged only once the server
+    /// has committed them to its on-disk journal (`j:true`).
+    ///
+    /// Scoped to the runtime-journal collections rather than set database-wide,
+    /// and within them to the records that ask for it
+    /// ([`Durability::Host`](crate::ports::journal::Durability::Host)), because
+    /// it is bought for one specific contract and costs a disk flush per write:
+    /// the at-most-once guarantee is that an effect's key is durable *before* the
+    /// side effect runs, and the default acknowledgement returns as soon as the
+    /// primary has the write in memory — which a primary crash in the wrong
+    /// millisecond loses, re-arming an effect that already fired.
+    fn journaled(&self, name: &str) -> Collection<Document> {
+        self.db.collection_with_options::<Document>(
+            name,
+            CollectionOptions::builder()
+                .write_concern(WriteConcern::builder().journal(true).build())
+                .build(),
+        )
     }
 
     /// Atomically allocates the next 0-based sequence for `(company, kind)`.
@@ -2001,6 +2045,148 @@ impl crate::ports::schedule_fires::ScheduleFireStore for MongoStore {
 }
 
 // ---------------------------------------------------------------------------
+// JournalStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::journal::JournalStore for MongoStore {
+    /// One journaled `insert_one` per record, sequenced by the same atomic
+    /// `counters` allocator [`EventLog`] uses.
+    ///
+    /// A document insert is atomic server-side, so the torn/merged-line class
+    /// the filesystem backend had to be fixed for (#386) cannot arise here at
+    /// all. The seq comes from the server rather than from a read-then-write, so
+    /// two hosts of one tenant overlapping across a rolling deploy interleave
+    /// without colliding — the same physics as `O_APPEND`, and the reason a
+    /// cross-process lock is not the missing piece.
+    ///
+    /// Fail-closed: an errored or timed-out insert returns `Err` before the
+    /// caller runs the side effect. The residual case — a timeout on a write the
+    /// server did commit — leaves a committed key with no effect, which is the
+    /// at-most-once contract's documented safe direction.
+    ///
+    /// Both durability levels are honoured (issue #392):
+    /// [`Durability::Host`](crate::ports::journal::Durability::Host) writes with
+    /// `j:true`, so the server has committed the insert to its own on-disk
+    /// journal before it acknowledges; `Process` takes the default
+    /// acknowledgement, which returns once the primary holds the write in
+    /// memory. Flattening these together would either tax the journal's
+    /// highest-volume records with a disk flush each, or drop the guarantee that
+    /// keeps an already-fired effect from firing again after a primary crash.
+    async fn append_journal(
+        &self,
+        company: &CompanyId,
+        line: &str,
+        durability: crate::ports::journal::Durability,
+    ) -> Result<()> {
+        use crate::ports::journal::Durability;
+
+        let seq = self.next_seq(company, JOURNAL).await?;
+        let collection = match durability {
+            Durability::Host => self.journaled(JOURNAL),
+            Durability::Process => self.collection(JOURNAL),
+        };
+        collection
+            .insert_one(doc! {
+                "company_id": company.as_ref(),
+                "seq": seq as i64,
+                "line": line,
+            })
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+
+    /// One ordered scan of this company's records, cursor-batched by the driver.
+    ///
+    /// Deliberately unbounded, and **not** a capped collection: capping would
+    /// silently drop the oldest records, and the oldest records are exactly the
+    /// at-most-once keys an effect from months ago committed. Un-committing one
+    /// re-arms that effect. Bounding the journal is a retention question with a
+    /// correctness argument attached (#575/#275 territory), not something a
+    /// storage-shape default gets to decide.
+    async fn read_journal(&self, company: &CompanyId) -> Result<Vec<String>> {
+        let mut cursor = self
+            .collection(JOURNAL)
+            .find(doc! {"company_id": company.as_ref()})
+            .sort(doc! {"seq": 1})
+            .await
+            .map_err(mongo_err)?;
+        let mut out = Vec::new();
+        while let Some(doc) = cursor.try_next().await.map_err(mongo_err)? {
+            out.push(get_str(&doc, "line")?);
+        }
+        Ok(out)
+    }
+
+    async fn journal_imported(&self, company: &CompanyId) -> Result<bool> {
+        Ok(self
+            .collection(JOURNAL_IMPORTS)
+            .find_one(doc! {"company_id": company.as_ref()})
+            .await
+            .map_err(mongo_err)?
+            .is_some())
+    }
+
+    /// Clear, copy, receipt — in that order, and the order carries the whole
+    /// safety argument.
+    ///
+    /// MongoDB gives no transaction across three collections without a replica
+    /// set, so this cannot be atomic the way the sqlite backend's import is.
+    /// It does not need to be: the receipt is written **last**, so an import
+    /// interrupted anywhere leaves the gate open and the next boot re-runs the
+    /// clear-and-copy from the top. What must never happen is a *partial* copy
+    /// behind a *closed* gate — a journal missing its tail is a set of
+    /// at-most-once keys that quietly went missing — and writing the receipt
+    /// last is what makes that unreachable.
+    ///
+    /// The copy is one **ordered** `insert_many`, so the records land in the
+    /// order they were read and the sequence numbers mean what they say.
+    async fn complete_import(&self, company: &CompanyId, lines: Vec<String>) -> Result<()> {
+        let journal = self.journaled(JOURNAL);
+        journal
+            .delete_many(doc! {"company_id": company.as_ref()})
+            .await
+            .map_err(mongo_err)?;
+        if !lines.is_empty() {
+            let docs: Vec<Document> = lines
+                .iter()
+                .enumerate()
+                .map(|(seq, line)| {
+                    doc! {
+                        "company_id": company.as_ref(),
+                        "seq": seq as i64,
+                        "line": line.as_str(),
+                    }
+                })
+                .collect();
+            journal.insert_many(docs).await.map_err(mongo_err)?;
+        }
+        // The counter has to move too, or the first append after an import would
+        // hand out seq 0 and collide with the copy's first row on the unique
+        // index. `$max` rather than `$set`, so a counter that is somehow already
+        // ahead is never wound back.
+        self.collection("counters")
+            .update_one(
+                doc! {"_id": format!("{}:{JOURNAL}", company.as_ref())},
+                doc! {"$max": {"next": lines.len() as i64}},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        self.journaled(JOURNAL_IMPORTS)
+            .update_one(
+                doc! {"company_id": company.as_ref()},
+                doc! {"$set": {"at_ms": now_millis() as i64, "lines": lines.len() as i64}},
+            )
+            .with_options(UpdateOptions::builder().upsert(true).build())
+            .await
+            .map_err(mongo_err)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UsageMeter
 // ---------------------------------------------------------------------------
 
@@ -3026,6 +3212,60 @@ mod test {
                 .and_then(|options| options.unique)
                 .unwrap_or(false),
             "a partial filter without uniqueness would guard nothing at all"
+        );
+    }
+
+    /// **Issue #392 through the port**: the host-durable append asks the server
+    /// for `j:true`, and the process-durable one does not.
+    ///
+    /// `assert_journal_store` cannot catch this — a backend that ignored the
+    /// `Durability` argument stores and orders every record identically and
+    /// passes the whole suite, silently dropping the guarantee that keeps an
+    /// already-fired effect from firing again after a primary crash. So the
+    /// constructed handles are asserted directly, the same way
+    /// `the_partial_filter_is_keyed_on_the_field_not_the_parameter_name` asserts
+    /// a built `IndexModel` rather than the reasoning behind it.
+    ///
+    /// Needs no server: `Client::with_options` resolves lazily and
+    /// `collection_with_options` builds a handle locally, so this runs on the
+    /// `mongodb` feature alone and cannot pass vacuously the way the URI-gated
+    /// tests can. (It is a `tokio::test` only because the driver's constructor
+    /// spawns a cleanup task, not because anything here awaits the network.)
+    #[tokio::test]
+    async fn only_the_host_durable_journal_write_asks_for_j_true() {
+        // A client handle, not a connection: `with_options` resolves lazily and
+        // never touches the network, so this stays a pure shape assertion.
+        let client = Client::with_options(
+            mongodb::options::ClientOptions::builder()
+                .hosts(vec![mongodb::options::ServerAddress::Tcp {
+                    host: "localhost".into(),
+                    port: Some(27017),
+                }])
+                .build(),
+        )
+        .expect("build a client handle");
+        let store = MongoStore {
+            db: client.database("oc_test_shape"),
+            senders: Arc::new(StdMutex::new(HashMap::new())),
+        };
+
+        let host = store.journaled(JOURNAL);
+        assert_eq!(
+            host.write_concern().and_then(|concern| concern.journal),
+            Some(true),
+            "a host-durable record must be committed to the server's journal \
+             before the insert is acknowledged"
+        );
+
+        let process = store.collection(JOURNAL);
+        assert!(
+            process
+                .write_concern()
+                .and_then(|concern| concern.journal)
+                .is_none(),
+            "the process-durable level must NOT pay a disk flush: these are the \
+             journal's highest-volume records, and losing one makes the runtime \
+             re-ask rather than re-fire"
         );
     }
 
