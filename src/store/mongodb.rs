@@ -3588,6 +3588,12 @@ mod test {
     async fn conformance_skill_state_store() {
         let Some(s) = store().await else { return };
         conformance::assert_skill_state_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_read_state_store() {
+        let Some(s) = store().await else { return };
         conformance::assert_read_state_store(s.clone()).await;
         drop_db(&s).await;
     }
