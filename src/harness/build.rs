@@ -771,6 +771,10 @@ pub fn build_agent(
             // The company store, for the `add_agent` tool to persist overlay
             // teammates through the same path the console `POST .../team` uses.
             deps.store.clone(),
+            // Issue #661 (M7): the same revision store the console's workflow
+            // PUT/DELETE routes write through, so an agent edit is undoable and
+            // an agent delete cascades the history on identical terms.
+            deps.workflow_revisions.clone(),
             // Issue #339: the shared queue `run_workflow` / `create_workflow`
             // stage onto, so a dispatched card can link to the workflow its
             // attempt built or ran. Orchestrator-only, like the tools.
@@ -1406,6 +1410,7 @@ mod tests {
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

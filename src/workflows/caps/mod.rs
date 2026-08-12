@@ -293,6 +293,15 @@ pub async fn build_capabilities(
         state,
         resolver,
         agent,
+        // New in tinyflows 0.6.1, pinned here via the #675 cancel-token chain
+        // (openhuman #5520 → tinyflows #31). A `shell` node runs an inline
+        // POSIX script through a host-configured runner; OC wires none, and
+        // whether a workflow may spawn shell processes on the company host is a
+        // policy question this repo has not answered. `None` fails such a node
+        // at run time with a capability error — the honest answer until that
+        // decision is made, and no company manifest can currently author a
+        // `shell` node (mirrors `memory` below).
+        shell: None,
         // New in tinyflows 0.6, which arrived with the #499 pin bump. Left
         // unwired deliberately rather than pointed at the company's context
         // store: a `memory` node would then read and WRITE agent memory on
@@ -606,8 +615,15 @@ impl AgentRunner for HarnessAgentRunner {
         request: Value,
         _conn: Option<&str>,
     ) -> TfResult<Value> {
-        let message =
-            compose_turn_message(&message_from_request(&request), self.run_request.as_deref());
+        // Issue #782: fold the resolved upstream node output into the turn.
+        // `translate` binds `input = "=items"` on every agent node, so the engine
+        // resolves it to the previous step's output before calling us; without
+        // this fold that output had no channel into the agent's turn and was
+        // dropped (a `agent -> agent` pipeline's second teammate saw nothing).
+        // The static `prompt` still leads (`message_from_request`); the upstream
+        // input is appended under a labelled heading, then the #154 run topic.
+        let instruction = append_upstream_input(&message_from_request(&request), &request);
+        let message = compose_turn_message(&instruction, self.run_request.as_deref());
         tracing::debug!(
             company = %self.company,
             agent = agent_ref,
@@ -659,6 +675,109 @@ fn message_from_request(request: &Value) -> String {
         }
     }
     request.to_string()
+}
+
+/// The heading under which an agent node's turn carries its upstream step's
+/// output (issue #782).
+const UPSTREAM_INPUT_HEADING: &str = "## Input from the previous step";
+
+/// Folds the resolved upstream node output into `instruction`.
+///
+/// `translate` binds `input = "=items"` on every agent node, so by the time the
+/// engine calls [`run_agent`](AgentRunner::run_agent) the request's `input` field
+/// holds the `json` of every predecessor item (the `=items` set). This appends a
+/// rendering of that output under [`UPSTREAM_INPUT_HEADING`], *after* the node's
+/// static instruction, so both the standing job (`prompt`) and this run's actual
+/// upstream data reach the teammate.
+///
+/// # The byte-identical no-upstream path
+///
+/// When there is no renderable upstream output — the `input` key is absent (a
+/// hand-built request, or a node whose binding an author cleared), it resolved to
+/// `null`/`[]`, or every item was empty — `instruction` is returned **unchanged**.
+/// A single-agent workflow with no predecessor therefore composes exactly the
+/// message it did before #782, never a dangling empty heading. `message` shape is
+/// then decided by [`compose_turn_message`] alone, as before.
+fn append_upstream_input(instruction: &str, request: &Value) -> String {
+    let Some(section) = request.get("input").and_then(render_upstream_input) else {
+        return instruction.to_string();
+    };
+    let instruction = instruction.trim_end();
+    if instruction.is_empty() {
+        format!("{UPSTREAM_INPUT_HEADING}\n{section}")
+    } else {
+        format!("{instruction}\n\n{UPSTREAM_INPUT_HEADING}\n{section}")
+    }
+}
+
+/// Renders the upstream envelope(s) an agent node received (`request["input"]`,
+/// the resolved `=items` set) into the text the agent reads.
+///
+/// Each predecessor item is a stable `{ json, text, raw }` envelope (see the
+/// tinyflows `envelope` module), so the human-readable `text` (an upstream
+/// agent's prose) is preferred; a non-agent node whose output carries no `text`
+/// (a `tool_call` / `transform` / `output` node) is rendered as pretty JSON.
+/// Multiple predecessors — a fan-in (`merge -> agent`) or several edges into one
+/// agent — are all rendered, separated by a rule, so none is lost.
+///
+/// Returns `None` when nothing is renderable — an empty set, all-`null` items, or
+/// empty containers — which is what keeps the no-upstream path byte-identical.
+fn render_upstream_input(input: &Value) -> Option<String> {
+    let items: Vec<&Value> = match input {
+        Value::Array(items) => items.iter().collect(),
+        Value::Null => return None,
+        other => vec![other],
+    };
+    let rendered: Vec<String> = items.into_iter().filter_map(render_upstream_item).collect();
+    (!rendered.is_empty()).then(|| rendered.join("\n\n---\n\n"))
+}
+
+/// Renders one upstream item into the text an agent reads.
+///
+/// A capability node's output is the stable `{ json, text, raw }` envelope, so an
+/// envelope is unwrapped to its meaningful content — the prose `text` when it
+/// carries any, else the structured `json` — never the whole envelope (whose
+/// `raw` merely duplicates one of the two). A non-envelope value (a trigger
+/// payload, a bare scalar) is rendered directly. `None` for anything with nothing
+/// worth showing — a `null`, a blank string, an empty container, or an envelope
+/// whose text is blank AND whose json is empty — so it is skipped rather than
+/// emitting a blank block or an empty heading.
+fn render_upstream_item(item: &Value) -> Option<String> {
+    match item {
+        Value::Null => None,
+        Value::String(text) => {
+            let text = text.trim();
+            (!text.is_empty()).then(|| text.to_string())
+        }
+        // The `{ json, text, raw }` envelope: prefer prose, fall back to the
+        // structured payload, skip when both are empty.
+        Value::Object(map) if is_envelope(map) => {
+            if let Some(text) = map.get("text").and_then(Value::as_str) {
+                let text = text.trim();
+                if !text.is_empty() {
+                    return Some(text.to_string());
+                }
+            }
+            map.get("json").and_then(render_upstream_item)
+        }
+        Value::Object(map) => {
+            if map.is_empty() {
+                return None;
+            }
+            Some(serde_json::to_string_pretty(item).unwrap_or_else(|_| item.to_string()))
+        }
+        Value::Array(inner) if inner.is_empty() => None,
+        _ => Some(serde_json::to_string_pretty(item).unwrap_or_else(|_| item.to_string())),
+    }
+}
+
+/// Whether `map` is a capability node's stable `{ json, text, raw }` output
+/// envelope (the tinyflows `envelope` contract every capability node emits), so
+/// [`render_upstream_item`] can unwrap it to its content rather than dumping the
+/// redundant `raw`. A plain upstream object (a trigger payload) has no such shape
+/// and is rendered whole.
+fn is_envelope(map: &serde_json::Map<String, Value>) -> bool {
+    map.contains_key("json") && map.contains_key("text") && map.contains_key("raw")
 }
 
 /// Combines a node's authored instruction with the operator's run request
@@ -1010,6 +1129,127 @@ mod tests {
         // No known string key: fall back to the serialized object.
         let out = message_from_request(&json!({ "agent_ref": "x" }));
         assert!(out.contains("agent_ref"));
+    }
+
+    // ── Issue #782: the upstream node's output reaches the next agent's turn ──
+
+    /// The headline. An `agent -> agent` pipeline's second teammate must receive
+    /// the first's output. `translate` binds `input = "=items"`, the engine
+    /// resolves it to the predecessor envelope, and this proves the runner folds
+    /// that envelope's prose into the turn — under a heading, AFTER the node's
+    /// own instruction, so both survive.
+    #[test]
+    fn upstream_output_is_folded_into_the_turn() {
+        // The shape the engine hands us: `prompt` (the node's static job) plus
+        // `input` (the resolved `=items`) — one predecessor agent envelope.
+        let request = json!({
+            "prompt": "Write the launch post.",
+            "input": [{ "json": {}, "text": "The analyst found a 20% MoM jump.", "raw": {} }],
+        });
+        let message = append_upstream_input(&message_from_request(&request), &request);
+        // The node's own instruction still leads.
+        assert!(message.starts_with("Write the launch post."), "{message}");
+        // …the upstream output is present, under its heading…
+        assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
+        assert!(
+            message.contains("The analyst found a 20% MoM jump."),
+            "the previous step's output must reach the turn: {message}"
+        );
+    }
+
+    /// Fan-in: a `merge -> agent` (or several edges into one agent) resolves
+    /// `=items` to EVERY predecessor, and all of them must be delivered — the
+    /// "loses all but the first" failure is exactly what `=items` (not `=item`)
+    /// guards against.
+    #[test]
+    fn fan_in_delivers_every_predecessor() {
+        let request = json!({
+            "prompt": "Combine the research.",
+            "input": [
+                { "json": {}, "text": "Predecessor A: market is up.", "raw": {} },
+                { "json": {}, "text": "Predecessor B: sentiment is positive.", "raw": {} },
+            ],
+        });
+        let message = append_upstream_input(&message_from_request(&request), &request);
+        assert!(
+            message.contains("Predecessor A: market is up."),
+            "first predecessor missing: {message}"
+        );
+        assert!(
+            message.contains("Predecessor B: sentiment is positive."),
+            "second predecessor missing — a fan-in must not lose all but the first: {message}"
+        );
+    }
+
+    /// A non-agent predecessor (a `tool_call` / `transform` / `output` node) has
+    /// no prose `text`, so its structured output is rendered as JSON rather than
+    /// dropped.
+    #[test]
+    fn a_structured_predecessor_is_rendered_as_json() {
+        let request = json!({
+            "prompt": "Summarise the fetch.",
+            "input": [{ "json": { "rows": 3 }, "text": null, "raw": { "rows": 3 } }],
+        });
+        let message = append_upstream_input(&message_from_request(&request), &request);
+        assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
+        assert!(
+            message.contains("\"rows\""),
+            "structured output rendered: {message}"
+        );
+    }
+
+    /// The byte-identical guarantee. A single-agent workflow with no predecessor
+    /// (no `input`, or an empty / all-null / empty-container `input`) composes
+    /// exactly the pre-#782 message — never a dangling empty heading.
+    #[test]
+    fn no_upstream_output_is_byte_identical() {
+        let base = "Draft the launch post.";
+        for input in [
+            None,
+            Some(json!(null)),
+            Some(json!([])),
+            Some(json!([null])),
+            Some(json!([{}])),
+            Some(json!([{ "json": {}, "text": "   ", "raw": {} }])),
+        ] {
+            let mut request = serde_json::Map::new();
+            request.insert("prompt".to_string(), json!(base));
+            if let Some(input) = input.clone() {
+                request.insert("input".to_string(), input);
+            }
+            let request = Value::Object(request);
+            assert_eq!(
+                append_upstream_input(&message_from_request(&request), &request),
+                base,
+                "input {input:?} must not alter the message or add an empty heading"
+            );
+            // And the whole composition (including the #154 run topic) is
+            // unchanged from what `compose_turn_message` alone would produce.
+            let instruction = append_upstream_input(&message_from_request(&request), &request);
+            assert_eq!(
+                compose_turn_message(&instruction, Some("ship dark mode")),
+                compose_turn_message(base, Some("ship dark mode")),
+                "the no-upstream path must leave the run-topic composition untouched"
+            );
+        }
+    }
+
+    /// Upstream output and the #154 run topic coexist: the node's instruction
+    /// leads, the previous step's output follows under its heading, and the run's
+    /// subject follows under its own — all three reach the teammate.
+    #[test]
+    fn upstream_output_and_run_topic_coexist() {
+        let request = json!({
+            "prompt": "Write the post.",
+            "input": [{ "json": {}, "text": "ANALYST_SAID_THIS", "raw": {} }],
+        });
+        let instruction = append_upstream_input(&message_from_request(&request), &request);
+        let message = compose_turn_message(&instruction, Some("dark mode launch"));
+        assert!(message.starts_with("Write the post."), "{message}");
+        assert!(message.contains(UPSTREAM_INPUT_HEADING), "{message}");
+        assert!(message.contains("ANALYST_SAID_THIS"), "{message}");
+        assert!(message.contains("Request for this run:"), "{message}");
+        assert!(message.contains("dark mode launch"), "{message}");
     }
 
     #[test]

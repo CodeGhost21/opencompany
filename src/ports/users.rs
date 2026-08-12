@@ -128,6 +128,21 @@ pub struct InviteRecord {
     /// Epoch-millis timestamp of redemption; `None` while still outstanding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub accepted_at_millis: Option<u64>,
+    /// Epoch-millis timestamp of when the invite mail was accepted by the
+    /// transport; `None` if no mail was sent.
+    ///
+    /// `None` is the honest answer for three different situations, and the
+    /// console says so rather than implying delivery: the host has no mail
+    /// transport wired, the send was attempted and failed, or the record
+    /// predates invite mail existing at all. Every store persists invites as a
+    /// JSON blob, so `serde(default)` is the whole migration — an older row
+    /// loads as `None`, which is true of it.
+    ///
+    /// It records that the transport *accepted* the message, which is the
+    /// furthest thing this process can honestly claim to know. A bounce after
+    /// that point happens somewhere this code cannot see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notified_at_millis: Option<u64>,
 }
 
 impl InviteRecord {
@@ -184,6 +199,24 @@ pub trait UserStore: Send + Sync {
     ) -> Result<Option<InviteRecord>>;
     /// Inserts or replaces an invite by id.
     async fn upsert_invite(&self, company: &CompanyId, invite: &InviteRecord) -> Result<()>;
+    /// Stamps [`InviteRecord::notified_at_millis`] on an invite that still
+    /// exists, leaving every other field alone. Returns whether one was
+    /// updated.
+    ///
+    /// Deliberately narrower than [`UserStore::upsert_invite`], and the
+    /// narrowness is the point. The stamp is written *after* the invite mail
+    /// leaves, which is a network round trip — long enough for an admin who
+    /// mistyped the address to revoke the invite in the meantime. Writing the
+    /// pre-send record back through an upsert would recreate the row they just
+    /// revoked, silently restoring an address to the allowlist. A no-op is the
+    /// correct outcome there: the revocation stands, and nothing claims a mail
+    /// landed for a grant that no longer exists.
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool>;
     /// Deletes an invite by id; returns whether one was removed.
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool>;
 }
@@ -221,6 +254,7 @@ mod test {
             created_at_millis: 0,
             expires_at_millis: 100,
             accepted_at_millis: None,
+            notified_at_millis: None,
         };
         assert!(invite.is_redeemable(99));
         // Expiry is exclusive: at the boundary the invite is already dead.
@@ -229,6 +263,46 @@ mod test {
 
         invite.accepted_at_millis = Some(50);
         assert!(!invite.is_redeemable(60), "a redeemed invite is single-use");
+    }
+
+    /// The no-migration claim for issue #584, asserted rather than assumed.
+    ///
+    /// Every store persists invites as a JSON blob, so the only thing standing
+    /// between an existing deployment and a boot failure is `serde(default)`.
+    /// This is a blob in the shape written *before* the field existed.
+    #[test]
+    fn an_invite_stored_before_invite_mail_loads_as_unmailed() {
+        let legacy = serde_json::json!({
+            "id": "i1",
+            "email": "ada@example.com",
+            "role": "member",
+            "invitedBy": "u1",
+            "createdAtMillis": 1,
+            "expiresAtMillis": 100,
+        });
+        let invite: InviteRecord = serde_json::from_value(legacy).expect("a pre-#584 row loads");
+        assert_eq!(
+            invite.notified_at_millis, None,
+            "a row written before invite mail must read as un-mailed, not as sent"
+        );
+
+        // And an unmailed invite serializes exactly as it did before the field
+        // existed, so nothing downstream sees a new key it did not expect.
+        let json = serde_json::to_value(&invite).unwrap();
+        assert!(
+            json.get("notifiedAtMillis").is_none(),
+            "an unmailed invite must not emit the key: {json}"
+        );
+
+        let mailed = InviteRecord {
+            notified_at_millis: Some(7),
+            ..invite
+        };
+        assert_eq!(
+            serde_json::to_value(&mailed).unwrap()["notifiedAtMillis"],
+            7,
+            "a mailed invite must report when"
+        );
     }
 
     #[test]

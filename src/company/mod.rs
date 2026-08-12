@@ -104,6 +104,12 @@ pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
     required_config_problems,
 };
+// Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
+// graph projected onto the narrow agent authoring schema, plus the policy
+// residue that schema cannot carry. Lives with the parser it reads, and stays
+// crate-internal like every other raw-shape helper above.
+#[cfg(feature = "openhuman")]
+pub(crate) use workflow_file::{WorkflowSpecProjection, project_workflow_spec};
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.
 // Ungated: the REST route is in the default build, so gating this behind

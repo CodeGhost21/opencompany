@@ -22,6 +22,7 @@ use crate::ports::context::ContextStore;
 use crate::ports::events::EventLog;
 use crate::ports::facts::FactStore;
 use crate::ports::inbox::InboxStore;
+use crate::ports::journal::JournalStore;
 use crate::ports::login_codes::LoginCodeStore;
 use crate::ports::memory::MemoryStore;
 use crate::ports::read_state::ReadStateStore;
@@ -220,6 +221,16 @@ pub struct StorageHandles {
     pub users: Arc<dyn UserStore>,
     pub sessions: Arc<dyn SessionStore>,
     pub login_codes: Arc<dyn LoginCodeStore>,
+    /// The runtime journal's durable sink (#726): at-most-once effect keys, the
+    /// parked-approval queue, grants, and cycle brackets.
+    ///
+    /// Not `Option`, unlike [`ownership`](Self::ownership): a backend that
+    /// cannot hold the journal cannot host a company at all, and a `None` here
+    /// would be an invitation to fall back to the filesystem — which is exactly
+    /// the bug (#726). On a mongodb tenant `/data` is ephemeral scratch, so a
+    /// silent fs journal there loses every committed key and every parked
+    /// approval the next time the container is replaced.
+    pub journal: Arc<dyn JournalStore>,
     /// Present when the backend persists company → tenant ownership.
     pub ownership: Option<Arc<dyn OwnershipStore>>,
 }
@@ -477,7 +488,8 @@ fn open_sqlite(data_dir: &Path) -> Result<Option<StorageHandles>> {
         read_state: store.clone(),
         users: store.clone(),
         sessions: store.clone(),
-        login_codes: store,
+        login_codes: store.clone(),
+        journal: store,
         ownership: None,
     }))
 }
@@ -519,6 +531,7 @@ async fn open_mongodb(settings: &StorageSettings) -> Result<Option<StorageHandle
         users: store.clone(),
         sessions: store.clone(),
         login_codes: store.clone(),
+        journal: store.clone(),
         ownership: Some(store),
     }))
 }

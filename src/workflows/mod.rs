@@ -15,6 +15,10 @@
 //! registry, or backend-proxied model — the shared architecture rule for this
 //! epic. The default build links none of it.
 
+/// Issue #782: end-to-end proof that an upstream node's output reaches a
+/// downstream agent node's turn (an `agent -> agent` pipeline passes data).
+#[cfg(test)]
+mod agent_upstream_input_test;
 pub mod caps;
 pub mod delivery;
 /// Issue #460: the company's `ApprovalPolicy` decides which `tool_call` nodes

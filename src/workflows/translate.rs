@@ -33,7 +33,10 @@
 //! An **agent** node's roster teammate id becomes the tinyflows `agent_ref` in
 //! node config, which the engine's `agent` node routes to the injected
 //! `AgentRunner` — that is how a step lands on the harness pool (see
-//! [`super::caps`]). `tool_call` and `http_request` nodes are mapped
+//! [`super::caps`]). It also carries an `input = "=items"` binding (issue #782)
+//! so the engine resolves the full set of upstream node outputs into the node's
+//! config at run time, giving the agent a channel to the previous step's result
+//! (the runner folds it into the turn message; fan-in delivers every predecessor). `tool_call` and `http_request` nodes are mapped
 //! structurally and both execute for real: a `tool_call` node runs a Cell A
 //! toolbelt tool, fail-closed on the company's `[tools].allow` grants, and an
 //! `http_request` node routes through the SSRF-guarded `GuardedHttpClient` —
@@ -142,6 +145,18 @@ fn translate_node(def: &WorkflowNodeDef) -> Node {
     // 1. Derived defaults.
     if def.kind == WorkflowNodeKind::Agent {
         config.insert("prompt".to_string(), json!(prompt_for(def)));
+        // Issue #782: bind the FULL upstream node output so the agent's turn can
+        // reference what the previous step produced. `=items` resolves (via the
+        // engine's `resolve_config_traced`) to the `json` of every input item —
+        // i.e. every direct-predecessor item, so a fan-in (`merge -> agent`, or
+        // several edges into one agent) delivers ALL predecessors rather than
+        // silently losing all but the first. The runner folds the resolved value
+        // into the turn message (see `super::caps`); before this an agent node
+        // lowered to only a static `prompt`, so an upstream node's output had no
+        // channel to the next agent and was dropped. Kept in the derived-default
+        // layer (like `prompt`), so an author can override the binding with their
+        // own expression (e.g. `=nodes.<id>.item.text`) via node config.
+        config.insert("input".to_string(), json!("=items"));
     }
 
     // 2. User config overlay.
@@ -336,6 +351,32 @@ mod tests {
         );
     }
 
+    /// **Issue #782.** Every agent node carries an `input = "=items"` binding so
+    /// the engine resolves the full set of upstream node outputs into its config
+    /// at run time — the only channel an upstream step's output has to the next
+    /// agent's turn. `=items` (not `=item`) is deliberate: it is the whole
+    /// predecessor set, so a fan-in (`merge -> agent`) delivers every predecessor
+    /// rather than only the first.
+    #[test]
+    fn agent_node_binds_the_full_upstream_output() {
+        let file = parse_workflow(CAMPAIGN).expect("campaign parses");
+        let graph = translate(&file);
+        // Every translated agent node carries the binding…
+        for node in graph.nodes.iter().filter(|n| n.kind == NodeKind::Agent) {
+            assert_eq!(
+                node.config["input"], "=items",
+                "agent node {} must bind the full upstream output set",
+                node.id
+            );
+        }
+        // …and a non-agent node does not (the binding is agent-specific).
+        let research = graph.nodes.iter().find(|n| n.id == "research").unwrap();
+        assert!(
+            research.config.get("input").is_none(),
+            "a tool_call node carries no upstream-output binding"
+        );
+    }
+
     /// A condition node's `yes`/`no` labels become `true`/`false` branch ports.
     #[test]
     fn condition_labels_map_to_true_false_ports() {
@@ -398,7 +439,12 @@ mod tests {
         assert_eq!(config("brief"), json!({}));
         assert_eq!(
             config("strategist"),
-            json!({ "agent_ref": "brand_strategist", "prompt": "Turns the brief into an angle + outline." })
+            json!({
+                "agent_ref": "brand_strategist",
+                "prompt": "Turns the brief into an angle + outline.",
+                // Issue #782: the upstream-output binding every agent node carries.
+                "input": "=items"
+            })
         );
         // The gate carries its boolean discriminant (issue #661): a condition
         // node must name the `field` it branches on.
@@ -415,7 +461,9 @@ mod tests {
             config("publish"),
             json!({
                 "agent_ref": "copywriter",
-                "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off."
+                "prompt": "Assemble the publish-ready post and hero-image reference, then hand off for operator sign-off.",
+                // Issue #782: the upstream-output binding every agent node carries.
+                "input": "=items"
             })
         );
         assert_eq!(config("done"), json!({}));

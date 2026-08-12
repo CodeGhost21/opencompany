@@ -328,6 +328,7 @@ fn brain_with(
         workflow_refs: Default::default(),
         run_outputs: Default::default(),
         run_output_store: None,
+        workflow_revisions: None,
         approval_requests: ApprovalRequestQueue::default(),
         secrets: None,
         web_allowed_domains: Vec::new(),

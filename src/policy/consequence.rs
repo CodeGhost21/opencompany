@@ -334,6 +334,46 @@ const DECLARED: &[Declared] = &[
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
     d("review_task", EffectGroup::Other, Reach::Nothing),
+    // Issue #661 (M7). `read_workflow` is a pure read of this company's own
+    // saved graphs — the same class as `query_company`, which already lists
+    // them.
+    d("read_workflow", EffectGroup::Other, Reach::Nothing),
+    // `update_workflow` takes `create_workflow`'s classification, and gets it by
+    // re-deriving rather than by copying. Four properties separate it from
+    // `workspace_write`, which is the tool it superficially resembles and which
+    // is deliberately `Reach::Consequence`:
+    //
+    //  * every content-changing update is **undoable by construction** — issue
+    //    #274 snapshots the prior body inside the same write lock, so the thing
+    //    an operator would want to have seen is still there afterwards;
+    //  * the tool refuses a scheduled target, so every workflow it CAN edit is
+    //    manual-run only: a bad edit's consequence materialises solely through
+    //    `run_workflow`, which parks;
+    //  * `expected_version` is required, so it cannot clobber state nobody read;
+    //  * validation is identical to the console's, including #682's per-kind
+    //    config rules — an agent edit cannot persist a graph an operator's
+    //    could not.
+    //
+    // Parking every fix-up save of a draft the agent itself just created would
+    // also recreate the #558/#561 no-consequence-interrupt pattern against the
+    // exact flow M7 exists to enable.
+    //
+    // The honest residual, recorded rather than quietly carried: `Reach::Nothing`
+    // means a `readonly` desk can edit a workflow. But `create_workflow` above is
+    // already `Nothing`, so such a desk can already author one — this is a
+    // pre-existing classification, not a new hole. If it is wrong, create and
+    // update are reclassified TOGETHER; neither moves alone.
+    d("update_workflow", EffectGroup::Other, Reach::Nothing),
+    // `delete_workflow` does not, and the argument is `workspace_delete`'s
+    // (#671) almost verbatim — with the object strictly worse. Deleting a
+    // workflow removes the graph AND cascades its whole #274 revision history
+    // away in the same call, so unlike an update there is no prior body left to
+    // restore from and unlike a workspace delete there is no artifact chain
+    // outliving it. `PerCall` for #671's second reason too: a standing grant on
+    // deletion is the shape that turns one bad turn into a company whose
+    // processes are quietly gone by the end of it, and per-call parking makes
+    // each removal its own card naming its own workflow.
+    d("delete_workflow", EffectGroup::Other, Reach::Consequence),
     // Running a saved workflow performs whatever that workflow performs, which
     // this layer cannot see. It parks, and it stays a per-call decision.
     d("run_workflow", EffectGroup::Other, Reach::Consequence),
@@ -1453,6 +1493,11 @@ mod tests {
             "media_generate_video",
             "mcp_call_tool",
             "run_workflow",
+            // Issue #661 (M7): removing a workflow takes its whole revision
+            // history with it, so there is nothing to restore afterwards. Its
+            // read and update siblings deliberately do NOT park (see `DECLARED`)
+            // — naming the one that does is how that split stays a decision.
+            "delete_workflow",
             // Issue #245: both reach a forge under the company's credential and
             // pull third-party-authored content into the agent's context, and
             // one of them writes a tree.
@@ -2116,8 +2161,11 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn the_declared_names_are_the_names_the_tools_return() {
-        use crate::harness::{orchestrator, publish, search, workspace_tools};
+        use crate::harness::{orchestrator, publish, search, workflow_admin, workspace_tools};
         for name in [
+            workflow_admin::READ_WORKFLOW_TOOL,
+            workflow_admin::UPDATE_WORKFLOW_TOOL,
+            workflow_admin::DELETE_WORKFLOW_TOOL,
             orchestrator::QUERY_COMPANY_TOOL,
             orchestrator::SPAWN_TASK_TOOL,
             orchestrator::DELEGATE_TO_DESK_TOOL,

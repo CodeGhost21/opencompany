@@ -180,7 +180,25 @@ export interface Invite {
   createdAtMillis: number;
   expiresAtMillis: number;
   acceptedAtMillis?: number;
+  /**
+   * When the invite email was accepted by the transport, if it was sent.
+   *
+   * Absent means no mail reached anyone — the host has no transport, the send
+   * failed, or the invite predates invite mail. The roster says so rather than
+   * implying delivery, because "invited" and "told they were invited" are
+   * different facts and only the operator can close the gap.
+   */
+  notifiedAtMillis?: number;
 }
+
+/**
+ * What happened to the invite email.
+ *
+ * Reported by the server rather than assumed by the console: an invite lands
+ * on a host with no mail transport just as readily as on one with, and the
+ * difference decides whether the operator still has to go and tell the person.
+ */
+export type InviteDelivery = "sent" | "no_transport" | "failed";
 
 /** Whether an invite comes from the manifest rather than a stored record. */
 export function isManifestInvite(invite: Invite): boolean {
@@ -203,14 +221,23 @@ export async function listInvites(
   return client.get<Invite[]>(`${client.scopeFor(company)}/users/invites`);
 }
 
-/** Invites an address. */
+/**
+ * Invites an address, and reports whether they were actually emailed.
+ *
+ * A 2xx here means the grant landed — it does **not** mean anyone was told.
+ * Callers must branch on `delivery` rather than treating success as delivery,
+ * which is the bug in issue #584.
+ */
 export async function invite(
   client: OpenCompanyClient,
   company: string | null,
   email: string,
   role: UserRole,
-): Promise<Invite> {
-  return client.post<Invite>(`${client.scopeFor(company)}/users/invites`, { email, role });
+): Promise<Invite & { delivery: InviteDelivery }> {
+  return client.post<Invite & { delivery: InviteDelivery }>(
+    `${client.scopeFor(company)}/users/invites`,
+    { email, role },
+  );
 }
 
 /** Revokes an invite. */
