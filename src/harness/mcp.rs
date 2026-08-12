@@ -307,17 +307,6 @@ impl Tool for OcMcpListServersTool {
     }
 }
 
-/// A hardening decorator around upstream's [`McpCallTool`](oh::tools::McpCallTool)
-/// that keeps the same tool name + schema but turns a raw transport failure into
-/// a **scrubbed, actionable** result and records it on a shared
-/// [`McpFailureQueue`] the brain drains after the turn.
-///
-/// Upstream's tool surfaces `mcp_call_tool failed: {err}` verbatim — which can
-/// carry a response body or (with query-parameter auth) the full request URL
-/// including the credential. This decorator classifies the error, scrubs it
-/// against the granted servers' known credentials, rewrites the agent-facing
-/// text into a "don't retry blindly, tell the operator" directive, and pushes an
-/// [`McpFailure`] so the operator sees a warning after the turn.
 /// What `mcp_call_tool` needs to record an `OauthCall` usage sample.
 ///
 /// Mirrors [`ComposioMetering`](crate::harness::composio::ComposioMetering):
@@ -347,6 +336,17 @@ impl McpMetering {
     }
 }
 
+/// A hardening decorator around upstream's [`McpCallTool`](oh::tools::McpCallTool)
+/// that keeps the same tool name + schema but turns a raw transport failure into
+/// a **scrubbed, actionable** result and records it on a shared
+/// [`McpFailureQueue`] the brain drains after the turn.
+///
+/// Upstream's tool surfaces `mcp_call_tool failed: {err}` verbatim — which can
+/// carry a response body or (with query-parameter auth) the full request URL
+/// including the credential. This decorator classifies the error, scrubs it
+/// against the granted servers' known credentials, rewrites the agent-facing
+/// text into a "don't retry blindly, tell the operator" directive, and pushes an
+/// [`McpFailure`] so the operator sees a warning after the turn.
 pub struct OcMcpCallTool {
     registry: Arc<McpServerRegistry>,
     security: Arc<SecurityPolicy>,
@@ -954,6 +954,151 @@ mod tests {
         assert!(
             !serialized.contains(CANARY),
             "the drained failure leaked the reflected credential: {serialized}"
+        );
+    }
+
+    /// A completed MCP call is counted, and a failed one is not (issue #698).
+    ///
+    /// The rule this exercises — `mcp:` namespacing — is unit-tested in
+    /// `crate::metering::oauth`. What only this test can reach is the wiring:
+    /// that the success branch calls the meter at all, that it passes *this*
+    /// company and agent rather than a default, and that the failure branch
+    /// stays silent. Deleting the `if let Some(meter)` block, moving it to the
+    /// `Err` arm, or threading the wrong field all pass every other test in the
+    /// tree.
+    ///
+    /// Both outcomes are driven through one fixture whose `tools/call` succeeds
+    /// or fails on the tool name, because "counts a success" is only half the
+    /// contract: `connections` is the count of providers seen, so a metered
+    /// failure would mint a connection row for a server that never answered.
+    #[tokio::test]
+    async fn a_completed_mcp_call_is_metered_and_a_failed_one_is_not() {
+        use axum::extract::State;
+        use axum::routing::post;
+        use axum::{Json, Router};
+        use std::sync::Mutex;
+
+        use crate::ports::usage::{SampleKind, UsageMeter, UsageSample};
+
+        #[derive(Default)]
+        struct RecordingMeter {
+            samples: Mutex<Vec<(String, UsageSample)>>,
+        }
+
+        #[async_trait]
+        impl UsageMeter for RecordingMeter {
+            async fn record(&self, company: &CompanyId, sample: &UsageSample) -> crate::Result<()> {
+                self.samples
+                    .lock()
+                    .unwrap()
+                    .push((company.to_string(), sample.clone()));
+                Ok(())
+            }
+            async fn query(
+                &self,
+                _company: &CompanyId,
+                _since: u64,
+            ) -> crate::Result<Vec<UsageSample>> {
+                Ok(Vec::new())
+            }
+        }
+
+        async fn handler(
+            State(()): State<()>,
+            Json(body): Json<Value>,
+        ) -> axum::response::Response {
+            use axum::response::IntoResponse;
+            let id = body.get("id").cloned().unwrap_or(Value::Null);
+            let method = body.get("method").and_then(Value::as_str).unwrap_or("");
+            match method {
+                "initialize" => Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "protocolVersion": "2025-11-25", "capabilities": {},
+                                "serverInfo": { "name": "fixture", "version": "0" } }
+                }))
+                .into_response(),
+                "tools/list" => Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "result": { "tools": [
+                        { "name": "echo", "description": "e", "inputSchema": { "type": "object" } },
+                        { "name": "boom", "description": "b", "inputSchema": { "type": "object" } }
+                    ] }
+                }))
+                .into_response(),
+                "tools/call" => {
+                    let called = body
+                        .get("params")
+                        .and_then(|p| p.get("name"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("");
+                    if called == "boom" {
+                        return (axum::http::StatusCode::INTERNAL_SERVER_ERROR, "boom")
+                            .into_response();
+                    }
+                    Json(json!({
+                        "jsonrpc": "2.0", "id": id,
+                        "result": { "content": [{ "type": "text", "text": "ok" }] }
+                    }))
+                    .into_response()
+                }
+                _ => Json(json!({ "jsonrpc": "2.0" })).into_response(),
+            }
+        }
+
+        let app = Router::new().route("/mcp", post(handler)).with_state(());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let endpoint = format!("http://{addr}/mcp");
+        let registry = registry_for_agent(&[decl("fixture", &endpoint)], &grants(&["mcp:*"]))
+            .expect("registry");
+
+        let meter = Arc::new(RecordingMeter::default());
+        let tool = OcMcpCallTool::new(
+            registry,
+            Arc::new(SecurityPolicy::default()),
+            Vec::new(),
+            McpFailureQueue::default(),
+            McpMetering {
+                company: CompanyId::new("acme"),
+                agent: "ceo".to_string(),
+                meter: Some(meter.clone()),
+            },
+        );
+
+        let ok = tool
+            .execute(json!({ "server": "fixture", "tool": "echo", "arguments": {} }))
+            .await
+            .expect("mcp_call_tool");
+        assert!(!ok.is_error, "the fixture's `echo` succeeds: {ok:?}");
+
+        {
+            let samples = meter.samples.lock().unwrap();
+            assert_eq!(samples.len(), 1, "one completed call, one sample");
+            let (company, sample) = &samples[0];
+            assert_eq!(company, "acme", "the sample is scoped to this company");
+            assert_eq!(sample.agent, "ceo", "attributed to the calling agent");
+            assert_eq!(sample.kind, SampleKind::OauthCall);
+            // Namespaced, so this row cannot merge with a Composio toolkit that
+            // happens to share the server's name.
+            assert_eq!(sample.provider, "mcp:fixture");
+            assert_eq!(sample.input_tokens, 0);
+            assert_eq!(sample.output_tokens, 0);
+            assert_eq!(sample.cost_usd, 0.0);
+        }
+
+        let failed = tool
+            .execute(json!({ "server": "fixture", "tool": "boom", "arguments": {} }))
+            .await
+            .expect("mcp_call_tool");
+        assert!(failed.is_error, "the fixture's `boom` fails: {failed:?}");
+        assert_eq!(
+            meter.samples.lock().unwrap().len(),
+            1,
+            "a call that never reached the server must not mint a connection row"
         );
     }
 
