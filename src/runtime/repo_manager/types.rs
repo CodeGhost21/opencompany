@@ -330,6 +330,12 @@ pub struct RepoMeta {
     pub can_push: bool,
 }
 
+// Compiled where it is used: under `github` (the forge client calls it) and
+// under `test` (the parse test drives it, in every feature lane). The default
+// non-test build links no forge client, so a `pub(crate)` fn with no caller there
+// would be dead code under `-D warnings` — this gate is what keeps the parse and
+// its test together without tripping that.
+#[cfg(any(feature = "github", test))]
 impl RepoMeta {
     /// Parses a repository object from GitHub's REST API into a [`RepoMeta`]
     /// (issue #734).
