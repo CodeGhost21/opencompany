@@ -573,7 +573,8 @@ fn file_url(path: &Path) -> String {
     format!("file://{}", path.display())
 }
 
-/// Sets a fresh checkout's commit identity to the agent's seat (issue #735).
+/// Sets a fresh checkout's commit identity to the agent's seat (issue #735) and
+/// turns commit signing off (issue #796).
 ///
 /// git makes commits with the repository's own `user.name`/`user.email`, so
 /// setting them here — before the agent can commit through `git_operations` —
@@ -581,10 +582,21 @@ fn file_url(path: &Path) -> String {
 /// to a shared machine identity. The address is synthetic and non-routable; it
 /// exists to identify, not to receive mail. Best-effort: a config that will not
 /// set is logged, and a checkout that is only ever read is unaffected either way.
+///
+/// `commit.gpgsign` / `tag.gpgsign` are forced to `false` because the clone
+/// inherits the host operator's global git config: on a host that signs its own
+/// commits (`commit.gpgsign = true`), every agent `git commit` would block on a
+/// GPG key the sandbox has no way to reach — the commit hangs or fails and the
+/// whole write flow stalls with the change staged but never committed. The
+/// agent's commits are attributed by identity, not signed by a key it does not
+/// hold; per-agent commit signing is the deferred issue #738.
 async fn attribute_checkout(dest: &Path, agent: &str) {
     for (key, value) in [
         ("user.name", agent.to_string()),
         ("user.email", format!("{agent}@agents.opencompany.local")),
+        // Issue #796: never inherit the host's `commit.gpgsign = true`.
+        ("commit.gpgsign", "false".to_string()),
+        ("tag.gpgsign", "false".to_string()),
     ] {
         match git::run(dest, &["config", key, &value], None, None).await {
             Ok(out) if out.ok => {}

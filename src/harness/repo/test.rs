@@ -1166,6 +1166,30 @@ async fn committed_checkout(ctx: &RepoToolContext, mirror: &Path, key: &str) {
     git_at(&dest, &["commit", "--quiet", "-m", "the fix"]);
 }
 
+/// Issue #796: a materialized checkout has commit/tag signing turned OFF, so an
+/// agent's `git commit` never blocks on a GPG key the sandbox cannot reach —
+/// even when the host operator's own git config turns signing on. Without this
+/// the change stages but never commits and the whole write flow stalls.
+#[tokio::test]
+async fn a_checkout_disables_commit_signing() {
+    let scratch = Scratch::new("no-gpgsign");
+    let dest = scratch.join("checkout");
+    std::fs::create_dir_all(&dest).unwrap();
+    git_at(&dest, &["init", "--quiet"]);
+    // A host that signs its own commits.
+    git_at(&dest, &["config", "commit.gpgsign", "true"]);
+
+    attribute_checkout(&dest, "coder").await;
+
+    assert_eq!(
+        git_at(&dest, &["config", "--get", "commit.gpgsign"]),
+        "false"
+    );
+    assert_eq!(git_at(&dest, &["config", "--get", "tag.gpgsign"]), "false");
+    // And the identity is still the agent's seat (issue #735).
+    assert_eq!(git_at(&dest, &["config", "--get", "user.name"]), "coder");
+}
+
 /// Publishing outside a task refuses — this tier is task turns only, and there
 /// is no card to name the branch. Nothing is staged and nothing is queued.
 #[tokio::test]
