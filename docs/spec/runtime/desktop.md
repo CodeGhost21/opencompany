@@ -296,6 +296,48 @@ valid evidence about embedded mode too.
 data root. The console renders that as a row; the desktop still holds remote
 hosts, which is the point of holding several.
 
+### First run
+
+`embedded::start` calls `opencompany::desktop::bootstrap_companies` before it
+binds, because a host with an empty registry cannot be signed into
+([issue #632](https://github.com/tinyhumansai/opencompany/issues/632)). Sign-in
+is per-company — `/api/v1/companies/{id}/auth/…`, or the sole-company alias —
+so an empty registry leaves the console rendering a login form for a company
+that does not exist.
+
+The two ways a company normally reaches the registry are both closed to a
+packaged application. Nobody types `serve --company <dir>` at a double-clicked
+app, and `POST /api/v1/companies` demands the `platform` scope, which
+`PlatformScope` grants only against a configured `platform_auth` — a prosumer
+host has no machine credential to hand out, deliberately. So the desktop
+bootstraps its own:
+
+1. **Adopt** every company bundle the data root already holds, skipping
+   `archived` ones (archiving removes a company from the registry on purpose,
+   and re-registering it at the next launch would undo that quietly). The
+   bundle is the only authority — a desktop company has no source directory to
+   re-read — and `RuntimeBuilder::build` carries the persisted record's
+   console-created desks, agents and workflows forward.
+2. **Seed** the `DEFAULT_PRESET_ID` preset when there were none, stamping the
+   preset slug as the record's template provenance. Fallback rather than
+   unconditional: seeding on every launch would hand the operator a second
+   starter company per run.
+
+`AppConfig.admin_email` is set to `DESKTOP_OPERATOR_EMAIL` — the same seam the
+hosted control plane fills with `OPENCOMPANY_ADMIN_EMAIL`, and the reason a
+person is eligible to sign in at all (`eligibility` in `src/server/users/`
+admits an existing user, a bootstrap admin, or an invite, and a fresh install
+has none of the three). The seeded manifest names the same address in its own
+`[users].admins`, so the company is self-describing if it is ever served
+elsewhere.
+
+Nothing is mailed: the host binds loopback, so `is_local_only` holds and
+`auth/request` returns the login code in its own response (`dev_code`), which
+the console redeems in place. `oc_embedded` carries `operatorEmail` so the
+sign-in form can offer the address — a person cannot guess it, and every other
+address gets the same silent `202`. It is a suggestion, not a lock: the field
+stays editable, which is what an operator who invites someone else needs.
+
 ### One row, however many launches
 
 The ephemeral port is not free: it means the embedded host's *address* is

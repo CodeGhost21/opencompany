@@ -31,6 +31,7 @@ use opencompany::{AppConfig, AppState};
 pub struct EmbeddedHost {
     address: std::net::SocketAddr,
     instance_id: String,
+    companies: Vec<String>,
     /// Holds the data root's exclusive lock for as long as the host runs.
     /// Dropping it would release the root while this process kept writing.
     _instance: EmbeddedInstance,
@@ -57,6 +58,21 @@ impl EmbeddedHost {
     /// to knock; this says who answers.
     pub fn instance_id(&self) -> &str {
         &self.instance_id
+    }
+
+    /// The address this host will sign a person in as.
+    ///
+    /// The console has to be told, because nobody could guess it and the login
+    /// form is otherwise a blank field on a host that admits exactly one
+    /// address. Not a secret: it grants nothing without a code minted by this
+    /// host and returned over loopback.
+    pub fn operator_email(&self) -> &'static str {
+        opencompany::desktop::DESKTOP_OPERATOR_EMAIL
+    }
+
+    /// The companies registered at boot, in listing order.
+    pub fn companies(&self) -> &[String] {
+        &self.companies
     }
 }
 
@@ -85,6 +101,12 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
 
     let config = AppConfig {
         bind: "127.0.0.1:0".to_string(),
+        // The standing local admin, and the same seam the hosted control plane
+        // fills with `OPENCOMPANY_ADMIN_EMAIL`. Without an eligible address no
+        // company on this host can be signed into, whoever created it — the
+        // seeded one names the operator in its own manifest, but a company
+        // added later by any other means would name nobody (issue #632).
+        admin_email: Some(opencompany::desktop::DESKTOP_OPERATOR_EMAIL.to_string()),
         ..AppConfig::default()
     };
     let state = AppState::new(config).with_home(instance.home().to_path_buf());
@@ -93,6 +115,16 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
     // waiting to contact it — which is the whole point, since the address it
     // would contact is what changed.
     let instance_id = state.instance_id().to_string();
+    // Before the listener, not after: a console that reached a host with an
+    // empty registry would render the "no companies" dead end this exists to
+    // remove, and the race is winnable — the address is handed to the webview
+    // the moment `start` returns.
+    let companies =
+        opencompany::desktop::bootstrap_companies(&state, opencompany::desktop::DEFAULT_PRESET_ID)
+            .await?
+            .into_iter()
+            .map(|id| id.as_ref().to_string())
+            .collect::<Vec<_>>();
 
     let (address, serving) = opencompany::server::bind("127.0.0.1:0", state).await?;
     let server = tokio::spawn(async move {
@@ -104,12 +136,14 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
     tracing::info!(
         %address,
         %instance_id,
+        companies = companies.len(),
         home = %instance.home().display(),
         "embedded host listening"
     );
     Ok(EmbeddedHost {
         address,
         instance_id,
+        companies,
         _instance: instance,
         server,
     })
@@ -118,6 +152,100 @@ pub async fn start(data_dir: PathBuf) -> opencompany::Result<EmbeddedHost> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Issue #632, end to end: a packaged install must be enterable with no
+    /// terminal, no mail server and no platform credential.
+    ///
+    /// Over HTTP rather than against the registry, because every step here is
+    /// one the console actually takes and each has its own way to fail: the
+    /// company has to exist *and* be reachable through the sole-company alias
+    /// the console addresses before it knows any id, the operator has to be
+    /// eligible or no code is minted, and the host has to be local-only or the
+    /// code is withheld from the response. Asserting a company was registered
+    /// would prove none of it.
+    #[tokio::test]
+    async fn a_fresh_install_can_be_signed_into() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = start(dir.path().to_path_buf()).await.expect("host starts");
+        let base = host.base_url();
+        let http = reqwest::Client::new();
+
+        assert_eq!(
+            host.companies().len(),
+            1,
+            "a fresh root gets exactly one starter company"
+        );
+
+        // Where the console starts, and where it used to stop: no session yet.
+        let listed = http
+            .get(format!("{base}/api/v1/companies"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), 401);
+
+        // The sole-company alias — what the console addresses before it has
+        // discovered any company id.
+        let requested: serde_json::Value = http
+            .post(format!("{base}/api/v1/company/auth/request"))
+            .json(&serde_json::json!({ "email": host.operator_email() }))
+            .send()
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        let code = requested["dev_code"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!("a loopback host with no mail transport echoes the code: {requested}")
+            })
+            .to_string();
+
+        let verified = http
+            .post(format!("{base}/api/v1/company/auth/verify"))
+            .json(&serde_json::json!({ "code": code }))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(verified.status(), 200, "the code redeems into a session");
+        let session = verified
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .expect("a session cookie comes back")
+            .to_string();
+
+        // And the call that was refused above now answers.
+        let listed = http
+            .get(format!("{base}/api/v1/companies"))
+            .header(reqwest::header::COOKIE, session)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(listed.status(), 200);
+        let companies: serde_json::Value = listed.json().await.unwrap();
+        assert_eq!(
+            companies.as_array().map(Vec::len),
+            Some(1),
+            "the signed-in operator sees their company: {companies}"
+        );
+    }
+
+    /// The starter company is seeded once, not per launch.
+    #[tokio::test]
+    async fn a_relaunch_reuses_the_company_the_root_already_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = start(dir.path().to_path_buf()).await.unwrap();
+        let seeded = first.companies().to_vec();
+        drop(first);
+
+        // `take_root` retries because the data root is released asynchronously;
+        // see the note in `stopping_a_host_frees_its_root_and_its_port`.
+        let relaunched = take_root(dir.path().to_path_buf()).await;
+        assert_eq!(relaunched.companies(), seeded.as_slice());
+    }
 
     #[tokio::test]
     async fn an_embedded_host_answers_on_loopback() {
