@@ -2673,7 +2673,7 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     .await
     .unwrap();
     let promoted = ws
-        .swap_files(&alpha, "swap-old", "swap-new", "report.md")
+        .swap_files(&alpha, Some("swap-old"), "swap-new", "report.md")
         .await
         .unwrap()
         .expect("the expected node is still current");
@@ -2699,13 +2699,103 @@ pub async fn assert_workspace_binary_store(ws: Arc<dyn WorkspaceStore>) {
     .await
     .unwrap();
     assert!(
-        ws.swap_files(&alpha, "already-gone", "swap-loser", "report.md")
+        ws.swap_files(&alpha, Some("already-gone"), "swap-loser", "report.md")
             .await
             .unwrap()
             .is_none()
     );
     assert!(ws.read(&alpha, "swap-loser").await.unwrap().is_none());
     assert!(ws.read_bytes(&alpha, "swap-loser").await.unwrap().is_none());
+
+    // -- Conditional first publish (issue #697) ---------------------------
+    //
+    // `None` installs only while the name is unoccupied. `report.md` is
+    // occupied at this point — the swap above promoted `swap-new` onto it — so
+    // this must LOSE rather than overwrite it.
+    //
+    // This case is the whole reason the parameter is an `Option` rather than
+    // two methods: `Some(id)` and `None` are one type apart and mean opposite
+    // things, and a caller that passes `None` meaning "replace whatever is
+    // there" compiles. Nothing but this assertion stops that mistake from
+    // silently reintroducing the duplicate-path race it was meant to fix.
+    ws.create_binary(
+        &alpha,
+        &node(
+            "create-onto-occupied",
+            "report.md.publishing-occupied",
+            Some("application/pdf"),
+            None,
+        ),
+        b"must-not-land",
+    )
+    .await
+    .unwrap();
+    assert!(
+        ws.swap_files(&alpha, None, "create-onto-occupied", "report.md")
+            .await
+            .unwrap()
+            .is_none(),
+        "`None` asserts the name is free; it must not overwrite an occupant"
+    );
+    let survivor = ws.read(&alpha, "swap-new").await.unwrap();
+    assert!(
+        survivor.is_some(),
+        "the node that held the path must still hold it"
+    );
+    let (_, stream) = ws.read_bytes(&alpha, "swap-new").await.unwrap().unwrap();
+    assert_eq!(
+        drain(stream).await,
+        b"new-payload".to_vec(),
+        "and its payload must be untouched"
+    );
+    // The loser consumes its own stage on this arm too, payload included.
+    assert!(
+        ws.read(&alpha, "create-onto-occupied")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        ws.read_bytes(&alpha, "create-onto-occupied")
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    // And the arm that succeeds: a name nothing holds is installed, keeping
+    // the staged node's id and taking the final name.
+    ws.create_binary(
+        &alpha,
+        &node(
+            "create-fresh",
+            "fresh.md.publishing-test",
+            Some("application/pdf"),
+            None,
+        ),
+        b"fresh-payload",
+    )
+    .await
+    .unwrap();
+    let created = ws
+        .swap_files(&alpha, None, "create-fresh", "fresh.md")
+        .await
+        .unwrap()
+        .expect("the name was free");
+    assert_eq!(created.id, "create-fresh");
+    assert_eq!(created.name, "fresh.md");
+    let (_, stream) = ws
+        .read_bytes(&alpha, "create-fresh")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(drain(stream).await, b"fresh-payload".to_vec());
+    // Exactly one node answers to the new name.
+    let tree = ws.tree(&alpha).await.unwrap();
+    assert_eq!(
+        tree.iter().filter(|n| n.name == "fresh.md").count(),
+        1,
+        "a first publish must leave exactly one node at the path: {tree:?}"
+    );
 
     // -- A binary node must carry a mime ----------------------------------
     assert!(

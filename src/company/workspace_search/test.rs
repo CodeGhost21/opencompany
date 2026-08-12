@@ -617,7 +617,7 @@ impl WorkspaceStore for FixedTree {
     async fn swap_files(
         &self,
         _company: &CompanyId,
-        _expected_id: &str,
+        _expected_id: Option<&str>,
         _replacement_id: &str,
         _name: &str,
     ) -> crate::Result<Option<WorkspaceNode>> {
