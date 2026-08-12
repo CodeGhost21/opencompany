@@ -1568,6 +1568,48 @@ impl RuntimeBuilder {
             .or_else(|| self.template_provenance.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
+        // Issue #752: a company whose roster holds `repo` does not come up on a
+        // backend that keeps secrets as plaintext on this container's disk.
+        //
+        // The bind-time refusal in `RepoManager::bind` covers new credentials.
+        // It cannot cover a company that bound one *before* this gate existed —
+        // that credential is already sitting on `/data`, and its agents would
+        // keep checking out under it forever. So the same condition is asked
+        // again here, where the answer is "this company does not start", and an
+        // operator restarting a tenant finds out at the moment they can still
+        // act on it.
+        //
+        // Read over the **effective roster**, not `[tools].allow` alone: an
+        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
+        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
+        // does not see, because the wildcard deliberately does not confer the
+        // namespace. Checking only the company line would miss exactly the
+        // configuration a wildcard company is most likely to have.
+        //
+        // NOT feature-gated, for the reason `build_agent` states about the repo
+        // tools themselves: a control compiled only under `openhuman` is a
+        // control most CI lanes never type-check.
+        if self.storage_kind.secrets_are_plaintext_on_disk() {
+            let roster_holds_repo =
+                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
+                    || self
+                        .manifest
+                        .agents
+                        .iter()
+                        .map(|agent| {
+                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
+                        })
+                        .chain(overlay_agents.iter().map(|overlay| {
+                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
+                        }))
+                        .any(|grants| crate::company::grants_repo_explicit(&grants));
+            if roster_holds_repo {
+                return Err(crate::error::OpenCompanyError::Config(
+                    crate::store::plaintext_secret_refusal(self.storage_kind),
+                ));
+            }
+        }
+
         // Issue #245: the company's repository mirror cache, rooted at the same
         // `companies/<slug>/` prefix the bundle uses so a company's whole
         // footprint sits in one subtree — and therefore inside the one quota
@@ -3346,6 +3388,120 @@ mod test {
 
     fn parse(toml_src: &str) -> CompanyManifest {
         toml::from_str(toml_src).expect("valid manifest")
+    }
+
+    // ---- issue #752: `repo` needs a backend that keeps secrets off disk ----
+
+    /// A company that already bound a repository predates the bind-time gate,
+    /// so the *restart* is where it has to be caught. A repo-granted company on
+    /// an fs host does not come up.
+    #[tokio::test]
+    async fn a_repo_granted_company_does_not_boot_on_a_plaintext_secret_backend() {
+        let home = tmp_home("oc-752-boot-");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["repo", "shell"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            // The default, spelled out: this is what a local `serve` is.
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect_err("an fs host must refuse to bring up a repo-granted company");
+        let message = err.to_string();
+        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
+        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
+        assert!(message.contains("`repo` grant"), "{message}");
+    }
+
+    /// The wildcard case, which a check against `[tools].allow` alone would let
+    /// through: `*` deliberately does **not** confer `repo`, so the company line
+    /// reads as ungranted while the agent naming `repo` explicitly holds it.
+    #[tokio::test]
+    async fn an_agent_that_names_repo_under_a_wildcard_company_is_caught_too() {
+        let home = tmp_home("oc-752-boot-wildcard-");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["*"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            tools = ["repo"]
+            "#,
+        );
+        // The company line itself is not an explicit grant — if it were, this
+        // test would pass for the wrong reason.
+        assert!(!crate::company::grants_repo_explicit(&manifest.tools.allow));
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect_err("an agent-level `repo` grant must be caught at boot");
+        assert!(err.to_string().contains("OPENCOMPANY_STORAGE=fs"), "{err}");
+    }
+
+    /// The other side, without which the two above only prove the check is on:
+    /// the same company boots on the backend that keeps secrets out of the
+    /// container, and a company that grants no `repo` boots on fs unaffected.
+    #[tokio::test]
+    async fn the_same_company_boots_where_secrets_leave_the_container() {
+        let home = tmp_home("oc-752-boot-ok-");
+        let granted = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["repo", "shell"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(home.path().to_path_buf(), granted)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Mongodb)
+            .build()
+            .await
+            .expect("mongodb-backed secrets must clear the #752 boot gate");
+
+        let ungranted_home = tmp_home("oc-752-boot-ungranted-");
+        let ungranted = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["shell", "web"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(ungranted_home.path().to_path_buf(), ungranted)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect("a company without `repo` is untouched by this gate");
     }
 
     // ---- `[policy]` override across a rebuild (issue #562) ----------------
