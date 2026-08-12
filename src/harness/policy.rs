@@ -39,9 +39,34 @@
 //! had to go back and ask for the same thing again — with the work having
 //! silently dead-ended in between.
 //!
-//! openhuman genuinely cannot be resumed here: it resolves a `RequireApproval`
-//! inline and the blocked call is gone by the time the operator sees it. So the
-//! call is not resumed, it is **re-issued**. Approving a parked harness effect
+//! The call is not resumed, it is **re-issued**, and the reason is narrower than
+//! this comment used to claim. It asserted openhuman "genuinely cannot be
+//! resumed"; that is false as a blanket statement and it is why nobody looked
+//! for years. openhuman never claimed impossibility — its own
+//! `ToolPolicyDecision::RequireApproval` doc says session execution
+//! *"currently"* treats the variant as fail-closed and that "callers that can
+//! prompt for approval may branch on this variant and retry". It even ships
+//! durable approval interrupt-and-resume already, for delegation, on tinyagents'
+//! graph executor. Two separate things are true (issue #561):
+//!
+//! * **Resolving inline is incidental.** openhuman blocks the call in one
+//!   `wrap_tool` middleware, and that hook is `async` and may call `next.run`
+//!   zero or more times — tinyagents' own `wrap_tool_retries_next_until_success`
+//!   pins that. Awaiting a verdict there and *then* dispatching is representable
+//!   today, with no upstream change.
+//! * **Durably suspending is structural.** The agent turn runs on
+//!   `AgentHarness`, which has no checkpointer; its `AgentRun` is not
+//!   `Serialize`; and the turn is a live async task holding the model context,
+//!   bounded by the run's wall-clock deadline.
+//!
+//! Which settles the design: an in-memory await survives neither a long approval
+//! nor a process restart, so against this crate's seven-day standing-grant
+//! ceiling it is a leak rather than a mechanism. Re-issuing is the honest answer
+//! here until the turn is checkpointable — see issue #561 for the full analysis,
+//! including why even the graph executor's `resume` *re-runs* its interrupted
+//! node rather than continuing a suspended call.
+//!
+//! Approving a parked harness effect
 //! mints a single-use [`GrantedCall`](crate::runtime::grants::GrantedCall)
 //! scoped to that agent, that tool and those exact arguments, and the
 //! [`HarnessBrain`](crate::harness::HarnessBrain) re-dispatches the granting
