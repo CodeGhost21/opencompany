@@ -1,0 +1,312 @@
+# The console write plane
+
+Every write the operator console makes, under `src/server/ops/`.
+
+Split out of [`api.md`](api.md), which was over the repository's 500-line ceiling.
+That file is the map of the API surface; this one is the write routes in detail.
+
+## Console write plane (`src/server/ops/`)
+
+The console's writes are a REST router family under `src/server/ops/`, each
+route registered under **both** scope forms (`…/companies/{id}/…` and the
+`…/company/…` prosumer alias) by the `scoped` helper. These are the mutations,
+plus a deliberate set of **read exceptions** — reads the console must reach over
+REST because it ships no GraphQL client: the two inbox `GET`s and the three
+workspace `GET`s (tree, file, `search`), the task export
+(`GET …/tasks/{taskId}/export`), the skill-registry browse
+(`GET …/skills/registry`), the agent detail (`GET …/team/{agentId}`), the policy
+read (`GET …/policy`), and the credential status `GET` — every one detailed
+below or in the credential section. Every other console read goes through
+GraphQL (see the [read plane](api-graphql.md)). Anything a build doesn't serve
+`404`s — the console treats that as "not wired yet".
+
+```text
+POST   …/tasks                              create a task card (`originChatId` records the thread it came from, #246)
+PATCH  …/tasks/{taskId}                      edit / move a task
+DELETE …/tasks/{taskId}                      delete a task
+GET    …/tasks/{taskId}/export               the task's record as a readable HTML document (#352)
+POST   …/tasks/{taskId}/discussion           post a message to the card's thread (#335)
+POST   …/memory                             add a memory fact
+DELETE …/memory/{factId}                     delete a memory fact
+GET    …/workspace                          the whole tree (metadata; no bodies)
+GET    …/workspace/file/{nodeId}             one file: content + inbound backlinks
+GET    …/workspace/search?q=…                which notes mention a phrase (#607)
+POST   …/workspace                          create a folder/file (or upload)
+PUT    …/workspace/file/{nodeId}             write file content
+PATCH  …/workspace/{nodeId}                  rename / move
+DELETE …/workspace/{nodeId}                  delete a node
+POST   …/workspace/sweep-empty-agent-folders?dry_run=  tidy `Agents/` strays (#700)
+POST   …/skills                             add a custom skill
+GET    …/skills/registry                     browse the shared skill library
+POST   …/skills/{slug}/install              install a registry/company skill
+POST   …/skills/{slug}/uninstall            uninstall a skill
+PUT    …/skills/{slug}                       enable / disable a skill
+POST   …/team                               add an operator-overlay teammate
+GET    …/team/{agentId}                      one agent in full (tier, tools, desks)
+PATCH  …/team/{agentId}                      edit an overlay teammate
+DELETE …/team/{agentId}                      remove an overlay teammate
+PUT    …/team/{agentId}/inbox                toggle a teammate's inbox
+PUT    …/team/{agentId}/budget               set / change / remove a daily cap
+DELETE …/team/{agentId}/budget               reset the cap to the manifest default
+GET    …/policy                              the autonomy tier + always-ask list
+PUT    …/policy                              set the tier and/or the always-ask list
+DELETE …/policy                              reset the policy to the manifest's
+POST   …/inboxes/{key}/read                  mark inbox messages read
+POST   …/inboxes/ingest                     HMAC-signed inbound email → inbox
+GET    …/inboxes                            list inboxes + unread counts
+GET    …/inboxes/{key}/messages              one teammate's mail (store order)
+```
+
+The two inbox `GET`s are the read exception, and they are **REST twins of the
+`Company.inboxes` GraphQL resolver**: the operator console ships no GraphQL
+client, so without them the Inbox view had no reachable per-agent read at all
+and fell back to a client-side fixture (issue #173). They read the same
+`InboxStore` both inbound paths — the ingest webhook and the IMAP poller — file
+into, and `GET …/team` tags each teammate with `inboxEnabled` so the Team toggle
+reflects that store too. Messages come back in append order; the console sorts
+them newest-first. The GraphQL resolver stays the canonical read for any client
+that does speak GraphQL — these routes duplicate it, they do not replace it.
+
+The two original workspace `GET`s (#177) are the same story one issue later:
+the console had no reachable workspace read either, so the Workspace tab
+persisted to `localStorage` and the operator and the agents looked at two
+different trees —
+a note written by an agent through its `workspace_*` tools (#237) was invisible
+to the operator, and vice versa. They are REST twins of `Company.workspaceTree`
+/ `workspaceFile`, differing only in timestamp shape (epoch millis, matching
+every other console read, rather than ISO-8601 strings). The backlink scan is
+literally shared code (`company::workspace_links`), so the two surfaces cannot
+report different backlinks for the same note. The tree read carries metadata
+only — bodies are fetched per file, so a navigation read does not grow with the
+size of the workspace. Reading a folder id as a file is a `404`, never an empty
+note.
+
+`GET …/workspace/search?q=…` (#607) is the **third workspace read**: it answers
+which notes mention a phrase, so discovery costs one call rather than a listing
+plus one read per candidate.
+Matching is a plain **case-insensitive substring** over node names and text
+bodies — no tokenising, no stemming, no ranking — which is the only definition
+that answers identically on all three storage backends, and it is defined once
+in `company::workspace_search`, shared with the GraphQL `Company.workspaceSearch`
+resolver and the agent `workspace_search` tool. Optional `prefix` scopes to a
+subtree; optional `limit` pages the answer (default 20, hard cap 50). A hit
+carries the node, its logical `path`, whether the `name` or the `content`
+matched, and — for a content match — a short `excerpt`. `total` reports every
+match, so a capped page says it is one. An empty `q` is a `400`, not "match
+everything": that is the tree read above, and answering it here would turn a
+cleared search box into a full-tree fetch. `limit=0` is a `400` for the same
+reason — it is never read as "no limit". A **binary** node matches on its name
+only: a text read of a payload is empty by the port's definition, and its bytes
+are never scanned or excerpted.
+
+`POST …/workspace/sweep-empty-agent-folders` (#700) removes the empty
+`Agents/<id>/` folders a pre-#570 company still carries. Operator-triggered
+rather than automatic — the affected tenants are hosted, so a subcommand would
+be unreachable for the operators who need it, and a boot sweep would change a
+tree on an upgrade nobody asked for. `?dry_run=true` answers
+`{"wouldRemove":[{id,name}…]}` and touches nothing, so the console can name
+every folder on a confirm dialog; the real call answers `{"removed":[…]}`, and
+which field carries the list is what actually happened. A node qualifies only
+when it is a direct child of the `Agents` root **by id**, is a folder, and has
+**no children counted structurally** — over every node in the tree, before any
+path is rendered, because a folder whose only child carries a path separator
+reads as empty to anything path-shaped while the recursive delete would still
+take it (#671), and sqlite and mongodb both accept such a name. An ambiguous
+root is a `409`, not a guess. Each removal announces its own
+`WorkspaceChanged{removed}` (#327); a second run removes nothing.
+
+All three workspace `GET`s — tree, file and `search` — and the `POST` / `PATCH`
+node bodies carry `createdBy` and `updatedBy` (#326), each
+`{"kind":"seed"|"operator"|"agent",
+"id"?}` with `id` present exactly when `kind` is `agent`. `createdBy` is fixed
+at creation; `updatedBy` follows content writes only, so an operator rename does
+not repaint an agent's authorship. The console renders the creator as a badge
+and the last writer only when the two differ. Both fields are always serialized,
+and a node predating the field reads back as `operator`. The `PUT` write route
+stamps `operator`; agent writes stamp `agent{id}` from the agent's roster id,
+which is fixed at agent-build time and never taken from tool arguments. Agents
+reach the same tree through `workspace_list` / `workspace_search` /
+`workspace_read` / `workspace_create` / `workspace_write`, and a created note has its default home
+in the reserved `Agents/<agent-id>/` folder (#551) — a convention the persona
+brief steers toward, not a boundary the routes enforce. `workspace_rename` and
+`workspace_delete` (#671) are the exception: those two *are* bounded to
+`Agents/<agent-id>/`, checked on the resolved node so an `id` argument refuses
+exactly as its path would. Neither restamps authorship; a delete leaves any
+artifact version that pointed at the node with a dangling `workspaceNodeId`,
+which is the same state the `DELETE` route above produces and is read-guarded
+before reuse. Boot scaffolds the
+`Agents/` root empty; an individual `Agents/<agent-id>/` is minted the first
+time that agent writes into it, and the `Desks/` root is minted whole the first
+time a desk produces something (#645) — so a tree read on a fresh company shows
+exactly one root and no member folders.
+
+Team writes are an **operator overlay** persisted through the store, merged
+into the manifest roster at read time — the version-controlled `company.toml`
+is never rewritten. Overlay teammates are addressable: since issue #71 the
+harness builds a real agent for each one, with the company-wide tool grant, no
+cognition tier, and never the orchestrator.
+
+`POST …/team` and the orchestrator's `add_agent` tool both **derive the roster
+id from the display name** (issue #686): "Dana Designer" becomes
+`dana_designer`, in the same snake_case grammar the manifest validator enforces
+on a hand-authored `[[agent]].id`. They used to mint an opaque
+`{millis}-{counter}` id, which #570/#552/#607 render as a workspace folder and
+in search-hit paths — so half a company's tree read as
+`Agents/019fad5ada20-000000000003/` beside `Agents/backend_engineer/`.
+
+- **Collisions suffix, they do not refuse.** A slug already held by a manifest
+  agent, another teammate, a desk id or name, or a reserved word (`operator`,
+  `Agents`, `Desks`) becomes `<slug>_2`, `_3`, … Duplicate display names have
+  always been accepted here, and an unsuffixed collision with a *manifest* id is
+  worse than a refusal: the roster build skips it, so the teammate would persist
+  and never materialise.
+- **Minted once, never re-minted.** `PATCH …/team/{agentId}` renames a teammate
+  and leaves the id alone; a name-keyed id would orphan its workspace folder,
+  budget row, desk memberships and inbox on every correction.
+- **Removal frees the slug**, so re-adding the same name takes the id back and
+  **adopts the old `Agents/<slug>/` folder** — the intended remedy for a typo'd
+  name, and not a way to get a clean slate.
+
+Teammates carrying generated ids are **not migrated**: rewriting them would
+rewrite the `WorkspaceOrigin` stamps issue #326 keeps honest, and every path
+into their folders. They keep working, reachable by display name through
+`crate::runtime::assignee`.
+
+`GET …/team/{agentId}` is the **agent detail** read (issue #264). `GET …/team`
+answers "who is on the roster"; this answers "what is this agent", and before it
+existed neither the console nor any other client could reach an agent's tier,
+its tool grants or its desk membership — the roster row carried none of them, so
+checking what a company actually grants an agent was not possible from outside
+the process.
+
+The `tools` object is the reason the route earns its keep. It carries three
+lists, because only the third is the answer:
+
+| field | meaning |
+|---|---|
+| `requested` | the agent's own `[[agent]].tools` globs. **Empty means the company's standard grant**, not "no tools" |
+| `companyAllow` | the `[tools].allow` ceiling the request is intersected with |
+| `effective` | what the agent actually holds |
+
+`effective` is computed by the same `agent_effective_grants` the harness calls
+when it builds the agent, so the readout cannot drift from what is enforced.
+`isOrchestrator` is likewise resolved by the roster rule (a `tier =
+"orchestrator"` agent, else the first declared) rather than read off `tier`, so
+a company that tags nobody still names its orchestrator.
+
+`PATCH …/team/{agentId}` edits an **overlay** teammate's `name`, `role` and
+`description`. It is a patch: an omitted key is left alone, and `"description":
+null` clears it — the two must stay apart or every partial save would erase an
+agent's instructions. A blank `name`/`role` is `400`, an unknown teammate `404`,
+and a **manifest** teammate is `409`: its fields live in the version-controlled
+`company.toml`, and the console does not rewrite the blueprint. The one thing
+that *is* changeable on such a teammate is its daily budget, and that works
+because #343 modelled it as an override rather than as a rewrite. Every detail
+response carries an `editable` list naming the fields this route will accept, so
+a client renders read-only from the host's answer instead of re-deriving the
+rule. `tier` and `tools` are read-only for both kinds: there is no override
+layer for either, and adding one is a policy decision rather than a form field.
+
+The two **budget** routes (issue #343) are how a teammate's `budget_usd_daily`
+becomes changeable without a redeploy. Both are **admin-only** — a member gets
+`403` and an unauthenticated caller `401` — and both stamp who set the cap and
+when, surfaced as `budgetSetBy` / `budgetSetAtMillis` on the roster row. A
+stored cap wins over the manifest, and the change is enforced on the teammate's
+**next dispatch**: the harness fingerprints the override set alongside its other
+freshness axes, so the roster is rebuilt before the next turn rather than at the
+next process start.
+
+`PUT` takes `{"budgetUsdDaily": <number|null>}` and the three cases stay apart
+on the wire, which is the point of the route:
+
+| body | effect |
+|---|---|
+| `{"budgetUsdDaily": 5}` | cap at $5/day |
+| `{"budgetUsdDaily": 0}` | cap at nothing — a real cap, not "uncapped" |
+| `{"budgetUsdDaily": null}` | remove the cap, beating a manifest cap |
+| `{}` | **`422`** — an omitted key is never read as "remove the cap" |
+
+A negative or non-finite amount is `400`; an unknown teammate is `404`.
+`DELETE` drops the override so the manifest default applies again — distinct
+from `PUT null`, and not expressible by it. `POST …/team` also accepts an
+optional `budgetUsdDaily`, so a console-created teammate can be given a cap at
+creation; only that form of the add requires an admin.
+
+The three **policy** routes (issue #562) are the company-scoped twin of the
+budget pair. Before them the autonomy tier lived only in `[policy].mode` and
+nothing in the console read or wrote it, so an operator drowning in approval
+cards could change it only by redeploying an edited `company.toml` — or, on a
+hosted tenant with a read-only manifest snapshot, not at all.
+
+`GET` returns the tier and always-ask list **in force**, what the manifest would
+restore, whether an override is set and by whom, and the selectable tiers with
+the host's own description of each (`POLICY_MODES` narrowed to tiers the console
+has text for, so it never offers one the host would downgrade). `PUT` takes `mode`
+and `alwaysApprove`, both optional and independent — `{"mode": "auto"}`
+leaves the list alone, `{"alwaysApprove": []}` clears it (a real state, not a
+reset), `{"mode": null}` stops overriding the tier, and `{}` is a **`422`**
+because a body that sets nothing is never stored. An unknown `mode` is `422`
+too, not accepted-and-downgraded, or the console would show a tier the gate was
+not running. Both writes are admin-only and attributed. `DELETE` restores the
+manifest's `[policy]` — its own verb, since a `PUT` of the manifest's current
+values would pin them. The change takes effect on the company's **next turn**
+(`ApprovalPolicy` is built per roster build, and this override is fingerprinted
+alongside the other freshness axes). It survives a rebuild unless the seed's
+`[policy]` itself changed: version control wins when it speaks, so tightening
+`company.toml` clears a looser tier set here, and a redeploy that changed
+nothing does not.
+
+### Credential-bearing surfaces (feature-gated)
+
+These write secrets to the `SecretStore` and expose only non-secret status.
+The networked half of each (DNS lookup, SMTP send, OAuth token exchange) is
+dependency-inverted behind a trait; when the relevant seam is absent the write
+route `404`s with `{"code":"not_wired"}`.
+
+```text
+GET    …/credential                         whether the company has its own key + which tier it presents
+PUT    …/credential                         set / rotate / clear the company's TinyHumans key  [admin]
+PUT    …/domain                             set the custom domain
+POST   …/domain/verify                       server-side DNS check
+PUT    …/smtp                               store SMTP credentials (secret store)
+POST   …/smtp/test                           send a test email
+POST   …/connections/{provider}/start        begin OAuth (returns authorize URL)   [feature: oauth]
+POST   …/connections/{provider}/disconnect   drop stored OAuth tokens               [feature: oauth]
+GET    /api/v1/oauth/callback                OAuth redirect target (unscoped; state carries the company)  [feature: oauth]
+```
+
+`…/credential` is the company's **one** TinyHumans key, presented by every
+surface wired to it (**Composio today**) — see
+[`credentials.md`](credentials.md) for the resolution order, the rotation
+guarantee, and which surfaces are deliberately outside it.
+
+### The OAuth callback always redirects
+
+`/api/v1/oauth/callback` is reached by a **browser navigation**, so anything it
+returns as a body becomes the page the operator is left on. It therefore never
+answers with JSON. Every outcome redirects to the console's Connections view:
+
+- success → `…/connections?connected=<provider>`
+- failure → `…/connections?connect_error=<code>[&provider=<provider>]`
+
+`<code>` is one of a closed set — `denied`, `invalid_request`, `invalid_state`,
+`unknown_company`, `provider_disabled`, `exchange_failed`, `store_failed` — that
+the console maps to operator-facing copy. The provider's own error text is
+logged host-side but never forwarded: it is attacker-influenced and must not
+ride in a URL that lands in browser history and access logs. `provider` is
+appended only when a signature-verified `state` supplies it, so the arms that
+fire before verification omit it.
+
+### Provider catalog vs. configured providers
+
+The console's Connections view offers 11 provider tiles; `well_known()` in
+`server::ops::connections` carries built-in authorize/token URLs for three
+families only (`slack`, `google`/`gmail`, `github`). Every other tile needs
+`OPENCOMPANY_OAUTH_<P>_AUTHORIZE_URL` / `_TOKEN_URL` alongside its `_ID` /
+`_SECRET`, or it is simply not enabled on that host.
+
+This gap is **known and safe**: an unconfigured tile fails at `start` with a
+`400 provider '<p>' is not enabled on this host`, the console shows a toast, and
+the browser never navigates — so there is no broken redirect to come back from.
+Closing the gap (shipping more well-known URLs, or hiding unconfigured tiles) is
+separate work.

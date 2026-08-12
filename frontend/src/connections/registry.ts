@@ -17,7 +17,12 @@ import { useSyncExternalStore } from "react";
 
 import { OpenCompanyClient } from "@/api/client";
 import { ApiError } from "@/api/types";
-import { defaultTransport, isAddressableBaseUrl, isDesktopRuntime } from "@/api/transport";
+import {
+  defaultTransport,
+  isAddressableBaseUrl,
+  isDesktopRuntime,
+  mayCarryACredential,
+} from "@/api/transport";
 import type { Transport } from "@/api/transport";
 import { forgetConnection, registerConnection } from "@/api/transport/desktop";
 import {
@@ -510,6 +515,16 @@ export function resetConnections(): void {
 export async function probe(id: ConnectionId): Promise<void> {
   const client = clientFor(id);
   if (!client || probing.has(id)) return;
+  const insecure = insecurelyCredentialed(getConnection(id));
+  if (insecure) {
+    // Refused here rather than left to fail at the core, because this is the
+    // one function that owns a row's status — and the core's refusal arrives
+    // as an IPC rejection that `client.ts` has already flattened into "cannot
+    // reach the company host". Saying it here is what makes the row name the
+    // reason instead of blaming a network that is working (issue #731).
+    patch(id, { status: "down", error: insecure });
+    return;
+  }
   probing.add(id);
   patch(id, { status: "connecting", error: undefined });
   try {
@@ -560,6 +575,39 @@ async function readIdentity(client: OpenCompanyClient): Promise<InstanceIdentity
   } catch {
     return null;
   }
+}
+
+/**
+ * Why this connection must not be contacted, or `null` when it may be.
+ *
+ * A credential over plain HTTP to a host that is not this machine, which the
+ * core refuses at registration (`may_carry_a_credential`). Answering the same
+ * question here is what turns that refusal into something a person can act on;
+ * see the note on `mayCarryACredential`.
+ *
+ * Desktop only. A browser's credential is a cookie the browser decides about,
+ * with `Secure` and the origin's own rules doing this job — narrowing the web
+ * build here would refuse the plain-HTTP deployments `opencompany serve` is
+ * built for, on the transport where the console is not the thing holding the
+ * secret.
+ *
+ * Read off the profile's credential *kind*, which is a claim about this machine
+ * rather than the secret itself: a `device` entry means the keychain holds a
+ * session the core will attach, and `platform` with a token means one arrived
+ * in the url. `cookie` and a token-less `platform` carry nothing, so a host
+ * added by hand and read anonymously stays permitted — the whole point of
+ * gating on the credential rather than on the scheme.
+ */
+function insecurelyCredentialed(connection: Connection | undefined): string | null {
+  if (!connection || !isDesktopRuntime()) return null;
+  const carries =
+    connection.credential.kind === "device" ||
+    (connection.credential.kind === "platform" && Boolean(connection.credential.token));
+  if (!carries || mayCarryACredential(connection.baseUrl)) return null;
+  // Names the credential generically: this covers a paired device session and a
+  // platform bearer from `?token=`, and the person reading it needs the reason
+  // rather than which of the two it was.
+  return `${connection.baseUrl} is not encrypted, so this connection's credential cannot be sent to it. Use https, or a host on this machine.`;
 }
 
 function statusFromError(err: unknown): Partial<Connection> {

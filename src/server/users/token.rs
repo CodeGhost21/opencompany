@@ -85,7 +85,7 @@ impl TokenSource for OsTokens {
         // A CSPRNG failure means the OS cannot give us randomness. There is no
         // safe degraded behavior — falling back to anything predictable would
         // hand out forgeable credentials — so refuse loudly instead.
-        getrandom::getrandom(out).expect("the OS CSPRNG is unavailable; cannot mint a secret");
+        getrandom::fill(out).expect("the OS CSPRNG is unavailable; cannot mint a secret");
     }
 }
 

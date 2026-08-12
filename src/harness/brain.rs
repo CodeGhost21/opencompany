@@ -120,7 +120,33 @@ impl Drop for CheckoutJanitor {
 pub struct HarnessBrain {
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
-    record: CompanyRecord,
+    /// The company's record, **re-read from the store at the top of every
+    /// cycle** (issue #707).
+    ///
+    /// # Why this is not a build-time snapshot any more
+    ///
+    /// It used to be a plain `CompanyRecord`, assigned once in [`Self::new`] and
+    /// never again. Desk chat routing reads it — [`Self::responder_for`] →
+    /// [`Self::desk_lead`] → `effective_desk_members` → `overlay_desk_order` —
+    /// so an operator who reordered a desk, added a desk member, or created a
+    /// desk in the console kept reaching the *old* lead until the process
+    /// restarted. Nothing rebuilt the brain in between: the only caller of
+    /// [`rebuild_company`](crate::runtime::rebuild_company) is an
+    /// inference-settings change.
+    ///
+    /// It was also a **divergence**, not merely a lag. Every other consumer of
+    /// this state already loads per call — `delegate_to_desk` re-reads the
+    /// record on each tool call, and the REST desk surfaces re-read per request
+    /// — so the console and a delegation card would name the new lead while a
+    /// desk chat still routed to the old one. Refreshing here makes chat routing
+    /// do what the correct consumers already do, which removes the divergence
+    /// rather than adding a second mechanism to paper over it.
+    ///
+    /// Behind an `RwLock<Arc<…>>` so a reader is a lock-free-ish clone of a
+    /// handle rather than a copy of the manifest, and so the guard is never held
+    /// across an `await`. Private, and reached only through [`Self::record`]:
+    /// there is deliberately no way to read a stale one.
+    record: std::sync::RwLock<Arc<CompanyRecord>>,
     responder: String,
     /// The attempt records a dispatched card writes into (issue #242).
     ///
@@ -146,10 +172,70 @@ impl HarnessBrain {
         Self {
             pool,
             deps,
-            record,
+            record: std::sync::RwLock::new(Arc::new(record)),
             responder,
             runs: None,
         }
+    }
+
+    /// This company's record as of the current cycle's refresh.
+    ///
+    /// Returns a handle rather than a borrow so no lock is held across the
+    /// `await` points every caller here has. Within one cycle every call sees
+    /// the same record: the refresh happens once, at the top of
+    /// [`run_cycle`](Brain::run_cycle), so a turn cannot observe the operator
+    /// changing a desk halfway through its own routing.
+    fn record(&self) -> Arc<CompanyRecord> {
+        self.record
+            .read()
+            .expect("harness brain record poisoned")
+            .clone()
+    }
+
+    /// Edits the record in place, for tests that set a company up after the
+    /// brain exists. Production code changes this only through
+    /// [`Self::refresh_record`], which is why this is test-only.
+    #[cfg(test)]
+    fn mutate_record(&self, edit: impl FnOnce(&mut CompanyRecord)) {
+        let mut guard = self.record.write().expect("harness brain record poisoned");
+        let mut next = (**guard).clone();
+        edit(&mut next);
+        *guard = Arc::new(next);
+    }
+
+    /// Re-reads the record from the store, so this cycle routes on what the
+    /// operator has actually saved (issue #707).
+    ///
+    /// # The error path is loud, and never silently stale
+    ///
+    /// A failed load **propagates and fails the cycle**. Falling back to the
+    /// previous record would reintroduce exactly the defect this exists to fix,
+    /// and would do it invisibly — the operator would see a turn that appeared
+    /// to succeed while routing on state they had already changed. It is also
+    /// not a new failure mode: the cycle path already loads this same record
+    /// with `?` (`runtime::cycle`), so a store this broken fails the turn
+    /// either way.
+    ///
+    /// `Ok(None)` — no persisted record — **keeps the current one** rather than
+    /// clearing it. That is the same choice [`RuntimeBuilder`] makes when it
+    /// seeds a brain (an absent record contributes no overlays rather than
+    /// erasing the manifest), and the alternative would turn a company whose
+    /// record has not been written yet into one with no roster at all.
+    async fn refresh_record(&self) -> Result<()> {
+        let id = self.record().id.clone();
+        match self.deps.store.load(&id).await? {
+            Some(fresh) => {
+                *self.record.write().expect("harness brain record poisoned") = Arc::new(fresh);
+            }
+            None => {
+                tracing::warn!(
+                    company = %id,
+                    "no persisted record to refresh from; the cycle routes on the record this \
+                     brain was built with"
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Overrides which roster agent answers operator messages.
@@ -257,7 +343,7 @@ impl HarnessBrain {
         let instruction = grant.instruction.clone();
 
         let guard = self.deps.steer.register(
-            &self.record.id,
+            &self.record().id,
             InflightEntry {
                 key: format!("approval:{approval_id}"),
                 task_id: None,
@@ -271,6 +357,8 @@ impl HarnessBrain {
         let control = guard.control().clone();
 
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Bound for the runner's whole lifetime (issue #707): one turn, one record.
+        let record = self.record();
         // Issue #453: the same argument as the publish claim below, one queue
         // over. This is a full agent turn with the whole toolbelt, so it can
         // reach `review_task` / `assign_task` / `spawn_task` — and nothing here
@@ -311,7 +399,13 @@ impl HarnessBrain {
         // bubble returned below, and its transient frames would otherwise
         // misattribute onto whichever chat thread the console is watching.
         let outcome = run_turn
-            .run_steered_background(&self.record.id, &grant.agent, &instruction, &control, None)
+            .run_steered_background(
+                &self.record().id,
+                &grant.agent,
+                &instruction,
+                &control,
+                None,
+            )
             .await;
         drop(guard);
 
@@ -347,7 +441,7 @@ impl HarnessBrain {
         // on this path. That is a strict improvement on dropping it unrun, and it
         // is recorded on the card the hand-off opens.
         let drained = match self
-            .delegation_runner(&run_turn)
+            .delegation_runner(&run_turn, &record)
             .drain_and_execute(
                 grant.origin_thread.as_deref(),
                 delegation::MessageContext::default(),
@@ -432,7 +526,7 @@ impl HarnessBrain {
             return Ok(None);
         };
         let Some(mut card) = tasks
-            .list(&self.record.id)
+            .list(&self.record().id)
             .await?
             .into_iter()
             .find(|t| t.id == task_id)
@@ -444,7 +538,7 @@ impl HarnessBrain {
 
         // Issue #205: who works this card, resolved against the FULL roster —
         // teammates, operator-overlay teammates and desks alike.
-        let resolution = assignee::resolve(&self.record, &card.assignee);
+        let resolution = assignee::resolve(&self.record(), &card.assignee);
         if let Some(reason) = resolution.rejection() {
             // The card names somebody this company does not have. Before this
             // it dispatched to the orchestrator anyway and the board kept the
@@ -493,7 +587,7 @@ impl HarnessBrain {
         if resolution.links_working_agent() && card.assignee != responder {
             card.assignee = responder.clone();
             card.updated_at_millis = now_millis();
-            tasks.upsert(&self.record.id, &card).await?;
+            tasks.upsert(&self.record().id, &card).await?;
         }
 
         // Issue #244: the dispatch-start baseline for "did this agent write
@@ -506,7 +600,7 @@ impl HarnessBrain {
         // and the whole detection path skipped rather than diffed against a
         // workspace nobody touched.
         let dispatched_responder = responder.clone();
-        let workspace = agent_workspace(&self.deps.workspace_root, &self.record.id, &responder);
+        let workspace = agent_workspace(&self.deps.workspace_root, &self.record().id, &responder);
         let workspace_at_dispatch = WorkspaceSnapshot::take(&workspace);
         // Claim the publish queue for this dispatch (#445). The claim clears on
         // the way in for the reason the bare `clear()` here always did — a chat
@@ -556,7 +650,7 @@ impl HarnessBrain {
         // RAII `Drop` deregisters on every exit path (success, error, redirect
         // exhaustion), so a crashed turn never leaves a ghost row in the strip.
         let guard = self.deps.steer.register(
-            &self.record.id,
+            &self.record().id,
             InflightEntry {
                 key: card.id.clone(),
                 task_id: Some(card.id.clone()),
@@ -578,6 +672,8 @@ impl HarnessBrain {
         // Route the background turn through the brain-agnostic `RunTurn` seam
         // (issue #176), re-attaching `HarnessDeps` behind `HarnessRunTurn`.
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+        // Bound for the runner's whole lifetime (issue #707): one turn, one record.
+        let record = self.record();
         // Issue #242: where this attempt's own approval requests begin. The
         // queue is shared with any chat turn earlier in the same cycle and is
         // append-only until the cycle-end drain, so a position taken here stays
@@ -619,7 +715,7 @@ impl HarnessBrain {
                 // discarded into the note), so its live turn frames must not leak
                 // onto the console timeline — run it un-streamed (#125 review).
                 .run_steered_background(
-                    &self.record.id,
+                    &self.record().id,
                     &responder,
                     &instruction,
                     &control,
@@ -666,7 +762,7 @@ impl HarnessBrain {
                             // way to `todo` — the hand-off did happen, and a
                             // re-dispatch should start from who it was given to.
                             let handoff = match self
-                                .delegation_runner(&run_turn)
+                                .delegation_runner(&run_turn, &record)
                                 .for_task(&card.id)
                                 // The delegate's turn is part of THIS attempt —
                                 // its steps and its spend belong to the card's
@@ -1024,7 +1120,7 @@ impl HarnessBrain {
             card.column = column.to_string();
         }
         card.updated_at_millis = now_millis();
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
         // `guard` drops here → the run leaves the in-flight strip.
         drop(guard);
 
@@ -1134,7 +1230,7 @@ impl HarnessBrain {
         let text = format!("dispatch refused: {reason}");
         settle(&mut card, TaskRunEnd::Failed, &orchestrator, &text);
         card.updated_at_millis = now_millis();
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
         // A refusal is a real, terminal attempt — one that spent nothing. It
         // settles like any other ending (#242), so the card's run history shows
         // "this was tried and refused, and why" rather than a gap.
@@ -1168,7 +1264,7 @@ impl HarnessBrain {
         let run_id = run_id?;
         let runs = self.runs.as_ref()?;
         Some(Arc::new(RunTraceSink::new(
-            self.record.id.clone(),
+            self.record().id.clone(),
             run_id,
             Arc::clone(runs),
         )))
@@ -1229,11 +1325,11 @@ impl HarnessBrain {
             step_count: sink.step_count(),
         };
         if let Err(err) = runs
-            .finish_run(&self.record.id, sink.run_id(), outcome)
+            .finish_run(&self.record().id, sink.run_id(), outcome)
             .await
         {
             tracing::warn!(
-                company = %self.record.id,
+                company = %self.record().id,
                 run = %sink.run_id(),
                 error = %err,
                 "[runs] could not settle an attempt row; the dispatch itself landed"
@@ -1296,7 +1392,7 @@ impl HarnessBrain {
     ) -> Option<String> {
         let instruction = publish::nudge_instruction(brief, reply, unpublished, scan_partial);
         let outcome = run_turn
-            .run_steered_background(&self.record.id, responder, &instruction, control, sink)
+            .run_steered_background(&self.record().id, responder, &instruction, control, sink)
             .await;
         // A steer that landed during the nudge is consumed here so it cannot
         // leak into a later `control.take()` and be mistaken for a steer of the
@@ -1356,7 +1452,7 @@ impl HarnessBrain {
         // General desk.
         if let Err(err) = events
             .append(
-                &self.record.id,
+                &self.record().id,
                 CompanyEvent::AgentReply {
                     parent: None,
                     chat_id: card.id.clone(),
@@ -1380,7 +1476,7 @@ impl HarnessBrain {
         // it is strictly worse than dropping the reply.
         if let Err(err) = events
             .append(
-                &self.record.id,
+                &self.record().id,
                 CompanyEvent::DeskTaskCompleted {
                     task_id: card.id.clone(),
                     desk: responder.to_string(),
@@ -1423,7 +1519,7 @@ impl HarnessBrain {
     /// orchestrator to name at all, which is the same empty-roster case
     /// [`orchestrator::orchestrator_id`] already tolerates.
     fn orchestrator(&self) -> String {
-        orchestrator::orchestrator_id(&self.record.manifest.agents)
+        orchestrator::orchestrator_id(&self.record().manifest.agents)
             .unwrap_or_else(|| self.responder.clone())
     }
 
@@ -1443,11 +1539,11 @@ impl HarnessBrain {
     /// text and never the link.
     async fn attempt_ordinal(&self, run_id: &str) -> Option<u32> {
         let runs = self.runs.as_ref()?;
-        match runs.get_run(&self.record.id, run_id).await {
+        match runs.get_run(&self.record().id, run_id).await {
             Ok(run) => run.map(|run| run.attempt),
             Err(err) => {
                 tracing::warn!(
-                    company = %self.record.id,
+                    company = %self.record().id,
                     run = %run_id,
                     error = %err,
                     "[runs] could not read an attempt's ordinal for the card's link; the link \
@@ -1548,7 +1644,7 @@ impl HarnessBrain {
             return Ok(Vec::new());
         };
 
-        let mut on_card = artifacts.list(&self.record.id, Some(&card.id)).await?;
+        let mut on_card = artifacts.list(&self.record().id, Some(&card.id)).await?;
         let mut written = Vec::with_capacity(published.len());
         for pending in published {
             let at = now_millis();
@@ -1640,7 +1736,7 @@ impl HarnessBrain {
                 // the version pointing at the node that currently holds it.
                 record.stamp_workspace_node(node_id);
             }
-            artifacts.upsert(&self.record.id, &record).await?;
+            artifacts.upsert(&self.record().id, &record).await?;
 
             // **A failed mirror does not lose the deliverable.** An explicit
             // publish that could not be filed into the tree is still recorded
@@ -1665,7 +1761,7 @@ impl HarnessBrain {
                     },
                     existing_node_id: prior_node.as_deref(),
                 };
-                match artifact_mirror::materialize(workspace.as_ref(), &self.record.id, target)
+                match artifact_mirror::materialize(workspace.as_ref(), &self.record().id, target)
                     .await
                 {
                     Ok(mirrored) => {
@@ -1713,7 +1809,7 @@ impl HarnessBrain {
                         // discard the remaining publishes' records to report
                         // something the next publish repairs.
                         if (body_changed || relinked)
-                            && let Err(err) = artifacts.upsert(&self.record.id, &record).await
+                            && let Err(err) = artifacts.upsert(&self.record().id, &record).await
                         {
                             tracing::warn!(
                                 task_id = %card.id,
@@ -1751,7 +1847,7 @@ impl HarnessBrain {
                                 crate::harness::publish::PayloadStorage::Refused,
                             ),
                         );
-                        if let Err(err) = artifacts.upsert(&self.record.id, &record).await {
+                        if let Err(err) = artifacts.upsert(&self.record().id, &record).await {
                             tracing::error!(
                                 task_id = %card.id,
                                 source = %pending.source,
@@ -1826,7 +1922,7 @@ impl HarnessBrain {
             ));
         };
         let Some(mut card) = tasks
-            .list(&self.record.id)
+            .list(&self.record().id)
             .await?
             .into_iter()
             .find(|card| card.id == card_id)
@@ -1855,7 +1951,7 @@ impl HarnessBrain {
             card.assignee = agent.to_string();
         }
         card.updated_at_millis = now_millis();
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
         tracing::info!(
             task_id = %card.id,
             agent = %agent,
@@ -1943,7 +2039,7 @@ impl HarnessBrain {
         // leave artifacts pointing at a card that was never created, which is
         // unreachable by every route and indistinguishable from the original
         // bug.
-        tasks.upsert(&self.record.id, &card).await?;
+        tasks.upsert(&self.record().id, &card).await?;
 
         // No run id: there is no attempt row behind a chat turn, and
         // `stamp_run` is skipped rather than given something invented.
@@ -1983,7 +2079,7 @@ impl HarnessBrain {
         if let Some(lead) = self.desk_lead(chat) {
             return lead;
         }
-        if self.record.is_roster_agent(chat) {
+        if self.record().is_roster_agent(chat) {
             return chat.to_string();
         }
         self.responder.clone()
@@ -2003,7 +2099,7 @@ impl HarnessBrain {
         // Desk-lead resolution is brain-agnostic — it reads only `CompanyRecord`
         // — so it lives on the delegation seam (issue #176); this stays a thin
         // wrapper for the routing callers on the brain.
-        delegation::desk_lead(&self.record, desk)
+        delegation::desk_lead(&self.record(), desk)
     }
 
     /// Drains the MCP failure queue **onto the operator bubble's step timeline**
@@ -2047,7 +2143,7 @@ impl HarnessBrain {
                 let server = failure.server.clone();
                 if let Err(err) = events
                     .append(
-                        &self.record.id,
+                        &self.record().id,
                         CompanyEvent::McpCallFailed {
                             task_id: task_id.map(str::to_string),
                             server: failure.server,
@@ -2172,7 +2268,8 @@ impl HarnessBrain {
         chat_id: Option<&str>,
     ) -> Result<delegation::DelegationOutcome> {
         let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
-        self.delegation_runner(&run_turn)
+        let record = self.record();
+        self.delegation_runner(&run_turn, &record)
             .run_delegation(delegation, chat_id, delegation::MessageContext::default())
             .await
     }
@@ -2188,13 +2285,23 @@ impl HarnessBrain {
     /// a turn that stopped at an unauthorised call produced nothing to review.
     /// Wired here, at the one factory, so every runner the brain builds settles
     /// by the same rule rather than each call site remembering to.
-    fn delegation_runner<'a>(&'a self, run_turn: &'a HarnessRunTurn<'a>) -> DelegationRunner<'a> {
+    /// `record` is passed in rather than read here because the runner borrows it
+    /// for its whole lifetime, and since issue #707 the brain's record lives
+    /// behind a lock — [`Self::record`] hands back a handle, and a handle
+    /// created inside this factory would die at the end of it. Every caller
+    /// binds one for the duration of the turn, which is also what keeps a single
+    /// turn on a single consistent record.
+    fn delegation_runner<'a>(
+        &'a self,
+        run_turn: &'a HarnessRunTurn<'a>,
+        record: &'a CompanyRecord,
+    ) -> DelegationRunner<'a> {
         DelegationRunner::new(
             run_turn,
-            &self.record,
+            record,
             self.deps.tasks.as_ref(),
             &self.deps.steer,
-            &self.record.id,
+            &record.id,
             &self.deps.delegations,
             orchestrator::MAX_DELEGATIONS_PER_TURN,
         )
@@ -2235,6 +2342,12 @@ fn settle(card: &mut TaskRecord, end: TaskRunEnd, responder: &str, body: &str) {
 #[async_trait]
 impl Brain for HarnessBrain {
     async fn run_cycle(&self, req: CycleRequest, host: &dyn CycleHost) -> Result<CycleResult> {
+        // Issue #707: re-read the record before anything routes on it, so a desk
+        // reorder / new desk / added desk member saved through the console
+        // reaches this turn. Once per cycle rather than per lookup, so one turn
+        // sees one consistent company. See `refresh_record` for why a failure
+        // fails the cycle instead of falling back to the previous record.
+        self.refresh_record().await?;
         // Issue #439: everything this cycle does runs inside its own approval
         // scope, so a workflow run executing concurrently cannot see, take, or
         // be taken by it.
@@ -2273,7 +2386,7 @@ impl HarnessBrain {
         host: &dyn CycleHost,
     ) -> Result<CycleResult> {
         // Idempotent — builds the roster on the first cycle, a no-op after.
-        self.pool.ensure(&self.record, &self.deps).await?;
+        self.pool.ensure(&self.record(), &self.deps).await?;
 
         let mut channel_responses = Vec::new();
         for event in &req.events {
@@ -2298,8 +2411,8 @@ impl HarnessBrain {
                         let outcome = self
                             .pool
                             .run_confined(
-                                &self.record.id,
-                                &self.record.manifest.company.name,
+                                &self.record().id,
+                                &self.record().manifest.company.name,
                                 text,
                                 &self.deps,
                                 chat.as_deref(),
@@ -2359,8 +2472,10 @@ impl HarnessBrain {
                     // hand-back all run behind the `RunTurn` impl. `HarnessDeps` is
                     // re-attached behind `HarnessRunTurn`.
                     let run_turn = HarnessRunTurn::new(&self.pool, &self.deps);
+                    // Bound for the runner's whole lifetime (issue #707): one turn, one record.
+                    let record = self.record();
                     let turn = self
-                        .delegation_runner(&run_turn)
+                        .delegation_runner(&run_turn, &record)
                         .handle_operator_message(&responder, text, chat_id)
                         .await?;
                     let mut operator_steps = turn.steps;
@@ -2874,8 +2989,8 @@ description = "Builds it."
     /// the engineer — the shape `delegate_to_desk` writes into a card's
     /// `assignee` (issue #205).
     fn brain_with_desk_tasks(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
-        let (mut brain, tasks) = brain_with_tasks(dir);
-        brain.record.manifest.group_chats = toml::from_str::<CompanyManifest>(
+        let (brain, tasks) = brain_with_tasks(dir);
+        let group_chats = toml::from_str::<CompanyManifest>(
             r#"
 [company]
 name = "Acme"
@@ -2892,6 +3007,7 @@ members = ["engineer"]
         )
         .expect("valid manifest")
         .group_chats;
+        brain.mutate_record(|r| r.manifest.group_chats = group_chats);
         (brain, tasks)
     }
 
@@ -3755,7 +3871,7 @@ members = ["engineer"]
         // while proving nothing about the terminal column.
         brain
             .pool
-            .ensure(&brain.record, &brain.deps)
+            .ensure(&brain.record(), &brain.deps)
             .await
             .expect("roster");
 
@@ -4692,13 +4808,15 @@ members = ["engineer"]
     #[tokio::test]
     async fn task_dispatch_routes_to_an_overlay_teammate() {
         let dir = tempfile::tempdir().unwrap();
-        let (mut brain, tasks) = brain_with_tasks(dir.path());
-        brain.record.overlay_agents.push(OverlayAgent {
-            id: "nova".into(),
-            name: "Nova".into(),
-            role: "Growth".into(),
-            description: None,
-            tools: Vec::new(),
+        let (brain, tasks) = brain_with_tasks(dir.path());
+        brain.mutate_record(|r| {
+            r.overlay_agents.push(OverlayAgent {
+                id: "nova".into(),
+                name: "Nova".into(),
+                role: "Growth".into(),
+                description: None,
+                tools: Vec::new(),
+            })
         });
         tasks
             .upsert(&CompanyId::new("acme"), &card("t1", "nova"))
@@ -4883,6 +5001,92 @@ members = ["engineer"]
     /// A brain over the desk-bearing record, wired to a real task store.
     fn brain_with_desk(dir: &std::path::Path) -> (HarnessBrain, Arc<FsOps>) {
         brain_over(dir, record_with_desk())
+    }
+
+    /// Issue #707, the retention half: a store with **no persisted record**
+    /// leaves the brain's record exactly as it was.
+    ///
+    /// `Ok(None)` is not a failure and must not be treated as one — an absent
+    /// record is what a company whose bundle has not been written yet looks
+    /// like, and clearing on it would leave that company with no roster and no
+    /// desks at all. Uses the real `FsCompanyStore` over a directory nothing was
+    /// saved to, which is precisely the shape that returns `Ok(None)`.
+    #[tokio::test]
+    async fn a_refresh_with_no_persisted_record_keeps_the_one_it_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let before = brain.record();
+
+        brain
+            .refresh_record()
+            .await
+            .expect("an absent record is not an error");
+
+        let after = brain.record();
+        assert_eq!(
+            after.manifest.company.name, before.manifest.company.name,
+            "the brain kept its record"
+        );
+        assert_eq!(
+            after.manifest.agents.len(),
+            before.manifest.agents.len(),
+            "an absent record must not empty the roster"
+        );
+        assert_eq!(
+            brain.desk_lead("eng_desk"),
+            Some("engineer".to_string()),
+            "nor cost the company its desks"
+        );
+    }
+
+    /// Issue #707, the loud half: a store that **cannot be read** fails the
+    /// refresh rather than falling back to the record already in hand.
+    ///
+    /// Falling back is the defect this whole change removes, and it would come
+    /// back invisibly — a turn that looked successful while routing on state the
+    /// operator had already replaced. So the error propagates and the cycle
+    /// fails. A corrupt `company.toml` is a real way to reach that arm, and
+    /// reaching it through the real store rather than a double is what keeps
+    /// this test honest about the failure it claims to cover.
+    #[tokio::test]
+    async fn a_refresh_that_cannot_read_the_store_fails_rather_than_going_stale() {
+        use crate::ports::store::CompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let store = FsCompanyStore::new(dir.path());
+        store.save(&brain.record()).await.expect("seed the record");
+
+        // A bundle whose manifest no longer parses: the store reports a failure
+        // rather than an absence, which is the arm under test.
+        let toml_path =
+            crate::store::Bundle::new(dir.path().to_path_buf(), &brain.record().id).company_toml();
+        tokio::fs::write(&toml_path, b"this is not = valid toml [[[")
+            .await
+            .expect("corrupt the manifest");
+
+        let err = brain
+            .refresh_record()
+            .await
+            .expect_err("an unreadable record must fail the refresh, not be ignored");
+        assert!(
+            err.to_string().contains("company.toml"),
+            "the failure names what could not be read: {err}"
+        );
+
+        // And through `run_cycle`, which is the level that actually protects
+        // the promise. Asserting only on `refresh_record` would leave the call
+        // site free to become `let _ = self.refresh_record().await;` — the
+        // refresh would still run, the error would be dropped, the turn would
+        // report success while routing on the record it already held, and every
+        // other test here would stay green. That is issue #707 returning by a
+        // different door, so the propagation is pinned where it is relied on.
+        let cycle = brain.run_cycle(request(Vec::new()), &NoopHost).await;
+        assert!(
+            cycle.is_err(),
+            "a cycle must fail when the record cannot be read, rather than \
+             quietly routing on a stale one"
+        );
     }
 
     /// The default responder is the `orchestrator`-tier agent, even when it is
@@ -5211,7 +5415,7 @@ members = ["eng1", "eng2"]
             .tasks
             .as_ref()
             .unwrap()
-            .list(&brain.record.id)
+            .list(&brain.record().id)
             .await
             .unwrap();
         assert_eq!(cards.len(), 1);
@@ -5270,7 +5474,7 @@ members = ["eng1", "eng2"]
             .tasks
             .as_ref()
             .unwrap()
-            .list(&brain.record.id)
+            .list(&brain.record().id)
             .await
             .unwrap();
         assert_eq!(cards.len(), 2, "both cards are opened either way");
@@ -5536,7 +5740,7 @@ members = ["eng1", "eng2"]
         // The pool must have the roster before a member turn can run.
         brain
             .pool
-            .ensure(&brain.record, &brain.deps)
+            .ensure(&brain.record(), &brain.deps)
             .await
             .expect("roster");
 

@@ -45,6 +45,36 @@ pub fn normalize_provider(provider: &str) -> String {
     trimmed.to_ascii_lowercase()
 }
 
+/// The namespace prefix for a remote MCP server's provider slug.
+///
+/// Composio toolkit slugs and MCP server names are two different namespaces
+/// that `by_provider` would otherwise merge, because it groups on one flat
+/// string. A company with a Composio `gmail` toolkit and an MCP server its
+/// operator also called `gmail` would see one row carrying the sum of both —
+/// and, since the `connections` KPI is that map's *row count*, would be told it
+/// has one connection where it has two (issue #698).
+pub const MCP_PROVIDER_PREFIX: &str = "mcp:";
+
+/// The provider slug recorded for a call through a remote MCP server.
+///
+/// Namespaced rather than bare, so the row cannot collide with a Composio
+/// toolkit of the same name. The prefix is part of the grouping key, which
+/// means it is also what an operator reads in the calls-by-provider chart —
+/// deliberately, because "which of my two `gmail` connections was this?" is a
+/// question the chart could not otherwise answer.
+///
+/// An empty or whitespace-only server name yields a bare [`UNKNOWN_PROVIDER`]
+/// rather than a prefixed one. A sample that cannot name its server is not
+/// evidence about MCP specifically, and minting `mcp:unknown` would invent a
+/// connection row for a server that was never identified.
+pub fn mcp_provider(server: &str) -> String {
+    let normalized = normalize_provider(server);
+    if normalized == UNKNOWN_PROVIDER {
+        return normalized;
+    }
+    format!("{MCP_PROVIDER_PREFIX}{normalized}")
+}
+
 /// Builds the [`UsageSample`] for one connected-tool invocation.
 ///
 /// Carries no tokens and no cost: an OAuth call is counted, not billed by token
@@ -212,5 +242,56 @@ mod tests {
         assert_eq!(usage.by_provider[1].calls, 1);
         // OAuth calls carry no tokens, so they never distort the token series.
         assert_eq!(usage.totals.tokens, 0);
+    }
+
+    #[test]
+    fn an_mcp_server_is_namespaced_away_from_composio_toolkits() {
+        assert_eq!(mcp_provider("linear"), "mcp:linear");
+        // Same normalisation as every other provider: the prefix does not
+        // exempt a server name from the case folding that stops `Linear` and
+        // `linear` becoming two connections.
+        assert_eq!(mcp_provider("  LINEAR "), "mcp:linear");
+    }
+
+    #[test]
+    fn an_unnamed_server_does_not_mint_a_phantom_mcp_connection() {
+        // `mcp:unknown` would be a connection row for a server nobody can
+        // point at. Falling back to the bare slug keeps the call counted in
+        // `oauthCalls` without inventing an MCP connection in `byProvider`.
+        assert_eq!(mcp_provider(""), UNKNOWN_PROVIDER);
+        assert_eq!(mcp_provider("   "), UNKNOWN_PROVIDER);
+    }
+
+    /// The collision issue #698 asks to prevent, asserted through the
+    /// aggregation rather than on the string, because the string is not the
+    /// claim — "two connections, counted separately" is.
+    #[test]
+    fn a_composio_toolkit_and_an_mcp_server_of_one_name_stay_two_connections() {
+        use std::collections::HashMap;
+
+        use crate::metering::{UsageRange, bucket_usage};
+
+        let now = 1_700_000_000_000u64;
+        let samples = vec![
+            // The Composio toolkit: bare slug, as `composio_execute` emits it.
+            oauth_call_sample("ceo", "gmail", now),
+            // An MCP server the operator also named `gmail`.
+            oauth_call_sample("ceo", &mcp_provider("gmail"), now),
+        ];
+        let usage = bucket_usage(&samples, UsageRange::D7, now, &HashMap::new());
+
+        assert_eq!(usage.totals.oauth_calls, 2);
+        assert_eq!(
+            usage.totals.connections, 2,
+            "an MCP server and a Composio toolkit sharing a name are two \
+             connections; merging them under-reports the KPI"
+        );
+        let providers: Vec<&str> = usage
+            .by_provider
+            .iter()
+            .map(|p| p.provider.as_str())
+            .collect();
+        assert!(providers.contains(&"gmail"), "{providers:?}");
+        assert!(providers.contains(&"mcp:gmail"), "{providers:?}");
     }
 }
