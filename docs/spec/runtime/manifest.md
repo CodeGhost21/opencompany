@@ -70,7 +70,8 @@ allow = ["web.*", "docs.*", "search"]  # company-wide grant; agents intersect
 search_daily_calls = 200           # per-company daily web_search cap (0 = paused)
 
 [policy]                           # see company-brain/approvals.md
-mode = "supervised"                # readonly | supervised (default) | auto | full
+mode = "supervised"                # readonly | supervised | auto | full
+                                   # parse default supervised; new companies get auto
 always_approve = ["payment.send", "filing.submit", "external.publish"]
 auto_approve_under_usd = 1.0
 
@@ -197,8 +198,13 @@ prompt = "Weekly review and operator digest"
   outward reads run unattended, anything that leaves the company or spends on
   submit still parks). `always_approve` lists effect kinds that park for
   approval regardless of amount and wins over every tier including `full`;
-  `auto_approve_under_usd` lets small spends through. Defaults are
-  conservative: `supervised`, with all money/publish/filing effects gated.
+  `auto_approve_under_usd` lets small spends through. The parse default is
+  `supervised`, with all money/publish/filing effects gated — but a **new**
+  company is given `auto`, written into its manifest explicitly rather than
+  left to that default. See
+  [approvals.md](../company-brain/approvals.md#which-tier-a-new-company-gets)
+  for why those are two separate knobs, and why moving the parse default is the
+  one thing issue #605 declined to do.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across

@@ -85,6 +85,30 @@ struct ProvisionBody {
     id: Option<String>,
 }
 
+/// Did the submitted manifest **text** name an approval tier?
+///
+/// Read from the raw TOML rather than from the parsed [`CompanyManifest`], and
+/// that is the whole point of the function. `Policy::mode` is a plain `String`
+/// behind a serde default, so a parsed manifest *always* carries a mode and can
+/// never be asked what its author actually wrote. Only the text distinguishes
+/// "the author chose `supervised`" from "the author said nothing".
+///
+/// Anything that does not parse as a table with `policy.mode` set counts as not
+/// declared. Unparseable text cannot reach here — the caller has already
+/// rejected it — so the `unwrap_or(false)` is for the shape, not for a case
+/// this can actually meet.
+fn declares_policy_mode(manifest_toml: &str) -> bool {
+    toml::from_str::<toml::Value>(manifest_toml)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("policy")
+                .and_then(|policy| policy.get("mode"))
+                .cloned()
+        })
+        .is_some()
+}
+
 /// `POST /api/v1/companies` — provision a company from a manifest body.
 async fn provision(
     PlatformScope(claims): PlatformScope,
@@ -113,7 +137,7 @@ async fn provision(
         (body, None)
     };
 
-    let manifest: CompanyManifest = match toml::from_str(&manifest_toml) {
+    let mut manifest: CompanyManifest = match toml::from_str(&manifest_toml) {
         Ok(manifest) => manifest,
         Err(err) => {
             return envelope(
@@ -123,6 +147,22 @@ async fn provision(
             );
         }
     };
+    // Issue #605: a company provisioned without a stated tier gets `auto`,
+    // recorded explicitly rather than inherited from a serde default.
+    //
+    // This is the one creation path with no template behind it. The other two
+    // both arrive carrying a tier already: `serve --company <dir>` and the
+    // desktop app read a `companies/*/company.toml`, and every shipped preset
+    // now declares `mode`.
+    //
+    // Written onto the manifest *before* the build, so the tier lands in the
+    // stored manifest the same way an authored one would. A provisioned tenant
+    // has no `company.toml` anywhere, so that record is the only place an
+    // operator can read their tier — leaving it implicit would make it
+    // unreadable rather than merely unstated.
+    if !declares_policy_mode(&manifest_toml) {
+        manifest.policy.mode = crate::company::PROVISIONED_POLICY_MODE.to_string();
+    }
     let problems = manifest.validate();
     if !problems.is_empty() {
         // Render the prosumer problem list; never leak serde traces.

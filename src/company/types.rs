@@ -54,6 +54,21 @@ pub const TOOL_PROVIDERS: &[&str] = &["openhuman", "builtin"];
 /// variant` in `harness::policy`.
 pub const POLICY_MODES: &[&str] = &["readonly", "supervised", "auto", "full"];
 
+/// The tier a **newly provisioned** company is given when its manifest does not
+/// name one (issue #605).
+///
+/// Deliberately *not* the same knob as [`default_policy_mode`]. That one answers
+/// for every manifest ever parsed, including the re-parse of a company that has
+/// been running for months, so moving it changes companies rather than creating
+/// them. This one is applied once, at provisioning, and written into the stored
+/// manifest as an ordinary explicit `mode` — after which nothing distinguishes
+/// the company from one whose author typed the line themselves.
+///
+/// See `docs/spec/company-brain/approvals.md` for why `auto` is the defensible
+/// default for a new company and why that argument does not extend to
+/// retroactively re-tiering existing ones.
+pub const PROVISIONED_POLICY_MODE: &str = "auto";
+
 /// Channels the runtime knows how to enable under `[channels.*]`.
 pub const KNOWN_CHANNELS: &[&str] = &["operator", "email", "slack", "sms", "web", "telegram"];
 
@@ -609,10 +624,26 @@ fn default_tool_provider() -> String {
 pub struct Policy {
     /// `readonly` | `supervised` (default) | `auto` | `full`.
     ///
-    /// The default stays `supervised` deliberately: issue #560 argues `auto`
-    /// should become it, but flipping it changes behaviour for every existing
-    /// company with no `[policy]` block on its next load, so that is its own
-    /// decision rather than a rider on adding the tier.
+    /// **The default stays `supervised`, and issue #605 is the decision to keep
+    /// it there rather than an unfinished flip.** #560 argued `auto` should
+    /// become the shipped default, and #605 agrees on the destination — new
+    /// companies do get `auto`. What it declines is delivering that by moving
+    /// *this* value, because this value answers for every manifest ever parsed,
+    /// not only for new ones. See [`PROVISIONED_POLICY_MODE`].
+    ///
+    /// Two things go wrong if it moves. The obvious one is that every company
+    /// with no `[policy]` block silently widens on its next load. The other is
+    /// not obvious and is worse: the persisted record stores this *defaulted*
+    /// value, so a silent `company.toml` that parsed to `supervised` last boot
+    /// parses to `auto` this boot, and `carry_policy_override` in
+    /// [`crate::runtime::builder`] — which is `previous_seed == next_seed` over
+    /// the whole block — reads that as version control having spoken and
+    /// **discards the operator's console `[policy]` override**, including one
+    /// that had tightened the tier. Nobody edited anything.
+    ///
+    /// So the tier a new company gets is written into its manifest at
+    /// provisioning, explicitly, where an operator can read it. Existing
+    /// companies are not re-tiered by a constant changing under them.
     #[serde(default = "default_policy_mode")]
     pub mode: String,
     /// Effect kinds that always park for approval regardless of amount.
