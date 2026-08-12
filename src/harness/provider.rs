@@ -531,6 +531,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
     // `with_usage` mirrors usage onto both slots; call it only when present so
     // the billing-free path leaves `usage: None` intact.
