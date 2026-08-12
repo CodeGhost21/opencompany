@@ -334,14 +334,23 @@ impl JournalRecord {
             // operator's withdrawal of authority. An operator action, so rare
             // enough that the flush costs nothing measurable.
             Self::StandingGrantRevoked { .. } => Durability::Host,
-
-            // Written *after* the tool already ran, batched at cycle end as an
-            // explicitly best-effort write whose failure is only logged
-            // (`CompanyCycle::run`). The design already accepts a turn-length
-            // loss window, so flushing inside a wider accepted window is
-            // theatre. A lost record re-arms a spent grant, which re-asks the
-            // operator.
-            Self::GrantConsumed { .. } => Durability::Process,
+            // Losing it re-arms a grant whose tool already ran. Replay keeps the
+            // `ApprovalGranted` that minted it and drops the redemption, so the
+            // grant returns to the live set and `GrantSet::consume` will admit
+            // the identical call again — no card, no operator, until the grant's
+            // own TTL. That is a repeated external action under an authority the
+            // operator spent once, which is the criterion above.
+            //
+            // The flush does not close the window on its own, and is not claimed
+            // to: redemption happens inside a sync `ToolPolicy::check` with no
+            // journal handle, so the id is buffered and written at cycle end
+            // (`CompanyCycle::run`), and a crash inside *that* gap loses the
+            // record before any append is reached. Flushing removes the part
+            // this file controls — the record that was written but only
+            // page-cached. Narrowing a duplication window is worth one flush on
+            // a record written at operator-decision scale; the batching is the
+            // remaining half and is not this issue's to close.
+            Self::GrantConsumed { .. } => Durability::Host,
             // Losing a park loses the *question*: the approval vanishes and the
             // agent parks it again on its next attempt. Nothing external fired.
             Self::ApprovalParked { .. } => Durability::Process,
@@ -1688,15 +1697,15 @@ impl RuntimeJournal {
     /// honours it, exactly as it is the single choke point for
     /// [`JOURNAL_WRITE_LOCKS`]:
     ///
-    /// * The two [`Durability::Host`] kinds — `EffectExecuted` and
-    ///   `StandingGrantRevoked` — go through
+    /// * The three [`Durability::Host`] kinds — `EffectExecuted`,
+    ///   `GrantConsumed` and `StandingGrantRevoked` — go through
     ///   [`append_line_durable`](crate::store::fs::append_line_durable) and are
     ///   flushed to stable storage before this returns. So the at-most-once
     ///   contract holds against **losing the machine** for precisely the records
     ///   whose loss would repeat an external action, and a failed flush fails
     ///   the append — which aborts `execute_effect_once` before `perform_effect`
     ///   and so cannot produce the duplicate it is guarding against.
-    /// * The other eleven are page-cache durable: killing the process cannot
+    /// * The other ten are page-cache durable: killing the process cannot
     ///   lose them, a host crash can. That is the decision, not a gap left open.
     ///   Losing any of them makes the runtime **re-ask** — an approval is parked
     ///   again, an operator is prompted again, a cycle bracket reads as
@@ -3432,7 +3441,7 @@ mod test {
     /// every other test in this file, and silently gives up the one guarantee
     /// the journal exists for. This is the test that notices.
     #[test]
-    fn host_durable_kinds_are_exactly_effect_executed_and_standing_grant_revoked() {
+    fn host_durable_kinds_are_exactly_the_three_that_could_repeat_an_action() {
         let all = every_record_kind();
         let tags: HashSet<String> = all.iter().map(record_tag).collect();
         assert_eq!(
@@ -3451,10 +3460,12 @@ mod test {
             host,
             vec![
                 "EffectExecuted".to_string(),
+                "GrantConsumed".to_string(),
                 "StandingGrantRevoked".to_string()
             ],
-            "the host-durable set is these two kinds and nothing else; \
-             widening it taxes the hot path, narrowing it lets an effect duplicate"
+            "the host-durable set is these three kinds and nothing else; \
+             widening it taxes the hot path, narrowing it lets an effect duplicate \
+             or a spent grant re-arm"
         );
     }
 
@@ -3503,10 +3514,20 @@ mod test {
             "StandingGrantRevoked must flush"
         );
 
+        journal
+            .record_grant_consumed(&ApprovalId::new("appr-1"), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            append_probe::counts(&path),
+            (1, 3),
+            "GrantConsumed must flush: losing it re-arms a grant whose tool ran"
+        );
+
         journal.record_cycle_finished("c-1", None).await.unwrap();
         assert_eq!(
             append_probe::counts(&path),
-            (2, 2),
+            (2, 3),
             "CycleFinished is process-durable and must not flush"
         );
 

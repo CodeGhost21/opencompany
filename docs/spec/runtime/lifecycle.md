@@ -93,10 +93,19 @@ choke point every record goes through — honours the declaration:
 
 | Records | Survives | Why |
 |---|---|---|
-| `EffectExecuted`, `StandingGrantRevoked` | **Host crash / power loss.** Flushed to stable storage (`sync_data`, plus the parent directory on the file's first write) before the append returns. | These are the only kinds whose loss makes the runtime **repeat an external action**. `EffectExecuted` is written immediately before the side effect, so losing it re-fires that effect on the next boot; losing a revocation silently re-arms a standing grant an operator took back, letting it keep admitting calls until its own deadline. |
-| The other eleven | **Process crash.** In the kernel page cache when the append returns; a host crash can lose them. | Losing any of them makes the runtime **re-ask**, never re-fire: an approval is parked again, an operator is prompted again, a cycle bracket reads as interrupted. That is the safe direction, and it is a decision rather than an omission. |
+| `EffectExecuted`, `GrantConsumed`, `StandingGrantRevoked` | **Host crash / power loss.** Flushed to stable storage (`sync_data`, plus every directory the append creates) before the append returns. | These are the only kinds whose loss makes the runtime **repeat an external action**. `EffectExecuted` is written immediately before the side effect, so losing it re-fires that effect on the next boot; losing a `GrantConsumed` keeps the `ApprovalGranted` that minted the grant and drops its redemption, returning a spent single-use grant to the live set where it admits the identical call again with no new approval card; losing a revocation silently re-arms a standing grant an operator took back, letting it keep admitting calls until its own deadline. |
+| The other ten | **Process crash.** In the kernel page cache when the append returns; a host crash can lose them. | Losing any of them makes the runtime **re-ask**, never re-fire: an approval is parked again, an operator is prompted again, a cycle bracket reads as interrupted. That is the safe direction, and it is a decision rather than an omission. |
 
-The split is affordable because the frequency runs the helpful way. The two
+`GrantConsumed`'s flush narrows its window rather than closing it, and is not
+claimed to do more. Redemption happens inside a synchronous `ToolPolicy::check`
+that holds no journal handle, so the id is buffered on the grant set and written
+when the cycle it belongs to ends; a crash inside *that* gap loses the record
+before any append is reached. The flush removes the half the journal controls —
+a record that was written but only page-cached. Closing the other half means
+recording the redemption where it happens, which is a change to the tool-policy
+seam rather than to durability.
+
+The split is affordable because the frequency runs the helpful way. The three
 flushed kinds are written at operator-decision scale — `EffectExecuted` sits in
 front of a network call costing 100ms–2s, so a flush ahead of it is invisible —
 while the highest-volume records (`CycleStarted`/`CycleFinished`, a pair per
