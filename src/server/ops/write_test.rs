@@ -63,6 +63,35 @@ async fn state_with_quota(
     home: &std::path::Path,
     quota: crate::runtime::WorkspaceQuota,
 ) -> AppState {
+    state_with(home, quota, None).await
+}
+
+/// [`state_with_company`], with the workspace tree served by `workspace`
+/// (issue #759).
+///
+/// The `fs` backend refuses to create two sibling nodes with one name
+/// (`reject_path_collision`, issue #665), so the raced tree the repair route
+/// exists to fix cannot be built through it. sqlite and mongodb — the backends
+/// hosted tenants run, and the reason the state exists at all — accept it, and
+/// this swaps in a double that behaves the same way. Everything else about the
+/// harness is unchanged, so the route under test is the one the console calls.
+async fn state_with_workspace(
+    home: &std::path::Path,
+    workspace: std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>,
+) -> AppState {
+    state_with(
+        home,
+        crate::runtime::WorkspaceQuota::default(),
+        Some(workspace),
+    )
+    .await
+}
+
+async fn state_with(
+    home: &std::path::Path,
+    quota: crate::runtime::WorkspaceQuota,
+    workspace: Option<std::sync::Arc<dyn crate::ports::workspace::WorkspaceStore>>,
+) -> AppState {
     use crate::ports::CompanyStore;
     let store = FsCompanyStore::new(home.to_path_buf());
     let id = CompanyId::new("acme");
@@ -84,12 +113,13 @@ async fn state_with_quota(
         })
         .await
         .unwrap();
-    let runtime = RuntimeBuilder::new(home.to_path_buf(), manifest())
+    let mut builder = RuntimeBuilder::new(home.to_path_buf(), manifest())
         .with_id(id.clone())
-        .with_workspace_quota(quota)
-        .build()
-        .await
-        .unwrap();
+        .with_workspace_quota(quota);
+    if let Some(workspace) = workspace {
+        builder = builder.with_workspace(workspace);
+    }
+    let runtime = builder.build().await.unwrap();
     let state = AppState::new(AppConfig::default());
     state.registry().insert(id, std::sync::Arc::new(runtime));
     // Every route needs a principal now; the harness signs in as an admin so
@@ -1869,6 +1899,290 @@ fn swept_names(list: &serde_json::Value) -> Vec<String> {
         .collect();
     names.sort();
     names
+}
+
+/// `POST …/workspace/merge-duplicate-folders` (issue #759): the operator's
+/// repair for a tree a publish race already left ambiguous.
+///
+/// The whole route in one test, because the halves only mean anything together.
+/// A preview that did not name the relocations is a confirm dialog nobody can
+/// agree to; a real run that reported only its successes would call a tree fixed
+/// while two rival documents still sit on one path; and a repair that could not
+/// be run twice would be useless precisely on the tenant that needs it, since
+/// the first pass deliberately leaves the file collision behind.
+///
+/// The workspace here is the permissive double, not `FsOps`: the `fs` backend
+/// refuses to create the duplicate in the first place (issue #665), so this
+/// state is only reachable on the sqlite and mongodb backends hosted tenants
+/// actually run.
+#[tokio::test]
+async fn workspace_merge_folds_duplicate_folders_and_reports_the_file_collision() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_workspace(
+        &home,
+        std::sync::Arc::new(
+            crate::company::workspace_repair::loose_store::LooseWorkspace::default(),
+        ),
+    )
+    .await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    async fn make(state: &AppState, body: Value) -> String {
+        let (status, node) = send(state, "POST", "/api/v1/company/workspace", Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{node}");
+        node["id"].as_str().expect("an id").to_string()
+    }
+
+    // The raced state: one deliverable folder published twice, each copy
+    // holding a different note — and both holding a `summary.md`, which is two
+    // documents on one path and the thing no merge may decide.
+    let a = make(&state, json!({"name": "reports", "kind": "folder"})).await;
+    let b = make(&state, json!({"name": "reports", "kind": "folder"})).await;
+    let a_note = make(
+        &state,
+        json!({"name": "q1.md", "kind": "file", "parentId": a, "content": "# Q1"}),
+    )
+    .await;
+    let b_note = make(
+        &state,
+        json!({"name": "q2.md", "kind": "file", "parentId": b, "content": "# Q2"}),
+    )
+    .await;
+    let a_summary = make(
+        &state,
+        json!({"name": "summary.md", "kind": "file", "parentId": a, "content": "# Mine"}),
+    )
+    .await;
+    let b_summary = make(
+        &state,
+        json!({"name": "summary.md", "kind": "file", "parentId": b, "content": "# Theirs"}),
+    )
+    .await;
+
+    let before = {
+        let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+        provisioned_names(&tree)
+    };
+    let events_before = journal_len(&runtime).await;
+
+    // -- the preview --------------------------------------------------------
+    let (status, preview) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let folds = preview["wouldMerge"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a preview answers with a list of folds, got {preview}"));
+    assert_eq!(folds.len(), 1, "{preview}");
+    let fold = &folds[0];
+
+    // Which twin survives is derived rather than hard-coded: two ULIDs minted
+    // in the same millisecond order by their random half, so the harness cannot
+    // know in advance which folder is older. The rule itself — oldest wins, node
+    // id breaks the tie — is pinned in `company::workspace_repair`'s own tests,
+    // where the timestamps are given.
+    let loser = fold["id"]
+        .as_str()
+        .expect("the fold names its loser")
+        .to_string();
+    let winner = fold["intoId"]
+        .as_str()
+        .expect("and its survivor")
+        .to_string();
+    assert!(
+        (loser == a && winner == b) || (loser == b && winner == a),
+        "the fold must be between the two `reports` folders, got {fold}"
+    );
+    let (moved, residual) = if loser == a {
+        (a_note.clone(), a_summary.clone())
+    } else {
+        (b_note.clone(), b_summary.clone())
+    };
+
+    assert_eq!(
+        fold["moved"].as_array().map(|m| m
+            .iter()
+            .map(|n| n["id"].as_str().unwrap_or_default())
+            .collect::<Vec<_>>()),
+        Some(vec![moved.as_str()]),
+        "the operator is shown every note that would change hands: {preview}"
+    );
+    assert_eq!(
+        fold["removed"],
+        json!(false),
+        "the duplicate still holds a rival document, so it cannot go: {preview}"
+    );
+    assert_eq!(
+        preview["residuals"].as_array().map(|r| r
+            .iter()
+            .map(|n| (
+                n["id"].as_str().unwrap_or_default(),
+                n["cause"].as_str().unwrap_or_default()
+            ))
+            .collect::<Vec<_>>()),
+        Some(vec![(residual.as_str(), "fileInTheWay")]),
+        "and told exactly which document is still theirs to settle: {preview}"
+    );
+    assert!(
+        preview.get("merged").is_none(),
+        "a preview must not claim it changed anything: {preview}"
+    );
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        before,
+        "a dry run must leave the tree exactly as it found it"
+    );
+    assert_eq!(
+        journal_len(&runtime).await,
+        events_before,
+        "a dry run must not announce anything either"
+    );
+
+    // -- the real thing -----------------------------------------------------
+    let (status, done) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        done.get("wouldMerge").is_none(),
+        "a real run must not answer in the preview's field: {done}"
+    );
+    assert_eq!(done["merged"][0]["id"], json!(loser));
+    assert_eq!(done["merged"][0]["removed"], json!(false));
+    assert_eq!(done["residuals"][0]["id"], json!(residual));
+
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    let parents: std::collections::HashMap<&str, &str> = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| {
+            (
+                node["id"].as_str().unwrap_or_default(),
+                node["parentId"].as_str().unwrap_or("-"),
+            )
+        })
+        .collect();
+    assert_eq!(
+        parents.get(moved.as_str()),
+        Some(&winner.as_str()),
+        "the note moved into the surviving folder, under the id it was published as"
+    );
+    assert_eq!(
+        parents.get(residual.as_str()),
+        Some(&loser.as_str()),
+        "and the rival document did not move at all"
+    );
+    assert!(
+        parents.contains_key(loser.as_str()),
+        "the duplicate folder still holds something, so it must still be there"
+    );
+
+    // The move announces itself, because the repair runs through
+    // `runtime.workspace()` — the same announcer-wrapped handle the per-node
+    // routes use (issue #327).
+    assert!(
+        workspace_changes(&runtime)
+            .await
+            .contains(&(moved.clone(), "updated".to_string())),
+        "an open console must see the note change hands"
+    );
+
+    // -- the operator settles the collision, and runs it again --------------
+    let (status, _) = send(
+        &state,
+        "DELETE",
+        &format!("/api/v1/company/workspace/{residual}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+
+    let (status, again) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        again["merged"][0]["removed"],
+        json!(true),
+        "with nothing left in it, the duplicate finally goes: {again}"
+    );
+    assert_eq!(again["residuals"], json!([]));
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert!(
+        !tree
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["id"] == json!(loser)),
+        "the duplicate is gone from the tree: {tree}"
+    );
+    assert!(
+        workspace_changes(&runtime)
+            .await
+            .contains(&(loser.clone(), "removed".to_string())),
+        "and its removal was announced too"
+    );
+
+    // -- and once more, which must be a no-op -------------------------------
+    let (status, third) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/merge-duplicate-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(third["merged"], json!([]), "nothing left to merge: {third}");
+    assert_eq!(third["residuals"], json!([]));
+
+    // The route resolves under the platform scope form too, and is never
+    // captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, scoped) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/workspace/merge-duplicate-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["wouldMerge"], json!([]));
+}
+
+/// Every `WorkspaceChanged` the company has journalled, as `(node id, change)`.
+async fn workspace_changes(
+    runtime: &std::sync::Arc<crate::runtime::CompanyRuntime>,
+) -> Vec<(String, String)> {
+    use crate::ports::types::CompanyEvent;
+    runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|stored| match stored.event {
+            CompanyEvent::WorkspaceChanged { node_id, change } => Some((node_id, change)),
+            _ => None,
+        })
+        .collect()
 }
 
 /// How many events the company has journalled so far.
