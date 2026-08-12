@@ -1,0 +1,252 @@
+# Agent isolation: what confines an agent, and what does not
+
+**Status: current, and deliberately uncomfortable.** This is the threat model
+[repos.md](../runtime/repos.md) deferred when the bound-repository read tier
+shipped (issue #245), filed as issue #752 C0. It exists to be read *before*
+someone concludes from a closed child issue that the agent shell is contained.
+It is not.
+
+Scope: what confines an agent running inside one OpenCompany tenant, with an
+emphasis on the agent that holds `shell`. Not in scope: authentication of
+humans ([users.md](../runtime/users.md)), cross-tenant isolation in
+shared-single-database mode ([storage.md](../runtime/storage.md), which states
+its own limit), or the console's own authorization model
+([api.md](../runtime/api.md)).
+
+## The claim, in one paragraph
+
+**One container per tenant is the only hard boundary OpenCompany has.**
+Everything inside that container — the server process, every agent's workspace,
+every stored credential, the shell an agent runs commands through — is one
+uid, one filesystem and one network namespace. The controls described below are
+real and worth having, but they are *policy applied to a cooperative
+component*, not a boundary between an attacker and the thing they want. An
+agent that has been prompt-injected is not a cooperative component.
+
+## Attacker model
+
+The attacker does not have an account. They write text that an agent reads:
+an issue body, a pull-request description, a web page fetched by `web_fetch`,
+a file in a repository the company bound, an inbound email, a Telegram message,
+a Composio trigger payload. Any of those can carry instructions, and the agent
+that reads them is the one holding the grants.
+
+Assume, therefore: **the attacker can issue any tool call the agent is granted,
+with any arguments.** The question this document answers is what that buys
+them. It is not "can the model be tricked" — assume yes — but "what is on the
+other side of the tool call when it is."
+
+## What is actually enforced today
+
+Each of these is real. None of them is a sandbox.
+
+| Control | Mechanism | Where |
+| --- | --- | --- |
+| One container per tenant | The `opencompany-manager` control plane builds and runs a per-tenant container | superproject, not this repo |
+| Database per tenant | `OPENCOMPANY_MONGODB_URI` is scoped to that tenant's database | [storage.md](../runtime/storage.md) |
+| Tool grants are per agent, and `repo` needs naming | `grants_repo_explicit` — the catch-all `*` does **not** confer `repo`, `media`, `composio` or `search` | `src/company/types.rs` |
+| Repo tools need a grant, a wired manager **and** a binding | Three of the four gates in `build_agent`, each fail-closed with a warning (the fourth is the row below) | `src/harness/build.rs` |
+| Repo credentials refused on a plaintext secret backend | Issue #752 C3 — bind, company boot and agent build all refuse unless `OPENCOMPANY_STORAGE=mongodb` | `src/store/select.rs`, `src/runtime/repo_manager.rs`, `src/runtime/builder.rs`, `src/harness/build.rs` |
+| Classic PATs refused at intake | `ghp_…` reads every repository the account can reach; the route refuses it and says how to make a fine-grained one | `src/server/ops/repos.rs` |
+| The credential never reaches argv, the environment or a file | A git credential helper on stdin, with an emptied environment | [repos.md](../runtime/repos.md) |
+| A checkout cannot reach the mirror it came from | Full object copy over `file://`, no hardlinks, no `alternates`, every back-reference severed | `src/harness/repo.rs` |
+| A push at a mirror is refused by the mirror | A `pre-receive` hook installed in every mirror | `install_push_refusal` |
+| Checkouts do not survive a turn | Orphaned checkouts swept at boot, tenant-scoped | `sweep_orphaned_checkouts` |
+| Repository configuration cannot make git run programs | `core.hooksPath=/dev/null`, no system/global config, scratch `$HOME`, deadline on every invocation | [repos.md](../runtime/repos.md) |
+| Shell without an audit logger is no shell | `workspace_audit` returns `None` → the whole `shell` namespace is withheld | `src/harness/toolbelt.rs` |
+| Copilot turns reach nothing | `ConfinedToolPolicy` denies every tool call by name, empty belt, empty memory | `src/harness/confine.rs` |
+| Web tools reject private and metadata IPs | OpenHuman's `url_guard`, always, regardless of allowlist | `src/harness/toolbelt.rs` |
+| Per-company web allowlist, when set | `[tools].web_allowed_domains`; empty means allow-any-public | `src/harness/toolbelt.rs` |
+
+**The exec `SecurityPolicy` is advisory.** `workspace_only`,
+`block_high_risk_commands` and `require_approval_for_medium_risk` are read by
+filesystem tools and by a command classifier. `workspace_dir` and `action_dir`
+set the shell's **working directory**. A working directory is not a jail.
+
+### On the write tier's approval gate, which is not here yet
+
+The repository **write** tier (#247, #734–#738) is in flight and is **not on
+`main`** as this is written — there is no `repo_publish` in the tree. When it
+lands, its approval gate is adequate for what it guards: a push is
+low-frequency, high-consequence and irreversible, exactly the shape an approval
+gate is for, and its constraints (host-generated branch name, never the default
+branch, no force, all inside `RepoManager`) are structural rather than
+prompt-reachable.
+
+It is still not a shell boundary. It runs in the same process and gates a
+*tool*. An injected agent moving data out does not call `repo_publish` — it
+calls `shell` and runs `git push`, or `curl`. So the gate does not lower the
+priority of anything in this document, and it must not be cited as if it did.
+
+A suggested precondition, not a code dependency: **the write tier should not
+reach a tenant whose pod lacks default-deny egress.**
+
+## What is not enforced
+
+### 1. There is no sandbox. The shell runs directly.
+
+OpenHuman's `ShellTool` routes execution through a sandbox backend only when
+the agent's sandbox mode is `Sandboxed`
+(`vendor/openhuman/src/openhuman/tools/impl/system/shell.rs`). `SandboxMode`
+defaults to `None`, and **OpenCompany never sets one** — grepping `src/` for
+`SandboxMode`, `jail` or `landlock` returns doc comments and nothing else. Every
+shell command an agent runs is a direct child of the server process, with the
+server's uid, the server's filesystem and the server's network.
+
+The `cwd_jail` / Landlock subsystem exists in `vendor/openhuman` but is neither
+wired nor compiled: `sandbox-landlock` is absent from the tenant feature set in
+`deploy-staging.yml`.
+
+### 2. Wiring Landlock would not close the exfiltration channel.
+
+From `vendor/openhuman/src/openhuman/sandbox/cwd_jail/README.md`, verbatim:
+*"Landlock does not gate network at all."* Egress isolation in OpenHuman exists
+only through the Docker sandbox backend's `--network`, which needs
+docker-in-docker and is not available in a tenant pod.
+
+So a filesystem jail is worth having and does nothing for token exfiltration on
+its own. This is why C4 is secondary and why closing it would not close #752.
+
+### 3. On `fs` and `sqlite`, secrets are plaintext on the container's disk.
+
+`FsSecretStore` writes one plaintext file per secret under
+`<data-dir>/companies/<slug>/secrets/` and says so in its own doc comment;
+`sqlite` puts the same bytes in a database file on the same disk. Both are
+readable by the uid the shell runs as.
+
+Since #752 C3 this specific exposure is refused rather than documented: binding
+a repository credential, booting a company whose roster grants `repo`, and
+wiring the repo tools for an agent all fail closed unless
+`OPENCOMPANY_STORAGE=mongodb`. That closes the *repository* credential on that
+path. It does not make the filesystem safe — every other secret on an `fs` host
+is still plaintext next to it, and nothing here touches the shell.
+
+### 4. There is no egress policy.
+
+A tenant pod can open a connection to any host that resolves. Nothing in this
+repo can change that, and no test in this repo can demonstrate otherwise: a
+manifest lint is not proof, a blocked packet is. This is C1, it lives in
+`opencompany-microservice`, and it is the load-bearing control in the whole set.
+
+### 5. There is no per-agent uid separation.
+
+Every agent in a tenant is the same uid, in the same process. Agent A's
+workspace is a directory agent B can `cat`. The grant system decides which
+*tools* an agent is offered; it does not decide what the shell can reach once
+one of them is `shell`.
+
+### 6. The audit trail does not survive its own subject.
+
+The shell audit log is `<workspace>/audit.log` — the agent's own workspace,
+which is the shell's working directory. An agent holding `shell` can truncate
+or delete the record of what it did. Withholding shell when the logger cannot
+initialize (which the toolbelt does) makes the log's *existence* fail-closed; it
+does nothing for its *integrity*.
+
+## Residual capability after every control in #752 lands
+
+**Read this section as if C0–C5 are already done, because that is when it
+matters.** It is written in the present tense on purpose: nothing below is
+fixed by the work #752 tracks.
+
+One container per tenant remains the only hard boundary. Inside a tenant, a
+prompt-injected agent holding `shell` that can reach an allowlisted host can
+still:
+
+1. **Exfiltrate any repository content it can read, to an attacker-controlled
+   repository on that same allowlisted git host.** Default-deny egress (C1)
+   allowlists the git host — it has to, or checkout and publish stop working.
+   The agent pushes to `github.com/attacker/drop` instead of
+   `github.com/acme/widgets`. Same host, same port, same protocol, same TLS
+   certificate authority. Nothing in the allowlist distinguishes them.
+2. **Cause writes anywhere the credential's scope reaches**, under the write
+   tier. The approval gate constrains what `repo_publish` may do; it does not
+   constrain what `git push` may do from a shell that holds the token.
+3. **Read every secret the tenant holds that is on the container's disk**, and
+   every agent's workspace in that tenant.
+4. **Destroy its own audit trail.**
+
+What C1–C5 actually buy: the number of hosts reachable drops from "the
+internet" to "a handful", raw sockets stop working (C2), the repository
+credential stops being a file on disk (C3), the filesystem an escaped process
+sees shrinks (C4), and a stolen token expires in an hour and reaches one
+repository (C5). Each of those raises cost and narrows a channel. **None of
+them puts a boundary between the agent and the credential, or between the agent
+and its egress.**
+
+The honest one-line summary, which belongs in any report on this work: *we
+narrowed the channels and shortened the credential's life; we did not contain
+the shell.*
+
+## An unresolved tension: egress policy versus the web tools
+
+Default-deny egress (C1) and `[tools].web_allowed_domains` pull in opposite
+directions, and both are load-bearing.
+
+- C1 wants the pod to reach a short, fixed list: the git host, the model API,
+  the TinyHumans backend, DNS. Everything else refused at the network layer.
+- The web tools want broad public reach. An empty `web_allowed_domains` means
+  *allow any public host*, and that is the default because a company doing
+  research, competitive analysis or customer support is expected to read the
+  web. Narrowing it to a per-company allowlist is a real product cost: an agent
+  that cannot open the page it was asked about is not doing the job.
+
+These cannot both be maximal. A pod-level allowlist that admits the public web
+so `web_fetch` keeps working is a pod-level allowlist that admits the attacker's
+collection endpoint, and C1 has bought approximately nothing. A pod-level
+allowlist tight enough to be a boundary breaks `web_fetch` for every company
+that has not enumerated its domains in advance.
+
+There is no resolution recorded here because none has been decided. The shapes
+worth considering, none of them free:
+
+- Route the web tools through an egress proxy inside the allowlist, and enforce
+  the per-company domain list at the proxy rather than in-process. Moves the
+  decision to a component the agent cannot talk around, and adds a component.
+- Split the tiers: companies that hold a repository credential get the tight
+  allowlist and lose open web; companies that want open web do not get `repo`.
+  Honest, and it makes the two capabilities mutually exclusive.
+- Accept broad egress and stop describing C1 as containment — treat it as
+  blocking raw sockets and non-HTTP protocols only.
+
+Whoever closes C1 must state which of these they chose, and what it costs.
+
+## What must never be claimed
+
+Not in a commit message, not in a PR body, not in a release note, not in this
+directory:
+
+- "The shell is sandboxed." It is not. No sandbox mode is set.
+- "Egress is locked down", without naming the allowlist and conceding that
+  exfiltration to an allowlisted host is unaffected.
+- "The agent cannot reach the credential." On `fs` it is a file it can read; on
+  `mongodb` it is in a process it is running inside.
+- "#752 is fixed." #752 cannot be closed by work in this repo. C3 and C4 are
+  the in-repo children; the load-bearing ones are C1, C2 and C5, and they are
+  in `opencompany-microservice`.
+- Any claim about egress justified by a passing test in this repository. No
+  test here can demonstrate that a packet was blocked.
+
+## The children of #752
+
+| ID | Scope | Repo | State |
+| --- | --- | --- | --- |
+| C0 | This document | opencompany | done |
+| C1 | Default-deny egress for tenant pods | `opencompany-microservice` / k8s | open — **highest priority** |
+| C2 | Pod `securityContext`: seccomp `RuntimeDefault`, drop all caps including `NET_RAW`, no privilege escalation | `opencompany-microservice` / k8s | open |
+| C3 | Fail closed on the fs secret backend for `repo` | opencompany | done |
+| C4 | Wire `cwd_jail` Landlock for the agent shell, plus a CI lane that builds the feature | opencompany | open — secondary |
+| C5 | Short-lived single-repository installation tokens instead of a long-lived write PAT | `opencompany-microservice` | open — before the write tier ships broadly |
+
+The write tier (#247, #734–#738) is a separate line of work, not a child of
+this one — but see the precondition above.
+
+## Related
+
+- [repos.md](../runtime/repos.md) — "The honest limit", which this document is
+  the deferred follow-up to.
+- [storage.md](../runtime/storage.md) — backend selection, and the repository
+  credential requirement C3 added.
+- [ports-state.md](../runtime/ports-state.md) — the `SecretStore` contract.
+- [company-brain/approvals.md](../company-brain/approvals.md) — the approval
+  model the publish gate sits in.

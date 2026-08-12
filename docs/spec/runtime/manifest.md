@@ -243,7 +243,7 @@ prompt = "Weekly review and operator digest"
   `supervised`, with all money/publish/filing effects gated — but a **new**
   company is given `auto`, written into its manifest explicitly rather than
   left to that default. See
-  [approvals.md](../company-brain/approvals.md#which-tier-a-new-company-gets)
+  [grants.md](../company-brain/grants.md#which-tier-a-new-company-gets)
   for why those are two separate knobs, and why moving the parse default is the
   one thing issue #605 declined to do. **A tool name is an
   effect kind** — the harness projects one onto the other — so

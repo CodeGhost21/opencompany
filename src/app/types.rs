@@ -528,6 +528,17 @@ impl AppState {
         self
     }
 
+    /// Which storage backend is serving the durable ports.
+    ///
+    /// Read by `/spec` and — since issue #752 — by every company builder, which
+    /// passes it down to the repository-credential gates. Those refuse on `fs`
+    /// and `sqlite`, so this is a security-relevant value and not only a
+    /// reporting one: a host that forgets to set it is treated as the refusing
+    /// case, which is the safe direction.
+    pub fn storage_kind(&self) -> crate::store::StorageKind {
+        self.storage_kind
+    }
+
     /// This host's stable public identity, minted on first use.
     ///
     /// See [`crate::app::instance`] for why it is random rather than derived

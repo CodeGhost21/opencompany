@@ -294,6 +294,12 @@ pub struct RuntimeBuilder {
     /// 256 MiB per-file cap and an unlimited tree, so a runtime built without
     /// naming a quota is still not a way to write an unbounded file.
     workspace_quota: crate::runtime::WorkspaceQuota,
+    /// Issue #752: which storage backend is serving this host's secrets. Only
+    /// the repository-credential gates read it, and the default is the refusing
+    /// side (`fs`) — a runtime built without naming a backend is assumed to keep
+    /// secrets as plaintext on disk, because that is what
+    /// [`with_stores`](Self::with_stores) not being called actually means.
+    storage_kind: crate::store::StorageKind,
     facts: Option<Arc<dyn FactStore>>,
     artifacts: Option<Arc<dyn ArtifactStore>>,
     runs: Option<Arc<dyn RunStore>>,
@@ -302,6 +308,7 @@ pub struct RuntimeBuilder {
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
+    read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
     users: Option<Arc<dyn UserStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
@@ -390,6 +397,7 @@ impl RuntimeBuilder {
             tasks: None,
             workspace: None,
             workspace_quota: crate::runtime::WorkspaceQuota::default(),
+            storage_kind: crate::store::StorageKind::default(),
             facts: None,
             artifacts: None,
             runs: None,
@@ -398,6 +406,7 @@ impl RuntimeBuilder {
             run_output_store: None,
             usage: None,
             skills: None,
+            read_state: None,
             users: None,
             sessions: None,
             login_codes: None,
@@ -517,6 +526,7 @@ impl RuntimeBuilder {
         self.run_output_store = Some(handles.run_outputs.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
+        self.read_state = Some(handles.read_state.clone());
         self.users = Some(handles.users.clone());
         self.sessions = Some(handles.sessions.clone());
         self.login_codes = Some(handles.login_codes.clone());
@@ -576,6 +586,18 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Records which storage backend serves this host's secrets (issue #752).
+    ///
+    /// Separate from [`with_stores`](Self::with_stores) because the two answer
+    /// different questions: `with_stores` hands over port *implementations*,
+    /// while this is the deployment's own name for the backend — the string an
+    /// operator set in `OPENCOMPANY_STORAGE` and the one the refusal quotes back
+    /// at them. Defaults to `fs`, the refusing side.
+    pub fn with_storage_kind(mut self, kind: crate::store::StorageKind) -> Self {
+        self.storage_kind = kind;
+        self
+    }
+
     /// Swaps the facts store (default: fs-backed).
     pub fn with_facts(mut self, facts: Arc<dyn FactStore>) -> Self {
         self.facts = Some(facts);
@@ -621,6 +643,15 @@ impl RuntimeBuilder {
     /// Swaps the usage meter (default: fs-backed).
     pub fn with_usage(mut self, usage: Arc<dyn UsageMeter>) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    /// Swaps the per-person channel read markers (default: fs-backed).
+    pub fn with_read_state(
+        mut self,
+        read_state: Arc<dyn crate::ports::read_state::ReadStateStore>,
+    ) -> Self {
+        self.read_state = Some(read_state);
         self
     }
 
@@ -967,6 +998,7 @@ impl RuntimeBuilder {
                     .unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
+                read_state: self.read_state.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
                 sessions: self.sessions.unwrap_or_else(|| fs_ops.clone()),
                 login_codes: self.login_codes.unwrap_or_else(|| fs_ops.clone()),
@@ -1549,6 +1581,48 @@ impl RuntimeBuilder {
             .or_else(|| self.template_provenance.clone());
         let ledger = existing.map(|r| r.ledger).unwrap_or_default();
 
+        // Issue #752: a company whose roster holds `repo` does not come up on a
+        // backend that keeps secrets as plaintext on this container's disk.
+        //
+        // The bind-time refusal in `RepoManager::bind` covers new credentials.
+        // It cannot cover a company that bound one *before* this gate existed —
+        // that credential is already sitting on `/data`, and its agents would
+        // keep checking out under it forever. So the same condition is asked
+        // again here, where the answer is "this company does not start", and an
+        // operator restarting a tenant finds out at the moment they can still
+        // act on it.
+        //
+        // Read over the **effective roster**, not `[tools].allow` alone: an
+        // agent naming `tools = ["repo"]` under a company allow-list of `["*"]`
+        // holds an explicit `repo` grant that `grants_repo_explicit(&allow)`
+        // does not see, because the wildcard deliberately does not confer the
+        // namespace. Checking only the company line would miss exactly the
+        // configuration a wildcard company is most likely to have.
+        //
+        // NOT feature-gated, for the reason `build_agent` states about the repo
+        // tools themselves: a control compiled only under `openhuman` is a
+        // control most CI lanes never type-check.
+        if self.storage_kind.secrets_are_plaintext_on_disk() {
+            let roster_holds_repo =
+                crate::company::grants_repo_explicit(&self.manifest.tools.allow)
+                    || self
+                        .manifest
+                        .agents
+                        .iter()
+                        .map(|agent| {
+                            agent_effective_grants(&self.manifest.tools.allow, &agent.tools)
+                        })
+                        .chain(overlay_agents.iter().map(|overlay| {
+                            agent_effective_grants(&self.manifest.tools.allow, &overlay.tools)
+                        }))
+                        .any(|grants| crate::company::grants_repo_explicit(&grants));
+            if roster_holds_repo {
+                return Err(crate::error::OpenCompanyError::Config(
+                    crate::store::plaintext_secret_refusal(self.storage_kind),
+                ));
+            }
+        }
+
         // Issue #245: the company's repository mirror cache, rooted at the same
         // `companies/<slug>/` prefix the bundle uses so a company's whole
         // footprint sits in one subtree — and therefore inside the one quota
@@ -1569,7 +1643,11 @@ impl RuntimeBuilder {
                 Bundle::new(home.clone(), &id).repos_dir(),
                 secrets.clone(),
             )
-            .with_quota(self.workspace_quota.tree_quota_bytes);
+            .with_quota(self.workspace_quota.tree_quota_bytes)
+            // Issue #752: the manager refuses a bind when a credential would
+            // land as plaintext on this container's disk, so it has to be told
+            // which backend is actually serving secrets.
+            .with_storage_kind(self.storage_kind);
             // The forge REST client (pull-request metadata + diff). Without the
             // feature there is no HTTP client to give it, and the PR route says
             // so rather than answering with an empty diff. Shadowed rather than
@@ -3323,6 +3401,120 @@ mod test {
 
     fn parse(toml_src: &str) -> CompanyManifest {
         toml::from_str(toml_src).expect("valid manifest")
+    }
+
+    // ---- issue #752: `repo` needs a backend that keeps secrets off disk ----
+
+    /// A company that already bound a repository predates the bind-time gate,
+    /// so the *restart* is where it has to be caught. A repo-granted company on
+    /// an fs host does not come up.
+    #[tokio::test]
+    async fn a_repo_granted_company_does_not_boot_on_a_plaintext_secret_backend() {
+        let home = tmp_home("oc-752-boot-");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["repo", "shell"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            // The default, spelled out: this is what a local `serve` is.
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect_err("an fs host must refuse to bring up a repo-granted company");
+        let message = err.to_string();
+        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
+        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
+        assert!(message.contains("`repo` grant"), "{message}");
+    }
+
+    /// The wildcard case, which a check against `[tools].allow` alone would let
+    /// through: `*` deliberately does **not** confer `repo`, so the company line
+    /// reads as ungranted while the agent naming `repo` explicitly holds it.
+    #[tokio::test]
+    async fn an_agent_that_names_repo_under_a_wildcard_company_is_caught_too() {
+        let home = tmp_home("oc-752-boot-wildcard-");
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["*"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            tools = ["repo"]
+            "#,
+        );
+        // The company line itself is not an explicit grant — if it were, this
+        // test would pass for the wrong reason.
+        assert!(!crate::company::grants_repo_explicit(&manifest.tools.allow));
+        let err = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect_err("an agent-level `repo` grant must be caught at boot");
+        assert!(err.to_string().contains("OPENCOMPANY_STORAGE=fs"), "{err}");
+    }
+
+    /// The other side, without which the two above only prove the check is on:
+    /// the same company boots on the backend that keeps secrets out of the
+    /// container, and a company that grants no `repo` boots on fs unaffected.
+    #[tokio::test]
+    async fn the_same_company_boots_where_secrets_leave_the_container() {
+        let home = tmp_home("oc-752-boot-ok-");
+        let granted = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["repo", "shell"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(home.path().to_path_buf(), granted)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Mongodb)
+            .build()
+            .await
+            .expect("mongodb-backed secrets must clear the #752 boot gate");
+
+        let ungranted_home = tmp_home("oc-752-boot-ungranted-");
+        let ungranted = parse(
+            r#"
+            [company]
+            name = "Acme"
+            [policy]
+            mode = "full"
+            [tools]
+            allow = ["shell", "web"]
+            [[agent]]
+            id = "ceo"
+            role = "Chief"
+            "#,
+        );
+        RuntimeBuilder::new(ungranted_home.path().to_path_buf(), ungranted)
+            .with_id(CompanyId::new("acme"))
+            .with_storage_kind(crate::store::StorageKind::Fs)
+            .build()
+            .await
+            .expect("a company without `repo` is untouched by this gate");
     }
 
     // ---- `[policy]` override across a rebuild (issue #562) ----------------

@@ -39,6 +39,41 @@ MongoDB settings:
 - `OPENCOMPANY_TENANT_ID` — tenant identity for **shared-single-DB** mode
   (default unset). See [Shared single database](#shared-single-database-mode).
 
+## Secrets at rest, and what that costs (issue #752)
+
+`fs` writes one **plaintext** file per secret under
+`<data-dir>/companies/<slug>/secrets/`; `sqlite` puts the same bytes in a
+database file on the same disk. Both are readable by the uid the server runs
+as — which is the uid an agent's `shell` tool runs as, in the same container.
+There is no boundary in between; see
+[../security/agent-isolation.md](../security/agent-isolation.md). `mongodb` is
+the only backend that keeps secrets out of the container, in the tenant
+database.
+
+**Repository credentials therefore require `OPENCOMPANY_STORAGE=mongodb`.**
+This is enforced, not advised, in three places:
+
+| Where | What happens |
+| --- | --- |
+| `POST …/repos` (bind) | `409 Conflict` with the refusal message; nothing is stored |
+| Company boot / rebuild | The company does not come up — `OpenCompanyError::Config` — when its **effective roster** grants `repo`, including an agent naming `repo` under a wildcard company allow-list |
+| Agent build | Repo tools are withheld (fail-closed, with a warning), which covers a teammate added through the console on a live runtime |
+
+The refusal names both remedies: set `OPENCOMPANY_STORAGE=mongodb` with
+`OPENCOMPANY_MONGODB_URI`, or drop the `repo` grant.
+
+**This is a breaking change for `fs` and `sqlite` deployments that have already
+bound a repository.** That is deliberate. Those are precisely the deployments
+carrying a plaintext repository token on a disk their agents can read, so a
+warning would leave the exposure in place and call it handled. Migration is one
+of the two remedies above; a bound credential on an fs host should also be
+**revoked at the forge**, since it has been readable for as long as it has been
+installed.
+
+Every *other* secret on an `fs` or `sqlite` host is still plaintext next to it.
+This gate closes one credential on one path; it does not make the filesystem
+safe.
+
 ## The root itself
 
 How the data root is resolved, why only one process may write it, and what

@@ -330,6 +330,40 @@ pub struct RepoMeta {
     pub can_push: bool,
 }
 
+// Compiled where it is used: under `github` (the forge client calls it) and
+// under `test` (the parse test drives it, in every feature lane). The default
+// non-test build links no forge client, so a `pub(crate)` fn with no caller there
+// would be dead code under `-D warnings` — this gate is what keeps the parse and
+// its test together without tripping that.
+#[cfg(any(feature = "github", test))]
+impl RepoMeta {
+    /// Parses a repository object from GitHub's REST API into a [`RepoMeta`]
+    /// (issue #734).
+    ///
+    /// Lives here, on the always-compiled type, rather than inline in the
+    /// feature-gated forge client, so the field extraction — above all the
+    /// `permissions.push` → [`can_push`](Self::can_push) mapping the write tier
+    /// fails closed on — is unit-tested in **every** build, not only when the
+    /// `github` feature happens to be compiled. A missing `permissions` block, or
+    /// a `permissions` block with no `push` key, reads as `false`: an absent
+    /// answer must never be mistaken for "can push".
+    pub(crate) fn from_github_json(json: &serde_json::Value) -> Self {
+        Self {
+            default_branch: json
+                .get("default_branch")
+                .and_then(|v| v.as_str())
+                .unwrap_or("main")
+                .to_string(),
+            size_kb: json.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
+            can_push: json
+                .get("permissions")
+                .and_then(|p| p.get("push"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false),
+        }
+    }
+}
+
 /// A pull request's metadata plus its unified diff.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -570,5 +604,51 @@ mod test {
             binding.can_push, None,
             "an absent capability must read as unknown (cannot-push), not a load failure"
         );
+    }
+
+    /// The `permissions.push` → `can_push` parse is the production boundary the
+    /// write tier fails closed on (issue #734), and every `RepoManager` test
+    /// drives a `FakeHost` that sets the bool directly — so this exercises the
+    /// real GitHub-JSON path the forge client uses. A misspelled key or an
+    /// inverted default would pass every other test but fail here.
+    #[test]
+    fn github_permissions_push_parses_to_can_push_and_fails_closed() {
+        let can_push = |v: serde_json::Value| RepoMeta::from_github_json(&v).can_push;
+
+        // A push-capable credential.
+        assert!(can_push(
+            serde_json::json!({ "permissions": { "push": true } })
+        ));
+        // A read-only credential.
+        assert!(!can_push(
+            serde_json::json!({ "permissions": { "push": false } })
+        ));
+        // No `permissions` block at all (a response shape the credential cannot
+        // read) → fail closed.
+        assert!(!can_push(serde_json::json!({ "size": 42 })));
+        // A `permissions` block that carries no `push` key → fail closed.
+        assert!(!can_push(
+            serde_json::json!({ "permissions": { "pull": true } })
+        ));
+        // A `push` value that is not a bool → fail closed rather than truthy.
+        assert!(!can_push(
+            serde_json::json!({ "permissions": { "push": "yes" } })
+        ));
+
+        // The sibling fields still parse from the same object.
+        let meta = RepoMeta::from_github_json(&serde_json::json!({
+            "default_branch": "trunk",
+            "size": 7,
+            "permissions": { "push": true }
+        }));
+        assert_eq!(meta.default_branch, "trunk");
+        assert_eq!(meta.size_kb, 7);
+        assert!(meta.can_push);
+
+        // An empty object falls back to the documented defaults.
+        let empty = RepoMeta::from_github_json(&serde_json::json!({}));
+        assert_eq!(empty.default_branch, "main");
+        assert_eq!(empty.size_kb, 0);
+        assert!(!empty.can_push);
     }
 }

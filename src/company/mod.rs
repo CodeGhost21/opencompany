@@ -114,9 +114,10 @@ pub(crate) use workflow_create::{
     update_company_workflow, workflow_version,
 };
 // Issue #580: the builder pass's courtesy validation, gated with the harness
-// builder that is its only caller.
+// builder that is its only caller. Issue #753 adds `workflow_callable_tool_slugs`
+// on the same footing — the create-time copilot's tool grounding.
 #[cfg(feature = "openhuman")]
-pub(crate) use workflow_create::courtesy_validate_draft;
+pub(crate) use workflow_create::{courtesy_validate_draft, workflow_callable_tool_slugs};
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
 use crate::{Result, VERSION};
