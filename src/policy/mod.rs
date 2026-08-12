@@ -16,9 +16,16 @@
 //! console card) while the tool policy that parks calls compiles only under the
 //! `openhuman` feature.
 
+//! The [`judgement`] module answers the question neither of the above asks:
+//! which calls should stop for a human *on their own merits*, in the gap the
+//! static configuration leaves (issue #338). Always compiled for the same
+//! reason [`consequence`] is — it is pure, it has no harness types in it, and
+//! keeping it out of the gated build means its tests run in the plain lane.
+
 pub mod always_approve;
 pub mod consequence;
 pub mod gate;
+pub mod judgement;
 
 /// Shared `composio_execute` call fixtures (issue #470). Test-only, and
 /// deliberately here rather than in any one test module: the key they build
@@ -29,3 +36,4 @@ pub(crate) mod test_support;
 
 pub use consequence::{Consequence, Reach, Standing, consequence_of};
 pub use gate::{DEFAULT_TTL_MILLIS, ManifestApprovalGate};
+pub use judgement::{CallPath, Judgement, StopReason, judge};
