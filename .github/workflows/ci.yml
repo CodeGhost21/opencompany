@@ -44,7 +44,8 @@ on:
 # a MERGE QUEUE, which verifies the exact merged state before it becomes `main`
 # and makes this question moot; it needs a `merge_group` trigger plus a
 # branch-protection change no PR can make, and with a 26–30 minute critical path
-# it either serialises merges to ~2/hour or has to batch. Tracked separately.
+# it either serialises merges to ~2/hour or has to batch. Issue #793 carries that
+# evaluation; this block is the fix that does not need anyone's settings.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.ref != format('refs/heads/{0}', github.event.repository.default_branch) }}
