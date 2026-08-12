@@ -3126,6 +3126,16 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_journal_store() {
+        conformance::assert_journal_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_import() {
+        conformance::assert_journal_import(store()).await;
+    }
+
+    #[tokio::test]
     async fn conformance_run_store() {
         conformance::assert_run_store(store()).await;
     }

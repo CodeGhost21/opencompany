@@ -3722,6 +3722,20 @@ mod test {
     }
 
     #[tokio::test]
+    async fn conformance_journal_store() {
+        let Some(s) = store().await else { return };
+        conformance::assert_journal_store(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_import() {
+        let Some(s) = store().await else { return };
+        conformance::assert_journal_import(s.clone()).await;
+        drop_db(&s).await;
+    }
+
+    #[tokio::test]
     async fn conformance_run_store() {
         let Some(s) = store().await else { return };
         conformance::assert_run_store(s.clone()).await;

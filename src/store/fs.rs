@@ -1450,8 +1450,23 @@ impl crate::ports::journal::JournalStore for FsJournalStore {
         }
     }
 
+    /// Every `\n`-separated segment of the file, minus the empty one the final
+    /// terminator produces.
+    ///
+    /// Splitting `"a\nb\n"` yields a third, empty segment that is an artefact of
+    /// the terminator rather than a record. Dropping exactly that one — the last,
+    /// and only when it is empty — is what makes this backend's read agree
+    /// element-for-element with a database backend's, which is what
+    /// `assert_journal_store` holds every backend to. It shifts no line number:
+    /// the discarded segment is past every record in the file, and a genuinely
+    /// blank line in the middle is still returned so a corruption report counts
+    /// it.
     async fn read_journal(&self, id: &CompanyId) -> Result<Vec<String>> {
-        read_lines_lossy(&self.path(id)).await
+        let mut lines = read_lines_lossy(&self.path(id)).await?;
+        if lines.last().is_some_and(String::is_empty) {
+            lines.pop();
+        }
+        Ok(lines)
     }
 
     /// Always imported: this store *is* the file an import would copy from.
@@ -1481,6 +1496,34 @@ mod test {
             .prefix("opencompany-test-")
             .tempdir()
             .expect("tempdir")
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_store() {
+        let root = tmp_root();
+        conformance::assert_journal_store(Arc::new(FsJournalStore::new(root.path()))).await;
+    }
+
+    /// The fs backend reports itself permanently imported, so
+    /// `assert_journal_import` does not apply to it: its store IS the file an
+    /// import would copy from, and the builder therefore never imports on this
+    /// backend. Asserted here rather than left implicit — a backend that
+    /// answered `false` would have the builder wipe and re-copy a company's
+    /// journal on every single boot.
+    #[tokio::test]
+    async fn the_filesystem_backend_never_needs_an_import() {
+        use crate::ports::journal::JournalStore;
+        let root = tmp_root();
+        let store = FsJournalStore::new(root.path());
+        let id = CompanyId::new("alpha");
+        assert!(store.journal_imported(&id).await.unwrap());
+        store
+            .append_journal(&id, "kept", crate::ports::journal::Durability::Host)
+            .await
+            .unwrap();
+        // And the unreachable import is the identity, not a wipe.
+        store.complete_import(&id, Vec::new()).await.unwrap();
+        assert_eq!(store.read_journal(&id).await.unwrap(), vec!["kept"]);
     }
 
     #[tokio::test]
