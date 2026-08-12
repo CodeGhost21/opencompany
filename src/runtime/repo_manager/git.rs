@@ -512,42 +512,72 @@ mod test {
         std::fs::remove_dir_all(&base).ok();
     }
 
-    #[tokio::test(start_paused = true)]
+    #[tokio::test]
     async fn a_git_that_overruns_its_deadline_is_stopped_and_reported() {
-        // Virtual time, not a zero deadline racing a real process.
+        // Drive the deadline against a git that deterministically blocks, not a
+        // real `git version` under virtual time. `tokio::time::timeout` polls
+        // its inner future first and only consults the deadline once that future
+        // returns `Pending`; a fast `git version` finished and had its output
+        // buffered before the first `Pending`, so the old `start_paused` version
+        // returned `Ok` — exactly what failed on Linux CI. Auto-advancing the
+        // clock does not help while the runtime is still waiting on a real
+        // child's I/O, so the deadline never reached the timeout arm reliably.
         //
-        // `tokio::time::timeout` polls its inner future first and only consults
-        // the deadline when that future returns `Pending`. `git version` can
-        // finish and have its output buffered before the first `Pending`, so a
-        // `Duration::ZERO` deadline returns `Ok` — which is exactly what
-        // happened on Linux CI while passing locally. The old comment here
-        // claimed determinism the code did not have.
-        //
-        // Under `start_paused` the clock is virtual and auto-advances whenever
-        // the runtime has nothing ready, which is precisely the state it is in
-        // while waiting on a real child's I/O. The deadline therefore fires on
-        // the first idle rather than on a stopwatch, and no wall-clock second
-        // is actually spent.
-        //
-        // What this proves is the shape of the timeout arm — the error an
-        // operator sees, and that the child is dropped (and so reaped, by
-        // `kill_on_drop`) rather than leaked. It does not, and cannot cheaply,
-        // prove the kill against a remote that really hangs; that is what the
-        // deadline exists for.
+        // So this test puts a fake `git` on `PATH` whose only special case is to
+        // block, checks that the deadline arm fires, and relies on `kill_on_drop`
+        // to reap the child instead of leaking it. The fake delegates everything
+        // else to the real git, so its presence on `PATH` cannot perturb sibling
+        // tests running concurrently in the same binary.
         let base = std::env::temp_dir().join(format!("oc-gittimeout-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
+
+        let real_git = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("command -v git")
+            .output()
+            .ok()
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .expect("real git must be on PATH");
+        let bin = base.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fake_git = bin.join("git");
+        std::fs::write(
+            &fake_git,
+            format!(
+                "#!/bin/sh\ncase \" $* \" in\n  *\" __deadline__ \"*) sleep 60;;\nesac\nexec {real_git} \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&fake_git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        // `run_bounded` rebuilds the child environment from this process's, so a
+        // test-local `PATH` prepend is enough to route `git` to the fake for the
+        // duration of the run. The marker still reaches the fake's `$*` scan
+        // because `hardening_flags()` prepends its own `-c` arguments ahead of
+        // it in the argv.
+        let original_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{original_path}", bin.display()));
+
+        // A 500ms deadline against a 60s sleep is a ~120x margin, not a race.
         let err = run_bounded(
             &base,
-            &["version"],
+            &["__deadline__"],
             None,
             None,
-            std::time::Duration::from_secs(300),
+            std::time::Duration::from_millis(500),
         )
         .await
         .unwrap_err()
         .to_string();
         assert!(err.contains("did not finish"), "{err}");
         assert!(err.contains("was stopped"), "{err}");
+
+        std::env::set_var("PATH", original_path);
         std::fs::remove_dir_all(&base).ok();
     }
 
