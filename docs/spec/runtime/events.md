@@ -47,7 +47,10 @@ approvals](#in-conversation-approvals-issue-379)), `ApprovalResolved`,
 `PaymentReceived`, `LifecycleChanged`, `AgentReply`, `MemoryFactDeleted`,
 `TaskDispatched`, `McpCallFailed`, `WorkflowCreated` (a new saved workflow
 graph was authored + enabled via the console `POST …/workflows` route or the
-orchestrator's `create_workflow` tool; journaled best-effort after persist),
+orchestrator's `create_workflow` tool; journaled best-effort after persist —
+`WorkflowUpdated` / `WorkflowDeleted` are journaled the same way and now reach
+the same two surfaces, since issue #661 gave the orchestrator `update_workflow`
+and `delete_workflow` alongside it),
 `TaskSteered` (an operator paused, cancelled, or redirected an in-flight task
 or delegation), `DeskTaskCompleted` (a dispatched board task finished its run —
 the terminal anchor a per-task timeline ends on; "completed" means the run

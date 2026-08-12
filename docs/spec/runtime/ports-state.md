@@ -38,7 +38,12 @@ changed nothing does not silently revert the operator), or an explicit
 console can show who moved the gate and when.
 And (issue #168) `overlay_workflows`: the
 workflow graph bodies authored at runtime through the console's create dialog or
-the orchestrator's `create_workflow` tool. These are persisted here rather than
+the orchestrator's `create_workflow` tool, and thereafter replaced or removed
+through the console's `PUT`/`DELETE …/workflows/{wid}` routes or the
+orchestrator's `update_workflow` / `delete_workflow` tools (issue #661).
+Both surfaces run the same company-layer core, so an agent edit snapshots the
+prior body to the #274 revision ring and an agent delete cascades that ring away
+exactly as an operator's does. These are persisted here rather than
 written into `companies/<name>/workflows/<id>.toml` because the company source
 tree is the version-controlled seed and, in hosted mode, a read-only crate mount
 (writing there failed every hosted tenant with `EROFS`). Every reader unions the
