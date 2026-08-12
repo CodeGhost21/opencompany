@@ -1032,17 +1032,21 @@ async fn a_publish_stages_the_agents_commit_and_pushes_the_namespaced_branch() {
     let checkout = scratch.join("checkout");
     let head = checkout_with_commit(&scratch, &mirror, &checkout, "FIX.md", "the fix\n");
 
-    // Stage: the agent's HEAD lands on the host-owned branch, host-side.
-    let branch = mgr
+    // Stage: the agent's HEAD lands on the host-owned branch, host-side, and the
+    // exact staged commit is returned so the approval can be bound to it.
+    let (branch, staged_head) = mgr
         .stage_publish("fixture", &checkout, "task-1")
         .await
         .unwrap();
     assert_eq!(branch, "oc/acme/task-1", "the branch is host-namespaced");
+    assert_eq!(staged_head, head, "stage_publish returns the staged commit");
     let staged = git_at(&mirror, &["rev-parse", "refs/heads/oc/acme/task-1"]);
     assert_eq!(staged, head, "the mirror ref points at the agent's commit");
 
     // Push: the remote receives exactly that branch and commit.
-    mgr.push_published("fixture", &branch).await.unwrap();
+    mgr.push_published("fixture", &branch, &staged_head)
+        .await
+        .unwrap();
     let bare = scratch.join("origin.git");
     let pushed = git_at(&bare, &["rev-parse", "refs/heads/oc/acme/task-1"]);
     assert_eq!(pushed, head, "the remote branch is the agent's commit");
@@ -1102,7 +1106,12 @@ async fn a_push_to_anything_but_this_companys_namespace_is_refused() {
         "oc/acme/../main", // a traversal out of the namespace
         "refs/heads/main", // a fully-qualified default ref
     ] {
-        let err = mgr.push_published("fixture", bad).await.unwrap_err();
+        // A valid-shaped commit id, so it is the branch that is refused — the
+        // branch is re-validated before the head is even looked at.
+        let err = mgr
+            .push_published("fixture", bad, &"a".repeat(40))
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, OpenCompanyError::InvalidRequest(_)),
             "branch {bad:?} should be refused: {err:?}"
@@ -1136,7 +1145,7 @@ async fn a_non_fast_forward_publish_is_refused_never_forced() {
     let c1 = scratch.join("checkout1");
     let head_a = checkout_with_commit(&scratch, &mirror, &c1, "A.md", "A\n");
     mgr.stage_publish("fixture", &c1, "task-1").await.unwrap();
-    mgr.push_published("fixture", "oc/acme/task-1")
+    mgr.push_published("fixture", "oc/acme/task-1", &head_a)
         .await
         .unwrap();
 
@@ -1144,10 +1153,10 @@ async fn a_non_fast_forward_publish_is_refused_never_forced() {
     // same branch and pushed. Since the push never forces, the remote refuses
     // the non-fast-forward.
     let c2 = scratch.join("checkout2");
-    checkout_with_commit(&scratch, &mirror, &c2, "B.md", "B\n");
+    let head_b = checkout_with_commit(&scratch, &mirror, &c2, "B.md", "B\n");
     mgr.stage_publish("fixture", &c2, "task-1").await.unwrap();
     let err = mgr
-        .push_published("fixture", "oc/acme/task-1")
+        .push_published("fixture", "oc/acme/task-1", &head_b)
         .await
         .unwrap_err();
     assert!(
@@ -1160,6 +1169,58 @@ async fn a_non_fast_forward_publish_is_refused_never_forced() {
     assert_eq!(
         remote, head_a,
         "the remote branch must still point at the first commit"
+    );
+}
+
+/// An approval is bound to the exact commit it was staged for (issue #735). A
+/// second publish on the same task force-updates the mirror's branch ref, but
+/// approving the first still publishes the first commit — the later re-stage
+/// cannot ride in on the earlier approval.
+#[tokio::test]
+async fn a_publish_pushes_the_approved_commit_even_after_a_restage() {
+    let scratch = Scratch::new("bound-commit");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+    let mirror = mgr.mirror_path("fixture");
+    let bare = scratch.join("origin.git");
+
+    // First publish stages commit A and records its head.
+    let c1 = scratch.join("checkout1");
+    checkout_with_commit(&scratch, &mirror, &c1, "A.md", "A\n");
+    let (_branch, head_a) = mgr.stage_publish("fixture", &c1, "task-1").await.unwrap();
+
+    // Before it is approved, a second publish on the SAME task stages commit B,
+    // force-updating the mirror's branch ref to B.
+    let c2 = scratch.join("checkout2");
+    let head_b = checkout_with_commit(&scratch, &mirror, &c2, "B.md", "B\n");
+    mgr.stage_publish("fixture", &c2, "task-1").await.unwrap();
+    assert_ne!(head_a, head_b);
+    assert_eq!(
+        git_at(&mirror, &["rev-parse", "refs/heads/oc/acme/task-1"]),
+        head_b,
+        "the mirror ref now points at the re-staged commit B"
+    );
+
+    // Approving the FIRST publish pushes A — the commit that approval was bound
+    // to — not whatever the branch ref points at now.
+    mgr.push_published("fixture", "oc/acme/task-1", &head_a)
+        .await
+        .unwrap();
+    let remote = git_at(&bare, &["rev-parse", "refs/heads/oc/acme/task-1"]);
+    assert_eq!(
+        remote, head_a,
+        "the approved commit reached the remote, not the re-staged one"
     );
 }
 

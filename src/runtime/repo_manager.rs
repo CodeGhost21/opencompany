@@ -806,7 +806,12 @@ impl RepoManager {
     /// `file://` transport; a fetch writes the ref without ever running
     /// `receive-pack`, so the mirror's unconditional push-refusal hook (and
     /// #245's contract test asserting it) is untouched.
-    pub async fn stage_publish(&self, key: &str, checkout: &Path, task: &str) -> Result<String> {
+    pub async fn stage_publish(
+        &self,
+        key: &str,
+        checkout: &Path,
+        task: &str,
+    ) -> Result<(String, String)> {
         // Ensures the repository is actually bound to this company before any git
         // runs — an unbound key resolves to no mirror and no credential.
         let _binding = self.get(key).await?;
@@ -845,7 +850,20 @@ impl RepoManager {
                 first_line(&out.stderr)
             )));
         }
-        Ok(branch)
+
+        // The exact commit just staged. The approval is bound to this SHA and the
+        // push sends this SHA, so a second `repo_publish` on the same task — which
+        // force-updates the branch ref above — cannot change what an earlier
+        // approval publishes.
+        let head = git::run(
+            &mirror,
+            &["rev-parse", &format!("refs/heads/{branch}")],
+            None,
+            None,
+        )
+        .await?
+        .require("reading the staged commit")?;
+        Ok((branch, head))
     }
 
     /// Pushes an already-staged `oc/<company>/<task>` branch from the mirror to
@@ -855,10 +873,19 @@ impl RepoManager {
     /// never reaches here, so the remote stays untouched. **Never a force push
     /// and never a `+` refspec:** a non-fast-forward is reported as a failure,
     /// not overwritten. The branch is re-validated as a publish branch this
-    /// manager owns before a single byte leaves the container.
-    pub async fn push_published(&self, key: &str, branch: &str) -> Result<()> {
+    /// manager owns, and `head` is the exact commit the approval was bound to,
+    /// before a single byte leaves the container.
+    pub async fn push_published(&self, key: &str, branch: &str, head: &str) -> Result<()> {
         let binding = self.get(key).await?;
         self.assert_publish_branch(branch)?;
+        // The commit the operator approved, as a bare object id. Validated so it
+        // can name exactly one object and nothing but one — a value carrying a
+        // space or a `:` would otherwise reshape the refspec below.
+        if head.len() != 40 || !head.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "{head:?} is not a commit id"
+            )));
+        }
 
         let token = self.token_for(&binding).await?.ok_or_else(|| {
             OpenCompanyError::InvalidRequest(format!(
@@ -873,11 +900,12 @@ impl RepoManager {
             )));
         }
 
-        // A plain, non-forced push of exactly the one ref. The refspec has no
-        // leading `+`, and there is no `--force` anywhere on this surface, so a
-        // branch that already exists on the remote and would not fast-forward is
-        // refused by the remote rather than clobbered.
-        let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+        // Push the exact approved commit to the branch. `<sha>:refs/heads/<branch>`
+        // sends that object no matter where the mirror's branch ref points now, so
+        // a second publish that re-staged this task's branch cannot substitute a
+        // different commit into this approval. Still no leading `+` and no
+        // `--force`: a non-fast-forward on the remote is refused, not clobbered.
+        let refspec = format!("{head}:refs/heads/{branch}");
         let askpass = git::AskpassDir::create(&self.root)?;
         let out = git::run(
             &mirror,

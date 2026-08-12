@@ -947,7 +947,8 @@ async fn committed_checkout(ctx: &RepoToolContext, mirror: &Path, key: &str) {
 #[tokio::test]
 async fn repo_publish_without_a_task_refuses() {
     let scratch = Scratch::new("publish-no-task");
-    let (manager, binding) = bound(&scratch, &["main"]).await;
+    let (manager, mut binding) = bound(&scratch, &["main"]).await;
+    binding.can_push = Some(true); // push-capable, so the task check is what refuses
     let ctx = context(&scratch, manager, vec![binding.clone()]);
     ctx.ledger.set_task(None); // a chat turn: no card
     let tool = repo_publish_tool(ctx.clone());
@@ -971,7 +972,8 @@ async fn repo_publish_without_a_task_refuses() {
 #[tokio::test]
 async fn repo_publish_stages_and_queues_a_native_approval() {
     let scratch = Scratch::new("publish-queue");
-    let (manager, binding) = bound(&scratch, &["main"]).await;
+    let (manager, mut binding) = bound(&scratch, &["main"]).await;
+    binding.can_push = Some(true);
     let mirror = manager.mirror_path(&binding.key);
     let ctx = context(&scratch, manager, vec![binding.clone()]);
     ctx.ledger.set_task(Some("card-1".to_string()));
@@ -1012,4 +1014,45 @@ async fn repo_publish_stages_and_queues_a_native_approval() {
         Some("oc/acme/card-1"),
         "the approval carries the host-generated branch"
     );
+    // The approval is bound to the exact staged commit, so the push is not at the
+    // mercy of a later re-stage of the same task.
+    assert_eq!(
+        req.effect.payload.get("head").and_then(|v| v.as_str()),
+        Some(staged.as_str()),
+        "the approval carries the staged commit id"
+    );
+}
+
+/// The tool is wired when any bound credential can push, but a specific
+/// repository whose own credential is read-only must be refused before staging —
+/// not left to fail when the host tries the push (issue #735).
+#[tokio::test]
+async fn repo_publish_refuses_a_read_only_binding() {
+    let scratch = Scratch::new("publish-readonly");
+    let (manager, mut binding) = bound(&scratch, &["main"]).await;
+    binding.can_push = Some(false); // this repository's credential cannot push
+    let mirror = manager.mirror_path(&binding.key);
+    let ctx = context(&scratch, manager, vec![binding.clone()]);
+    ctx.ledger.set_task(Some("card-1".to_string()));
+    committed_checkout(&ctx, &mirror, &binding.key).await;
+    let tool = repo_publish_tool(ctx.clone());
+
+    let result = tool
+        .execute(json!({ "repo": binding.key, "message": "the fix" }))
+        .await
+        .unwrap();
+    assert!(result.is_error, "{result:?}");
+    assert!(
+        result.text().contains("read-only"),
+        "the refusal must name the read-only credential: {}",
+        result.text()
+    );
+    assert_eq!(
+        ctx.approvals.queued(),
+        0,
+        "a read-only binding must stage and queue nothing"
+    );
+    // And nothing was staged into the mirror.
+    let (ok, _) = git_try(&mirror, &["rev-parse", "refs/heads/oc/acme/card-1"]);
+    assert!(!ok, "no branch may be staged for a read-only binding");
 }
