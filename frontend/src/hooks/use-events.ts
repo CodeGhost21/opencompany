@@ -144,6 +144,12 @@ export type CompanyStreamEvent =
        * just pressed Cancel that the run finished fine.
        */
       cancelled?: boolean;
+      /**
+       * System notices raised about the run (issue #638), e.g. that gated tool
+       * calls past the per-batch cap were discarded. Absent on the vast
+       * majority of runs. Not a failure — see `WorkflowRunOutcome.notices`.
+       */
+      notices?: string[];
     }
   // Issue #371/#382: the live per-node progress trail. A run announces itself,
   // then brackets each non-trigger node with a *started* frame as it begins and

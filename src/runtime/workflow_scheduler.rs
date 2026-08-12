@@ -1152,6 +1152,7 @@ mod test {
                             deliveries: Vec::new(),
                             cancelled: true,
                             nodes: Vec::new(),
+                            notices: Vec::new(),
                         });
                     }
                 }
@@ -1163,6 +1164,7 @@ mod test {
                 deliveries: self.deliveries.clone(),
                 cancelled: false,
                 nodes: Vec::new(),
+                notices: Vec::new(),
             })
         }
     }
@@ -2008,6 +2010,7 @@ to = "done"
                 pending_approvals,
                 error,
                 cancelled,
+                notices: _,
             } = event
             else {
                 unreachable!("filtered above")

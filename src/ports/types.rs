@@ -980,6 +980,24 @@ pub enum CompanyEvent {
         /// non-cancelled run's line byte-identical to what it was.
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         cancelled: bool,
+        /// System notices raised about this run (issue #638) — today, that a
+        /// node's turn gated more tool calls than the per-batch cap allows and
+        /// the excess was discarded.
+        ///
+        /// The run-side counterpart of the operator bubble the chat path pushes
+        /// (#561). A run has no conversation to speak on, so without this the
+        /// operator sees the first `cap` cards on the Approvals page and no
+        /// indication that any more were gated.
+        ///
+        /// Separate from [`error`](Self::WorkflowRunFinished::error) on purpose:
+        /// a run that overflowed the cap **succeeded**, and putting this there
+        /// would mark it failed and inflate the failure count.
+        ///
+        /// `#[serde(default)]` + `skip_serializing_if` so a pre-#638 line
+        /// replays and an ordinary run's event serializes byte-for-byte as it
+        /// did before — which is every run that did not overflow.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        notices: Vec<String>,
     },
     /// A workflow run began (issue #371) — the opening bracket of a run's
     /// per-node progress trail.
@@ -4890,6 +4908,7 @@ mod test {
             pending_approvals: vec!["review".to_string()],
             error: None,
             cancelled: false,
+            notices: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -4906,6 +4925,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: Some("agent node `worker` had no inference source".to_string()),
             cancelled: false,
+            notices: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
     }
@@ -4934,6 +4954,7 @@ mod test {
                 pending_approvals: Vec::new(),
                 error: None,
                 cancelled: false,
+                notices: Vec::new(),
             }
         );
         // …and serializing it back emits nothing extra.
@@ -4965,6 +4986,7 @@ mod test {
             pending_approvals: Vec::new(),
             error: None,
             cancelled: true,
+            notices: Vec::new(),
         };
         assert_eq!(round_trip(&event), event);
 
@@ -5077,6 +5099,7 @@ mod test {
                 pending_approvals: vec!["review".to_string()],
                 error: None,
                 cancelled: false,
+                notices: Vec::new(),
             }
         );
     }

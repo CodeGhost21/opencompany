@@ -332,17 +332,29 @@ impl DrainedRequests {
     /// and that assertion is #561's real guarantee — the cap quoted is the one
     /// the drain was taken against, never a constant the call site had lying
     /// around. Rewording around it beat loosening it.
+    ///
+    /// # Agreement
+    ///
+    /// Every countable word in the sentence branches on `n`, verbs and pronouns
+    /// included — a single discard reads "1 further gated tool call was not
+    /// raised … It was not run". Only the nouns branched at first, so the one
+    /// case an operator is most likely to hit read as "1 … call **were** not
+    /// raised". The sentence exists to be believed; ungrammatical is a reason
+    /// not to believe it.
     pub fn overflow_notice(&self) -> Option<String> {
         (self.discarded > 0).then(|| {
             let n = self.discarded;
             let cap = self.cap;
             let calls = if n == 1 { "call" } else { "calls" };
             let them = if n == 1 { "it" } else { "them" };
+            let were = if n == 1 { "was" } else { "were" };
+            let they = if n == 1 { "It" } else { "They" };
+            let they_are = if n == 1 { "it is" } else { "they are" };
             format!(
-                "Heads up: {n} further gated tool {calls} were not raised for approval. One \
+                "Heads up: {n} further gated tool {calls} {were} not raised for approval. One \
                  batch can raise at most {cap}, and {n} more needed your sign-off than that. \
-                 They were **not** run and they are **not** on the Approvals page — ask the \
-                 agent again to get {them} back."
+                 {they} {were} **not** run and {they_are} **not** on the Approvals page — ask \
+                 the agent again to get {them} back."
             )
         })
     }
@@ -2396,12 +2408,40 @@ mod tests {
     }
 
     /// One dropped request reads as one, not as "1 calls".
+    ///
+    /// The nouns agreed from the start; the verbs and pronouns did not, so a
+    /// single discard read "1 further gated tool call **were** not raised …
+    /// **They were** not run and **they are** not on the Approvals page". The
+    /// whole sentence has to agree, not the countable nouns in it — an operator
+    /// reading a confidently-worded, ungrammatical notice has cause to wonder
+    /// what else about it is stale.
     #[test]
     fn the_overflow_notice_is_singular_for_a_single_dropped_request() {
         let drained = DrainedRequests::new(Vec::new(), 1, 8);
         let notice = drained.overflow_notice().expect("one is still an overflow");
         assert!(notice.contains("1 further gated tool call "), "{notice}");
         assert!(!notice.contains("calls"), "{notice}");
+        assert!(notice.contains("call was not raised"), "{notice}");
+        assert!(notice.contains("It was **not** run"), "{notice}");
+        assert!(notice.contains("it is **not** on the"), "{notice}");
+        assert!(!notice.contains("were"), "{notice}");
+        assert!(!notice.contains("they"), "{notice}");
+        assert!(!notice.contains("They"), "{notice}");
+    }
+
+    /// …and the plural is untouched: the agreement fix must not singularise the
+    /// case that was already right.
+    #[test]
+    fn the_overflow_notice_stays_plural_for_several_dropped_requests() {
+        let drained = DrainedRequests::new(Vec::new(), 3, 8);
+        let notice = drained.overflow_notice().expect("three is an overflow");
+        assert!(
+            notice.contains("3 further gated tool calls were not"),
+            "{notice}"
+        );
+        assert!(notice.contains("They were **not** run"), "{notice}");
+        assert!(notice.contains("they are **not** on the"), "{notice}");
+        assert!(!notice.contains(" was "), "{notice}");
     }
 
     /// The notice names the cap the drain was actually taken against, not one a
