@@ -1267,17 +1267,109 @@ async fn perform_effect(rt: &CompanyRuntime, effect: &Effect) -> Result<()> {
             .get("head")
             .and_then(|v| v.as_str())
             .unwrap_or_default();
-        match rt.repos() {
-            Some(repos) => repos.push_published(repo, branch, head).await?,
-            None => {
-                return Err(crate::error::OpenCompanyError::Unimplemented(
-                    "a repository publish was approved but this host has no repository manager \
-                     configured to perform it",
-                ));
+        let task = effect
+            .payload
+            .get("task")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let agent = effect
+            .payload
+            .get("agent")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let message = effect
+            .payload
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let Some(repos) = rt.repos() else {
+            return Err(crate::error::OpenCompanyError::Unimplemented(
+                "a repository publish was approved but this host has no repository manager \
+                 configured to perform it",
+            ));
+        };
+        // The push is the irreversible half: its failure fails the effect.
+        repos.push_published(repo, branch, head).await?;
+
+        // Issue #736: open a pull request for the pushed branch, best-effort. The
+        // push has landed, so a PR failure must NOT fail the effect — the branch
+        // is on the remote regardless. It is reported instead: the operator is
+        // told, on the task itself, that the branch is up but the PR did not open.
+        let title = repo_publish_pr_title(message);
+        let body = repo_publish_pr_body(agent, task, message);
+        match repos.open_pull_request(repo, branch, &title, &body).await {
+            Ok(pr) => tracing::info!(
+                number = pr.number,
+                url = %pr.html_url,
+                branch,
+                "[repo] opened a pull request for the published branch"
+            ),
+            Err(err) => {
+                tracing::warn!(
+                    branch,
+                    "[repo] pushed the branch but could not open a pull request: {err}"
+                );
+                if !task.is_empty() {
+                    let note = format!(
+                        "Published `{branch}` to the remote, but the pull request could not be \
+                         opened: {err}. The branch is on the remote — open a PR from it by hand, \
+                         or approve another publish to retry."
+                    );
+                    if let Err(e) = rt
+                        .events
+                        .append(
+                            &rt.id,
+                            CompanyEvent::TaskDiscussionPosted {
+                                task_id: task.to_string(),
+                                text: note,
+                                by: None,
+                            },
+                        )
+                        .await
+                    {
+                        tracing::warn!(
+                            "[repo] could not record the pull-request failure on the task: {e}"
+                        );
+                    }
+                }
             }
         }
     }
     Ok(())
+}
+
+/// The title of the pull request a `repo_publish` opens (issue #736): the first
+/// line of the agent's message, bounded, or a plain fallback when it said
+/// nothing.
+fn repo_publish_pr_title(message: &str) -> String {
+    let first = message.trim().lines().next().unwrap_or("").trim();
+    if first.is_empty() {
+        "Published by an OpenCompany agent".to_string()
+    } else {
+        first.chars().take(72).collect()
+    }
+}
+
+/// The body of that pull request (issue #736): the agent's message, then task
+/// and agent linkage so an operator landing on the PR can get back to the card
+/// and the seat that produced it.
+fn repo_publish_pr_body(agent: &str, task: &str, message: &str) -> String {
+    let mut body = String::new();
+    let message = message.trim();
+    if !message.is_empty() {
+        body.push_str(message);
+        body.push_str("\n\n");
+    }
+    body.push_str("---\n");
+    body.push_str("Opened host-side by an OpenCompany agent");
+    if !agent.is_empty() {
+        body.push_str(&format!(" (`{agent}`)"));
+    }
+    if !task.is_empty() {
+        body.push_str(&format!(" for task `{task}`"));
+    }
+    body.push('.');
+    body
 }
 
 /// Sends an `email.send` effect via the company's own outbound-mail handle
@@ -1959,6 +2051,8 @@ impl<'a> CycleHostImpl<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -2053,6 +2147,8 @@ impl<'a> CycleHostImpl<'a> {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         self.rt.tasks().upsert(&self.company, &card).await?;
         Ok(ToolResult {
@@ -2556,6 +2652,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -2615,6 +2713,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -5617,6 +5717,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await
@@ -5687,6 +5789,8 @@ mod test {
                     plan: None,
                     deliverable: crate::ports::tasks::TaskDeliverable::Once,
                     workflow_proposal: None,
+                    origin_run_id: None,
+                    origin_workflow_id: None,
                 },
             )
             .await

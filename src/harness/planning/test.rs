@@ -751,6 +751,8 @@ fn card(id: &str, assignee: &str) -> TaskRecord {
         // to link to (issue #339). Load-bearing rather than a default: the
         // re-plan test below starts from a card that HAS an output.
         output: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     }
 }
 

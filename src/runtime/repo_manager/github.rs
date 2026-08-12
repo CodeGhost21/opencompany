@@ -20,7 +20,7 @@
 
 use async_trait::async_trait;
 
-use super::types::{PullRequestView, RepoCoordinates, RepoHost, RepoMeta};
+use super::types::{PullRequestRef, PullRequestView, RepoCoordinates, RepoHost, RepoMeta};
 use crate::Result;
 use crate::error::OpenCompanyError;
 
@@ -125,6 +125,72 @@ impl HttpRepoHost {
         let bytes = read_capped(stream, MAX_DIFF_BYTES).await?;
         Ok(truncate_utf8(&bytes, MAX_DIFF_BYTES))
     }
+
+    /// Issues an authenticated POST of a JSON body and returns the response body
+    /// (issue #736).
+    ///
+    /// Shares [`get`](Self::get)'s auth headers and its credential-error mapping
+    /// — 401/403/404 all become the same `InvalidRequest` naming the token, since
+    /// GitHub answers 404 for a repository a fine-grained token was not granted.
+    /// A non-success status carries GitHub's own explanation (a create failure —
+    /// "a pull request already exists", a protected base — is explained in the
+    /// body), trimmed to its first line so an API response never pastes a wall of
+    /// JSON into ours. The response of a create is a single small object, so it
+    /// is read whole rather than through the diff cap.
+    async fn post(&self, url: &str, token: &str, body: &serde_json::Value) -> Result<String> {
+        let response = self
+            .http
+            .post(url)
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Accept", "application/vnd.github+json")
+            .header("X-GitHub-Api-Version", "2022-11-28")
+            .json(body)
+            .send()
+            .await
+            .map_err(|e| OpenCompanyError::Store(format!("could not reach the GitHub API: {e}")))?;
+        let status = response.status();
+        if status == reqwest::StatusCode::UNAUTHORIZED
+            || status == reqwest::StatusCode::FORBIDDEN
+            || status == reqwest::StatusCode::NOT_FOUND
+        {
+            return Err(OpenCompanyError::InvalidRequest(
+                "GitHub refused that credential for this repository. A fine-grained token \
+                 answers 404 for a repository it was not granted, so check that the token \
+                 lists this repository and has write access to Contents and Pull requests — \
+                 and that it has not expired."
+                    .to_string(),
+            ));
+        }
+        if !status.is_success() {
+            let detail = response.text().await.unwrap_or_default();
+            let detail = github_message(&detail);
+            return Err(OpenCompanyError::Store(format!(
+                "the GitHub API answered {status}{}",
+                if detail.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {detail}")
+                }
+            )));
+        }
+        response
+            .text()
+            .await
+            .map_err(|e| OpenCompanyError::Store(format!("reading the GitHub response: {e}")))
+    }
+}
+
+/// The human `message` field GitHub puts on an error response, if any — the one
+/// sentence worth surfacing out of a JSON error body.
+fn github_message(body: &str) -> String {
+    serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("message")
+                .and_then(|m| m.as_str())
+                .map(str::to_string)
+        })
+        .unwrap_or_default()
 }
 
 /// Collects a byte stream until it holds more than `limit`, then stops.
@@ -228,6 +294,37 @@ impl RepoHost for HttpRepoHost {
             base_ref: string_at(&["base", "ref"]),
             diff,
         })
+    }
+
+    async fn create_pull_request(
+        &self,
+        coords: &RepoCoordinates,
+        token: &str,
+        head: &str,
+        base: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PullRequestRef> {
+        let url = format!("{}/repos/{}/{}/pulls", self.base, coords.owner, coords.repo);
+        let payload = serde_json::json!({
+            "title": title,
+            "head": head,
+            "base": base,
+            "body": body,
+        });
+        let response = self.post(&url, token, &payload).await?;
+        let json: serde_json::Value = serde_json::from_str(&response)?;
+        let number = json.get("number").and_then(|v| v.as_u64()).ok_or_else(|| {
+            OpenCompanyError::Store(
+                "GitHub accepted the pull request but its response named no number".to_string(),
+            )
+        })?;
+        let html_url = json
+            .get("html_url")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+            .to_string();
+        Ok(PullRequestRef { number, html_url })
     }
 }
 

@@ -917,6 +917,8 @@ pub async fn assert_task_store(tasks: Arc<dyn TaskStore>) {
         plan: None,
         deliverable: crate::ports::tasks::TaskDeliverable::Once,
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
 
     tasks.upsert(&alpha, &task("t1", "todo", 1)).await.unwrap();
@@ -3631,6 +3633,66 @@ pub async fn assert_schedule_fire_store(
     assert_eq!(
         winners, 1,
         "exactly one of {N} concurrent claimers may win the key"
+    );
+
+    // -- delete_schedule_fires: purge one schedule's whole ledger (issue #708) --
+    //
+    // Fresh schedule ids so this block never disturbs the prune-count assertions
+    // above. `del-a` gets three minutes, `del-b` one, and beta a same-named row,
+    // to prove the delete is scoped to exactly `(company, schedule_id)`.
+    for m in [200_u64, 201, 202] {
+        assert!(fires.claim_fire(&alpha, "del-a", m).await.unwrap());
+    }
+    assert!(fires.claim_fire(&alpha, "del-b", 200).await.unwrap());
+    assert!(fires.claim_fire(&beta, "del-a", 200).await.unwrap());
+
+    let removed = fires.delete_schedule_fires(&alpha, "del-a").await.unwrap();
+    assert_eq!(
+        removed, 3,
+        "delete removes every row for the schedule, whatever its minute"
+    );
+    assert_eq!(
+        fires.latest_fire(&alpha, "del-a").await.unwrap(),
+        None,
+        "a purged schedule has no anchor left — the recreate starts fresh"
+    );
+    // The recreate case: a purged minute is no longer claimed, so the first tick
+    // after a same-id recreate wins it again instead of losing to a stale claim.
+    assert!(
+        fires.claim_fire(&alpha, "del-a", 201).await.unwrap(),
+        "a purged minute is claimable again (delete+recreate fires, not suppressed)"
+    );
+
+    // Scoped: the sibling schedule and the other company are untouched.
+    assert_eq!(
+        fires.latest_fire(&alpha, "del-b").await.unwrap(),
+        Some(200),
+        "a sibling schedule's rows survive another schedule's delete"
+    );
+    assert_eq!(
+        fires.latest_fire(&beta, "del-a").await.unwrap(),
+        Some(200),
+        "company A's delete never reaches company B's identically-named schedule"
+    );
+
+    // A never-fired id removes nothing, and the call is idempotent.
+    assert_eq!(
+        fires
+            .delete_schedule_fires(&alpha, "del-never")
+            .await
+            .unwrap(),
+        0,
+        "deleting a schedule that never fired removes nothing"
+    );
+    assert_eq!(
+        fires.delete_schedule_fires(&alpha, "del-b").await.unwrap(),
+        1,
+        "del-b's single row is removed"
+    );
+    assert_eq!(
+        fires.delete_schedule_fires(&alpha, "del-b").await.unwrap(),
+        0,
+        "a second delete of the same schedule is idempotent — nothing left to remove"
     );
 }
 

@@ -321,12 +321,22 @@ pub fn build_agent(
         // isolated), so those handles are built only under `wants_shell`.
         if wants_shell {
             let runtime = toolbelt::native_runtime();
-            // Fail closed: `workspace_audit` returns `None` if the per-workspace
-            // audit logger cannot be initialized, and `shell_tools` then withholds
+            // Fail closed: `shell_audit` returns `None` if the per-agent audit
+            // logger cannot be initialized, and `shell_tools` then withholds
             // the shell namespace entirely rather than register an unaudited
             // `ShellTool`. A granted agent silently loses shell here — the
-            // error-level log in `workspace_audit` surfaces why.
-            let audit = toolbelt::workspace_audit(&workspace);
+            // error-level log in `shell_audit` surfaces why.
+            //
+            // The sink is HOST-owned and lives outside the workspace (issue
+            // #775): `companies/<slug>/audit/<agent>/`, resolved from the
+            // explicitly-threaded `audit_root` rather than from the workspace's
+            // parent. Inside the workspace it was a policy-permitted write
+            // target for the agent's own file tools.
+            let audit = toolbelt::shell_audit(&agent_audit_dir(
+                &deps.audit_root,
+                company,
+                &manifest_agent.id,
+            ));
             tools.extend(toolbelt::shell_tools(
                 exec_security.clone(),
                 runtime,
@@ -943,6 +953,24 @@ pub fn agent_workspace(root: &Path, company: &CompanyId, agent_id: &str) -> Path
     root.join(company.as_ref()).join(agent_id).join("workspace")
 }
 
+/// One agent's shell audit sink directory, resolved from the instance data root:
+/// `{audit_root}/companies/{company}/audit/{agent}` (issue #775).
+///
+/// A thin adapter over
+/// [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir) so
+/// the harness names the layout through the layout type instead of transcribing
+/// the path — the same reason [`agent_workspace`] exists.
+///
+/// `audit_root` is [`HarnessDeps::audit_root`](crate::harness::HarnessDeps),
+/// **not** the workspace root: the sink must not land inside the agent workspace,
+/// which is also the `workspace_only` policy root the file tools sandbox to.
+///
+/// Naming only — this never touches the disk.
+/// [`toolbelt::shell_audit`](crate::harness::toolbelt::shell_audit) creates it.
+pub fn agent_audit_dir(audit_root: &Path, company: &CompanyId, agent_id: &str) -> PathBuf {
+    crate::store::DataLayout::new(audit_root).agent_audit_dir(company.as_ref(), agent_id)
+}
+
 /// Create one agent's sandbox directory, returning the path
 /// [`agent_workspace`] names. Idempotent.
 ///
@@ -991,7 +1019,7 @@ pub fn ensure_agent_workspace(
 /// A [`SecurityPolicy`] that sandboxes an agent's file tools to `workspace` and
 /// nowhere else: `workspace_only` with both the workspace and the tool action
 /// root pinned to the agent's own directory.
-fn workspace_security(workspace: &Path) -> SecurityPolicy {
+pub(crate) fn workspace_security(workspace: &Path) -> SecurityPolicy {
     let dir: PathBuf = workspace.to_path_buf();
     SecurityPolicy {
         workspace_dir: dir.clone(),
@@ -1004,7 +1032,7 @@ fn workspace_security(workspace: &Path) -> SecurityPolicy {
 /// The file tools granted under the `files`/`docs` namespace, each sandboxed to
 /// the agent's `workspace` by a shared [`workspace_security`] policy: read,
 /// write, edit, list, grep, and glob within the workspace only.
-fn file_tools(workspace: &Path) -> Vec<Box<dyn Tool>> {
+pub(crate) fn file_tools(workspace: &Path) -> Vec<Box<dyn Tool>> {
     let security = Arc::new(workspace_security(workspace));
     vec![
         Box::new(FileReadTool::new(security.clone())),
@@ -1385,7 +1413,13 @@ mod tests {
     /// Minimal `HarnessDeps` for building a single agent: offline mock provider,
     /// no-op stores, no meter/skills/mcp/media/composio, `AllowAll` capability
     /// filter (identity). Workspace lands under a caller-owned tempdir.
-    fn pin_deps(workspace_root: std::path::PathBuf) -> HarnessDeps {
+    fn pin_deps(root: std::path::PathBuf) -> HarnessDeps {
+        // Two DISTINCT roots under one caller-owned tempdir, mirroring
+        // production (`<home>/harness` beside `<home>/companies`). Reusing one
+        // root here would let a test pass while the audit sink sat inside the
+        // workspace tree — the exact defect issue #775 fixed.
+        let workspace_root = root.join("harness");
+        let audit_root = root;
         HarnessDeps {
             provider: Arc::new(MockProvider::new("mock: ")),
             provider_slug: "mock".to_string(),
@@ -1393,6 +1427,7 @@ mod tests {
             store: Arc::new(PinStore),
             meter: None,
             workspace_root,
+            audit_root,
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -1683,12 +1718,7 @@ mod tests {
     /// `deps.repo_bindings` — so the difference between the two is exactly
     /// "the operator bound something", which is two of the four gate states.
     fn built_tool_names_with_repos(grants: &[&str], bindings: usize) -> Vec<String> {
-        built_tool_names_with_repos_full(
-            grants,
-            bindings,
-            false,
-            crate::store::StorageKind::Mongodb,
-        )
+        built_tool_names_with_repos_cap(grants, bindings, false)
     }
 
     /// [`built_tool_names_with_repos`], with control over whether the bound
@@ -1701,7 +1731,7 @@ mod tests {
         bindings: usize,
         push_capable: bool,
     ) -> Vec<String> {
-        built_tool_names_with_repos_full(
+        built_tool_names_with_repos_on_cap(
             grants,
             bindings,
             push_capable,
@@ -1719,13 +1749,13 @@ mod tests {
         bindings: usize,
         storage_kind: crate::store::StorageKind,
     ) -> Vec<String> {
-        built_tool_names_with_repos_full(grants, bindings, false, storage_kind)
+        built_tool_names_with_repos_on_cap(grants, bindings, false, storage_kind)
     }
 
     /// The full repository-wiring fixture: both the push-capability (#735) and
     /// the secret-backend (#752) gates spelled out. The three wrappers above each
     /// default the axis they do not vary.
-    fn built_tool_names_with_repos_full(
+    fn built_tool_names_with_repos_on_cap(
         grants: &[&str],
         bindings: usize,
         push_capable: bool,
@@ -1954,7 +1984,7 @@ mod tests {
             crate::store::StorageKind::Fs,
             crate::store::StorageKind::Sqlite,
         ] {
-            let plaintext = built_tool_names_with_repos_full(&["repo.write"], 1, true, kind);
+            let plaintext = built_tool_names_with_repos_on_cap(&["repo.write"], 1, true, kind);
             assert!(
                 !plaintext.contains(&publish),
                 "a push-capable `repo.write` on {} must not wire repo_publish: {plaintext:?}",

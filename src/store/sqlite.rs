@@ -2189,6 +2189,20 @@ impl crate::ports::schedule_fires::ScheduleFireStore for SqliteStore {
             .map_err(sql_err)?;
         Ok(removed)
     }
+
+    async fn delete_schedule_fires(&self, company: &CompanyId, schedule_id: &str) -> Result<usize> {
+        let conn = self.conn();
+        // Every row for one schedule, whatever its minute — the delete-time
+        // purge (#708). A never-fired id matches nothing, so `changes()` is 0.
+        let removed = conn
+            .execute(
+                "DELETE FROM schedule_fires \
+                 WHERE company_id = ?1 AND schedule_id = ?2",
+                params![company.as_ref(), schedule_id],
+            )
+            .map_err(sql_err)?;
+        Ok(removed)
+    }
 }
 
 // ---------------------------------------------------------------------------

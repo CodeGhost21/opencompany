@@ -83,7 +83,8 @@ use crate::ports::types::{CompanyId, SecretValue};
 #[cfg(feature = "github")]
 pub use github::HttpRepoHost;
 pub use types::{
-    BindRequest, PullRequestView, RepoBinding, RepoCoordinates, RepoHost, RepoMeta, TokenKind,
+    BindRequest, PullRequestRef, PullRequestView, RepoBinding, RepoCoordinates, RepoHost, RepoMeta,
+    TokenKind,
 };
 use types::{RepoIndex, classify_token, fingerprint, parse_repo_url};
 
@@ -1007,6 +1008,58 @@ impl RepoManager {
             repo: binding.repo,
         };
         host.pull_request(&coords, number, &token).await
+    }
+
+    /// Opens a pull request from an already-published `oc/<company>/<task>` branch
+    /// into the repository's default branch, host-side (issue #736).
+    ///
+    /// Degrades honestly, the same shape [`pull_request`](Self::pull_request)
+    /// uses: with no forge client wired this is `Unimplemented` rather than a
+    /// silent no-op, so a caller can tell "the PR was not opened" from "the PR was
+    /// opened empty". The base is fetched fresh so the PR always targets what the
+    /// forge considers default now, and a read-only binding is refused here too —
+    /// PR creation rides the same push-capable credential the publish did, and no
+    /// agent ever reaches this: the client stays host-side.
+    pub async fn open_pull_request(
+        &self,
+        key: &str,
+        branch: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<PullRequestRef> {
+        let binding = self.get(key).await?;
+        let Some(host) = self.host.as_ref() else {
+            return Err(OpenCompanyError::Unimplemented(
+                "opening a pull request needs a forge client; rebuild with the `github` feature",
+            ));
+        };
+        if binding.can_push != Some(true) {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "{} is bound with a credential that cannot push, so no pull request can be opened",
+                binding.url
+            )));
+        }
+        let Some(token) = self.token_for(&binding).await? else {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "{} is bound without a credential, so no pull request can be opened",
+                binding.url
+            )));
+        };
+        let coords = RepoCoordinates {
+            owner: binding.owner.clone(),
+            repo: binding.repo.clone(),
+        };
+        let base = host.repo_meta(&coords, &token).await?.default_branch;
+        // A published branch is `oc/<company>/<task>`, so it is never the default
+        // branch — but assert it rather than trust it, because GitHub rejects a
+        // pull request from a branch into itself with an opaque 422.
+        if branch == base {
+            return Err(OpenCompanyError::InvalidRequest(format!(
+                "refusing to open a pull request from {base:?} into itself"
+            )));
+        }
+        host.create_pull_request(&coords, &token, branch, &base, title, body)
+            .await
     }
 
     /// Binds a repository from a URL this surface does not otherwise accept —

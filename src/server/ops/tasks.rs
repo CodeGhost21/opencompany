@@ -141,6 +141,27 @@ pub(crate) struct TaskCard {
     /// so the existing wire shape is unchanged for every card without one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) workflow_proposal: Option<TaskWorkflowProposal>,
+    /// The workflow run whose agent node opened this card (issue #661 / M5).
+    ///
+    /// Projected because a card with no parent and no origin chat is otherwise
+    /// unexplained on the board: an operator finding a card they did not open, and
+    /// that no conversation asked for, has nothing to look at. With this the console
+    /// can link straight to the run in the workflow history panel.
+    ///
+    /// Omitted when absent — which is every card not opened by a run, i.e. every
+    /// card that existed before this — so the board's existing wire shape is
+    /// unchanged.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) origin_run_id: Option<String>,
+    /// The workflow graph that run is of (issue #661 / M5).
+    ///
+    /// Carried beside the run id rather than resolved from it, for the reason
+    /// [`TaskRecord::origin_workflow_id`](crate::ports::TaskRecord::origin_workflow_id)
+    /// gives: the journal is trimmable and the board is not, so a card must be able
+    /// to name its workflow after its run's rows are gone. Omitted when absent, in
+    /// lockstep with `originRunId`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) origin_workflow_id: Option<String>,
 }
 
 impl From<TaskRecord> for TaskCard {
@@ -159,6 +180,8 @@ impl From<TaskRecord> for TaskCard {
             plan: t.plan,
             deliverable: t.deliverable,
             workflow_proposal: t.workflow_proposal,
+            origin_run_id: t.origin_run_id,
+            origin_workflow_id: t.origin_workflow_id,
         }
     }
 }
@@ -410,6 +433,8 @@ async fn create_task(
         // one.
         deliverable: body.deliverable.unwrap_or_default(),
         workflow_proposal: None,
+        origin_run_id: None,
+        origin_workflow_id: None,
     };
     company.runtime.upsert_task(&record).await?;
     Ok(Json(record.into()))

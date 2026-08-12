@@ -747,6 +747,8 @@ async fn tasks_page_reflects_upserts_and_column_filter() {
                 plan: None,
                 deliverable: crate::ports::tasks::TaskDeliverable::Once,
                 workflow_proposal: None,
+                origin_run_id: None,
+                origin_workflow_id: None,
             },
         )
         .await

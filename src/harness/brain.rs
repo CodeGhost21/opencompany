@@ -2031,6 +2031,8 @@ impl HarnessBrain {
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         };
         // The card is written **first**: an artifact's `task_id` must name a
         // card that exists. If the artifact writes then fail, the failure
@@ -2782,6 +2784,7 @@ description = "Runs Acme."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -2946,6 +2949,7 @@ description = "Builds it."
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
             artifacts: None,
@@ -3061,6 +3065,7 @@ members = ["engineer"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(ops.clone()),
             artifacts: Some(artifacts),
@@ -3714,6 +3719,8 @@ members = ["engineer"]
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         }
     }
 
@@ -4961,6 +4968,7 @@ members = ["engineer"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: Some(Arc::new(FsOps::new(dir))),
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
             artifacts: None,
@@ -5808,6 +5816,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -5947,6 +5956,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir.path())),
             meter: None,
             workspace_root: dir.path().to_path_buf(),
+            audit_root: dir.path().to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -6032,6 +6042,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -6357,6 +6368,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: None,
             artifacts: None,
@@ -6723,6 +6735,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: Some("stub-model".to_string()),
             tasks: Some(Arc::new(FsOps::new(dir))),
             artifacts: None,
@@ -6777,6 +6790,8 @@ members = ["eng1", "eng2"]
             plan: None,
             deliverable: crate::ports::tasks::TaskDeliverable::Once,
             workflow_proposal: None,
+            origin_run_id: None,
+            origin_workflow_id: None,
         }
     }
 
@@ -7035,6 +7050,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks.clone()),
             // Same handle as `tasks` (FsOps is both stores), so a steered run's
@@ -7369,6 +7385,7 @@ members = ["eng1", "eng2"]
             store: Arc::new(FsCompanyStore::new(dir)),
             meter: None,
             workspace_root: dir.to_path_buf(),
+            audit_root: dir.to_path_buf(),
             model_override: None,
             tasks: Some(tasks),
             skills: None,

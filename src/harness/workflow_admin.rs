@@ -791,6 +791,11 @@ impl Tool for DeleteWorkflowTool {
             self.admin.source_dir.as_deref(),
             &self.admin.store,
             &revisions,
+            // Issue #708: no fire-ledger purge from the tool path, and none is
+            // owed — this tool refuses to delete a scheduled workflow at all
+            // (`refuse_scheduled` above), so it can never orphan a ledger. Only
+            // the HTTP delete path (which permits scheduled deletes) wires `Some`.
+            None,
             self.admin.events.as_ref(),
             &wid,
             expected_version.as_deref(),

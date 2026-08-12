@@ -1138,6 +1138,7 @@ mod decide_tests {
                 cancelled: false,
                 nodes: Vec::new(),
                 notices: Vec::new(),
+                board: Vec::new(),
             })
         }
     }

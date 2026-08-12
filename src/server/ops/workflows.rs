@@ -124,6 +124,14 @@ pub fn router() -> Router<AppState> {
             "/workflows/draft-from-description",
             post(draft_from_description),
         ))
+        // Issue #783: the wired, granted `tool_call` slugs this company can reach
+        // from a workflow, so the per-workflow copilot can ground a proposal on
+        // real tools instead of guessing (`github_integration` and the like).
+        // Reads the SAME `workflow_callable_tool_slugs` the create-time copilot
+        // grounds on (issue #753), so the two cannot drift. A static prefix
+        // registered here with the others and BEFORE the dynamic
+        // `/workflows/{wid}` below — `tool-slugs` is a syntactically valid `wid`.
+        .merge(scoped("/workflows/tool-slugs", get(workflow_tool_slugs)))
         // Issue #383: stop a run that is still walking its graph. Registered
         // here, with the other static `/workflows/...` prefixes and BEFORE the
         // dynamic `/workflows/{wid}` below, for the reason the comment above
@@ -806,6 +814,7 @@ async fn delete_workflow(
         company.runtime.source_dir(),
         company.runtime.store(),
         company.runtime.workflow_revisions(),
+        Some(company.runtime.schedule_fires()),
         Some(company.runtime.events()),
         &wid,
         query.expected_version.as_deref(),
@@ -1115,6 +1124,17 @@ struct RunWorkflowResponse {
     /// check, and its absence a loud signal that the run was REAL.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     dry_run: bool,
+    /// The board writes this run's agent nodes performed (issue #661 / M5).
+    ///
+    /// The same rows `GET …/workflows/runs` returns and the same rows the
+    /// `WorkflowRunFinished` event carries — one shape across all three, so the
+    /// console reads a run's board effects identically whether it awaited the run
+    /// or found it in the history.
+    ///
+    /// Omitted when empty, so an existing caller's body is byte-unchanged for every
+    /// run that touched no card.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    board: Vec<crate::ports::WorkflowRunBoardRow>,
 }
 
 /// The `detach: true` response (issue #383): the run's id, handed back before
@@ -1309,6 +1329,10 @@ async fn run_workflow(
             // discriminator a console pointed at an old host would never see.
             nodes: run.nodes.into_iter().map(WorkflowRunNode::from).collect(),
             dry_run,
+            // Issue #661 (M5): carried on the synchronous path too, so a console
+            // that pressed Run learns what the run did to the board without a
+            // second read of the history.
+            board: run.board,
         })),
         Ok(Err(err)) => Err(ApiError(err).into_response()),
         Err(join) => {
@@ -1649,6 +1673,55 @@ async fn draft_from_description(
     Err(super::not_wired("the workflow copilot"))
 }
 
+/// The `GET …/workflows/tool-slugs` answer (issue #783): the wired, granted
+/// `tool_call` slugs the per-workflow copilot may ground a proposal on.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkflowToolSlugsResponse {
+    /// The slugs a proposed `tool_call` node may name — every one of them will
+    /// clear the same grant gate `update_workflow` applies on write.
+    slugs: Vec<String>,
+}
+
+/// `GET …/workflows/tool-slugs` (both scope forms) — the per-workflow copilot's
+/// tool grounding (issue #783). Answers the exact slug set
+/// [`workflow_callable_tool_slugs`](crate::company::workflow_callable_tool_slugs)
+/// computes for the create-time copilot (issue #753), so the two grounding
+/// surfaces cannot drift and a slug shown here is one a proposed `tool_call`
+/// clears at courtesy validation.
+#[cfg(feature = "openhuman")]
+async fn workflow_tool_slugs(
+    company: ScopedCompany,
+) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+    let record = company
+        .runtime
+        .store()
+        .load(company.runtime.id())
+        .await
+        .map_err(|err| ApiError(err).into_response())?
+        .ok_or_else(|| {
+            ApiError(OpenCompanyError::CompanyNotFound(
+                company.runtime.id().to_string(),
+            ))
+            .into_response()
+        })?;
+    Ok(Json(WorkflowToolSlugsResponse {
+        slugs: crate::company::workflow_callable_tool_slugs(&record),
+    }))
+}
+
+/// `GET …/workflows/tool-slugs` on a build with no harness. The workflow tool
+/// surface lives behind the `openhuman` feature, so a default build wires no
+/// `tool_call` grants at all: the honest answer is an empty list, not a 404 —
+/// the copilot then grounds on "no tools" rather than being unable to tell.
+#[cfg(not(feature = "openhuman"))]
+async fn workflow_tool_slugs(
+    company: ScopedCompany,
+) -> Result<Json<WorkflowToolSlugsResponse>, Response> {
+    let _ = &company;
+    Ok(Json(WorkflowToolSlugsResponse { slugs: Vec::new() }))
+}
+
 // ---------------------------------------------------------------------------
 // Run history (issue #228)
 // ---------------------------------------------------------------------------
@@ -1730,6 +1803,18 @@ struct WorkflowRunOutcome {
     /// Omitted when empty, like `nodes` — which is nearly every run.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     notices: Vec<String>,
+    /// The board writes this run's agent nodes performed (issue #661 / M5) — one
+    /// row per card opened or re-owned.
+    ///
+    /// The port row is projected **verbatim** rather than reshaped: it is already
+    /// camelCase and already structural (see
+    /// [`WorkflowRunBoardRow`](crate::ports::WorkflowRunBoardRow)), so a second
+    /// transcription here would only be a place for the journal's shape and the
+    /// console's to drift apart. Same choice `deliveries` makes one field up.
+    ///
+    /// Omitted when empty, like `notices` — which is nearly every run.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    board: Vec<crate::ports::WorkflowRunBoardRow>,
 }
 
 /// One node's outcome inside a run (issue #371).
@@ -1849,6 +1934,10 @@ async fn list_runs(
                     // wound down yet.
                     cancelled: false,
                     notices: Vec::new(),
+                    // Only a finish carries these, so a run in flight lists none —
+                    // even one whose nodes have already opened cards. The rows
+                    // arrive with the settle below.
+                    board: Vec::new(),
                 });
             }
             CompanyEvent::WorkflowNodeFinished {
@@ -1881,6 +1970,7 @@ async fn list_runs(
                 error,
                 cancelled,
                 notices,
+                board,
             } => {
                 if !matches(&workflow_id) {
                     continue;
@@ -1899,6 +1989,7 @@ async fn list_runs(
                     entry.running = false;
                     entry.cancelled = cancelled;
                     entry.notices = notices;
+                    entry.board = board;
                     continue;
                 }
                 // …else stand alone. Two ways to get here, both legitimate: a
@@ -1920,6 +2011,7 @@ async fn list_runs(
                     running: false,
                     cancelled,
                     notices,
+                    board,
                 });
             }
             _ => {}
@@ -2446,6 +2538,56 @@ mod tests {
         }
     }
 
+    /// Issue #661 (M5): the synchronous run response carries the run's board
+    /// rows, in the same camelCase shape the journal event and the history route
+    /// use — so a console that pressed Run learns what the run did to the board
+    /// without a second read.
+    ///
+    /// The omission half matters as much: a run that touched no card must send no
+    /// `board` key, so every existing caller's body is byte-unchanged.
+    #[test]
+    fn the_run_response_carries_board_rows_and_omits_them_when_empty() {
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-1".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: vec![crate::ports::WorkflowRunBoardRow {
+                action: crate::ports::WorkflowBoardAction::Assigned,
+                task_id: Some("card-1".into()),
+                title: None,
+                assignee: Some("ceo".into()),
+            }],
+        })
+        .expect("serialize");
+        assert_eq!(json["board"][0]["action"], "assigned");
+        assert_eq!(json["board"][0]["taskId"], "card-1");
+        assert_eq!(json["board"][0]["assignee"], "ceo");
+        assert!(
+            json["board"][0].get("title").is_none(),
+            "an assign row names no title — the console resolves it by id: {json}"
+        );
+
+        let json = serde_json::to_value(RunWorkflowResponse {
+            output: serde_json::json!({ "nodes": {} }),
+            pending_approvals: Vec::new(),
+            deliveries: Vec::new(),
+            run_id: "run-2".into(),
+            cancelled: false,
+            nodes: Vec::new(),
+            dry_run: false,
+            board: Vec::new(),
+        })
+        .expect("serialize");
+        assert!(
+            json.get("board").is_none(),
+            "a run that touched no card sends no board key: {json}"
+        );
+    }
+
     /// The run response carries `deliveries` in camelCase — this is the ONLY
     /// place an operator learns a report was not delivered, since a delivery
     /// failure never fails the run.
@@ -2468,6 +2610,7 @@ mod tests {
             cancelled: false,
             nodes: Vec::new(),
             dry_run: false,
+            board: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["node"], "done");
@@ -2500,6 +2643,7 @@ mod tests {
             cancelled: false,
             nodes: Vec::new(),
             dry_run: false,
+            board: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"][0]["status"], "pending");
@@ -2517,6 +2661,7 @@ mod tests {
             cancelled: false,
             nodes: Vec::new(),
             dry_run: false,
+            board: Vec::new(),
         })
         .unwrap();
         assert_eq!(json["deliveries"], serde_json::json!([]));
@@ -2897,6 +3042,35 @@ mod tests {
             );
         }
 
+        /// Issue #783: the per-workflow copilot's tool-grounding read answers
+        /// `200 {"slugs":[…]}` on **both** scope forms — which also proves the
+        /// static prefix is wired ahead of the dynamic `/workflows/{wid}` (a
+        /// route-miss, or a `tool-slugs` swallowed as a `wid`, would not be this
+        /// shape). The blank tenant grants no tools, so the list is empty here;
+        /// the point pinned is the contract shape and that the route exists.
+        #[tokio::test]
+        async fn tool_slugs_answers_a_slug_array_on_both_scope_forms() {
+            let home_dir = home();
+            let home = home_dir.path().to_path_buf();
+            let (state, _store, _id) = hosted_state(&home).await;
+
+            for uri in [
+                "/api/v1/company/workflows/tool-slugs",
+                "/api/v1/companies/acme/workflows/tool-slugs",
+            ] {
+                let response = router(state.clone())
+                    .oneshot(request("GET", uri, None))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "tool-slugs on {uri}");
+                let body = json_body(response).await;
+                assert!(
+                    body["slugs"].is_array(),
+                    "tool-slugs answers a `slugs` array on {uri}, got: {body}"
+                );
+            }
+        }
+
         /// A create body whose trigger carries a cron.
         fn scheduled_create_body() -> serde_json::Value {
             serde_json::json!({
@@ -3085,6 +3259,7 @@ mod tests {
                         error: error.map(str::to_string),
                         cancelled: false,
                         notices: Vec::new(),
+                        board: Vec::new(),
                     },
                 )
                 .await
@@ -3319,6 +3494,7 @@ mod tests {
                         error: error.map(str::to_string),
                         cancelled: false,
                         notices: Vec::new(),
+                        board: Vec::new(),
                     },
                 )
                 .await
@@ -4455,6 +4631,7 @@ mod tests {
                             cancelled: true,
                             nodes: Vec::new(),
                             notices: Vec::new(),
+                            board: Vec::new(),
                         });
                     }
                 }
@@ -4466,6 +4643,7 @@ mod tests {
                     cancelled: false,
                     nodes: Vec::new(),
                     notices: Vec::new(),
+                    board: Vec::new(),
                 })
             }
         }
@@ -5094,6 +5272,7 @@ label = "ok"
                         elapsed_ms: 3,
                     }],
                     notices: Vec::new(),
+                    board: Vec::new(),
                 })
             }
         }

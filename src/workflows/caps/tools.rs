@@ -103,9 +103,20 @@ impl WorkflowToolInvoker {
     /// Builds the invoker: assemble the Cell A toolbelt under `security`
     /// (sandboxed to `workspace`), run it through the capability `filter`, and
     /// index the survivors by name. `grants` is the company's `[tools].allow`.
+    ///
+    /// `audit_dir` is the host-owned shell audit sink (issue #775) and is
+    /// **separate from `workspace`** on purpose: `workspace` is the
+    /// `workspace_only` policy root a `tool_call` node's file/exec tools are
+    /// sandboxed to, so a sink inside it would be a policy-permitted write
+    /// target for the workflow's own `shell`. It is passed in rather than
+    /// derived here for the same reason
+    /// [`HarnessDeps::audit_root`](crate::harness::HarnessDeps::audit_root) is
+    /// an explicit field.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         security: Arc<SecurityPolicy>,
         workspace: &Path,
+        audit_dir: &Path,
         web_allowed_domains: Vec<String>,
         grants: Vec<String>,
         filter: &CapabilityFilter,
@@ -119,7 +130,7 @@ impl WorkflowToolInvoker {
             tools.extend(toolbelt::shell_tools(
                 security.clone(),
                 toolbelt::native_runtime(),
-                toolbelt::workspace_audit(workspace),
+                toolbelt::shell_audit(audit_dir),
                 workspace,
             ));
         }
@@ -336,6 +347,10 @@ mod tests {
     #[test]
     fn construction_only_initializes_granted_tool_families() {
         let dir = tempfile::tempdir().unwrap();
+        // A SEPARATE root from the workspace: the audit sink is host-owned and
+        // must never live inside the directory the exec policy sandboxes to
+        // (issue #775).
+        let audit = tempfile::tempdir().unwrap();
         let security = Arc::new(toolbelt::exec_security(
             dir.path(),
             crate::harness::policy::PolicyMode::Supervised,
@@ -344,6 +359,7 @@ mod tests {
         let none = WorkflowToolInvoker::new(
             security.clone(),
             dir.path(),
+            audit.path(),
             Vec::new(),
             Vec::new(),
             &CapabilityFilter::AllowAll,
@@ -355,6 +371,7 @@ mod tests {
         let code = WorkflowToolInvoker::new(
             security,
             dir.path(),
+            audit.path(),
             Vec::new(),
             vec!["code.*".to_string()],
             &CapabilityFilter::AllowAll,
@@ -370,6 +387,7 @@ mod tests {
     #[test]
     fn search_wires_only_with_an_explicit_grant_and_a_backend() {
         let dir = tempfile::tempdir().unwrap();
+        let audit = tempfile::tempdir().unwrap();
         let security = Arc::new(toolbelt::exec_security(
             dir.path(),
             crate::harness::policy::PolicyMode::Supervised,
@@ -384,6 +402,7 @@ mod tests {
         let wired = WorkflowToolInvoker::new(
             security.clone(),
             dir.path(),
+            audit.path(),
             Vec::new(),
             vec!["search".to_string()],
             &CapabilityFilter::AllowAll,
@@ -396,6 +415,7 @@ mod tests {
         let wildcard = WorkflowToolInvoker::new(
             security.clone(),
             dir.path(),
+            audit.path(),
             Vec::new(),
             vec!["*".to_string()],
             &CapabilityFilter::AllowAll,
@@ -408,6 +428,7 @@ mod tests {
         let uncredentialed = WorkflowToolInvoker::new(
             security,
             dir.path(),
+            audit.path(),
             Vec::new(),
             vec!["search".to_string()],
             &CapabilityFilter::AllowAll,

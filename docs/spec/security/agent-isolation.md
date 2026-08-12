@@ -53,7 +53,9 @@ Each of these is real. None of them is a sandbox.
 | A push at a mirror is refused by the mirror | A `pre-receive` hook installed in every mirror | `install_push_refusal` |
 | Checkouts do not survive a turn | Orphaned checkouts swept at boot, tenant-scoped | `sweep_orphaned_checkouts` |
 | Repository configuration cannot make git run programs | `core.hooksPath=/dev/null`, no system/global config, scratch `$HOME`, deadline on every invocation | [repos.md](../runtime/repos.md) |
-| Shell without an audit logger is no shell | `workspace_audit` returns `None` → the whole `shell` namespace is withheld | `src/harness/toolbelt.rs` |
+| Shell without an audit logger is no shell | `shell_audit` returns `None` → the whole `shell` namespace is withheld | `src/harness/toolbelt.rs` |
+| The audit sink is not in the agent's sandbox | Issue #752 C6 — the sink is the host-owned `companies/<slug>/audit/<agent>/`, so the file tools' `workspace_only` policy **refuses** it instead of permitting it | `src/store/layout.rs`, `src/harness/toolbelt.rs` |
+| A command that could not be recorded does not run | `AuditedShellTool` appends the intent line and fsyncs it **before** delegating; an append failure refuses the call | `src/harness/audit.rs` |
 | Copilot turns reach nothing | `ConfinedToolPolicy` denies every tool call by name, empty belt, empty memory | `src/harness/confine.rs` |
 | Web tools reject private and metadata IPs | OpenHuman's `url_guard`, always, regardless of allowlist | `src/harness/toolbelt.rs` |
 | Per-company web allowlist, when set | `[tools].web_allowed_domains`; empty means allow-any-public | `src/harness/toolbelt.rs` |
@@ -135,13 +137,51 @@ workspace is a directory agent B can `cat`. The grant system decides which
 *tools* an agent is offered; it does not decide what the shell can reach once
 one of them is `shell`.
 
-### 6. The audit trail does not survive its own subject.
+### 6. The audit trail still does not survive a determined `shell`.
 
-The shell audit log is `<workspace>/audit.log` — the agent's own workspace,
-which is the shell's working directory. An agent holding `shell` can truncate
-or delete the record of what it did. Withholding shell when the logger cannot
-initialize (which the toolbelt does) makes the log's *existence* fail-closed; it
-does nothing for its *integrity*.
+Narrowed by C6 (issue #775), and worth reading for what it did **not** buy.
+
+It used to read: the shell audit log is `<workspace>/audit.log` — the agent's own
+workspace. That was an understatement. The workspace is also the
+`SecurityPolicy { workspace_only: true }` root the file tools enforce, so the
+audit trail sat *inside the write sandbox*: rewriting the record of an agent's
+own commands was a **policy-permitted** write through its ordinary file tools,
+not something it had to reach for `shell` to do. The one fail-closed write
+boundary this codebase has included the audit log as a legitimate target.
+
+Two things changed:
+
+- **The sink moved out.** It is now the host-owned
+  `companies/<slug>/audit/<agent>/audit.log`, one directory per agent, resolved
+  through `DataLayout::agent_audit_dir` and threaded to the harness as an
+  explicit `audit_root`. The permitted write is now a refused one. This is a
+  boundary change rather than a hardening: the same `file_write` call that
+  truncated the trail now lands on an inert file inside the sandbox.
+- **The gate moved earlier.** Withholding shell when the logger cannot
+  *initialize* made the log's existence fail-closed at build time and nothing
+  more; upstream's `emit_audit` is post-execution and warn-and-continue by
+  explicit design ("audit must never block or fail a tool call"), so a sink that
+  became unwritable mid-session yielded commands that ran with **zero** record.
+  That is not a nuisance — an attacker holding `shell` can fill the volume on
+  purpose, so warn-and-continue is a way to *mint unaudited shell*.
+  `AuditedShellTool` appends the command's intent line, fsynced, before the
+  command runs, and refuses the call if that append fails. A full disk becomes a
+  shell outage, which is the safe direction and the same choice boot already
+  makes on an unwritable journal root.
+
+**What is still not enforced, and must not be claimed otherwise.** The shell
+path is untouched: same uid, same filesystem, no sandbox (§1). A deliberate `rm`
+against the host-side sink still succeeds, and so does a `>` at it. This is
+**not** tamper-evidence, and hash chaining or signed segments in-container would
+not make it so — one uid and one process means the attacker holds both the chain
+and any key. Genuine tamper-evidence needs an external sink and belongs with C1.
+Durability is container-lifetime, deliberately: losing a journal record corrupts
+*behaviour*, while losing an audit record loses *evidence*, and evidence that
+must outlive the container needs somewhere else to live anyway.
+
+What C6 actually buys, stated exactly: the sanctioned write paths refuse the
+sink, and the intent line of the command that destroys it is on disk before it
+runs.
 
 ## Residual capability after every control in #752 lands
 
@@ -164,7 +204,12 @@ still:
    constrain what `git push` may do from a shell that holds the token.
 3. **Read every secret the tenant holds that is on the container's disk**, and
    every agent's workspace in that tenant.
-4. **Destroy its own audit trail.**
+4. **Destroy its own audit trail — but only by naming it.** Since C6 the sink is
+   host-owned and outside the write sandbox, so the file tools refuse it and
+   there is no longer an *accidental* or merely-permitted path to it. What
+   remains is a deliberate destructive shell command aimed at a host-owned
+   path, whose own intent line was fsynced before it ran. The record of the
+   erasure survives the erasure; the erasure still works.
 
 What C1–C5 actually buy: the number of hosts reachable drops from "the
 internet" to "a handful", raw sockets stop working (C2), the repository
@@ -221,6 +266,9 @@ directory:
   exfiltration to an allowlisted host is unaffected.
 - "The agent cannot reach the credential." On `fs` it is a file it can read; on
   `mongodb` it is in a process it is running inside.
+- "The audit log is tamper-proof", or tamper-evident, or protected. C6 moved it
+  out of the write sandbox and made an unrecordable command refuse to run. The
+  shell can still delete the file. Say *that*.
 - "#752 is fixed." #752 cannot be closed by work in this repo. C3 and C4 are
   the in-repo children; the load-bearing ones are C1, C2 and C5, and they are
   in `opencompany-microservice`.
@@ -237,6 +285,7 @@ directory:
 | C3 | Fail closed on the fs secret backend for `repo` | opencompany | done |
 | C4 | Wire `cwd_jail` Landlock for the agent shell, plus a CI lane that builds the feature | opencompany | open — secondary |
 | C5 | Short-lived single-repository installation tokens instead of a long-lived write PAT | `opencompany-microservice` | open — before the write tier ships broadly |
+| C6 | Move the shell audit sink out of the agent workspace, and refuse a command whose intent could not be recorded | opencompany | done (issue #775) — see §6 for what it did *not* buy |
 
 The write tier (#247, #734–#738) is a separate line of work, not a child of
 this one — but see the precondition above.

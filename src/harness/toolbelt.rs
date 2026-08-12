@@ -24,8 +24,14 @@
 //!   the real fail-closed approval gate on top of it, **except** on the workflow
 //!   `tool_call` path, where no such gate is installed and this policy is the
 //!   whole tier. See [`autonomy_for`].
-//! * Shell command audit is keyed on the agent's own workspace dir
-//!   ([`workspace_audit`]) so audit trails never cross tenants.
+//! * Shell command audit is keyed on a per-agent, **host-owned** sink directory
+//!   ([`shell_audit`]) — `companies/<slug>/audit/<agent>/`, deliberately outside
+//!   the agent's own workspace — so audit trails never cross tenants *and* the
+//!   agent's sanctioned write paths cannot reach the record of what it did
+//!   (issue #775). The shell tool itself is wrapped by
+//!   [`AuditedShellTool`](crate::harness::audit::AuditedShellTool), which
+//!   appends the command's intent line *before* the command runs and refuses
+//!   the call if that append fails.
 //! * Web tools reuse OpenHuman's upstream SSRF guard (`url_guard`): every
 //!   request is validated against the per-company allowlist AND has
 //!   private/loopback/link-local/metadata IPs rejected — even in the default
@@ -250,23 +256,99 @@ pub fn native_runtime() -> Arc<dyn RuntimeAdapter> {
     Arc::new(NativeRuntime::new())
 }
 
-/// A workspace-scoped [`AuditLogger`] for shell command execution, built the way
-/// OpenHuman's `runtime_node::build_runtime_tools` does. Keyed on the agent's
-/// own workspace dir so audit trails are tenant-isolated.
+/// A shell audit logger paired with the file it appends to.
 ///
-/// Returns `None` when the logger cannot be initialized. Callers **must** treat
-/// `None` as fail-closed: [`shell_tools`] withholds the `ShellTool` entirely
-/// rather than register it unaudited (see there). The failure is logged at
-/// `error!` (not `warn!`): losing the audit logger drops shell capability for
-/// the agent, so the event must surface in production error telemetry.
-pub fn workspace_audit(workspace: &Path) -> Option<Arc<AuditLogger>> {
-    match get_or_create_workspace_audit_logger(AuditConfig::default(), workspace.to_path_buf()) {
-        Ok(logger) => Some(logger),
+/// The pairing is structural on purpose. [`AuditLogger`] does not expose its own
+/// path, and the fail-closed refusal in
+/// [`AuditedShellTool`](crate::harness::audit::AuditedShellTool) has to *name*
+/// the sink it could not write — an operator staring at a shell outage needs
+/// that path. Carrying the two together means the name can never describe a
+/// different file than the one being appended to.
+#[derive(Clone)]
+pub struct ShellAudit {
+    /// The shared per-agent logger. Cloning shares one instance, so every
+    /// append serializes through its write lock.
+    pub logger: Arc<AuditLogger>,
+    /// The file `logger` appends to, derived from the same
+    /// [`AuditConfig::default`] the logger was built with.
+    pub sink: std::path::PathBuf,
+}
+
+impl ShellAudit {
+    /// A disabled logger over a sentinel `sink`, for tests and contexts that
+    /// need a handle but must not touch the filesystem. `log()` short-circuits
+    /// before any I/O, so the sink path is never opened.
+    pub fn disabled() -> Self {
+        Self {
+            logger: AuditLogger::disabled(),
+            sink: std::path::PathBuf::new(),
+        }
+    }
+}
+
+impl std::fmt::Debug for ShellAudit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ShellAudit")
+            .field("sink", &self.sink)
+            .finish_non_exhaustive()
+    }
+}
+
+/// The per-agent [`AuditLogger`] for shell command execution, built the way
+/// OpenHuman's `runtime_node::build_runtime_tools` does, but keyed on a
+/// **host-owned** sink directory rather than the agent's workspace.
+///
+/// `audit_dir` is
+/// [`DataLayout::agent_audit_dir`](crate::store::DataLayout::agent_audit_dir) —
+/// `companies/<slug>/audit/<agent>/`, per agent and outside every agent
+/// workspace. Two properties depend on that, and neither survives putting the
+/// sink back in the workspace:
+///
+/// * The workspace is also the `workspace_only` [`SecurityPolicy`] root the
+///   file tools enforce, so a sink inside it is a **policy-permitted** target:
+///   the plain relative `file_write("audit.log")` — no traversal, no absolute
+///   path, no `shell` — is exactly what the policy allows, and it used to land
+///   on the audit trail. Outside the workspace that same call reaches nothing
+///   that matters (issue #775). Absolute paths and `../` are refused either
+///   way, by `workspace_only`'s own rules; they are not what moved.
+/// * The vendored registry caches one logger per *directory*, first config
+///   wins, so a directory shared between agents would hand the second agent the
+///   first agent's file.
+///
+/// The directory is created here, before the logger is built: the vendored
+/// factory keys its process-global registry on the *canonicalized* path and
+/// silently falls back to the raw one when the directory is missing, which
+/// registers one physical sink twice and reopens the interleaving race the
+/// registry exists to prevent.
+///
+/// Returns `None` when the directory cannot be created or the logger cannot be
+/// initialized. Callers **must** treat `None` as fail-closed: [`shell_tools`]
+/// withholds the `ShellTool` entirely rather than register it unaudited (see
+/// there). The failure is logged at `error!` (not `warn!`): losing the audit
+/// logger drops shell capability for the agent, so the event must surface in
+/// production error telemetry.
+///
+/// This makes the sink unreachable *through the sanctioned tool paths*. It is
+/// not tamper-evidence — the shell runs as the same uid and can still delete the
+/// file. See `docs/spec/security/agent-isolation.md`.
+pub fn shell_audit(audit_dir: &Path) -> Option<ShellAudit> {
+    if let Err(error) = std::fs::create_dir_all(audit_dir) {
+        tracing::error!(
+            audit_dir = %audit_dir.display(),
+            %error,
+            "[toolbelt] shell audit sink directory could not be created; withholding shell capability (fail-closed) — this agent gets NO shell tool"
+        );
+        return None;
+    }
+    let config = AuditConfig::default();
+    let sink = audit_dir.join(&config.log_path);
+    match get_or_create_workspace_audit_logger(config, audit_dir.to_path_buf()) {
+        Ok(logger) => Some(ShellAudit { logger, sink }),
         Err(error) => {
             tracing::error!(
-                workspace = %workspace.display(),
+                audit_dir = %audit_dir.display(),
                 %error,
-                "[toolbelt] workspace audit logger init failed; withholding shell capability (fail-closed) — this agent gets NO shell tool"
+                "[toolbelt] shell audit logger init failed; withholding shell capability (fail-closed) — this agent gets NO shell tool"
             );
             None
         }
@@ -286,22 +368,33 @@ pub fn workspace_audit(workspace: &Path) -> Option<Arc<AuditLogger>> {
 ///   Node/Python bootstrap in v1).
 /// * `read_workspace_state` — read-only git/tree overview.
 ///
-/// **Fail closed on audit:** `audit` is `None` only when the per-workspace audit
-/// logger could not be initialized (see [`workspace_audit`]). In that case the
-/// whole `shell` namespace is withheld — an empty vector — so a `ShellTool` can
-/// never run commands with no audit record. Dropping the capability is the safe
+/// **Fail closed on audit:** `audit` is `None` only when the per-agent audit
+/// logger could not be initialized (see [`shell_audit`]). In that case the whole
+/// `shell` namespace is withheld — an empty vector — so a `ShellTool` can never
+/// run commands with no audit record. Dropping the capability is the safe
 /// failure mode; registering an unaudited shell is not.
+///
+/// **Fail closed at run time too:** the `ShellTool` is wrapped in an
+/// [`AuditedShellTool`](crate::harness::audit::AuditedShellTool), which appends
+/// the command's intent line *before* delegating and refuses the call when that
+/// append fails. Init-time fail-closed alone was not enough — upstream's
+/// post-execution `emit_audit` is warn-and-continue by design, so a sink that
+/// became unwritable *after* the agent was built would let commands run with no
+/// record at all.
 pub fn shell_tools(
     security: Arc<SecurityPolicy>,
     runtime: Arc<dyn RuntimeAdapter>,
-    audit: Option<Arc<AuditLogger>>,
+    audit: Option<ShellAudit>,
     workspace: &Path,
 ) -> Vec<Box<dyn Tool>> {
     let Some(audit) = audit else {
         return Vec::new();
     };
     vec![
-        Box::new(ShellTool::new(security, runtime, audit)),
+        Box::new(crate::harness::audit::AuditedShellTool::new(
+            ShellTool::new(security, runtime, Arc::clone(&audit.logger)),
+            audit,
+        )),
         Box::new(WorkspaceStateTool::new(workspace.to_path_buf())),
     ]
 }
@@ -520,12 +613,7 @@ mod tests {
     fn shell_tools_expose_expected_names() {
         let ws = Path::new("/tmp/oc-toolbelt-shell");
         let security = test_security(ws, PolicyMode::Supervised);
-        let tools = shell_tools(
-            security,
-            native_runtime(),
-            Some(AuditLogger::disabled()),
-            ws,
-        );
+        let tools = shell_tools(security, native_runtime(), Some(ShellAudit::disabled()), ws);
         let got = names(&tools);
         for expected in ["shell", "read_workspace_state"] {
             assert!(got.contains(&expected), "missing {expected}: {got:?}");
@@ -573,7 +661,7 @@ mod tests {
         let shell = shell_tools(
             security.clone(),
             native_runtime(),
-            Some(AuditLogger::disabled()),
+            Some(ShellAudit::disabled()),
             ws,
         );
         let code = code_tools(security, ws);
@@ -965,7 +1053,7 @@ mod tests {
         let mut tools = shell_tools(
             security.clone(),
             native_runtime(),
-            Some(AuditLogger::disabled()),
+            Some(ShellAudit::disabled()),
             ws,
         );
         tools.extend(code_tools(security, ws));
@@ -1029,7 +1117,7 @@ mod tests {
         let mut tools: Vec<Box<dyn Tool>> = shell_tools(
             security.clone(),
             native_runtime(),
-            Some(AuditLogger::disabled()),
+            Some(ShellAudit::disabled()),
             ws,
         );
         tools.extend(code_tools(security.clone(), ws));
