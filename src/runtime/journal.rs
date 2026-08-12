@@ -2812,6 +2812,7 @@ mod test {
             at_millis,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         }
     }
 
@@ -2911,6 +2912,7 @@ mod test {
             expires_at_millis,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
             scope: None,
         }
     }

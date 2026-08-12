@@ -2806,6 +2806,7 @@ mod tests {
             at_millis: 1_000,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         }
     }
 
@@ -3012,6 +3013,7 @@ mod tests {
             at_millis: 1_000,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         });
 
         queue.clear();
@@ -3284,6 +3286,7 @@ mod tests {
             at_millis: 1_000,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         });
 
         {
@@ -3320,6 +3323,7 @@ mod tests {
             at_millis: 1_000,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         };
         shared.grant(call.clone());
 
@@ -3834,6 +3838,7 @@ mod tests {
             expires_at_millis,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
             scope: None,
         }
     }

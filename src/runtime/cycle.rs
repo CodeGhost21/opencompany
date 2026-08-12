@@ -865,6 +865,9 @@ working on):\n{}\n]",
             // within it; both come from one read so they cannot disagree.
             origin_thread: conversation.thread,
             origin_parent: conversation.parent,
+            // Issue #796: the task this call was parked from, carried so a
+            // standing grant can reclaim the task's checkout across parks.
+            origin_task: self.approval_origin_task(id),
             // Issue #457: which slice of the tool the card was actually about.
             // Read off the **parked effect's own payload** — the arguments the
             // operator was shown — rather than re-derived from anything live, so
@@ -909,6 +912,9 @@ working on):\n{}\n]",
             // the thread within it; one read, so the pair cannot disagree.
             origin_thread: conversation.thread,
             origin_parent: conversation.parent,
+            // Issue #796: the task this call was parked from, so the
+            // re-dispatched turn can reclaim its held-across-park checkout.
+            origin_task: self.approval_origin_task(id),
         };
         self.rt.journal.record_granted(&grant).await?;
         self.rt.grants.grant(grant);
@@ -918,6 +924,20 @@ working on):\n{}\n]",
             "[approval] minted a single-use grant; the agent will re-issue the call"
         );
         Ok(())
+    }
+
+    /// The task a parked approval belonged to, if it was raised from a task turn
+    /// (issue #796).
+    ///
+    /// The same `approval_task` join [`consumed_grant_effect`](Self::consumed_grant_effect)
+    /// uses, lifted out so both mint paths stamp a grant's `origin_task` from one
+    /// projection. `None` for an approval raised outside a task.
+    fn approval_origin_task(&self, id: &ApprovalId) -> Option<String> {
+        self.rt
+            .journal
+            .approval_task(id)
+            .flatten()
+            .and_then(|task| task.task_id().map(str::to_string))
     }
 
     /// Describes a grant the agent just redeemed, so an operator-approved tool
@@ -947,12 +967,7 @@ working on):\n{}\n]",
         Some(ExecutedEffect {
             kind: effect.kind.clone(),
             amount_usd: effect.amount_usd,
-            task_id: self
-                .rt
-                .journal
-                .approval_task(id)
-                .flatten()
-                .and_then(|task| task.task_id().map(str::to_string)),
+            task_id: self.approval_origin_task(id),
             at_millis: now_millis(),
             irreversible: self.rt.approval_gate.is_irreversible(&effect),
         })
@@ -3439,6 +3454,7 @@ mod test {
             at_millis: 0,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         });
         // A fresh one, to prove the sweep is selective rather than a flush.
         rt.grants.grant(GrantedCall {
@@ -3449,6 +3465,7 @@ mod test {
             at_millis: now_millis(),
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         });
 
         let expired = rt.sweep_expired_grants().await.unwrap();

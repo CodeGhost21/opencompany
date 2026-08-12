@@ -163,6 +163,23 @@ pub struct GrantedCall {
     /// is the pre-#435 behaviour.
     #[serde(default)]
     pub origin_parent: Option<EventSeq>,
+    /// The task the parked call belonged to, when it was raised from a task turn
+    /// (issue #796) — copied off the approval's `approval_task` join when the
+    /// grant is minted.
+    ///
+    /// **Routing only, never part of the redemption match**, on exactly the same
+    /// terms as [`origin_thread`](Self::origin_thread): the operator approved a
+    /// call, not a task, and [`GrantSet::consume`] matches on `(agent, tool,
+    /// args)` alone. It rides along so the re-dispatched turn can reclaim the
+    /// task's held-across-park checkout ([`CheckoutLedger`] in
+    /// `crate::harness::repo`) and so a denied or expired grant's tree can be
+    /// swept once no live grant names the task.
+    ///
+    /// `None` for an approval raised outside a task (a plain operator chat) and
+    /// on a grant replayed from a line written before this field existed — both
+    /// mean there is no task checkout to resume, which is the pre-#796 behaviour.
+    #[serde(default)]
+    pub origin_task: Option<String>,
 }
 
 /// The hard ceiling on a standing grant's life: 7 days.
@@ -288,6 +305,16 @@ pub struct StandingGrant {
     /// answer in the channel, as before.
     #[serde(default)]
     pub origin_parent: Option<EventSeq>,
+    /// The task the parked call belonged to, when raised from a task turn
+    /// (issue #796), carried on exactly the terms
+    /// [`GrantedCall::origin_task`] documents: routing and cleanup only, never
+    /// part of the `(agent, tool, unexpired)` match. A standing grant can resume
+    /// a task's checkout across repeated parks, so it carries the same link.
+    ///
+    /// `None` for an approval raised outside a task, and on a grant replayed
+    /// from a line written before this field existed.
+    #[serde(default)]
+    pub origin_task: Option<String>,
     /// The slice of [`tool`](Self::tool) this grant is confined to, when the
     /// tool's name is not the whole of what it can do (issue #457).
     ///
@@ -483,6 +510,24 @@ impl GrantSet {
         self.inner.lock().expect("grant set poisoned").live.len()
     }
 
+    /// Whether any live grant — single-use or standing — names `task` as its
+    /// origin (issue #796).
+    ///
+    /// The harness asks this to decide whether a task's checkout held across an
+    /// approval park is still awaiting a resume (a live grant names it) or has
+    /// been orphaned by a denied or expired approval (none does), so
+    /// [`CheckoutLedger::sweep_orphans`](crate::harness::repo::CheckoutLedger::sweep_orphans)
+    /// can reclaim the disk. A spent grant is already removed from both maps, so
+    /// this reads `false` the moment the resume is under way — which is safe
+    /// because the resuming turn has reclaimed the tree onto its turn-scoped list
+    /// by then.
+    pub fn any_for_task(&self, task: &str) -> bool {
+        let state = self.inner.lock().expect("grant set poisoned");
+        let names_task = |t: &Option<String>| t.as_deref() == Some(task);
+        state.live.values().any(|g| names_task(&g.origin_task))
+            || state.standing.values().any(|g| names_task(&g.origin_task))
+    }
+
     // -----------------------------------------------------------------------
     // Standing grants (issue #374)
     // -----------------------------------------------------------------------
@@ -631,6 +676,7 @@ mod test {
             at_millis: 1_000,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         }
     }
 
@@ -656,6 +702,7 @@ mod test {
         set.grant(GrantedCall {
             origin_thread: Some("desk-finance".to_string()),
             origin_parent: Some(EventSeq::new(7)),
+            origin_task: None,
             ..call("a1", "finance", "composio_execute", args.clone())
         });
         let redeemed = set
@@ -680,6 +727,7 @@ mod test {
             set.grant(GrantedCall {
                 origin_thread: origin.0,
                 origin_parent: origin.1,
+                origin_task: None,
                 ..call("a1", "finance", "composio_execute", args.clone())
             });
             assert!(
@@ -836,6 +884,7 @@ mod test {
             expires_at_millis,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
             scope: None,
         }
     }

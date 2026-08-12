@@ -2028,6 +2028,7 @@ mod tests {
             expires_at_millis: u64::MAX,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
             scope: minted,
         };
 

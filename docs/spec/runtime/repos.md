@@ -227,12 +227,25 @@ limit"](#the-honest-limit), and are not claimed here.
 
 ### The lifecycle
 
-A checkout's life is exactly one turn's. Every path the tools create is recorded
-on a per-turn ledger, and an RAII janitor claimed at each turn's entry point
-deletes them on the way out — success, error, steer cancel, redirect exhaustion
-and panic-unwind alike. A mid-loop redirect deletes the abandoned turn's
-checkout too, so a re-run starts from a fresh tree rather than one a discarded
-turn half-patched.
+A checkout's life is one turn's — with one deliberate exception the write tier
+needs (issue #796). Every path the tools create is recorded on a per-turn
+ledger, and an RAII janitor claimed at each turn's entry point deletes them on
+the way out — success, error, steer cancel, redirect exhaustion and panic-unwind
+alike. A mid-loop redirect deletes the abandoned turn's checkout too, so a re-run
+starts from a fresh tree rather than one a discarded turn half-patched.
+
+**The exception: surviving an approval park.** A write is not one turn's work —
+`repo_checkout` → edit → `git_operations` commit → `repo_publish` are each a
+`Reach::Consequence` step that parks under `supervised`, and a park ends the
+turn. So a checkout a *task* turn parked with is held on a task-keyed retained
+set the janitor does not touch, keyed by the task the parked approval carries
+(`GrantedCall::origin_task`); the approval's re-issue reclaims it, so the resumed
+step commits and publishes on the same tree — and the same commit — the parked
+step left. It is deleted when the task's resumed step finishes without parking
+again, or — if the approval is denied or expired — swept the next time any turn
+claims the janitor and no live grant still names the task. This is the "deleted
+at task end" this tier always promised; a per-turn delete made it a deadlock
+under supervision.
 
 A host killed mid-turn ends no turn, so boot sweeps
 `<harness>/<company>/*/workspace/repos` before the company starts. It is
