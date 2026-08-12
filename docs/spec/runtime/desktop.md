@@ -63,6 +63,10 @@ second is what someone types into "Add a host". Parsing is not enough either —
 `URL` accepts `tauri://localhost` and `file:///x`, and neither is a company
 host — so the check is `http:` or `https:`.
 
+Whether that host may then be *trusted with a secret* is a separate question,
+answered separately — see "Where a credential may travel" below. Collapsing the
+two would either forbid anonymous HTTP or permit credentialed HTTP.
+
 Two consequences follow, and both are load-bearing
 ([#613](https://github.com/tinyhumansai/opencompany/issues/613)):
 
@@ -121,6 +125,48 @@ is attached. `RequestBuilder::header` appends and axum reads the *first* value,
 so a header from the webview would otherwise be the one the host honoured.
 Keeping the token out of the webview is worth little if the webview still
 decides what a request authenticates as.
+
+### Where a credential may travel
+
+Addressability is not the only question a base url has to answer. A host can be
+perfectly reachable over a wire anyone on the path can read, and the desktop's
+credential is a device session — a person's standing authority on a company,
+attached to every request and to the whole life of the event stream, and
+replayable by whoever copies it down
+([#731](https://github.com/tinyhumansai/opencompany/issues/731)).
+
+So a second rule sits beside the first: **a credential travels over HTTPS, or to
+a host on this machine, and nowhere else.** `may_carry_a_credential` in
+`src-tauri/src/proxy/mod.rs` is the one that enforces it, with
+`mayCarryACredential` in `frontend/src/api/transport/index.ts` as the console's
+copy — the same arrangement as `isAddressableBaseUrl`, and for the same reason:
+a check in the console alone is bypassed by anything reaching the proxy
+directly, and a check in Rust alone arrives as an opaque IPC rejection that
+`client.ts` flattens into "cannot reach the company host".
+
+Loopback is exempt because `http://127.0.0.1:<port>` is how the embedded host is
+reached, on a port that changes every launch and so can never carry a
+certificate; `localhost` and its subdomains come with it, per RFC 6761. The
+private ranges are deliberately **not** exempt — an office LAN is precisely
+where someone else is on the path.
+
+The rule turns on the credential rather than on the scheme, which is what keeps
+a home-lab or staging host without a certificate usable: an anonymous connection
+to one still registers and still reads, because nothing is exposed that a
+passer-by could not have asked the host for themselves. Three surfaces apply it:
+
+- `ProxyRegistry::upsert` refuses to register a credentialed connection to such
+  a host, by name — `this host is not encrypted`, not `not an absolute host url`,
+  because an operator told the second goes to debug a network that is working.
+- `claim` in `commands.rs` refuses the pairing exchange before opening a socket.
+  This is the one place a session token is *created* rather than replayed — the
+  code goes out in the request and the token comes back in the response — and it
+  never touches the registry, so `upsert`'s refusal does not cover it. Its client
+  also refuses redirects: a 307 from an HTTPS base to an HTTP one would re-send
+  the claim, body and all, over the wire the check just refused.
+- `probe` in `registry.ts` marks such a connection `down` with the reason,
+  before contacting it, so the row says what is wrong instead of blaming the
+  network.
 
 The webview also runs under a CSP (`src-tauri/tauri.conf.json`) whose
 `connect-src` allows the IPC origin only. All host traffic goes through Rust and
@@ -193,7 +239,9 @@ a paired session by connection id. Pairing runs entirely in Rust —
 answers with the company, device id and expiry — so the token exists for one
 HTTP response that the webview is not on the path of. That is the difference
 between a design where the webview *should not* hold the credential and one
-where it *cannot*.
+where it *cannot*. The claim itself is a plain `claim()` rather than command
+logic, so the rules on it can be tested without starting a GUI — see "Where a
+credential may travel" for the one it enforces.
 
 The console's `Credential { kind: "device", ref }` is therefore a record that
 this machine is paired, not something the core is told. `ref` is the host's
