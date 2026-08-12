@@ -39,6 +39,10 @@ Supporting docs:
   `workflow`-deliverable card builds a proposed graph that lands In Review for
   approval before it exists, then apply/reject; host-authority conversion and
   the one authoring path
+- [workflow-vocabulary.md](workflow-vocabulary.md) — the node-kind authoring
+  contract: the 12 kinds an author may write and what each lowers to, the
+  engine-only kinds (`code` / `memory` / `dedup` / `loop`) OpenCompany refuses
+  at parse and why, and the builder ⊂ parser ⊂ engine nesting
 - [rebuild.md](rebuild.md) — replacing a registered runtime in place (quiesce →
   hand over → swap), so a first-time inference config needs no restart
 - [api.md](api.md) — HTTP routes and auth
@@ -47,6 +51,10 @@ Supporting docs:
   reaches every surface wired to it, and which surfaces are deliberately outside
   it
 - [config.md](config.md) — configuration and the one-key story
+- [repos.md](repos.md) — bound repositories: the host-side mirror cache, how a
+  credential reaches git without entering argv, the environment or any file, the
+  alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
+  of same-user confinement
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
 

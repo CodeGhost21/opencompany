@@ -175,6 +175,13 @@ struct AddMember {
     /// member exactly as before, so adding the field takes no permission away.
     #[serde(default)]
     budget_usd_daily: Option<f64>,
+    /// An optional per-teammate tool grant (issue #661 / L5): tool-namespace
+    /// globs INTERSECTED with the company's `[tools].allow` at roster-build time
+    /// — narrow-only, never a widen. Omitted or empty gives the standard
+    /// company-wide grant, so adding the field takes no permission away: it can
+    /// only restrict the new teammate below what the company already allows.
+    #[serde(default)]
+    tools: Vec<String>,
 }
 
 /// The set-budget body.
@@ -413,6 +420,14 @@ async fn add_member(
     let write_lock = company_write_lock(company.id());
     let _lock = write_lock.lock().await;
 
+    // Issue #661 / L5: trim + drop blank globs, mirroring the orchestrator
+    // `add_agent` parse. Empty stays empty → the standard company-wide grant.
+    let tools: Vec<String> = body
+        .tools
+        .into_iter()
+        .map(|glob| glob.trim().to_string())
+        .filter(|glob| !glob.is_empty())
+        .collect();
     let mut record = load_record(&company).await?;
     let agent = OverlayAgent {
         // A readable id derived from the name, unique against the roster this
@@ -425,6 +440,9 @@ async fn add_member(
         name: body.name,
         role: body.role,
         description: body.description,
+        // Issue #661 / L5: the teammate's own grant, intersected with the
+        // company allow-list by the shared reads/roster build. Empty = standard.
+        tools,
     };
     record.overlay_agents.push(agent.clone());
     let attribution = author.map(|admin| BudgetOverride {

@@ -72,7 +72,8 @@ search_daily_calls = 200           # per-company daily web_search cap (0 = pause
 [policy]                           # see company-brain/approvals.md
 mode = "supervised"                # readonly | supervised | auto | full
                                    # parse default supervised; new companies get auto
-always_approve = ["payment.send", "filing.submit", "external.publish"]
+always_approve = ["publish_artifact"]   # default []; names a tool or an open
+                                   # effect kind — see approvals.md
 auto_approve_under_usd = 1.0
 
 [place]                            # see company-as-agent/
@@ -204,7 +205,15 @@ prompt = "Weekly review and operator digest"
   left to that default. See
   [approvals.md](../company-brain/approvals.md#which-tier-a-new-company-gets)
   for why those are two separate knobs, and why moving the parse default is the
-  one thing issue #605 declined to do.
+  one thing issue #605 declined to do. **A tool name is an
+  effect kind** — the harness projects one onto the other — so
+  `["publish_artifact"]` and `["payment.send"]` are the same syntax at
+  different segment counts (issue #684). Operator-authored effect kinds remain
+  open-ended because a hosted brain may emit a kind this repository has never
+  seen; the shared matcher runs before the checkpoint taxonomy. The default is
+  **empty**: `supervised` already parks every money / publish / filing effect
+  through that taxonomy, so the conservative default is the mode, not the
+  list.
 - **`[place]`** drives the [going-public flow](../company-as-agent/README.md).
   `skills` feed Agent Card generation; prices are decimal strings (USDC).
 - **`[budget].monthly_usd`** is a hard ceiling enforced by the kernel across

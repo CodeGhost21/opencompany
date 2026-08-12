@@ -36,7 +36,10 @@
 //! Still **not wired**: the bare-completion `LlmProvider` fallback and `code`
 //! nodes. They are explicit stubs that return a clear capability error rather
 //! than a silent no-op, so a workflow that reaches one fails loudly; a workflow
-//! that never reaches one is unaffected.
+//! that never reaches one is unaffected. The `llm` stub takes care to report the
+//! *right* failure: the engine's output_parser auto-fix (default on) calls `llm`
+//! to repair a schema mismatch, so that stub surfaces the schema errors rather
+//! than masking them behind "bare LLM completion is not wired" (issue #661).
 //!
 //! Also not wired, and for a different reason: **memory**, which tinyflows 0.6
 //! added with the #499 pin bump. The other two are unbuilt; this one is
@@ -83,6 +86,27 @@ type EffectSlots = (
     Option<Arc<dyn AgentRunner>>,
 );
 
+/// What one run needs the capability bundle to know about *itself*.
+///
+/// Bundled rather than passed as five more parameters (issue #638 added the
+/// fifth and tipped `build_capabilities` over clippy's arity limit). They
+/// genuinely travel together — every one is scoped to this run and meaningless
+/// without the others — so a struct is the honest shape rather than a way of
+/// making the lint quiet.
+pub struct RunContext<'a> {
+    /// The workflow being run.
+    pub workflow_id: &'a str,
+    /// This run's id (issue #395), the key its approvals are stamped with.
+    pub run_id: &'a str,
+    /// The operator's topic for this run (issue #154), threaded to the agent
+    /// capability so a node's turn carries what was actually asked.
+    pub run_request: Option<String>,
+    /// Issue #542: stub every effectful slot and journal nothing.
+    pub dry_run: bool,
+    /// Where an agent node leaves an operator-facing notice (issue #638).
+    pub notices: RunNotices,
+}
+
 /// Assembles the [`Capabilities`] bundle for a run of `workflow_id`.
 ///
 /// `record` carries everything the outside-world capabilities need: the company
@@ -112,15 +136,27 @@ type EffectSlots = (
 /// policy and search backend are not built at all for a dry run — nothing needs
 /// them. Because every effect is stubbed, a future node kind cannot reach a real
 /// effect through a dry bundle: the engine only calls what is on the bundle.
+///
+/// # Errors
+///
+/// Live mode (issue #661) creates the per-run workspace directory the
+/// `tool_call` / `http_request` slots are rooted at; if that mkdir fails this
+/// returns [`OpenCompanyError::Harness`](crate::error::OpenCompanyError::Harness)
+/// rather than proceeding with effects pointed at a directory that does not
+/// exist. A dry run builds no workspace and is infallible.
 pub async fn build_capabilities(
     pool: Arc<HarnessPool>,
     deps: HarnessDeps,
     record: &CompanyRecord,
-    workflow_id: &str,
-    run_id: &str,
-    run_request: Option<String>,
-    dry_run: bool,
-) -> Capabilities {
+    run: RunContext<'_>,
+) -> crate::error::Result<Capabilities> {
+    let RunContext {
+        workflow_id,
+        run_id,
+        run_request,
+        dry_run,
+        notices,
+    } = run;
     let company = record.id.clone();
     // Issue #562: the tier actually in force — the operator's console override
     // when one is set, the manifest's otherwise. Reading `manifest.policy` here
@@ -171,14 +207,20 @@ pub async fn build_capabilities(
         )
     } else {
         let workflow_ws = workflow_workspace(&deps.workspace_root, &company, workflow_id, run_id);
-        if let Err(err) = tokio::fs::create_dir_all(&workflow_ws).await {
-            tracing::warn!(
-                company = %company,
-                workspace = %workflow_ws.display(),
-                %err,
-                "workflow: could not create the per-run workspace"
-            );
-        }
+        // L2 (issue #661): a workspace the `tool_call` / `http_request` slots
+        // cannot create is not something to warn past and keep going — the run
+        // would proceed with those effects rooted at a directory that does not
+        // exist, failing later and further from the cause. Abort here so the
+        // caller sees the real reason. The failure precedes the WorkflowRunStarted
+        // journal append, so a failed mkdir leaves no orphaned started row.
+        tokio::fs::create_dir_all(&workflow_ws)
+            .await
+            .map_err(|err| {
+                crate::error::OpenCompanyError::Harness(format!(
+                    "workflow run could not create its workspace directory {}: {err}",
+                    workflow_ws.display()
+                ))
+            })?;
 
         // ONE exec-security policy shared by the tool_call toolbelt and the
         // http_request client, sandboxed to the workflow workspace with the
@@ -238,11 +280,12 @@ pub async fn build_capabilities(
             company.clone(),
             run_id.to_string(),
             run_request,
+            notices,
         ));
         (Arc::new(tools), Arc::new(http), state, Some(agent))
     };
 
-    Capabilities {
+    Ok(Capabilities {
         llm: Arc::new(UnwiredLlm),
         tools,
         http,
@@ -260,7 +303,7 @@ pub async fn build_capabilities(
         // no company manifest can currently produce one (`NodeKind` has no
         // `memory` variant on our side).
         memory: None,
-    }
+    })
 }
 
 /// Builds a traversal-safe workspace path unique to one workflow execution.
@@ -333,6 +376,39 @@ pub struct HarnessAgentRunner {
     /// run, so without this the run's topic never reaches the teammate doing the
     /// work — the agent would run, find no subject, and ask for one.
     run_request: Option<String>,
+    /// Where this node leaves an operator-facing notice (issue #638).
+    notices: RunNotices,
+}
+
+/// Where an agent node leaves a notice for the operator (issue #638).
+///
+/// A shared handle rather than a return value because there is nowhere to
+/// return it to: `AgentRunner::run_agent` hands the engine a `Value` that
+/// becomes the node's output, and a system notice is emphatically not node
+/// output — it would ride into a downstream `=item` binding and into the run's
+/// persisted output snapshot. So the notice goes sideways, out to the runner
+/// that owns the run, and lands on [`WorkflowRun::notices`].
+///
+/// Cheap to clone; every clone appends to the same list, which is what lets one
+/// run's several agent nodes each contribute.
+#[derive(Clone, Default)]
+pub struct RunNotices {
+    inner: Arc<std::sync::Mutex<Vec<String>>>,
+}
+
+impl RunNotices {
+    /// Records one notice.
+    pub fn push(&self, notice: String) {
+        self.inner
+            .lock()
+            .expect("run notices poisoned")
+            .push(notice);
+    }
+
+    /// Takes everything recorded so far, leaving the collector empty.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.inner.lock().expect("run notices poisoned"))
+    }
 }
 
 impl HarnessAgentRunner {
@@ -345,6 +421,7 @@ impl HarnessAgentRunner {
         company: CompanyId,
         run_id: String,
         run_request: Option<String>,
+        notices: RunNotices,
     ) -> Self {
         Self {
             pool,
@@ -352,6 +429,7 @@ impl HarnessAgentRunner {
             company,
             run_id,
             run_request,
+            notices,
         }
     }
 
@@ -440,10 +518,33 @@ impl HarnessAgentRunner {
         // count, a run that flooded the gate looks identical to one that did
         // not.
         let drained = queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN);
+        let notice = drained.overflow_notice();
         let discarded = drained.discarded;
         let requests = drained.requests;
         if requests.is_empty() {
             return;
+        }
+
+        // Issue #638: told to the operator, not only logged. Raised BEFORE the
+        // parking guard below, and that ordering is a fix in itself — the guard
+        // `return`s, so on a runtime with no approvals gate the overflow was
+        // not even reaching the log. The notice is about calls that were
+        // *discarded*, which is true whether or not the survivors could be
+        // parked; if anything it matters more when they could not.
+        if let Some(notice) = notice {
+            // `overflow_notice` rather than a sentence of our own: the wording
+            // lives on `DrainedRequests` (#561) precisely so the chat path and
+            // this one cannot tell an operator the same thing two ways.
+            self.notices.push(notice);
+        }
+        if discarded > 0 {
+            tracing::warn!(
+                company = %self.company,
+                run_id = %self.run_id,
+                discarded,
+                "workflow agent node: more gated tool calls than one run may park; the excess \
+                 was discarded"
+            );
         }
 
         let Some(parking) = self
@@ -464,24 +565,6 @@ impl HarnessAgentRunner {
             return;
         };
 
-        if discarded > 0 {
-            // Bounded exactly as the cycle drain is: a model that keeps
-            // re-trying a blocked tool must not be able to flood the queue.
-            //
-            // Issue #638: the chat path now *tells* the operator when it
-            // discards (#561, `DrainedRequests::overflow_notice`); this one
-            // still only logs. Less bad than the chat path was — the count
-            // exists somewhere — but a log line is not the operator learning
-            // anything. Fixing it needs a surface a run can speak on, which is
-            // why it is tracked separately rather than done here.
-            tracing::warn!(
-                company = %self.company,
-                run_id = %self.run_id,
-                discarded,
-                "workflow agent node: more gated tool calls than one run may park; the excess \
-                 was discarded"
-            );
-        }
         for request in requests {
             // The delivery precedent: a workflow run has no board card behind it
             // and no conversation to raise the request in, so it is recorded
@@ -626,20 +709,76 @@ pub(super) fn run_request_text(input: &Value) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed.to_string())
 }
 
-/// The bare-completion fallback. An `agent` node with no `agent_ref` would land
-/// here; [`translate`](crate::workflows::translate) always sets `agent_ref` for a
-/// roster agent, so reaching this means an agent node with no teammate assigned.
+/// The message a bare-LLM call that is NOT the engine's schema auto-fix gets: an
+/// `agent` node reached `llm` with no `agent_ref`.
+/// [`translate`](crate::workflows::translate) always sets `agent_ref` for a roster
+/// agent, so reaching that path means an agent node with no teammate assigned.
+const BARE_LLM_UNWIRED_MESSAGE: &str = "workflow agent node has no roster agent; bare LLM \
+     completion is not wired for company workflows";
+
+/// The bare-completion fallback (`llm` capability), left unwired for company
+/// workflows.
+///
+/// Two distinct callers reach this, and issue #661 (M4) is that they used to get
+/// the same message:
+///
+/// * The engine's **output_parser auto-fix** (default on) calls `llm` to *repair*
+///   a value that failed schema validation — handing us
+///   `{ "task": "coerce_to_schema", "schema", "value", "errors": [ … ] }`. Because
+///   this path errors here, the generic "bare LLM completion is not wired"
+///   message used to **mask** the real failure (the schema errors) the operator
+///   needed to see. Now that shape surfaces the schema failures and merely *notes*
+///   that the repair path is unavailable.
+/// * An **`agent` node with no `agent_ref`** lands here with the node config as
+///   the request. That genuinely is "no roster agent", and keeps the original
+///   message byte-identical.
 struct UnwiredLlm;
 
 #[async_trait]
 impl LlmProvider for UnwiredLlm {
-    async fn complete(&self, _request: Value, _conn: Option<&str>) -> TfResult<Value> {
+    async fn complete(&self, request: Value, _conn: Option<&str>) -> TfResult<Value> {
+        // The engine's output-parser auto-fix asked us to coerce a value to a
+        // schema and handed us the schema failures. Surface THOSE — the real
+        // cause — rather than a message about the (unavailable) repair path,
+        // which is what masked them before #661. Same `output_parser: value
+        // failed schema validation:` lead the engine's non-auto-fix arm uses, so
+        // the on_error-routed error reads identically whichever arm produced it.
+        if let Some(errors) = auto_fix_schema_errors(&request) {
+            return Err(EngineError::Capability(format!(
+                "output_parser: value failed schema validation: {errors} (LLM auto-fix is not \
+                 available: bare LLM completion is not wired for company workflows)"
+            )));
+        }
+        // Any other request — an agent node with no `agent_ref`, whose request is
+        // the node config — keeps the original message unchanged.
         Err(EngineError::Capability(
-            "workflow agent node has no roster agent; bare LLM completion is not wired for \
-             company workflows"
-                .to_string(),
+            BARE_LLM_UNWIRED_MESSAGE.to_string(),
         ))
     }
+}
+
+/// Extracts the joined schema-validation failures from the engine's output-parser
+/// auto-fix request, if this is one.
+///
+/// The engine's `schema::parse_and_validate` asks `llm` to coerce a value to a
+/// schema with `{ "task": "coerce_to_schema", "schema", "value", "errors": [ … ] }`,
+/// where `errors` is the non-empty list of human-readable schema failures. Returns
+/// those failures joined by `; ` for exactly that shape, and `None` for anything
+/// else — including a `coerce_to_schema` request with a missing / empty / non-string
+/// `errors` — so the caller falls back to the generic bare-LLM message. Matching on
+/// the request shape (not the node kind) also covers the `agent` node's own
+/// output-parser sub-port, which routes through the same engine helper.
+fn auto_fix_schema_errors(request: &Value) -> Option<String> {
+    if request.get("task").and_then(Value::as_str) != Some("coerce_to_schema") {
+        return None;
+    }
+    let errors: Vec<&str> = request
+        .get("errors")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    (!errors.is_empty()).then(|| errors.join("; "))
 }
 
 /// `code` nodes are not part of the OpenCompany model and never emitted by
@@ -658,6 +797,116 @@ impl CodeRunner for UnwiredCode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Issue #638: a node that gates more calls than the cap allows leaves the
+    /// operator a **notice**, not only a log line.
+    ///
+    /// Asserted on `RunNotices` — the value that becomes `WorkflowRun::notices`
+    /// and then the journaled outcome the history panel reads — rather than on
+    /// a log, which is what the issue asks for and what the chat path already
+    /// had via #561.
+    #[tokio::test]
+    async fn an_overflowing_node_leaves_the_operator_a_notice() {
+        let over = MAX_APPROVAL_REQUESTS_PER_TURN + 3;
+        let (notices, queue) = overflowing_runner_notices(over, true).await;
+
+        assert_eq!(notices.len(), 1, "one notice for one overflow: {notices:?}");
+        let notice = &notices[0];
+        assert!(
+            notice.contains(&format!("at most {MAX_APPROVAL_REQUESTS_PER_TURN}")),
+            "it must quote the cap that did the discarding: {notice}"
+        );
+        assert!(notice.contains('3'), "…and how many went past it: {notice}");
+        assert_eq!(
+            queue.drain(MAX_APPROVAL_REQUESTS_PER_TURN).requests.len(),
+            0,
+            "the drain already emptied this run's scope"
+        );
+    }
+
+    /// The ordering fix that rides with it. The `parking`-is-`None` guard
+    /// `return`s, and it used to sit **above** the overflow branch — so on a
+    /// runtime with no approvals gate the discard was not even reaching the
+    /// log, let alone the operator.
+    ///
+    /// That is the worst case, not a corner: the survivors could not be parked
+    /// either, so the notice is the *only* thing the operator can be told.
+    #[tokio::test]
+    async fn the_notice_survives_a_runtime_with_no_approvals_gate() {
+        let over = MAX_APPROVAL_REQUESTS_PER_TURN + 2;
+        let (notices, _) = overflowing_runner_notices(over, false).await;
+        assert_eq!(
+            notices.len(),
+            1,
+            "no gate to park into is exactly when the operator most needs telling: {notices:?}"
+        );
+    }
+
+    /// A node that stayed under the cap says nothing — the notice must be the
+    /// exception, not a line on every run.
+    #[tokio::test]
+    async fn a_node_within_the_cap_raises_no_notice() {
+        let (notices, _) = overflowing_runner_notices(MAX_APPROVAL_REQUESTS_PER_TURN, true).await;
+        assert!(notices.is_empty(), "nothing was discarded: {notices:?}");
+    }
+
+    /// Queues `count` gated calls in a run's scope, drains them through
+    /// `park_gated_calls`, and returns whatever the run was told.
+    ///
+    /// `with_gate` selects whether a `parking` sink is wired, which is the axis
+    /// the guard-order test needs.
+    async fn overflowing_runner_notices(
+        count: usize,
+        with_gate: bool,
+    ) -> (Vec<String>, crate::harness::policy::ApprovalRequestQueue) {
+        use crate::harness::policy::{ApprovalRequest, ApprovalScope};
+        use crate::ports::types::{Effect, EffectGroup};
+
+        let dir = tempfile::Builder::new()
+            .prefix("oc-638-")
+            .tempdir()
+            .expect("tempdir");
+        let (mut deps, _journal) =
+            crate::workflows::gated_tool_turn_test::deps(String::new(), dir.path());
+        if !with_gate {
+            deps.delivery = None;
+        }
+        let queue = deps.approval_requests.clone();
+        let notices = RunNotices::default();
+        let runner = HarnessAgentRunner::new(
+            Arc::new(HarnessPool::new()),
+            deps,
+            CompanyId::new("acme"),
+            "run-1".to_string(),
+            None,
+            notices.clone(),
+        );
+
+        // Pushed inside the run's own scope, exactly as its turn would.
+        let claim = queue.claim(ApprovalScope::Run("run-1".to_string()));
+        claim
+            .scoped(async {
+                for i in 0..count {
+                    queue.push(ApprovalRequest {
+                        tool: "shell".to_string(),
+                        reason: "gated".to_string(),
+                        effect: Effect {
+                            kind: "shell".to_string(),
+                            group: EffectGroup::Other,
+                            amount_usd: None,
+                            established_thread: false,
+                            first_time_counterparty: false,
+                            payload: json!({ "n": i }),
+                            agent: Some("ceo".to_string()),
+                            run_id: None,
+                        },
+                    });
+                }
+            })
+            .await;
+        claim.scoped(runner.park_gated_calls()).await;
+        (notices.take(), queue)
+    }
 
     #[test]
     fn message_prefers_prompt_then_input_then_message() {
@@ -808,12 +1057,16 @@ mod tests {
             Arc::new(HarnessPool::new()),
             deps,
             &record,
-            "wf",
-            "run:1",
-            None,
-            false,
+            RunContext {
+                workflow_id: "wf",
+                run_id: "run:1",
+                run_request: None,
+                dry_run: false,
+                notices: RunNotices::default(),
+            },
         )
-        .await;
+        .await
+        .expect("build_capabilities");
 
         assert!(
             caps.memory.is_none(),
@@ -847,12 +1100,16 @@ mod tests {
             Arc::new(HarnessPool::new()),
             deps,
             &record,
-            "wf",
-            "run:1",
-            None,
-            true, // dry
+            RunContext {
+                workflow_id: "wf",
+                run_id: "run:1",
+                run_request: None,
+                dry_run: true,
+                notices: RunNotices::default(),
+            },
         )
-        .await;
+        .await
+        .expect("build_capabilities");
 
         // http: the stub echoes without sending, carrying the marker.
         let http_out = caps
@@ -886,5 +1143,176 @@ mod tests {
             None,
             "dry state must be the inert NoopState, never durable"
         );
+    }
+
+    // ── Issue #661 (M4): the unwired `llm` stub reports the RIGHT failure ──
+
+    /// T1 — the engine's output_parser auto-fix request (it calls `llm` to repair
+    /// a schema mismatch) surfaces the SCHEMA errors, not the generic bare-LLM
+    /// lead that used to mask them.
+    #[tokio::test]
+    async fn unwired_llm_surfaces_schema_errors_on_auto_fix_request() {
+        let request = json!({
+            "task": "coerce_to_schema",
+            "schema": { "type": "object", "required": ["name", "age"] },
+            "value": { "other": 1 },
+            "errors": [
+                "$: missing required property `name`",
+                "$: missing required property `age`",
+            ],
+        });
+        let EngineError::Capability(msg) = UnwiredLlm
+            .complete(request, None)
+            .await
+            .expect_err("an unwired llm must error")
+        else {
+            panic!("expected a capability error");
+        };
+        // The real cause is present…
+        assert!(
+            msg.contains("failed schema validation"),
+            "should carry the schema-validation lead: {msg}"
+        );
+        assert!(
+            msg.contains("missing required property `name`")
+                && msg.contains("missing required property `age`"),
+            "should carry the specific schema failures: {msg}"
+        );
+        // …and it does NOT lead with the generic bare-LLM message that hid them.
+        assert!(
+            !msg.starts_with("workflow agent node has no roster agent"),
+            "the schema failure must not be masked by the generic lead: {msg}"
+        );
+    }
+
+    /// T2 — any other request (here an agent node with no `agent_ref`, whose
+    /// request is the node config) keeps the generic message byte-identical.
+    #[tokio::test]
+    async fn unwired_llm_keeps_generic_message_for_non_auto_fix_request() {
+        let EngineError::Capability(msg) = UnwiredLlm
+            .complete(json!({ "prompt": "hi" }), None)
+            .await
+            .expect_err("an unwired llm must error")
+        else {
+            panic!("expected a capability error");
+        };
+        assert_eq!(
+            msg, BARE_LLM_UNWIRED_MESSAGE,
+            "a non-auto-fix request must get the byte-identical generic message"
+        );
+    }
+
+    /// T4 — a `coerce_to_schema` request whose `errors` is empty or missing (or
+    /// not an array of strings) falls back to the generic message rather than
+    /// emitting an empty schema-error string or panicking.
+    #[tokio::test]
+    async fn unwired_llm_falls_back_when_auto_fix_carries_no_errors() {
+        for request in [
+            json!({ "task": "coerce_to_schema" }),
+            json!({ "task": "coerce_to_schema", "errors": [] }),
+            json!({ "task": "coerce_to_schema", "errors": "oops" }),
+            json!({ "task": "coerce_to_schema", "errors": [1, 2] }),
+        ] {
+            let EngineError::Capability(msg) = UnwiredLlm
+                .complete(request.clone(), None)
+                .await
+                .expect_err("an unwired llm must error")
+            else {
+                panic!("expected a capability error for {request}");
+            };
+            assert_eq!(
+                msg, BARE_LLM_UNWIRED_MESSAGE,
+                "a coerce_to_schema request with no usable errors must fall back \
+                 to the generic message: {request}"
+            );
+        }
+    }
+
+    // ── Issue #661 (L2): a workspace mkdir failure aborts the live build ──
+
+    /// T5 — live mode with an impossible `workspace_root` (a path rooted under a
+    /// regular file) fails the build with a `Harness` error naming the path and
+    /// the underlying I/O cause, instead of warning past it and handing back a
+    /// bundle whose effects are rooted at a directory that does not exist.
+    #[tokio::test]
+    async fn build_capabilities_live_errors_when_workspace_cannot_be_created() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A regular file where a directory would need to be: `create_dir_all`
+        // under it fails with ENOTDIR.
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"x").expect("write file");
+
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace_root = not_a_dir.clone();
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        // `Capabilities` is not `Debug`, so match rather than `expect_err`.
+        let err = match build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            RunContext {
+                workflow_id: "wf",
+                run_id: "run:1",
+                run_request: None,
+                dry_run: false, // live: the workspace mkdir runs
+                notices: RunNotices::default(),
+            },
+        )
+        .await
+        {
+            Ok(_) => panic!("an uncreatable workspace must fail the build"),
+            Err(err) => err,
+        };
+
+        let crate::error::OpenCompanyError::Harness(msg) = &err else {
+            panic!("expected a Harness error, got {err:?}");
+        };
+        assert!(
+            msg.contains("could not create its workspace directory"),
+            "message should name the failure: {msg}"
+        );
+        assert!(
+            msg.contains("not-a-dir"),
+            "message should name the offending path: {msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("not a directory"),
+            "message should carry the underlying I/O cause: {msg}"
+        );
+    }
+
+    /// T6 — the same impossible root is harmless for a dry run: it builds no
+    /// workspace, so the bundle assembles fine.
+    #[tokio::test]
+    async fn build_capabilities_dry_ignores_an_impossible_workspace_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let not_a_dir = dir.path().join("not-a-dir");
+        std::fs::write(&not_a_dir, b"x").expect("write file");
+
+        let (mut deps, _journal) = crate::workflows::gated_tool_turn_test::deps(
+            "http://127.0.0.1:1/unused".to_string(),
+            dir.path(),
+        );
+        deps.workspace_root = not_a_dir;
+        let record = crate::workflows::gated_tool_turn_test::record();
+
+        build_capabilities(
+            Arc::new(HarnessPool::new()),
+            deps,
+            &record,
+            RunContext {
+                workflow_id: "wf",
+                run_id: "run:1",
+                run_request: None,
+                dry_run: true, // dry: no workspace mkdir at all
+                notices: RunNotices::default(),
+            },
+        )
+        .await
+        .expect("a dry build never touches the workspace");
     }
 }

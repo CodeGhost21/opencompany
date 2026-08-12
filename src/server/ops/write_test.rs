@@ -1227,6 +1227,62 @@ async fn workspace_create_write_move_and_cycle_rejection() {
     assert_eq!(status, StatusCode::NO_CONTENT);
 }
 
+/// Issue #666 applies to every way the filesystem path can change, not only to
+/// creates. A rename that could alias a sibling is refused before either the
+/// index or either file body moves.
+#[tokio::test]
+async fn workspace_rename_cannot_claim_a_siblings_physical_path() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (_, first) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "first.md", "kind": "file", "content": "first body"})),
+    )
+    .await;
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let (_, second) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "second.md", "kind": "file", "content": "second body"})),
+    )
+    .await;
+    let second_id = second["id"].as_str().unwrap().to_string();
+
+    let (status, refusal) = send(
+        &state,
+        "PATCH",
+        &format!("/api/v1/company/workspace/{second_id}"),
+        Some(json!({"name": "first.md"})),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["code"], "conflict", "{refusal}");
+
+    for (id, name, content) in [
+        (&first_id, "first.md", "first body"),
+        (&second_id, "second.md", "second body"),
+    ] {
+        let (status, file) = send(
+            &state,
+            "GET",
+            &format!("/api/v1/company/workspace/file/{id}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{file}");
+        assert_eq!(file["name"], name, "the refused rename changed metadata");
+        assert_eq!(
+            file["content"], content,
+            "the refused rename moved or overwrote a sibling body"
+        );
+    }
+}
+
 /// The read plane the console's Workspace tab runs on (issue #177): the tree
 /// `GET` reflects writes, and the file `GET` carries content plus
 /// server-computed backlinks.
@@ -1596,6 +1652,235 @@ async fn workspace_search_returns_hits_with_paths_and_excerpts() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(results["total"], json!(1));
+}
+
+/// `POST …/workspace/sweep-empty-agent-folders` (issue #700): the operator's
+/// one-time tidy of the empty `Agents/<id>/` folders a pre-#570 company still
+/// carries.
+///
+/// The whole route in one test, because the halves only mean something together:
+/// the dry run has to name every folder *and* leave the tree alone, or the
+/// confirm dialog it feeds is either uninformative or a lie; the real run has to
+/// remove exactly those folders, leave the occupied one, and announce each
+/// removal so a console watching the feed sees the tree change rather than
+/// discovering it on the next refetch.
+#[tokio::test]
+async fn workspace_sweep_previews_then_removes_only_the_empty_agent_folders() {
+    use crate::ports::types::CompanyEvent;
+
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+    // Boot already scaffolded `Agents/`; find it rather than making a rival.
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    let agents_id = tree
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["name"] == "Agents")
+        .expect("boot scaffolds the Agents root")["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Two strays from the #551 era, one folder that actually holds a
+    // deliverable, and a note filed directly under the root by an operator.
+    let mut empty = Vec::new();
+    for id in ["ceo", "cto"] {
+        let (_, folder) = send(
+            &state,
+            "POST",
+            "/api/v1/company/workspace",
+            Some(json!({"name": id, "kind": "folder", "parentId": agents_id})),
+        )
+        .await;
+        empty.push(folder["id"].as_str().unwrap().to_string());
+    }
+    let (_, cmo) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "cmo", "kind": "folder", "parentId": agents_id})),
+    )
+    .await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "launch-brief.md",
+            "kind": "file",
+            "parentId": cmo["id"].as_str().unwrap(),
+            "content": "# Launch",
+        })),
+    )
+    .await;
+    send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({
+            "name": "README.md",
+            "kind": "file",
+            "parentId": agents_id,
+            "content": "# who is who",
+        })),
+    )
+    .await;
+
+    let before = {
+        let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+        provisioned_names(&tree)
+    };
+    let events_before = journal_len(&runtime).await;
+
+    // -- the preview ------------------------------------------------------
+    let (status, preview) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        swept_names(&preview["wouldRemove"]),
+        vec!["ceo", "cto"],
+        "the confirm dialog needs every folder named, not a count: {preview}"
+    );
+    assert!(
+        preview.get("removed").is_none(),
+        "a preview must not claim it removed anything: {preview}"
+    );
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        before,
+        "a dry run must leave the tree exactly as it found it"
+    );
+    assert_eq!(
+        journal_len(&runtime).await,
+        events_before,
+        "a dry run must not announce anything either"
+    );
+
+    // -- the real thing ---------------------------------------------------
+    let (status, done) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        swept_names(&done["removed"]),
+        vec!["ceo", "cto"],
+        "an operator who disagrees needs to know what went: {done}"
+    );
+    assert!(
+        done.get("wouldRemove").is_none(),
+        "a real run must not answer in the preview's field: {done}"
+    );
+
+    let (_, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(
+        provisioned_names(&tree),
+        vec![
+            "Agents".to_string(),
+            "README.md".to_string(),
+            "cmo".to_string(),
+            "launch-brief.md".to_string(),
+        ],
+        "the folder holding a deliverable, the operator's note and the root all stay"
+    );
+
+    // One `WorkspaceChanged{removed}` per folder — the announcer is reached
+    // because the handler deletes through `runtime.workspace()`, the same
+    // wrapped handle the per-node delete uses (issue #327).
+    let journal = runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap();
+    //
+    // Sorted on both sides rather than compared in creation order: the sweep
+    // walks whatever order `tree()` returns, and the port promises none.
+    let mut announced: Vec<&str> = journal
+        .iter()
+        .filter_map(|stored| match &stored.event {
+            CompanyEvent::WorkspaceChanged { node_id, change } if change == "removed" => {
+                Some(node_id.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    announced.sort_unstable();
+    let mut expected: Vec<&str> = empty.iter().map(String::as_str).collect();
+    expected.sort_unstable();
+    assert_eq!(
+        announced, expected,
+        "each removal announces itself, exactly once, and nothing else was announced removed"
+    );
+
+    // -- and again, which must be a no-op ---------------------------------
+    let (status, again) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace/sweep-empty-agent-folders",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        again["removed"],
+        json!([]),
+        "running it twice must remove nothing the second time: {again}"
+    );
+
+    // The route resolves under the platform scope form too, and is never
+    // captured as a node id by the `…/workspace/{node_id}` route.
+    let (status, scoped) = send(
+        &state,
+        "POST",
+        "/api/v1/companies/acme/workspace/sweep-empty-agent-folders?dry_run=true",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(scoped["wouldRemove"], json!([]));
+}
+
+/// The sorted folder names in a sweep response list.
+fn swept_names(list: &serde_json::Value) -> Vec<String> {
+    let mut names: Vec<String> = list
+        .as_array()
+        .unwrap_or_else(|| panic!("the sweep answers with a list, got {list}"))
+        .iter()
+        .map(|folder| folder["name"].as_str().unwrap_or_default().to_string())
+        .collect();
+    names.sort();
+    names
+}
+
+/// How many events the company has journalled so far.
+async fn journal_len(runtime: &std::sync::Arc<crate::company::runtime::CompanyRuntime>) -> usize {
+    runtime
+        .events()
+        .read_from(
+            runtime.id(),
+            crate::ports::types::EventSeq::new(0),
+            usize::MAX,
+        )
+        .await
+        .unwrap()
+        .len()
 }
 
 #[tokio::test]
@@ -2792,6 +3077,7 @@ async fn mcp_reachability_lists_reaching_agents_including_overlay() {
         name: "Helper".to_string(),
         role: "Assistant".to_string(),
         description: None,
+        tools: Vec::new(),
     };
     let state = state_with_manifest_and_overlays(&home, manifest, vec![overlay]).await;
 
@@ -3922,6 +4208,7 @@ async fn task_detail_assembles_timeline_and_lineage() {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         },
     ] {
         runtime.events().append(&company, event).await.unwrap();
@@ -4878,6 +5165,7 @@ async fn task_timeline_scopes_approvals_to_the_run_window() {
             output: "shipped".into(),
             column: "in_review".into(),
             artifact_ids: Vec::new(),
+            origin_chat_id: None,
         },
         // After the window closed — must not leak either.
         approval("after"),
@@ -5280,6 +5568,7 @@ async fn a_task_that_never_waited_reports_no_waiting_fields() {
                 output: "shipped".into(),
                 column: "in_review".into(),
                 artifact_ids: Vec::new(),
+                origin_chat_id: None,
             },
         )
         .await
@@ -7052,6 +7341,88 @@ async fn an_uploaded_image_round_trips_through_the_blob_route() {
     assert_eq!(got.to_vec(), png, "the bytes must survive the round trip");
 }
 
+/// Issue #666: the filesystem backend derives payload paths from sibling
+/// names, so accepting the same name twice used to leave two ids pointing at
+/// one file. The second upload overwrote the first while the first node kept
+/// its old length and digest.
+///
+/// Refusing the colliding create is the filesystem backend's honest answer: it
+/// preserves the first payload and prevents the blob route from serving bytes
+/// under metadata computed for a different file.
+#[tokio::test]
+async fn a_same_name_upload_is_refused_without_overwriting_the_first_blob() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let first_bytes = vec![0x89, b'P', b'N', b'G', 0xff];
+    let (status, first) =
+        upload_file(&state, "chart.png", Some("image/png"), &first_bytes, None).await;
+    assert_eq!(status, StatusCode::OK, "{first}");
+    let first_id = first["id"].as_str().unwrap().to_string();
+    let first_sha = first["sha256"].as_str().unwrap().to_string();
+
+    let second_bytes = vec![0x89, b'P', b'N', b'G', 1, 2, 3, 0xff];
+    let (status, refusal) =
+        upload_file(&state, "chart.png", Some("image/png"), &second_bytes, None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["code"], "conflict", "{refusal}");
+    assert!(
+        refusal["error"]
+            .as_str()
+            .is_some_and(|message| message.contains("chart.png")),
+        "the operator can identify the occupied name: {refusal}"
+    );
+
+    let response = blob_response(&state, &first_id).await;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-length"],
+        first_bytes.len().to_string(),
+        "the surviving node still describes its own payload"
+    );
+    assert_eq!(response.headers()["etag"], format!("\"{first_sha}\""));
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    assert_eq!(
+        body.as_ref(),
+        first_bytes.as_slice(),
+        "the refused upload must not overwrite the first file"
+    );
+
+    let (status, tree) = send(&state, "GET", "/api/v1/company/workspace", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        tree.as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["name"] == "chart.png")
+            .count(),
+        1,
+        "a rejected collision must not leave a second metadata row"
+    );
+
+    // The physical paths differ when the parent differs, so this is not a
+    // workspace-wide filename ban.
+    let (_, folder) = send(
+        &state,
+        "POST",
+        "/api/v1/company/workspace",
+        Some(json!({"name": "Archive", "kind": "folder"})),
+    )
+    .await;
+    let folder_id = folder["id"].as_str().unwrap();
+    let (status, nested) = upload_file(
+        &state,
+        "chart.png",
+        Some("image/png"),
+        &second_bytes,
+        Some(folder_id),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{nested}");
+    assert_eq!(nested["parentId"], folder_id);
+}
+
 /// A Markdown upload stays a **note**, not a payload. Storing it as bytes would
 /// silently cost it the editor, the diff-free text read, backlinks and search —
 /// so the decision is asserted rather than left to whichever branch ran.
@@ -7512,6 +7883,96 @@ async fn a_file_over_the_per_file_cap_is_refused_as_too_large_not_as_malformed()
     );
 
     assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// A file part declared as a texty type, so the upload takes the **text**
+/// branch rather than the binary one.
+fn text_file_part_prefix(filename: &str) -> Vec<u8> {
+    format!(
+        "--{OVERSIZE_BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; \
+         filename=\"{filename}\"\r\nContent-Type: text/csv\r\n\r\n"
+    )
+    .into_bytes()
+}
+
+/// Issue #665: an over-cap upload is refused even when its bytes are valid
+/// UTF-8.
+///
+/// The store's quota decorator meters **binary payloads only**, and that is a
+/// deliberate narrowing — `src/runtime/workspace_quota.rs` says so, on the
+/// grounds that "a note is bounded by what a model will emit into a tool call".
+/// That premise holds for every writer the decorator covers and is false for
+/// this route, which is where arbitrary operator-supplied bytes enter the tree.
+///
+/// So a 65 MiB `.csv` — valid UTF-8, therefore classified as prose — used to be
+/// stored with **no size check at all**, while the byte-identical payload under
+/// a binary content type was refused. Same request, same size, opposite answer,
+/// decided by whether the bytes happened to decode.
+///
+/// The narrowing itself is untouched: an agent's note is still unmetered, and
+/// `tree_quota_gb` still counts binary payloads alone.
+#[tokio::test]
+async fn an_over_cap_upload_is_refused_even_when_its_bytes_are_valid_utf8() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let before = tree_names(&state).await;
+
+    // NUL bytes: valid UTF-8, so `text_body` decodes them and the upload takes
+    // the text branch. One megabyte over the 64 MiB default cap.
+    let oversize = 65 * 1024 * 1024;
+    let (status, body) = post_upload(
+        &state,
+        streamed_multipart(
+            text_file_part_prefix("export.csv"),
+            oversize,
+            format!("\r\n--{OVERSIZE_BOUNDARY}--\r\n").into_bytes(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["code"], "workspace_quota_exceeded", "{body}");
+    let message = body["error"].as_str().expect("an error message");
+    assert!(message.contains("export.csv"), "names the file: {message}");
+    assert!(message.contains("65.0 MiB"), "names its size: {message}");
+    assert!(message.contains("64.0 MiB"), "names the limit: {message}");
+    assert!(message.contains("Nothing was stored"), "{message}");
+
+    assert_eq!(tree_names(&state).await, before, "and nothing was stored");
+}
+
+/// The other half of #665, and the reason the fix is a cap rather than a
+/// reclassification: an *under*-cap text upload is still stored as prose.
+///
+/// Refusing large text must not turn ordinary text uploads into opaque blobs — a
+/// `.csv` an operator uploads is meant to stay searchable, backlinkable and
+/// editable in the console. If this ever fails, the fix has started deciding
+/// storage representation instead of bounding size.
+#[tokio::test]
+async fn an_under_cap_text_upload_is_still_stored_as_prose() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+
+    let (status, node) = upload_file(
+        &state,
+        "notes.csv",
+        Some("text/csv"),
+        b"a,b,c\n1,2,3\n",
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK, "{node}");
+    assert_eq!(
+        node["content"], "a,b,c\n1,2,3\n",
+        "a text upload keeps its body: {node}"
+    );
+    assert!(
+        node.get("mime").is_none() || node["mime"].is_null(),
+        "and is a prose note, not a binary payload: {node}"
+    );
 }
 
 /// The route's own backstop is classified too, and it fires while *skipping* a

@@ -7,6 +7,7 @@ that state through the `Brain` port. Cognition itself is
 it.
 
 Supporting docs: [charter.md](charter.md), [approvals.md](approvals.md),
+[per-call-judgement.md](per-call-judgement.md),
 [memory.md](memory.md).
 
 ## Definition

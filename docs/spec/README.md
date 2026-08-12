@@ -76,6 +76,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [company-brain/README.md](company-brain/README.md) | What the company brain is; the cycle |
 | [company-brain/charter.md](company-brain/charter.md) | The company constitution |
 | [company-brain/approvals.md](company-brain/approvals.md) | Checkpoints and the approval model |
+| [company-brain/per-call-judgement.md](company-brain/per-call-judgement.md) | Which calls warrant a human, per call (step 7 of the gate) |
 | [company-brain/memory.md](company-brain/memory.md) | Long-term memory and retention |
 | [runtime/README.md](runtime/README.md) | Kernel architecture and crate layout |
 | [runtime/ports.md](runtime/ports.md) | Port trait contracts (normative) — index, assembly, defaults |
@@ -90,6 +91,7 @@ L0  Substrate       api.tinyhumans.ai, openhuman-core, tiny.place, filesystem
 | [runtime/planning.md](runtime/planning.md) | The Planning station: pass contract, prerequisite verdicts, boot sweep |
 | [runtime/api.md](runtime/api.md) | HTTP surface and auth model |
 | [runtime/config.md](runtime/config.md) | Configuration and the one-key story |
+| [runtime/repos.md](runtime/repos.md) | Bound repositories: mirror cache, credential handling, quota |
 | [runtime/data-root.md](runtime/data-root.md) | Data-root resolution, the single-writer lock, instance identity |
 | [runtime/desktop.md](runtime/desktop.md) | The desktop client: connections, transport seam, embedded host |
 | [company-as-agent/README.md](company-as-agent/README.md) | Companies as economy citizens |

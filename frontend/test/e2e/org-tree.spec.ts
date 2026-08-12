@@ -220,6 +220,25 @@ async function openChart(page: Page) {
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
 }
 
+/**
+ * The chat member pane — the channel rail is the other `complementary` on
+ * screen, so the pane is always the last one.
+ */
+const memberPane = (page: Page) => page.getByRole("complementary").last();
+
+/**
+ * Open the chat member pane if it is shut.
+ *
+ * Its open state lives in `ChatView`, which unmounts when the operator steps
+ * into another view — so this has to be re-run after a round trip through the
+ * chart, and a blind click would close what a previous call opened.
+ */
+async function openMemberPane(page: Page) {
+  const toggle = page.getByRole("button", { name: /members$/i });
+  if ((await toggle.getAttribute("aria-pressed")) !== "true") await toggle.click();
+  await expect(page.getByRole("heading", { name: "Team" })).toBeVisible();
+}
+
 test.beforeEach(reset);
 
 test("#311 the org chart is reachable, which it was not before", async ({ page }) => {
@@ -393,6 +412,135 @@ test("#311 blueprint structure offers no control the host would refuse", async (
   await page.reload();
   await expect(chart(page)).toBeVisible({ timeout: 30_000 });
   await expect(deskNode(page, "Growth")).toHaveCount(0);
+});
+
+test("#485 #/company/<deskId> lands on that desk, not just on the chart", async ({ page }) => {
+  await mockApi(page);
+
+  // The chat member pane's "Manage on the org chart" writes exactly this
+  // address. Before #485 the shell dropped the hash's second segment on the
+  // way into this view, so the chart had no per-desk address at all.
+  await page.goto("/#/company/growth");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+
+  const growth = deskNode(page, "Growth");
+  await expect(growth).toHaveAttribute("data-desk-focused", "true");
+  // Focus, not only a ring: a ring says nothing to a screen reader, and "where
+  // did that link put me" is the question focus answers.
+  await expect(growth).toBeFocused();
+  // Nobody else is marked — arriving at one desk must not light up the chart.
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(1);
+
+  // The address survives, so the link the operator followed stays shareable.
+  await expect.poll(() => page.url()).toContain("#/company/growth");
+
+  // And the ring is not sticky: it clears on the first move rather than on a
+  // timer nobody can pick correctly against a chart that loads over a network.
+  await page.keyboard.press("Escape");
+  await expect(growth).not.toHaveAttribute("data-desk-focused", "true");
+});
+
+test("#485 a desk id the chart doesn't have is a silent no-op", async ({ page }) => {
+  await mockApi(page);
+
+  // `useHashView` hands the second segment back unvalidated, and a link can
+  // outlive the desk it names. A stale bookmark gets the company, not a banner.
+  await page.goto("/#/company/deleted-last-week");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  await expect(chart(page).locator('[role="treeitem"][aria-level="2"]')).toHaveCount(2);
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  // Not rewritten either: only this view knows which desk ids exist, so the
+  // shell has no business canonicalising a segment it cannot judge.
+  await expect.poll(() => page.url()).toContain("#/company/deleted-last-week");
+
+  // The teeth on the assertions above: focus is not simply broken. Point the
+  // same chart at a desk it *does* have and the marker appears.
+  await page.goto("/#/company/engineering");
+  await expect
+    .poll(() => deskNode(page, "Engineering").getAttribute("data-desk-focused"), {
+      timeout: 30_000,
+    })
+    .toBe("true");
+});
+
+test("#485 following the same desk link twice still lands on it", async ({ page }) => {
+  await mockApi(page);
+
+  // Every hop here is an in-app hash change, never `page.goto`: a full
+  // navigation remounts the chart and resets the very state this pins, so it
+  // would pass whether or not the bug exists.
+  await page.goto("/#/company/growth");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  await expect(deskNode(page, "Growth")).toHaveAttribute("data-desk-focused", "true");
+
+  // Off to the bare chart. The view stays mounted, so whatever it remembers
+  // about the last honoured id survives.
+  await page.evaluate(() => {
+    window.location.hash = "#/company";
+  });
+  await expect(chart(page)).toBeVisible();
+  // The previous desk must not keep wearing the ring once it is no longer the
+  // route's target.
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
+
+  // Back to the same desk. This is the case that regressed: the id matched the
+  // one already honoured, so the arrival was skipped and the link did nothing.
+  await page.evaluate(() => {
+    window.location.hash = "#/company/growth";
+  });
+  const growth = deskNode(page, "Growth");
+  await expect(growth).toHaveAttribute("data-desk-focused", "true");
+  await expect(growth).toBeFocused();
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(1);
+});
+
+test("#485 a stale id does not leave the previous desk wearing the ring", async ({ page }) => {
+  await mockApi(page);
+
+  await page.goto("/#/company/growth");
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+  await expect(deskNode(page, "Growth")).toHaveAttribute("data-desk-focused", "true");
+
+  // An id the chart does not have is a no-op for *arrival*, but it must still
+  // retire the previous target's mark — otherwise the ring claims a desk the
+  // address no longer names.
+  await page.evaluate(() => {
+    window.location.hash = "#/company/deleted-last-week";
+  });
+  await expect(chart(page)).toBeVisible();
+  await expect(chart(page).locator("[data-desk-focused]")).toHaveCount(0);
+});
+
+test("#485 a membership edit on the chart is there when you get back to chat", async ({ page }) => {
+  await mockApi(page);
+
+  // The round trip #485 is actually for: read the desk in chat, notice it is
+  // short a person, fix that where it can be fixed, come back.
+  await page.goto("/#/chat/engineering");
+  await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({ timeout: 30_000 });
+  await openMemberPane(page);
+  await expect(memberPane(page)).toContainText("Grace");
+  await expect(memberPane(page).locator("ul").first()).not.toContainText("Turing");
+
+  await memberPane(page).getByRole("button", { name: "Manage on the org chart" }).click();
+  await expect(chart(page)).toBeVisible({ timeout: 30_000 });
+
+  const engineering = deskNode(page, "Engineering");
+  await engineering.getByRole("button", { name: "Add teammate" }).click();
+  await page.getByRole("menuitem", { name: "Turing" }).click();
+  await expect(engineering.locator('[role="treeitem"][aria-level="3"]')).toHaveCount(3);
+
+  // Back the way we came — a hash navigation, so Back is the operator's own
+  // route home and not a reload.
+  await page.goBack();
+  await expect(page.getByPlaceholder("Message #engineering")).toBeVisible({ timeout: 30_000 });
+  await openMemberPane(page);
+  // Chat re-reads the desks when it remounts, so no reload is needed for the
+  // edit to show. The two surfaces stay separate reads of one host list —
+  // there is no shared client cache to keep in step, and adding one would put
+  // the pane's drop rule and the chart's badge rule on the same data path.
+  await expect(memberPane(page).locator("ul").first()).toContainText("Turing");
 });
 
 test("#311 a seat naming nobody on the roster is shown, not hidden", async ({ page }) => {

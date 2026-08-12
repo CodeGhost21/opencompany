@@ -246,6 +246,7 @@ async fn team_reports_the_effective_cap_and_its_attribution() {
         name: "Jamie".to_string(),
         role: "Growth".to_string(),
         description: None,
+        tools: Vec::new(),
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -329,12 +330,14 @@ async fn team_keeps_zero_explicit_null_and_manifest_only_caps_distinct() {
         name: "Zeroed".to_string(),
         role: "Growth".to_string(),
         description: None,
+        tools: Vec::new(),
     });
     record.overlay_agents.push(OverlayAgent {
         id: "uncapped".to_string(),
         name: "Uncapped".to_string(),
         role: "Ops".to_string(),
         description: None,
+        tools: Vec::new(),
     });
     let admin = Actor {
         kind: ActorKind::User,
@@ -1472,4 +1475,201 @@ fn regenerate_sdl_snapshot() {
     let path =
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/server/graphql/schema.graphql");
     std::fs::write(&path, super::sdl()).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// A binary node is not a note, on either read surface (issue #669)
+// ---------------------------------------------------------------------------
+
+/// Mints a real binary node in the store, the way an upload or a publish does.
+async fn given_a_binary_node(state: &AppState, name: &str, mime: &str, bytes: &[u8]) -> String {
+    let id = CompanyId::new("acme");
+    let workspace = state.registry().get(&id).unwrap().workspace().clone();
+    let node = crate::ports::workspace::WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: name.to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: None,
+        updated_at_millis: 1_700_000_000_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: Some(mime.to_string()),
+        size: None,
+        sha256: None,
+    };
+    workspace.create_binary(&id, &node, bytes).await.unwrap();
+    node.id
+}
+
+/// The headline of #669: `workspaceFile` reported a payload as an ordinary note
+/// with no content, so a 4 MB PNG and a genuinely empty note were the same
+/// response — on the surface whose entire job is to be unambiguous.
+///
+/// Asserted against the REST twin in the same test rather than in isolation.
+/// The two are documented as differing only in timestamp shape, and the bug was
+/// precisely that they disagreed about something much larger than that; a test
+/// that pinned only the GraphQL half would not notice them drifting apart again
+/// in the other direction.
+#[tokio::test]
+async fn graphql_and_rest_agree_that_a_binary_node_holds_no_text() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0xff];
+    let id = given_a_binary_node(&state, "hero.png", "image/png", png).await;
+
+    // GraphQL: an error naming the route that does serve the bytes, and no
+    // `content: ""` masquerading as an empty note.
+    let value = query(
+        router(state.clone()),
+        &format!(
+            r#"{{"query":"{{ company(id:\"acme\"){{ workspaceFile(id:\"{id}\"){{ name content }} }} }}"}}"#
+        ),
+    )
+    .await;
+    let errors = value["errors"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a payload must not resolve as a note: {value}"));
+    let message = errors[0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("image/png") && message.contains("workspace/blob/"),
+        "the refusal must name the type and the route that works: {message}"
+    );
+    assert!(
+        value["data"]["company"]["workspaceFile"].is_null(),
+        "no half-answer alongside the error: {value}"
+    );
+
+    // REST, the twin, for the same node: the same refusal.
+    let response = router(state)
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/api/v1/company/workspace/file/{id}"))
+                .header("cookie", crate::server::test_support::fixed_cookie("acme"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let rest = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        rest.contains("image/png") && rest.contains("workspace/blob/"),
+        "REST must still refuse the same way: {rest}"
+    );
+}
+
+/// The other half of #669, and the reason refusing above is not merely a harder
+/// `null`: the tree now carries the three fields that let a consumer discover a
+/// binary exists **before** it asks for text it cannot have.
+///
+/// Without these the refusal would be a dead end — a GraphQL client would have
+/// no way to reach a payload at all, because nothing in the schema said payloads
+/// were a thing. The REST `FsNode` has carried them since #553.
+#[tokio::test]
+async fn the_tree_projects_a_binary_nodes_mime_size_and_digest() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let png: &[u8] = &[0x89, b'P', b'N', b'G', 0xff];
+    given_a_binary_node(&state, "hero.png", "image/png", png).await;
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workspaceTree { name mime size sha256 } } }"}"#,
+    )
+    .await;
+    assert!(value["errors"].is_null(), "{value}");
+    let tree = value["data"]["company"]["workspaceTree"]
+        .as_array()
+        .unwrap();
+    let image = tree
+        .iter()
+        .find(|node| node["name"] == serde_json::json!("hero.png"))
+        .unwrap_or_else(|| panic!("the binary node is in the tree: {value}"));
+
+    assert_eq!(image["mime"], "image/png");
+    assert_eq!(
+        image["size"].as_f64().unwrap(),
+        png.len() as f64,
+        "the size the store computed, not the None this test sent in"
+    );
+    let sha = image["sha256"]
+        .as_str()
+        .unwrap_or_else(|| panic!("a digest is projected: {image}"));
+    assert_eq!(sha.len(), 64, "the store's sha256, hex-encoded");
+}
+
+/// A folder and a prose note both leave all three null. The console reads
+/// `mime`'s **presence** as "render or download this instead of editing it", so
+/// a projection that invented an empty string here would put every note behind
+/// a download card.
+///
+/// Both are asserted because only one of them is a real test of the rule: a
+/// folder can never carry a payload, so its nulls are structural, whereas a note
+/// is a `File` exactly like the binary above and `mime` is the single field
+/// telling them apart.
+#[tokio::test]
+async fn a_prose_note_projects_no_binary_metadata() {
+    let home_dir = home();
+    let home = home_dir.path().to_path_buf();
+    let state = state_with_company(&home).await;
+    let id = CompanyId::new("acme");
+    let workspace = state.registry().get(&id).unwrap().workspace().clone();
+    crate::company::workspace_scaffold::ensure_agent_folder(workspace.as_ref(), &id, "maya")
+        .await
+        .unwrap();
+
+    // A folder is the easy half. The note is the half that matters: it is a
+    // `File` like the payload above, so `mime`'s absence is the *only* thing
+    // separating the two, and a projection that reached for a default here
+    // would put every note in the company behind a download card.
+    let note = crate::ports::workspace::WorkspaceNode {
+        id: crate::ports::generate_id(),
+        name: "Charter.md".to_string(),
+        kind: crate::ports::workspace::NodeKind::File,
+        parent_id: None,
+        updated_at_millis: 1_700_000_000_000,
+        created_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        updated_by: crate::ports::workspace::WorkspaceOrigin::Operator,
+        mime: None,
+        size: None,
+        sha256: None,
+    };
+    workspace
+        .create(&id, &note, Some("# Charter\n\nprose, not bytes.\n"))
+        .await
+        .unwrap();
+
+    let value = query(
+        router(state),
+        r#"{"query":"{ company(id:\"acme\"){ workspaceTree { name kind mime size sha256 } } }"}"#,
+    )
+    .await;
+    assert!(value["errors"].is_null(), "{value}");
+    let tree = value["data"]["company"]["workspaceTree"]
+        .as_array()
+        .unwrap_or_else(|| panic!("the tree resolves: {value}"));
+    let find = |name: &str| {
+        tree.iter()
+            .find(|node| node["name"] == serde_json::json!(name))
+            .unwrap_or_else(|| panic!("`{name}` is in the tree: {value}"))
+            .clone()
+    };
+
+    let folder = find("maya");
+    assert!(folder["mime"].is_null(), "{folder}");
+    assert!(folder["size"].is_null(), "{folder}");
+    assert!(folder["sha256"].is_null(), "{folder}");
+
+    let note = find("Charter.md");
+    assert_eq!(
+        note["kind"], "file",
+        "a note is a file, not a folder: {note}"
+    );
+    assert!(note["mime"].is_null(), "{note}");
+    assert!(note["size"].is_null(), "{note}");
+    assert!(note["sha256"].is_null(), "{note}");
 }

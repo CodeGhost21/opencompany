@@ -66,6 +66,11 @@ pub mod workspace_search;
 // default build, and it touches nothing but the `WorkspaceStore` port.
 pub mod workspace_scaffold;
 pub mod workspace_seed;
+// Issue #700: the operator-triggered removal of the empty `Agents/<id>/` folders
+// a pre-#570 company still carries. Always compiled and openhuman-free, like the
+// scaffold whose fail-closed root lookup it shares: its only caller is the
+// console's REST route, and it touches nothing but the `WorkspaceStore` port.
+pub mod workspace_sweep;
 
 use std::path::Path;
 
@@ -83,7 +88,7 @@ pub use types::{
     GATEABLE_NAMESPACES, INFERENCE_PROVIDERS, INFERENCE_TIERS, Inference, KNOWN_CHANNELS,
     McpServer, ORCHESTRATOR_TIER, PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROVISIONED_POLICY_MODE,
     Place, Plan, Policy, Schedule, Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit,
-    grants_media_explicit, grants_search_explicit, grants_workspace_write_explicit,
+    grants_media_explicit, grants_repo_explicit, grants_search_explicit, grants_workspace_write_explicit,
     orchestrator_id,
 };
 pub use workflow_file::{

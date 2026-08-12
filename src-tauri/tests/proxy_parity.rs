@@ -35,7 +35,8 @@ async fn host_and_proxy() -> (embedded::EmbeddedHost, ProxyRegistry, tempfile::T
                 credential: Credential::None,
             },
         )
-        .await;
+        .await
+        .expect("an absolute host url");
     (host, proxy, dir)
 }
 
@@ -149,7 +150,8 @@ async fn an_unreachable_host_is_a_transport_failure() {
                 credential: Credential::None,
             },
         )
-        .await;
+        .await
+        .expect("an absolute host url");
     assert!(proxy.request("dead", get("/healthz")).await.is_err());
 }
 
@@ -170,7 +172,8 @@ async fn the_session_header_is_attached_to_a_device_connection() {
                 credential: Credential::Device("acme.not-a-real-token".to_string()),
             },
         )
-        .await;
+        .await
+        .expect("an absolute host url");
 
     let answered = proxy
         .request("device", get("/api/v1/company/auth/me"))
@@ -204,7 +207,8 @@ async fn two_connections_are_addressed_independently() {
                     credential: Credential::None,
                 },
             )
-            .await;
+            .await
+            .expect("an absolute host url");
     }
 
     let spec_a = proxy.request("a", get("/spec")).await.unwrap();

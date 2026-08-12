@@ -1137,6 +1137,7 @@ mod decide_tests {
                 deliveries: Vec::new(),
                 cancelled: false,
                 nodes: Vec::new(),
+                notices: Vec::new(),
             })
         }
     }

@@ -22,6 +22,7 @@ import { McpServersSection } from "@/views/connections/McpServersSection";
 import { CompanyCredentialCard } from "@/views/connections/CompanyCredentialCard";
 import { ComposioSection } from "@/views/connections/ComposioSection";
 import { ProvidersSection } from "@/views/connections/ProvidersSection";
+import { RepositoriesCard } from "@/views/connections/RepositoriesCard";
 import { ChannelsSection } from "./connections/ChannelsSection";
 import { useLocalScope } from "@/connections/ConnectionContext";
 
@@ -433,6 +434,8 @@ export function ConnectionsView({ client, company }: Props) {
         />
 
         <ChannelsSection client={client} company={company} canManage={canManage} />
+
+        <RepositoriesCard client={client} company={company} canManage={canManage} />
 
         {/* The page's one provider list (issue #582). It used to be two — this
             grid and a categorised grid of eleven hardcoded tiles below it — and

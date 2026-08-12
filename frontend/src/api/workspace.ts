@@ -317,6 +317,50 @@ export function deleteNode(
   return client.del<void>(`${client.scopeFor(company)}/workspace/${encodeURIComponent(id)}`);
 }
 
+/** One folder the sweep removed, or would remove (issue #700). */
+export interface SweptFolder {
+  id: string;
+  name: string;
+}
+
+/**
+ * The sweep's answer. Exactly one list is present, and **which** one is what
+ * actually happened: a preview answers `wouldRemove`, a real run answers
+ * `removed`.
+ */
+interface SweepResult {
+  wouldRemove?: SweptFolder[];
+  removed?: SweptFolder[];
+}
+
+/**
+ * Remove the empty `Agents/<id>/` folders a pre-#570 company still carries
+ * (issue #700), or — with `dryRun` — find out which ones those are without
+ * touching anything.
+ *
+ * The two calls are the same request twice: the console previews, names every
+ * folder on a confirm dialog, and only then asks for the deletion. Nothing here
+ * decides emptiness; the host counts children structurally, over every node in
+ * the tree, because a folder whose only child has no renderable path reads as
+ * empty to anything that goes by paths while the store's recursive delete would
+ * still take it (issue #671).
+ *
+ * Reads the field that matches what was asked for, rather than whichever list
+ * turns up. If the host ever disagrees with this caller about `dryRun`, an
+ * absent field yields an empty list — so a preview cannot render as "17 folders
+ * deleted", and a real run cannot be mistaken for a preview.
+ */
+export async function sweepEmptyAgentFolders(
+  client: OpenCompanyClient,
+  company: string | null,
+  dryRun: boolean,
+): Promise<SweptFolder[]> {
+  const result = await client.post<SweepResult>(
+    `${client.scopeFor(company)}/workspace/sweep-empty-agent-folders?dry_run=${dryRun}`,
+  );
+  return (dryRun ? result.wouldRemove : result.removed) ?? [];
+}
+
 /**
  * Upload a file of any kind (issue #553).
  *
@@ -367,6 +411,33 @@ export async function fetchBlobUrl(
     `${client.scopeFor(company)}/workspace/blob/${encodeURIComponent(id)}`,
   );
   return URL.createObjectURL(blob);
+}
+
+/**
+ * Identifies the *bytes* a binary node currently holds (issue #669).
+ *
+ * The viewer fetches a payload once and holds an object URL for it, so it needs
+ * to know when that URL has gone stale. The node id alone cannot say: a
+ * re-publish overwrites a payload **in place** and deliberately keeps the id, so
+ * an operator watching an image while an agent regenerated it kept seeing — and
+ * downloading — the old bytes until they navigated away and back.
+ *
+ * `sha256` is the answer because it *is* "these are different bytes", which is
+ * also why the blob route serves it as the `ETag`. The two obvious alternatives
+ * are both wrong in a way that shows up rarely enough to be nasty: `size` misses
+ * a same-length rewrite, and `updatedAtMillis` moves on a rename that changed no
+ * bytes at all, forcing a needless refetch of a payload that may be 60 MB.
+ *
+ * This exists as a named function rather than as entries in a `useEffect`
+ * dependency array because a dependency array is exactly the kind of thing a
+ * later edit shortens without noticing, and because the rule above is worth
+ * asserting in a test.
+ *
+ * A node with no digest falls back to the id, which is the pre-#553 behaviour
+ * and correct: nothing here can detect a change the host did not report.
+ */
+export function blobCacheKey(node: Pick<FsNode, "id" | "sha256">): string {
+  return node.sha256 ? `${node.id}:${node.sha256}` : node.id;
 }
 
 /** A human-readable size, for the metadata a binary node shows instead of a body. */

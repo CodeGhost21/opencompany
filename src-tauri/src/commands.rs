@@ -63,8 +63,8 @@ pub async fn oc_connect(
                 credential,
             },
         )
-        .await;
-    Ok(())
+        .await
+        .map_err(|error| error.to_string())
 }
 
 #[tauri::command]
@@ -206,6 +206,10 @@ pub async fn oc_pair_device(
             Some(session) => Credential::Device(session),
             None => Credential::None,
         };
+        // Infallible in practice: `base_url` was just read back out of the
+        // registry, so it is one `upsert` already accepted. Surfaced rather
+        // than swallowed anyway — a pairing that reported success while the
+        // credential never took effect is the worst of the three outcomes.
         proxy
             .upsert(
                 connection_id.clone(),
@@ -214,7 +218,8 @@ pub async fn oc_pair_device(
                     credential,
                 },
             )
-            .await;
+            .await
+            .map_err(|error| error.to_string())?;
     }
 
     Ok(PairedDevice {
@@ -236,6 +241,7 @@ pub async fn oc_forget_device(
 ) -> Result<(), String> {
     crate::keychain::forget_device(&connection_id).map_err(|error| error.to_string())?;
     if let Ok(base_url) = proxy.base_url(&connection_id).await {
+        // As in `oc_pair_device`: a url the registry already accepted.
         proxy
             .upsert(
                 connection_id,
@@ -244,7 +250,8 @@ pub async fn oc_forget_device(
                     credential: Credential::None,
                 },
             )
-            .await;
+            .await
+            .map_err(|error| error.to_string())?;
     }
     Ok(())
 }
