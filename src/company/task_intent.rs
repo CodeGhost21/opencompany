@@ -55,11 +55,20 @@
 //!
 //! Not the LLM classifier issue #267 sketches. OpenHuman's `trigger_triage`
 //! precedent classifies *external* triggers and pays a fast model to do it;
-//! OpenCompany has one `ChatModel` per company and no fast tier, so a
-//! pre-turn classifier would add a full-price serial round-trip to every
-//! message. It is tracked in **issue #678** along with fast-model routing, a
-//! first-class `automate` class, and gating the hosted path once #176 gives it
-//! a delegation stack to gate.
+//! OpenCompany maps its workloads onto [`INFERENCE_TIERS`] but declares no
+//! cheap tier for classification, so a pre-turn classifier would add a
+//! full-price serial round-trip to every message. It is tracked in **issue
+//! #678** along with fast-model routing, a first-class `automate` class, and
+//! gating the hosted path — which waits on **#723**, since the hosted brain has
+//! no delegation stack to gate until the Medulla transport exists.
+//!
+//! What this module *does* carry toward it is
+//! [`triage_message_detailed`]: the seam that separates a `Chatter` the
+//! classifier decided from one it fell back to. Escalating only the abstentions
+//! is what keeps such a classifier off the messages this layer already names —
+//! the difference between paying per hard message and paying per message.
+//!
+//! [`INFERENCE_TIERS`]: crate::company::INFERENCE_TIERS
 
 /// Bare greeting / acknowledgement messages that must never open a card, matched
 /// against the whole message (punctuation stripped). Kept short and exact so a
@@ -354,16 +363,74 @@ impl MessageTriage {
 /// 5. **A leading imperative** → `Track`.
 /// 6. **Anything else** → `Chatter`, the safe middle.
 pub fn triage_message(text: &str) -> MessageTriage {
+    triage_message_detailed(text).triage
+}
+
+/// Whether a rule decided this message, or the classifier simply ran out of
+/// rules (issue #678).
+///
+/// # Why `Chatter` is two different answers
+///
+/// [`triage_message`] returns `Chatter` from three places, and they do not mean
+/// the same thing. An empty message and a bare greeting are *decisions* — the
+/// classifier recognised them and is confident nothing should happen. The final
+/// arm is an **abstention**: no rule matched, and `Chatter` is chosen because it
+/// asserts nothing, not because the message was understood.
+///
+/// Collapsed into one variant, the two are indistinguishable, so anything
+/// downstream that wants to think harder about the hard cases has to think
+/// about every "hi" as well. Separating them is what lets a model be asked
+/// about *only* the residue.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TriageConfidence {
+    /// A rule matched: this classification is the classifier's answer.
+    Matched,
+    /// No rule matched. The triage is [`MessageTriage::Chatter`] by
+    /// construction — the safe middle — and carries no positive claim about
+    /// what the message was.
+    Abstained,
+}
+
+/// A triage plus whether the classifier actually decided it (issue #678).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TriageOutcome {
+    pub triage: MessageTriage,
+    pub confidence: TriageConfidence,
+}
+
+impl TriageOutcome {
+    /// Whether the classifier ran out of rules on this message.
+    ///
+    /// The escalation trigger: an abstention is the only class where a second,
+    /// costlier opinion can add anything, because every other outcome is a rule
+    /// firing.
+    pub fn abstained(&self) -> bool {
+        matches!(self.confidence, TriageConfidence::Abstained)
+    }
+}
+
+/// [`triage_message`], plus whether the answer was decided or fallen back to.
+///
+/// The classification is byte-for-byte what `triage_message` returns; this only
+/// reports which arm produced it. See [`TriageConfidence`].
+pub fn triage_message_detailed(text: &str) -> TriageOutcome {
+    let matched = |triage| TriageOutcome {
+        triage,
+        confidence: TriageConfidence::Matched,
+    };
+
     let trimmed = text.trim();
     if trimmed.is_empty() {
-        return MessageTriage::Chatter;
+        // A decision, not a fallback: nothing was said, and no model can find
+        // an ask in an empty string.
+        return matched(MessageTriage::Chatter);
     }
 
     let lower = trimmed.to_lowercase();
     // Whole-message greeting/ack check (strip trailing punctuation first).
     let bare = lower.trim_end_matches(['.', '!', '?', ' ']).trim();
     if GREETINGS.contains(&bare) {
-        return MessageTriage::Chatter;
+        return matched(MessageTriage::Chatter);
     }
 
     // Strip leading filler ("ok now …", "and also …") so the ask underneath is
@@ -372,15 +439,20 @@ pub fn triage_message(text: &str) -> MessageTriage {
 
     // Frame beats interrogative: a polite instruction stays work.
     if REQUEST_FRAMES.iter().any(|f| core.starts_with(f)) && contains_action(core) {
-        return MessageTriage::Track(to_title(trimmed));
+        return matched(MessageTriage::Track(to_title(trimmed)));
     }
     if is_question(core) {
-        return MessageTriage::Answer;
+        return matched(MessageTriage::Answer);
     }
     if starts_with_action(core) {
-        return MessageTriage::Track(to_title(trimmed));
+        return matched(MessageTriage::Track(to_title(trimmed)));
     }
-    MessageTriage::Chatter
+    // The residue. Every rule above declined, so this says only "no rule
+    // recognised it" — which is exactly the set worth a costlier opinion.
+    TriageOutcome {
+        triage: MessageTriage::Chatter,
+        confidence: TriageConfidence::Abstained,
+    }
 }
 
 /// Returns a cleaned task title when `text` is an actionable request, else
@@ -789,6 +861,90 @@ mod tests {
                 triage_message(msg),
                 MessageTriage::Chatter,
                 "should be chatter: {msg}"
+            );
+        }
+    }
+
+    // ── Issue #678: which Chatter is a decision, and which is a shrug ───────
+
+    /// The whole point of the seam. `Chatter` covers two unlike things, and only
+    /// one of them is worth a second opinion.
+    #[test]
+    fn a_recognised_chatter_is_a_decision_and_the_residue_is_an_abstention() {
+        for decided in ["", "   ", "hi", "hello", "thanks"] {
+            let out = triage_message_detailed(decided);
+            assert_eq!(out.triage, MessageTriage::Chatter, "{decided:?}");
+            assert!(
+                !out.abstained(),
+                "a greeting or an empty message is recognised, not fallen back to: {decided:?}"
+            );
+        }
+        for residue in [
+            "the deck looks good to me",
+            "i'll be offline tomorrow",
+            "nice work on the launch",
+        ] {
+            let out = triage_message_detailed(residue);
+            assert_eq!(out.triage, MessageTriage::Chatter, "{residue:?}");
+            assert!(
+                out.abstained(),
+                "no rule matched this, so the Chatter is a shrug: {residue:?}"
+            );
+        }
+    }
+
+    /// Every arm that fires a rule reports `Matched` — an abstention must never
+    /// be reachable from a positive classification, or the escalation trigger
+    /// would spend a model call on messages the cheap layer already named.
+    #[test]
+    fn every_positive_classification_reports_matched() {
+        for msg in [
+            "draft the launch plan for next quarter",
+            "can you build the landing page?",
+            "what is on the board?",
+            "show me the headcount",
+            "create a workflow named nightly digest",
+        ] {
+            let out = triage_message_detailed(msg);
+            assert!(
+                !out.abstained(),
+                "a rule decided this, so it is not an abstention: {msg:?} -> {:?}",
+                out.triage
+            );
+            assert_ne!(
+                out.triage,
+                MessageTriage::Chatter,
+                "fixture must exercise a non-Chatter arm: {msg:?}"
+            );
+        }
+    }
+
+    /// The seam is observational. `triage_message` is the byte-for-byte answer
+    /// it always was — #463 pins two card paths to the title it returns, so a
+    /// classification drift here would desynchronise the REST handler from
+    /// `chat_handler_card` and orphan the card.
+    #[test]
+    fn the_detailed_entry_point_changes_no_classification() {
+        for msg in [
+            "",
+            "   ",
+            "hi",
+            "thanks",
+            "…",
+            "the deck looks good to me",
+            "i'll be offline tomorrow",
+            "draft the launch plan for next quarter",
+            "can you build the landing page?",
+            "what is on the board?",
+            "show me the headcount",
+            "ok now also draft the brief",
+            "is the build ok?",
+            "create a workflow named nightly digest",
+        ] {
+            assert_eq!(
+                triage_message(msg),
+                triage_message_detailed(msg).triage,
+                "the detailed entry point must not reclassify: {msg:?}"
             );
         }
     }
