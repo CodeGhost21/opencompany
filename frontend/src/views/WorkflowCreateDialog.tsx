@@ -19,6 +19,7 @@ import { History, Plus, RotateCcw, Sparkles, Trash2 } from "lucide-react";
 import {
   CREATABLE_NODE_KINDS,
   DESTINATION_KINDS,
+  destinationLabel,
   createWorkflow,
   draftWorkflowFromDescription,
   listWorkflowRevisions,
@@ -1048,6 +1049,7 @@ export function WorkflowCreateDialog({
                 company={company}
                 roster={roster}
                 workflows={workflows}
+                createMode={!editing}
                 errors={{
                   schedule: fieldErrors[errorKey(n.key, "schedule")],
                   destinationTarget: fieldErrors[errorKey(n.key, "destinationTarget")],
@@ -1215,6 +1217,7 @@ function NodeRow({
   company,
   roster,
   workflows,
+  createMode,
   errors,
   configErrors,
   onValidateField,
@@ -1230,6 +1233,9 @@ function NodeRow({
   roster: TeamMemberDto[];
   /** The company's workflows, for a `sub_workflow` node's picker (issue #541). */
   workflows: WorkflowSummary[];
+  /** True while creating a new workflow (not editing an existing one), so the
+   * trigger row can disclose that a scheduled workflow is created paused (#813). */
+  createMode: boolean;
   /** Blur-time problems for this row's validated fields, if any. */
   errors: Partial<Record<ValidatedField, string>>;
   /** Blur-time problems for this row's config fields, keyed by engine key. */
@@ -1308,6 +1314,7 @@ function NodeRow({
           <ScheduleField
             client={client}
             company={company}
+            createMode={createMode}
             schedule={node.schedule}
             error={errors.schedule}
             onChange={(schedule) => onChange({ schedule })}
@@ -1336,7 +1343,12 @@ function NodeRow({
               }
             >
               <SelectTrigger className="h-8" aria-label="Send report to">
-                <SelectValue />
+                {/* base-ui renders the raw stored value in the collapsed
+                    control unless given text, which surfaced the bare
+                    `__none__` sentinel; map every value to its label. #813 */}
+                <SelectValue>
+                  {destinationLabel(node.destinationKind || NO_DESTINATION)}
+                </SelectValue>
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value={NO_DESTINATION}>
@@ -1412,6 +1424,7 @@ function NodeRow({
 function ScheduleField({
   client,
   company,
+  createMode,
   schedule,
   error,
   onChange,
@@ -1419,6 +1432,8 @@ function ScheduleField({
 }: {
   client: OpenCompanyClient;
   company: string | null;
+  /** True on a new workflow, to disclose the created-paused default (#813). */
+  createMode: boolean;
   schedule: string;
   /** The blur-time cron problem for this field, when there is one. */
   error?: string;
@@ -1488,6 +1503,17 @@ function ScheduleField({
           schedule={schedule}
           suppressError={Boolean(error)}
         />
+      )}
+      {/* A scheduled workflow is disarmed on create (#276 disarm rule,
+          src/company/workflow_create.rs); nothing else in the dialog says so,
+          so an author who sets a cron here would think it is armed. Disclose it
+          at author time — create mode only, and only once a real schedule is
+          set. #813 */}
+      {createMode && looksLikeCron(schedule) && (
+        <p className="text-3xs text-muted-foreground">
+          Heads up: a scheduled workflow is created paused. Resume it from the
+          list to arm the schedule.
+        </p>
       )}
     </div>
   );
