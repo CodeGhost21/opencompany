@@ -3566,13 +3566,13 @@ mod test {
 
         for (created, holder) in [("companies", dir.path()), ("acme", &companies)] {
             assert!(
-                append_probe::dir_synced(holder),
+                append_probe::dir_syncs(holder) > 0,
                 "the directory holding the entry naming `{created}` must be flushed \
                  before a host-durable record is reported durable"
             );
         }
         assert!(
-            append_probe::dir_synced(&home),
+            append_probe::dir_syncs(&home) > 0,
             "the journal file's own directory entry must be flushed"
         );
     }

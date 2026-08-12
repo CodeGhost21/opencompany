@@ -134,12 +134,14 @@ pub(crate) async fn append_line(path: &Path, line: &str) -> Result<()> {
 ///
 /// The write itself is unchanged — one `write_all` under `O_APPEND`, so the
 /// atomicity argument in [`append_line`] carries over untouched — and is
-/// followed by `File::sync_data`. When the file did **not** exist before the
-/// open, the parent directory is opened and `sync_all`ed as well: on a create it
-/// is the directory entry that names the new file, and that entry is a separate
-/// write which a host crash can lose on its own, leaving a flushed file nothing
-/// can find. One `try_exists` pays for that, and it is confined to this function
-/// so the plain path never stats.
+/// followed by `File::sync_data`. When this append is the one that **creates**
+/// the file, the parent directory is opened and `sync_all`ed as well: on a
+/// create it is the directory entry that names the new file, and that entry is a
+/// separate write which a host crash can lose on its own, leaving a flushed file
+/// nothing can find. Whether it created the file is decided by the open itself
+/// rather than by a prior stat ([`open_for_append`]), so a concurrent deleter
+/// cannot make the append skip that flush. Creating the file's *parent chain*
+/// durably is [`create_dir_all_durable`], and is the caller's to ask for.
 ///
 /// **A failed flush fails the append.** For the caller this exists for — the
 /// journal's `EffectExecuted` commit, written immediately before the side effect
@@ -165,15 +167,8 @@ async fn append_line_inner(path: &Path, line: &str, sync: bool) -> Result<()> {
     tokio::task::spawn_blocking(move || {
         use std::io::Write;
         // Whether this append is the one that creates the file, which is the
-        // only append whose directory entry needs flushing. Asked before the
-        // open, and only on the durable path. An error answers "assume new",
-        // which costs one needless directory flush and never skips a needed one.
-        let creating = sync && !owned_path.try_exists().unwrap_or(false);
-        let mut file = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&owned_path)
-            .map_err(|e| io_err(&owned_path, e))?;
+        // only append whose directory entry needs flushing.
+        let (mut file, creating) = open_for_append(&owned_path, sync)?;
         file.write_all(record.as_bytes())
             .map_err(|e| io_err(&owned_path, e))?;
         if sync {
@@ -188,6 +183,63 @@ async fn append_line_inner(path: &Path, line: &str, sync: bool) -> Result<()> {
     })
     .await
     .map_err(|e| OpenCompanyError::Store(format!("spawn_blocking failed: {e}")))?
+}
+
+/// Opens `path` for appending, reporting whether **this open** created it.
+///
+/// The plain path does not need the answer and takes the single-syscall route.
+/// The durable path does need it — it decides whether the directory entry naming
+/// the file is flushed — and needs it to be *true*, which is why it is not asked
+/// with a `try_exists` before the open. That would be a time-of-check window: a
+/// concurrent deleter landing between the stat and the open answers "already
+/// there" for a file this open then re-creates, and the append skips the
+/// directory flush it exists to guarantee, leaving a synced record under a name
+/// that was never written down. An in-process [`path_lock`] does not help,
+/// because the deleter that matters is another process on the same data
+/// directory.
+///
+/// So the answer comes from the open itself, where it cannot be stale:
+/// `create_new` succeeding **is** the creation, and an append-open succeeding is
+/// proof the file was already there. Neither is cheaper than the stat it
+/// replaces — one open when the file exists, two when it does not, against the
+/// stat-plus-open it cost before.
+///
+/// The two opens can lose to each other repeatedly (created, then deleted, then
+/// absent again), so the retry is bounded and gives up in the safe direction:
+/// assume created, pay one needless directory flush, never skip a needed one.
+fn open_for_append(path: &Path, sync: bool) -> Result<(std::fs::File, bool)> {
+    /// Enough to absorb a racing deleter; past this the path is being churned by
+    /// something whose behaviour no answer here would survive anyway.
+    const ATTEMPTS: usize = 3;
+
+    let create_or_open = || {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .map_err(|e| io_err(path, e))
+    };
+    if !sync {
+        // `creating` is meaningless on the plain path — nothing flushes.
+        return Ok((create_or_open()?, false));
+    }
+    for _ in 0..ATTEMPTS {
+        match std::fs::OpenOptions::new().append(true).open(path) {
+            Ok(file) => return Ok((file, false)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(io_err(path, e)),
+        }
+        match std::fs::OpenOptions::new()
+            .create_new(true)
+            .append(true)
+            .open(path)
+        {
+            Ok(file) => return Ok((file, true)),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(io_err(path, e)),
+        }
+    }
+    Ok((create_or_open()?, true))
 }
 
 /// Flushes the directory entry naming `path`, so a newly created file is still
@@ -289,7 +341,7 @@ pub(crate) async fn create_dir_all_durable(dir: &Path) -> Result<()> {
 /// full statement of what a unit test can and cannot establish here.
 #[cfg(test)]
 pub(crate) mod append_probe {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashMap;
     use std::path::{Path, PathBuf};
     use std::sync::{LazyLock, Mutex};
 
@@ -323,28 +375,33 @@ pub(crate) mod append_probe {
             .unwrap_or((0, 0))
     }
 
-    /// Every directory [`super::sync_parent_dir`] has flushed.
+    /// How many times [`super::sync_parent_dir`] has flushed each directory.
     ///
     /// The same argument as the append tally: a flushed directory and an
     /// unflushed one are identical on disk, so the honest check is to count the
-    /// request where it is made. Never cleared — tests own unique temp paths and
-    /// ask about their own.
-    static DIR_SYNCS: LazyLock<Mutex<HashSet<PathBuf>>> =
-        LazyLock::new(|| Mutex::new(HashSet::new()));
+    /// request where it is made. A count rather than a set, because *how often*
+    /// is the question for the directory flush — it is meant to be paid by the
+    /// append that creates a file and by no other. Never cleared: tests own
+    /// unique temp paths and ask about their own.
+    static DIR_SYNCS: LazyLock<Mutex<HashMap<PathBuf, usize>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
 
     pub(crate) fn record_dir_sync(path: &Path) {
-        DIR_SYNCS
+        *DIR_SYNCS
             .lock()
             .expect("append-probe poisoned")
-            .insert(key(path));
+            .entry(key(path))
+            .or_insert(0) += 1;
     }
 
-    /// Whether `path`'s directory entry block was flushed.
-    pub(crate) fn dir_synced(path: &Path) -> bool {
+    /// How many times `path`'s directory entry block was flushed.
+    pub(crate) fn dir_syncs(path: &Path) -> usize {
         DIR_SYNCS
             .lock()
             .expect("append-probe poisoned")
-            .contains(&key(path))
+            .get(&key(path))
+            .copied()
+            .unwrap_or(0)
     }
 }
 
@@ -1402,7 +1459,7 @@ mod test {
             (&journal_dir, "holds the entry naming the journal file"),
         ] {
             assert!(
-                append_probe::dir_synced(dir),
+                append_probe::dir_syncs(dir) > 0,
                 "{} — unflushed, a host crash can lose the subtree under it",
                 why
             );
@@ -1410,6 +1467,51 @@ mod test {
 
         let rows: Vec<serde_json::Value> = read_jsonl(&path).await.expect("no corrupt lines");
         assert_eq!(rows.len(), 1, "the record itself still landed");
+    }
+
+    /// **Issue #392**: the directory flush is paid by the append that *creates*
+    /// the file, and by no other — decided by the open rather than by a stat
+    /// taken before it.
+    ///
+    /// The race the decision-by-open closes (a deleter landing between a
+    /// `try_exists` and the open, so a re-created file skips the flush that
+    /// makes it findable) cannot be reproduced deterministically in a unit test;
+    /// it needs a second process interleaved between two syscalls. What is
+    /// pinned here is the contract that race would break, across all three
+    /// answers: create flushes, append-to-existing does not, and a re-create
+    /// after a delete flushes again.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn the_directory_flush_is_paid_only_by_the_append_that_creates() {
+        let root_dir = tmp_root();
+        let dir = root_dir.path().join("journal");
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let path = dir.join("journal.jsonl");
+        // The `create_dir_all` above is not durable, so the tally starts here.
+        let before = append_probe::dir_syncs(&dir);
+
+        append_line_durable(&path, "{\"i\":0}").await.unwrap();
+        assert_eq!(
+            append_probe::dir_syncs(&dir) - before,
+            1,
+            "the creating append flushes the entry naming the new file"
+        );
+
+        append_line_durable(&path, "{\"i\":1}").await.unwrap();
+        assert_eq!(
+            append_probe::dir_syncs(&dir) - before,
+            1,
+            "an append to a file that is already there writes no new entry, \
+             so it must not pay for a directory flush"
+        );
+
+        tokio::fs::remove_file(&path).await.unwrap();
+        append_line_durable(&path, "{\"i\":2}").await.unwrap();
+        assert_eq!(
+            append_probe::dir_syncs(&dir) - before,
+            2,
+            "re-creating the file writes a new entry, which must be flushed"
+        );
     }
 
     /// A durable append into a directory that does not exist must surface the
