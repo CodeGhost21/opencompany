@@ -88,19 +88,30 @@ pub async fn record_run_finished(
     // by an operator — the stop signal resolves *into* an `Ok(cancelled)`, never
     // into an `Err` — so the error arm is unambiguously a failure or the boot
     // sweep's synthetic one.
-    let (deliveries, pending_approvals, error, cancelled): (
+    // Issue #638: `notices` rides the Ok arm for the same reason `cancelled`
+    // does — a run that never returned produced no notices, and an `Err` is
+    // already fully described by `error`.
+    let (deliveries, pending_approvals, error, cancelled, notices): (
         Vec<DeliveryReport>,
         Vec<String>,
         Option<String>,
         bool,
+        Vec<String>,
     ) = match outcome {
         Ok(run) => (
             run.deliveries.clone(),
             run.pending_approvals.clone(),
             None,
             run.cancelled,
+            run.notices.clone(),
         ),
-        Err(err) => (Vec::new(), Vec::new(), Some(err.to_string()), false),
+        Err(err) => (
+            Vec::new(),
+            Vec::new(),
+            Some(err.to_string()),
+            false,
+            Vec::new(),
+        ),
     };
 
     let event = CompanyEvent::WorkflowRunFinished {
@@ -114,6 +125,7 @@ pub async fn record_run_finished(
         pending_approvals,
         error,
         cancelled,
+        notices,
     };
 
     if let Err(err) = events.append(company, event).await {
@@ -369,6 +381,62 @@ mod test {
             deliveries,
             cancelled: false,
             nodes: Vec::new(),
+            notices: Vec::new(),
+        }
+    }
+
+    /// Issue #638: a run's notices survive onto the journaled outcome, which is
+    /// the row the console's history panel reads.
+    ///
+    /// The point of the assertion is the **round trip**, not the assignment: the
+    /// event is written to a real JSONL log and read back, so a field that
+    /// serialized but did not deserialize — or one `skip_serializing_if` dropped
+    /// on the way out — fails here rather than in front of an operator.
+    #[tokio::test]
+    async fn a_runs_notices_reach_the_journaled_outcome() {
+        let (_dir, events) = log();
+        let company = CompanyId::new("acme");
+        let notice = "Heads up: 3 further gated tool calls were not raised for approval.";
+        let run = WorkflowRun {
+            notices: vec![notice.to_string()],
+            ..run_with(Vec::new(), Vec::new())
+        };
+
+        record_run_finished(&events, &company, "wf", false, "run-1", Ok(&run)).await;
+
+        let journaled = journaled(&events, &company).await;
+        let CompanyEvent::WorkflowRunFinished { notices, error, .. } = journaled
+            .iter()
+            .find(|e| matches!(e, CompanyEvent::WorkflowRunFinished { .. }))
+            .expect("the outcome was journaled")
+        else {
+            unreachable!("matched above")
+        };
+        assert_eq!(notices, &vec![notice.to_string()]);
+        assert!(
+            error.is_none(),
+            "a run that raised a notice did not fail — putting this in `error` \
+             would inflate the failure count and hide a real failure among them",
+        );
+    }
+
+    /// The other direction, and the one that keeps the field honest: a run with
+    /// nothing to say carries an empty list, and a *failed* run carries none at
+    /// all rather than inheriting whatever the Ok arm would have had.
+    #[tokio::test]
+    async fn an_ordinary_run_and_a_failed_run_carry_no_notices() {
+        let (_dir, events) = log();
+        let company = CompanyId::new("acme");
+
+        let ok = run_with(Vec::new(), Vec::new());
+        record_run_finished(&events, &company, "wf", false, "run-ok", Ok(&ok)).await;
+        record_run_finished(&events, &company, "wf", false, "run-bad", Err("boom")).await;
+
+        for event in journaled(&events, &company).await {
+            let CompanyEvent::WorkflowRunFinished { notices, .. } = event else {
+                continue;
+            };
+            assert!(notices.is_empty(), "nothing to say means an empty list");
         }
     }
 
@@ -678,6 +746,7 @@ mod test {
                     pending_approvals: Vec::new(),
                     error: None,
                     cancelled: false,
+                    notices: Vec::new(),
                 },
             )
             .await

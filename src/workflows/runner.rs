@@ -264,14 +264,21 @@ async fn run_workflow_inner(
     // BEFORE the WorkflowRunStarted journal append below — so a workspace the
     // effects cannot be rooted at leaves no orphaned started row, and the caller
     // sees the real cause instead of a later, further-removed effect failure.
+    // Issue #638: where an agent node leaves an operator-facing notice. Owned
+    // here, by the run, because that is the only scope that outlives the nodes
+    // and reaches `WorkflowRun`.
+    let notices = super::caps::RunNotices::default();
     let capabilities = super::caps::build_capabilities(
         pool,
         deps,
         record,
-        &workflow.id,
-        &run_id,
-        run_request,
-        dry_run,
+        super::caps::RunContext {
+            workflow_id: &workflow.id,
+            run_id: &run_id,
+            run_request,
+            dry_run,
+            notices: notices.clone(),
+        },
     )
     .await?;
 
@@ -537,6 +544,11 @@ async fn run_workflow_inner(
             deliveries: Vec::new(),
             cancelled: true,
             nodes,
+            // A stopped run still reports what its completed nodes had to say
+            // — a discarded-overflow notice describes calls that were already
+            // refused before the stop, and withholding it would leave the
+            // operator with fewer cards than were gated and no explanation.
+            notices: notices.take(),
         });
     }
 
@@ -553,6 +565,7 @@ async fn run_workflow_inner(
             deliveries,
             cancelled: false,
             nodes,
+            notices: notices.take(),
         });
     }
 
@@ -656,6 +669,10 @@ async fn run_workflow_inner(
         deliveries,
         cancelled: false,
         nodes,
+        // Issue #638: whatever the nodes had to tell the operator. Empty for
+        // every run that did not overflow the approval cap, which is nearly all
+        // of them.
+        notices: notices.take(),
     })
 }
 
@@ -904,6 +921,9 @@ fn cancelled_run() -> WorkflowRun {
         // (the drain runs before this returns), so "how far did it get?" is
         // answered by the history, not by this settled body.
         nodes: Vec::new(),
+        // Nothing to say: this constructor is the pre-engine stop path, so no
+        // node ran and no node raised anything.
+        notices: Vec::new(),
     }
 }
 
@@ -1042,6 +1062,9 @@ description = "Runs Acme."
             delivery: None,
             search: None,
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 
@@ -1355,6 +1378,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel.clone())],
             // This case delivers to a channel, which never parks.
             parking: None,
@@ -2434,6 +2458,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
             users: Arc::new(crate::store::FsOps::new(dir)),
+            bootstrap_admin: None,
             channels: Vec::new(),
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: gate,
@@ -2726,6 +2751,7 @@ to = "gate"
             }),
             inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
             users,
+            bootstrap_admin: None,
             channels: Vec::new(),
             parking: Some(super::super::delivery::DeliveryParking {
                 approvals: Arc::new(crate::policy::ManifestApprovalGate::new(policy)),
@@ -2849,6 +2875,7 @@ to = "gate"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir)),
             users: Arc::new(FsOps::new(dir)),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel)],
             parking: None,
             events,
@@ -3936,6 +3963,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel.clone())],
             parking: None,
             events: events.clone(),
@@ -3995,6 +4023,7 @@ to = "done"
             mail: None,
             inbox: Arc::new(crate::store::FsInboxStore::new(dir.path())),
             users: Arc::new(FsOps::new(dir.path())),
+            bootstrap_admin: None,
             channels: vec![Arc::new(channel.clone())],
             parking: None,
             events: events.clone(),

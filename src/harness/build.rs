@@ -437,6 +437,56 @@ pub fn build_agent(
         }
     }
 
+    // Bound repositories (issue #245, agent half) — `repo_checkout` / `repo_pr`
+    // over the company's own mirrored source. THREE hard gates, and the third is
+    // not redundant:
+    //
+    //  1. an **EXPLICIT** `repo` grant (`grants_repo_explicit`) — the catch-all
+    //     `*` does NOT confer it, following `media` / `composio` / `search`.
+    //     Sharper here than for any of them: a checkout puts a third party's
+    //     source inside a sandbox the same agent may hold `shell` over, so a
+    //     wildcard set for file and shell tools must not carry it in.
+    //  2. a wired manager (`deps.repos`), which is a filesystem-home property —
+    //     a runtime assembled without one has no mirror cache at all.
+    //  3. at least one **binding**. A granted, wired, but unbound company has
+    //     nothing for either tool to resolve against, so every call would be a
+    //     refusal listing an empty set. Wiring nothing and warning is the
+    //     honest state, and it is what the console's "granted but nothing
+    //     bound" notice is telling the operator to fix.
+    //
+    // NOT feature-gated, like `search` and unlike `media` / `composio`: the
+    // mirror and the git runner are always compiled, and with no forge client
+    // `repo_pr` degrades through `RepoManager::pull_request`'s honest
+    // `Unimplemented` answer rather than through a build that omits the tool.
+    // Hiding an agent-reachable surface behind a feature no CI job compiles is
+    // how #288 / #281 / #297 each happened.
+    if crate::company::grants_repo_explicit(grants) {
+        match (&deps.repos, deps.repo_bindings.is_empty()) {
+            (Some(repos), false) => {
+                tools.extend(crate::harness::repo::repo_tools(
+                    crate::harness::repo::RepoToolContext {
+                        repos: repos.clone(),
+                        bindings: deps.repo_bindings.clone().into(),
+                        workspace: workspace.clone(),
+                        ledger: deps.checkouts.clone(),
+                    },
+                ));
+            }
+            (Some(_), true) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo` but this company has bound no \
+                 repositories; repo tools NOT wired (fail-closed)"
+            ),
+            (None, _) => tracing::warn!(
+                company = %company,
+                agent = %manifest_agent.id,
+                "[build] agent explicitly grants `repo` but no repository cache is configured on \
+                 this host; repo tools NOT wired (fail-closed)"
+            ),
+        }
+    }
+
     // Company workspace (issues #237, #551) — live read (and optionally
     // create/write) tools over the shared note tree, so an agent can ground an
     // answer in the company's own `Standards/` / `Playbooks/` instead of
@@ -1219,6 +1269,9 @@ mod tests {
             // tools are never built and the pinned belt below is the
             // pre-#237 belt exactly.
             workspace: None,
+            repos: None,
+            repo_bindings: Vec::new(),
+            checkouts: crate::harness::repo::CheckoutLedger::default(),
         }
     }
 
@@ -1444,6 +1497,139 @@ mod tests {
             !unrelated.contains(&"web_search".to_string()),
             "an unrelated grant must not confer web_search: {unrelated:?}"
         );
+    }
+
+    // --- Bound-repository wiring gates (issue #245, agent half) -------------
+
+    /// Build one agent under `grants` with a repository manager **and** one
+    /// binding wired, and return its live tool names. Mirrors
+    /// [`built_tool_names`], differing only in `deps.repos` /
+    /// `deps.repo_bindings` — so the difference between the two is exactly
+    /// "the operator bound something", which is two of the four gate states.
+    fn built_tool_names_with_repos(grants: &[&str], bindings: usize) -> Vec<String> {
+        use crate::runtime::repo_manager::types::RepoBinding;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut deps = pin_deps(dir.path().to_path_buf());
+        deps.repos = Some(std::sync::Arc::new(crate::runtime::RepoManager::new(
+            CompanyId::new("acme"),
+            dir.path().join("repos"),
+            std::sync::Arc::new(crate::store::FsSecretStore::new(dir.path())),
+        )));
+        deps.repo_bindings = (0..bindings)
+            .map(|n| RepoBinding {
+                key: format!("acme-widgets-{n:012}"),
+                url: "https://github.com/acme/widgets".to_string(),
+                owner: "acme".to_string(),
+                repo: "widgets".to_string(),
+                branches: vec!["main".to_string()],
+                token_fingerprint: "0f1e2d3c4b5a".to_string(),
+                last_fetched_millis: None,
+                size_bytes: 0,
+                bound_at_millis: 1,
+            })
+            .collect();
+        let manifest_agent = ManifestAgent {
+            id: "desk".to_string(),
+            role: "Desk Lead".to_string(),
+            description: None,
+            tier: None,
+            tools: Vec::new(),
+            budget_usd_daily: None,
+        };
+        let policy = ApprovalPolicy::new(&Policy::default(), None);
+        let grants: Vec<String> = grants.iter().map(|g| g.to_string()).collect();
+        let agent = build_agent(
+            &CompanyId::new("acme"),
+            "Acme",
+            &manifest_agent,
+            policy,
+            &deps,
+            &grants,
+            &[],
+            false,
+        )
+        .expect("agent builds");
+        let mut names: Vec<String> = agent.tools().iter().map(|t| t.name().to_string()).collect();
+        names.sort();
+        names
+    }
+
+    /// The four gate states of the repository surface (issue #245), in one
+    /// table.
+    ///
+    /// The load-bearing row is the first, and it is load-bearing more sharply
+    /// here than for `media` / `composio` / `search`: a checkout puts a third
+    /// party's source inside a sandbox the same agent may hold `shell` over, so
+    /// it can never ride in on the wildcard a company set for its file tools.
+    ///
+    /// The last row is the one a reader is most likely to think redundant. A
+    /// granted, wired, but **unbound** company has nothing for either tool to
+    /// resolve against, so every call would be a refusal listing an empty set —
+    /// wiring nothing is the honest state, and it is what the console's
+    /// "granted but nothing bound" notice exists to tell the operator to fix.
+    #[test]
+    fn repo_tools_are_wired_only_by_explicit_grant_a_manager_and_a_binding() {
+        let pair = ["repo_checkout".to_string(), "repo_pr".to_string()];
+
+        // `*` + manager + binding → absent. The wildcard never confers this.
+        let wildcard = built_tool_names_with_repos(&["*"], 1);
+        for tool in &pair {
+            assert!(
+                !wildcard.contains(tool),
+                "a bare `*` must NOT confer the repository family: {wildcard:?}"
+            );
+        }
+
+        // explicit `repo` + manager + binding → both present.
+        let granted = built_tool_names_with_repos(&["repo"], 1);
+        for tool in &pair {
+            assert!(
+                granted.contains(tool),
+                "an explicit `repo` grant with a binding must wire {tool}: {granted:?}"
+            );
+        }
+        // The sub-grant form works the same way `media.*` / `composio.*` do.
+        let sub_granted = built_tool_names_with_repos(&["repo.checkout"], 1);
+        for tool in &pair {
+            assert!(sub_granted.contains(tool), "{sub_granted:?}");
+        }
+
+        // explicit `repo`, NO manager → absent, fail-closed.
+        let unwired = built_tool_names(&["repo"], false);
+        for tool in &pair {
+            assert!(
+                !unwired.contains(tool),
+                "a repo grant with no repository cache must wire nothing: {unwired:?}"
+            );
+        }
+
+        // explicit `repo` + manager, NO binding → absent, fail-closed.
+        let unbound = built_tool_names_with_repos(&["repo"], 0);
+        for tool in &pair {
+            assert!(
+                !unbound.contains(tool),
+                "a repo grant with nothing bound must wire nothing: {unbound:?}"
+            );
+        }
+        // …and the rest of the belt is untouched in every refused state, so the
+        // gate withholds a family rather than breaking the agent.
+        assert_eq!(
+            unbound,
+            built_tool_names(&["repo"], false),
+            "the unbound state must differ from the unwired state by nothing"
+        );
+    }
+
+    /// Granting `repo` must not quietly hand over anything *else*: the bound
+    /// `["repo"]` belt is the ungranted belt plus exactly the two tools.
+    #[test]
+    fn the_repo_grant_adds_exactly_two_tools() {
+        let mut baseline = built_tool_names(&[], false);
+        let granted = built_tool_names_with_repos(&["repo"], 1);
+        baseline.push("repo_checkout".to_string());
+        baseline.push("repo_pr".to_string());
+        baseline.sort();
+        assert_eq!(granted, baseline, "the `repo` grant widened the belt");
     }
 
     /// Granting `search` must not quietly hand over anything *else*: the

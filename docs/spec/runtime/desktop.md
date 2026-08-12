@@ -40,6 +40,45 @@ Anything reading or writing that state must depend on **both** — a callback th
 closes over the scope but depends only on the company will write under the host
 the operator just switched away from.
 
+### On the desktop a base url is absolute or it is nothing
+
+A browser can be given anything, including the empty string, which means *same
+origin* — that is how every web deployment finds its host, since
+`opencompany serve` mounts the console at the origin serving the assets.
+
+The desktop is the runtime with a rule. `ProxyTransport` hands the base url to
+Rust, which joins it to a path by concatenation, so anything without an
+authority yields a *relative* url and `reqwest` refuses it at `send`. The
+request never reaches a socket, and the console reports "couldn't reach a
+company host" about a host that was never addressed.
+`isAddressableBaseUrl()` is the one place that says so — both the bootstrap add
+in `App.tsx` and `restoreConnections()` ask it, and `ProxyRegistry::upsert`
+enforces the same thing from below, at the last moment the caller is still on
+the stack.
+
+The empty string is the form
+[#613](https://github.com/tinyhumansai/opencompany/issues/613) reported, and
+only the shortest one: `/api` and `localhost:8080` fail identically, and the
+second is what someone types into "Add a host". Parsing is not enough either —
+`URL` accepts `tauri://localhost` and `file:///x`, and neither is a company
+host — so the check is `http:` or `https:`.
+
+Two consequences follow, and both are load-bearing
+([#613](https://github.com/tinyhumansai/opencompany/issues/613)):
+
+- **The desktop can hold zero connections.** The embedded host arrives over IPC
+  and may never arrive at all. The rail therefore stays on screen at a count of
+  zero — it holds the only "add a host" there is — and the console renders the
+  absence rather than an empty pane.
+- **Launch selection is stated, not sorted.** Restored hosts are added before
+  the embedded one, so list order records when a host was learned about, not
+  which one a person means. `App` selects the embedded host when nothing has
+  been chosen.
+
+Only the same-origin *default* is refused. A desktop pointed at a real host
+through `?api=` or an injected `OPENCOMPANY_CONFIG` still gets its bootstrap
+connection.
+
 ## The transport seam
 
 `Transport` has two implementations, chosen at runtime by `isDesktopRuntime()`

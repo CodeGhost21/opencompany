@@ -33,6 +33,10 @@ pub mod mailer;
 pub mod mcp;
 pub mod memory;
 pub mod policy;
+/// Issue #245 (operator half): bind a real repository to a company, list what
+/// is bound, revoke one. The whole credential path, with **no agent surface**
+/// behind it — no grant, no tool. See [`repos`].
+pub mod repos;
 pub mod runs;
 pub mod scope;
 pub mod skills;
@@ -170,6 +174,7 @@ pub fn router() -> Router<AppState> {
         .merge(workspace::router())
         .merge(skills::router())
         .merge(mcp::router())
+        .merge(repos::router())
         .merge(inference::router())
         .merge(team::router())
         .merge(policy::router())
