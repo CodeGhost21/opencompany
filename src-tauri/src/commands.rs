@@ -29,6 +29,16 @@ pub struct EmbeddedInfo {
     /// identity: keyed on the address, the console reads every launch as a
     /// first meeting and leaves the previous launch's row behind, dead (#615).
     pub instance_id: String,
+    /// The address this host admits, for the sign-in form to offer (#632).
+    ///
+    /// A desktop install has no mail transport and one standing admin, so the
+    /// person in front of it cannot discover what to type and the host will
+    /// answer every other address with the same silent 202. Carrying it is what
+    /// turns the login form from a guessing game into a click.
+    ///
+    /// Not a credential: it names who may sign in, and the code that actually
+    /// does it is minted per attempt and returned only on a loopback host.
+    pub operator_email: String,
 }
 
 /// Registers (or re-registers) a host this client talks to.
@@ -304,6 +314,7 @@ pub fn oc_embedded(state: State<'_, crate::AppHandleState>) -> Option<EmbeddedIn
         base_url: host.base_url(),
         data_dir: state.data_dir.display().to_string(),
         instance_id: host.instance_id().to_string(),
+        operator_email: host.operator_email().to_string(),
     })
 }
 
@@ -434,5 +445,27 @@ mod test {
         // The host's status, passed through — which is what "not followed"
         // looks like from here.
         assert!(error.contains("307"), "{error}");
+    }
+
+    /// The console reads these keys by name, and a rename here is silent on
+    /// both sides: TypeScript has nothing to check a Rust struct against, and
+    /// every field is optional in the console precisely so an older shell
+    /// degrades instead of failing. A wrong key would therefore land as "the
+    /// sign-in form is blank again" (#632) rather than as an error.
+    #[test]
+    fn the_embedded_record_answers_in_the_keys_the_console_reads() {
+        let wire = serde_json::to_value(EmbeddedInfo {
+            base_url: "http://127.0.0.1:1234".into(),
+            data_dir: "/data".into(),
+            instance_id: "inst-1".into(),
+            operator_email: "operator@opencompany.local".into(),
+        })
+        .expect("serialise");
+
+        let object = wire.as_object().expect("an object");
+        assert_eq!(
+            object.keys().map(String::as_str).collect::<Vec<_>>(),
+            vec!["baseUrl", "dataDir", "instanceId", "operatorEmail"],
+        );
     }
 }

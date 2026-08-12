@@ -38,6 +38,18 @@ interface Props {
    * of this view refuses to be.
    */
   notice?: string;
+  /**
+   * An address to start the form with, when the caller knows one.
+   *
+   * Only the desktop's embedded host does: a packaged install admits one
+   * standing local operator and mails nothing, so a blank field asked a person
+   * to guess an address they have never seen, and every guess came back as the
+   * same silent acknowledgement (#632).
+   *
+   * A suggestion, not a lock — it seeds the field and the person can replace
+   * it, which matters as soon as they invite anyone else to their own host.
+   */
+  suggestedEmail?: string;
   /** A code lifted out of a magic-link URL, redeemed on mount by the caller. */
   onSignedIn: (me: Me) => void;
 }
@@ -57,7 +69,14 @@ type Mode = "link" | "password";
  *    keeps; there is nothing to put in localStorage and nothing for an XSS to
  *    steal.
  */
-export function Login({ client, company, companyName, notice, onSignedIn }: Props) {
+export function Login({
+  client,
+  company,
+  companyName,
+  notice,
+  suggestedEmail,
+  onSignedIn,
+}: Props) {
   const [mode, setMode] = useState<Mode>("link");
   /**
    * The ecosystem sign-in buttons this host offers, or `[]` if it offers none.
@@ -69,7 +88,19 @@ export function Login({ client, company, companyName, notice, onSignedIn }: Prop
    * not an error worth showing anyone.
    */
   const [hubProviders, setHubProviders] = useState<HubProvider[]>([]);
-  const [email, setEmail] = useState("");
+  const [email, setEmail] = useState(suggestedEmail ?? "");
+  // The suggestion usually arrives *after* this mounts. A relaunch restores the
+  // embedded connection from its remembered profile immediately, while the
+  // address and the operator come over IPC a moment later — so on every launch
+  // but the first, seeding the initial state alone would leave the field blank.
+  //
+  // Only into an empty field: a suggestion must never overwrite what somebody
+  // has typed, and clearing the prefilled address on purpose (to sign in as
+  // someone else) must not be undone — this runs when the *suggestion* changes,
+  // which it does once.
+  useEffect(() => {
+    if (suggestedEmail) setEmail((current) => (current === "" ? suggestedEmail : current));
+  }, [suggestedEmail]);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -273,6 +304,15 @@ export function Login({ client, company, companyName, notice, onSignedIn }: Prop
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="you@company.com"
                 />
+                {suggestedEmail && email === suggestedEmail ? (
+                  // Otherwise the prefilled address reads as somebody else's,
+                  // and the natural move is to clear it — which is the one
+                  // address this host will not answer for.
+                  <p className="text-xs text-muted-foreground" data-testid="suggested-email-hint">
+                    The operator account on this computer. Nothing is mailed —
+                    the link comes back here.
+                  </p>
+                ) : null}
               </div>
 
               {mode === "password" ? (
