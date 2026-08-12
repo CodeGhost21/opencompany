@@ -1202,6 +1202,39 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         Some(9)
     );
 
+    // The mailed stamp round-trips through the backend, both ways (issue
+    // #584). It is what the console reads to say "invite email sent", so a
+    // backend that dropped it would render every invite as un-mailed.
+    let mut notified = invite("i1", "carol@example.com", 1);
+    notified.notified_at_millis = Some(11);
+    users.upsert_invite(&alpha, &notified).await.unwrap();
+    assert_eq!(
+        users
+            .find_invite_by_email(&alpha, "carol@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .notified_at_millis,
+        Some(11),
+        "a stored notified_at_millis must survive the round trip"
+    );
+    // And back to unset: a store that only ever wrote the field when present
+    // would leave a stale timestamp behind on a re-invite.
+    users
+        .upsert_invite(&alpha, &invite("i1", "carol@example.com", 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        users
+            .find_invite_by_email(&alpha, "carol@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .notified_at_millis,
+        None,
+        "clearing notified_at_millis must persist as cleared"
+    );
+
     assert!(users.delete_invite(&alpha, "i1").await.unwrap());
     assert!(!users.delete_invite(&alpha, "i1").await.unwrap());
     assert!(users.list_invites(&alpha).await.unwrap().is_empty());

@@ -247,6 +247,46 @@ mod test {
         assert!(!invite.is_redeemable(60), "a redeemed invite is single-use");
     }
 
+    /// The no-migration claim for issue #584, asserted rather than assumed.
+    ///
+    /// Every store persists invites as a JSON blob, so the only thing standing
+    /// between an existing deployment and a boot failure is `serde(default)`.
+    /// This is a blob in the shape written *before* the field existed.
+    #[test]
+    fn an_invite_stored_before_invite_mail_loads_as_unmailed() {
+        let legacy = serde_json::json!({
+            "id": "i1",
+            "email": "ada@example.com",
+            "role": "member",
+            "invitedBy": "u1",
+            "createdAtMillis": 1,
+            "expiresAtMillis": 100,
+        });
+        let invite: InviteRecord = serde_json::from_value(legacy).expect("a pre-#584 row loads");
+        assert_eq!(
+            invite.notified_at_millis, None,
+            "a row written before invite mail must read as un-mailed, not as sent"
+        );
+
+        // And an unmailed invite serializes exactly as it did before the field
+        // existed, so nothing downstream sees a new key it did not expect.
+        let json = serde_json::to_value(&invite).unwrap();
+        assert!(
+            json.get("notifiedAtMillis").is_none(),
+            "an unmailed invite must not emit the key: {json}"
+        );
+
+        let mailed = InviteRecord {
+            notified_at_millis: Some(7),
+            ..invite
+        };
+        assert_eq!(
+            serde_json::to_value(&mailed).unwrap()["notifiedAtMillis"],
+            7,
+            "a mailed invite must report when"
+        );
+    }
+
     #[test]
     fn user_record_round_trips_as_camel_case() {
         let user = UserRecord {
