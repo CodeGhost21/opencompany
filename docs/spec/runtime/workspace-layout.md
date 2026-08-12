@@ -23,9 +23,15 @@ locations instead of ad-hoc paths:
   files/       ← instance-shared files (exports, attachments)
   logs/        ← instance logs
   tmp/         ← ephemeral scratch, cleared on startup by default
-  harness/     ← agent + workflow sandboxes (see below; minted on demand)
   openhuman/   ← the embedded OpenHuman runtime's own root (see below)
 ```
+
+Two runtime trees are **not** `DataLayout` directories and are absent from this
+tree: the agent + workflow sandboxes (`<home>/harness`, see below) and the MCP
+registry (`<home>/mcp`). They hang off the resolved *home*, which coincides with
+this root whenever `<home>` and `OPENCOMPANY_DATA_DIR` agree — as they do by
+default and in the hosted shape — and splits from it when `--home` diverges
+(see “`--home` moves the bundles and the runtime trees” below).
 
 Per-company state (each bundle's own `memory/`/`context/`) lives under
 `companies/<slug>/`; the top-level `memory/`/`store/`/`files/` are the shared,
@@ -39,8 +45,10 @@ per-tenant path prefix is needed.
 
 The vendored OpenHuman runtime resolves its own workspace, and its default is a
 subdirectory of the user's **home directory** — which in a tenant container is
-the read-only root filesystem. Its durable agent journal
-(`{workspace}/tinyagents_store/`) therefore failed to create its store root on
+the read-only root filesystem. Its durable agent journal lives at
+`<root>/workspace/tinyagents_store/`, where `<root>` is the value handed to it
+as `OPENHUMAN_WORKSPACE` and the vendored resolver nests a `workspace/` level
+under that root. It therefore failed to create its store root on
 every append, and the vendored append worker reported that to stderr once per
 event with no dedup or backoff, burying every other line in the container log
 (issue #446).
@@ -127,12 +135,15 @@ exactly the layout above, and exactly `DataLayout::companies_dir()`.
 
 One consequence worth knowing:
 
-- **`--home` moves the bundles but not the workspace.** It places company
-  bundles only; `memory/`, `store/`, `files/`, `logs/` and `tmp/` always follow
-  `OPENCOMPANY_DATA_DIR`. So two hosts isolated by `--home` alone still share one
-  workspace. `serve` prints an operator-visible warning naming both roots
-  whenever they are not aligned. Prefer `OPENCOMPANY_DATA_DIR`, which moves the
-  whole instance. A hosted tenant sets both to the same value
+- **`--home` moves the bundles and the runtime trees, but not the shared
+  workspace.** It places company bundles (`<home>/companies/`) and — since the
+  harness and MCP trees hang off the same resolved home — the agent sandboxes
+  and MCP registry (`<home>/harness`, `<home>/mcp`); `memory/`, `store/`,
+  `files/`, `logs/` and `tmp/` always follow `OPENCOMPANY_DATA_DIR`. So two hosts
+  isolated by `--home` alone still share one workspace. `serve` prints an
+  operator-visible warning naming both roots whenever they are not aligned.
+  Prefer `OPENCOMPANY_DATA_DIR`, which moves the whole instance. A hosted tenant
+  sets both to the same value
   (`docker/entrypoint.sh` passes `--home "$OPENCOMPANY_DATA_DIR"`), so it never
   warns — nor does the local default, whose home and data root are now the same
   path. Passing `--home ~/.opencompany/companies` by hand recreates the legacy

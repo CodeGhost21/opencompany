@@ -7,12 +7,15 @@ Split out of [`api.md`](api.md), which was over the repository's 500-line ceilin
 ## Read plane — GraphQL (`/graphql`)
 
 Every console **read** is served by a single async-graphql query surface at
-`POST /graphql` (with a `GET /graphql` GraphiQL explorer in development) — the
-sole exceptions being the two inbox `GET`s and the two workspace `GET`s above,
-which exist because the console ships no GraphQL client and those two views need
-a reachable read (issues #173 and #177 respectively). The schema is
-query-only — REST otherwise owns writes — and is **built once at startup** and
-stored on `AppState`; each request injects its resolved `GqlAuth` principal.
+`POST /graphql` (with a `GET /graphql` GraphiQL explorer in development). The
+REST **read exceptions** are the console reads that ship over REST instead —
+the two inbox `GET`s and the three workspace `GET`s, the task export, the
+skill-registry browse, the agent detail `GET`, the policy read, and the
+credential status `GET` — each because the console ships no GraphQL client and
+that view needs a reachable read (issues #173, #177, #607, #352, #264, #562;
+see the [write plane](api-write-plane.md)). The schema is query-only — REST
+otherwise owns writes — and is **built once at startup** and stored on
+`AppState`; each request injects its resolved `GqlAuth` principal.
 
 The schema is rooted at a **`Company` aggregation object** so a view fetches
 everything it needs in one round trip; the only top-level queries are
@@ -23,8 +26,10 @@ single-company mode), and `skillRegistry` (the unscoped shared library). Under
 `usage`, `finances`, `connections`, `domain`, and `smtp`. The authoritative
 contract is the SDL snapshot at
 [`src/server/graphql/schema.graphql`](../../../src/server/graphql/schema.graphql)
-(`graphql::sdl()` regenerates it). Mutations and subscriptions are out of
-scope; SSE (`/chat` streaming, the `/events` work feed) is not yet wired.
+(`graphql::sdl()` regenerates it). GraphQL mutations and subscriptions are out
+of scope — streaming is wired over REST instead: `/chat` (below, the one
+conversational surface) and the `/events` work feed
+([events.md](events.md)).
 
 - **`/chat`** enqueues an `OperatorMessage` event and streams the resulting
   cycle's channel responses over SSE. One conversational surface, one voice:

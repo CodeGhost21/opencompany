@@ -10,9 +10,14 @@ That file is the map of the API surface; this one is the write routes in detail.
 The console's writes are a REST router family under `src/server/ops/`, each
 route registered under **both** scope forms (`…/companies/{id}/…` and the
 `…/company/…` prosumer alias) by the `scoped` helper. These are the mutations,
-plus **two deliberate read exceptions**: the two inbox `GET`s at the end of the
-block below, and the two workspace `GET`s (#177). Every other console read goes
-through GraphQL (see the read plane below). Anything a build doesn't serve
+plus a deliberate set of **read exceptions** — reads the console must reach over
+REST because it ships no GraphQL client: the two inbox `GET`s and the three
+workspace `GET`s (tree, file, `search`), the task export
+(`GET …/tasks/{taskId}/export`), the skill-registry browse
+(`GET …/skills/registry`), the agent detail (`GET …/team/{agentId}`), the policy
+read (`GET …/policy`), and the credential status `GET` — every one detailed
+below or in the credential section. Every other console read goes through
+GraphQL (see the [read plane](api-graphql.md)). Anything a build doesn't serve
 `404`s — the console treats that as "not wired yet".
 
 ```text
@@ -62,9 +67,10 @@ reflects that store too. Messages come back in append order; the console sorts
 them newest-first. The GraphQL resolver stays the canonical read for any client
 that does speak GraphQL — these routes duplicate it, they do not replace it.
 
-The two workspace `GET`s are the same story one issue later (#177): the console
-had no reachable workspace read either, so the Workspace tab persisted to
-`localStorage` and the operator and the agents looked at two different trees —
+The two original workspace `GET`s (#177) are the same story one issue later:
+the console had no reachable workspace read either, so the Workspace tab
+persisted to `localStorage` and the operator and the agents looked at two
+different trees —
 a note written by an agent through its `workspace_*` tools (#237) was invisible
 to the operator, and vice versa. They are REST twins of `Company.workspaceTree`
 / `workspaceFile`, differing only in timestamp shape (epoch millis, matching
@@ -75,8 +81,9 @@ only — bodies are fetched per file, so a navigation read does not grow with th
 size of the workspace. Reading a folder id as a file is a `404`, never an empty
 note.
 
-`GET …/workspace/search?q=…` (#607) answers which notes mention a phrase, so
-discovery costs one call rather than a listing plus one read per candidate.
+`GET …/workspace/search?q=…` (#607) is the **third workspace read**: it answers
+which notes mention a phrase, so discovery costs one call rather than a listing
+plus one read per candidate.
 Matching is a plain **case-insensitive substring** over node names and text
 bodies — no tokenising, no stemming, no ranking — which is the only definition
 that answers identically on all three storage backends, and it is defined once
@@ -108,8 +115,9 @@ take it (#671), and sqlite and mongodb both accept such a name. An ambiguous
 root is a `409`, not a guess. Each removal announces its own
 `WorkspaceChanged{removed}` (#327); a second run removes nothing.
 
-Both workspace `GET`s — and the `POST` / `PATCH` node bodies — carry
-`createdBy` and `updatedBy` (#326), each `{"kind":"seed"|"operator"|"agent",
+All three workspace `GET`s — tree, file and `search` — and the `POST` / `PATCH`
+node bodies carry `createdBy` and `updatedBy` (#326), each
+`{"kind":"seed"|"operator"|"agent",
 "id"?}` with `id` present exactly when `kind` is `agent`. `createdBy` is fixed
 at creation; `updatedBy` follows content writes only, so an operator rename does
 not repaint an agent's authorship. The console renders the creator as a badge
