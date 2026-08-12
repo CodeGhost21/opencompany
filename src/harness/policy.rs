@@ -1611,14 +1611,20 @@ mod tests {
         use crate::ports::approvals::ApprovalGate;
         use crate::ports::types::PolicyDecision;
 
-        // A leading segment, an exact dotted kind, a bare tool name, a
-        // near-miss that must NOT be gated, and a case variant.
+        // A leading segment, an exact dotted kind, a bare tool name, an
+        // unrelated declared tool that must NOT be gated, and a case variant.
         //
-        // Every name here is one the tier itself has no opinion about under
-        // `full`, so the only thing that can make the two paths disagree is the
-        // fence. A priced name like `web_search` would drag the harness's
+        // Every name here is one both paths leave to the fence: the tier has no
+        // opinion about it under `full`, **and** it is a declared, non-priced
+        // tool, so the per-call judgement (issue #338) is silent on it too — the
+        // thing that used to make a not-gated name diverge after `full` decided
+        // to allow was that undeclared tools stop under the judgement. The
+        // near-miss the segment boundary exists to exclude (`payment` vs
+        // `payroll.export`) stopped fitting here once the judge began stopping
+        // undeclared tools; that boundary is pinned in `always_approve::test`
+        // instead. A priced name like `web_search` would drag the harness's
         // metered-read and budget arms into a comparison that is not about
-        // `always_approve`, so it is deliberately absent.
+        // `always_approve`, so it is deliberately absent here.
         let fence = &["payment", "filing.submit", "publish_artifact"];
         let names = [
             "payment.send",
@@ -1626,7 +1632,7 @@ mod tests {
             "filing.submit",
             "publish_artifact",
             "PUBLISH_ARTIFACT",
-            "payroll.export",
+            "workspace_read",
         ];
 
         // `full` on both sides, so the tier decides nothing and any parking
@@ -1680,7 +1686,7 @@ mod tests {
         ));
         assert_eq!(
             harness
-                .check(&request("payroll.export", serde_json::json!({})))
+                .check(&request("workspace_read", serde_json::json!({})))
                 .await,
             ToolPolicyDecision::Allow
         );
