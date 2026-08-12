@@ -266,11 +266,12 @@ fn dto_from_decl(
 /// roster walk beside this one is exactly how the two consoles would come to
 /// disagree with each other and with the harness. The roster is exactly what the harness builds in
 /// `build_roster`: the manifest agents (each with its own `tools` narrowed by
-/// the company `allow`), plus the promoted overlay teammates. An overlay
-/// teammate has no manifest `tools` row, so it inherits the full company `allow`
-/// — the standard grant `overlay_agent_to_manifest` gives it — and an overlay id
-/// already claimed by a manifest agent is skipped, both mirroring the harness so
-/// console reachability equals what an agent is actually granted.
+/// the company `allow`), plus the promoted overlay teammates — each narrowed by
+/// **its own** `tools` line the same way (issue #661), which for the common
+/// empty line is still the full company `allow`, the standard grant
+/// `overlay_agent_to_manifest` gives it. An overlay id already claimed by a
+/// manifest agent is skipped, both mirroring the harness so console
+/// reachability equals what an agent is actually granted.
 pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)> {
     let allow = &record.manifest.tools.allow;
     let mut grants: Vec<(String, Vec<String>)> = record
@@ -294,9 +295,21 @@ pub(super) fn roster_grants(record: &CompanyRecord) -> Vec<(String, Vec<String>)
         if manifest_ids.contains(overlay.id.as_str()) {
             continue;
         }
-        // No manifest tools row → the company's standard grant (empty `tools`
-        // ⇒ inherit `allow`), matching `overlay_agent_to_manifest`.
-        grants.push((overlay.id.clone(), agent_effective_grants(allow, &[])));
+        // The overlay teammate's **own** tools line, read through the same
+        // function and with the same empty-means-inherit rule as the manifest
+        // half above — matching `overlay_agent_to_manifest` (issue #740).
+        //
+        // This read was hard-coded empty until #661 gave `OverlayAgent` a tools
+        // list. The comment that stood here ("no manifest tools row → the
+        // company's standard grant") described a fact that expired with that
+        // change, which is why it read as a decision rather than a stale
+        // assumption: a scoped teammate reported as reaching every enabled
+        // server, and the console asserted a connection the harness does not
+        // grant.
+        grants.push((
+            overlay.id.clone(),
+            agent_effective_grants(allow, &overlay.tools),
+        ));
     }
     grants
 }
@@ -864,4 +877,102 @@ async fn discover_tools(
 ) -> Response {
     let _ = (company, name);
     crate::server::ops::not_wired("mcp tool discovery")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::company::CompanyManifest;
+    use crate::ports::types::{CompanyId, OverlayAgent};
+
+    /// A company allowing two MCP families, with one manifest agent that lists
+    /// none (so it inherits both).
+    fn record(overlay_agents: Vec<OverlayAgent>) -> CompanyRecord {
+        let manifest: CompanyManifest = toml::from_str(
+            r#"
+[company]
+name = "Acme"
+
+[tools]
+allow = ["mcp:notion", "mcp:linear"]
+
+[[agent]]
+id = "ceo"
+role = "Chief Executive"
+"#,
+        )
+        .expect("manifest parses");
+        CompanyRecord {
+            id: CompanyId::new("acme"),
+            manifest,
+            ledger: Vec::new(),
+            lifecycle: "running".to_string(),
+            overlay_agents,
+            overlay_desk_members: Vec::new(),
+            overlay_desk_order: Vec::new(),
+            overlay_desks: Vec::new(),
+            overlay_workflows: Vec::new(),
+            overlay_budgets: Vec::new(),
+            overlay_policy: None,
+            disabled_workflows: Vec::new(),
+            template_provenance: None,
+        }
+    }
+
+    fn teammate(id: &str, tools: Vec<&str>) -> OverlayAgent {
+        OverlayAgent {
+            id: id.to_string(),
+            name: id.to_string(),
+            role: "Growth".to_string(),
+            description: None,
+            tools: tools.into_iter().map(str::to_string).collect(),
+        }
+    }
+
+    /// Issue #740: a scoped overlay teammate must not read back here as
+    /// reaching everything.
+    ///
+    /// `roster_grants` is what every MCP server row's `reachableBy` is computed
+    /// from. #661 gave `OverlayAgent` a tools list and taught two of the three
+    /// readers to honour it; this one still passed an empty grant, so a
+    /// teammate scoped to one server reported as reaching all of them — the
+    /// console asserting a connection the harness does not grant.
+    #[test]
+    fn a_scoped_overlay_teammate_does_not_read_back_as_reaching_everything() {
+        let scoped = record(vec![teammate("jamie", vec!["mcp:notion"])]);
+        let grants = roster_grants(&scoped);
+        let jamie = grants
+            .iter()
+            .find(|(id, _)| id == "jamie")
+            .expect("the overlay teammate is on the roster");
+        assert_eq!(
+            jamie.1,
+            vec!["mcp:notion".to_string()],
+            "a scoped teammate reaches only what it was scoped to"
+        );
+
+        // The manifest agent lists nothing and still inherits everything, so
+        // the narrowing above is the teammate's own and not a company change.
+        let ceo = grants
+            .iter()
+            .find(|(id, _)| id == "ceo")
+            .expect("on roster");
+        assert_eq!(
+            ceo.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
+
+    /// The empty-means-inherit rule (#264) is untouched: a teammate written
+    /// before #661, and every teammate created without a scope, still reads
+    /// back holding the company's whole grant.
+    #[test]
+    fn an_unscoped_overlay_teammate_still_inherits_the_company_grant() {
+        let grants = roster_grants(&record(vec![teammate("jamie", Vec::new())]));
+        let jamie = grants.iter().find(|(id, _)| id == "jamie").expect("roster");
+        assert_eq!(
+            jamie.1,
+            vec!["mcp:notion".to_string(), "mcp:linear".to_string()]
+        );
+    }
 }

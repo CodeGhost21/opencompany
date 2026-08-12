@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef } from "react";
 
 import type { ApprovalSummary, GrantScope, TurnStep, Verdict } from "@/api/types";
 import { cn } from "@/lib/utils";
@@ -39,12 +39,32 @@ interface Props {
 }
 
 /**
+ * How close to the bottom still counts as "parked at the bottom", in CSS
+ * pixels. Sub-pixel layout and a fractional `clientHeight` mean the arithmetic
+ * rarely lands on exactly zero, so a strict test would read a view that is
+ * visibly at the bottom as scrolled away and stop following.
+ */
+const BOTTOM_SLACK_PX = 32;
+
+/**
  * The scrolling body of a channel.
  *
  * Rows are bottom-anchored: the view sticks to the newest message, which is
  * what a chat log wants and what a plain scroll container does not do on its
  * own. Day dividers ride along as sticky pills so the date stays legible while
  * you scroll through it.
+ *
+ * Anchoring is two rules, not one (issue #757):
+ *
+ * 1. **Arriving at a channel jumps, it does not travel.** Opening a channel
+ *    anchors instantly in a layout effect, before the browser paints, so the
+ *    first frame the operator sees is already the newest message. Animating
+ *    here would be animating from a position that was never theirs — and the
+ *    longer the transcript, the longer the slide.
+ * 2. **Growth follows, but only if they are already at the bottom.** A tool row
+ *    or reply arriving while they watch should glide into view; the same row
+ *    arriving while they have scrolled up to read history must not yank the
+ *    viewport away from what they are reading.
  */
 export function MessageTimeline({
   channel,
@@ -61,18 +81,59 @@ export function MessageTimeline({
 }: Props) {
   const scroller = useRef<HTMLDivElement>(null);
   const liveStepCount = liveSteps?.length ?? 0;
+  /**
+   * Is the view parked at the bottom, and therefore still following?
+   *
+   * A ref rather than state on purpose: it is read inside effects and written
+   * from a scroll handler that fires at frame rate. Making it state would
+   * re-render the whole transcript on every wheel tick to compute a value no
+   * rendered output depends on.
+   */
+  const following = useRef(true);
+  /** The channel the growth effect has already settled on. See rule 2. */
+  const settledOn = useRef<string | null>(null);
 
+  const trackFollowing = useCallback(() => {
+    const el = scroller.current;
+    if (!el) return;
+    const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+    following.current = fromBottom <= BOTTOM_SLACK_PX;
+  }, []);
+
+  // Rule 1 — arriving at a channel. `useLayoutEffect` so the jump happens
+  // before paint: with `useEffect` the browser paints the un-anchored position
+  // first, which is the flash this issue is about. `channel.id` is the
+  // dependency, not `items.length` — two channels can hold the same number of
+  // rows, and an effect keyed on the count would not fire for that switch at
+  // all, leaving the new channel wearing the old one's scroll offset.
+  useLayoutEffect(() => {
+    const el = scroller.current;
+    if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    following.current = true;
+  }, [channel.id]);
+
+  // Rule 2 — growth while the channel is open. Each new tool row grows the
+  // block at the bottom, so the scroll has to follow it as the turn works, not
+  // only when the reply lands. A card arriving counts too — it is the thing the
+  // operator has to act on. Skipped entirely when they have scrolled away.
+  //
+  // `channel.id` is a dependency so the first pass after a switch can *defer*:
+  // the layout effect above has already anchored this channel, and animating on
+  // top of that is the very travel rule 1 removes.
   useEffect(() => {
     const el = scroller.current;
     if (!el) return;
+    if (settledOn.current !== channel.id) {
+      settledOn.current = channel.id;
+      return;
+    }
+    if (!following.current) return;
     el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-    // Each new tool row grows the block at the bottom, so the scroll has to
-    // follow it as the turn works, not only when the reply lands. A card
-    // arriving counts too — it is the thing the operator has to act on.
-  }, [items.length, typing, liveStepCount]);
+  }, [channel.id, items.length, typing, liveStepCount]);
 
   return (
-    <div ref={scroller} className="flex-1 overflow-y-auto">
+    <div ref={scroller} onScroll={trackFollowing} className="flex-1 overflow-y-auto">
       <div className="flex min-h-full flex-col justify-end pb-4">
         <ChannelIntro channel={channel} empty={items.length === 0} />
         {items.map((item) =>

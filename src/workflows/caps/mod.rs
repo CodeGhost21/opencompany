@@ -293,6 +293,15 @@ pub async fn build_capabilities(
         state,
         resolver,
         agent,
+        // New in tinyflows 0.6.1, pinned here via the #675 cancel-token chain
+        // (openhuman #5520 → tinyflows #31). A `shell` node runs an inline
+        // POSIX script through a host-configured runner; OC wires none, and
+        // whether a workflow may spawn shell processes on the company host is a
+        // policy question this repo has not answered. `None` fails such a node
+        // at run time with a capability error — the honest answer until that
+        // decision is made, and no company manifest can currently author a
+        // `shell` node (mirrors `memory` below).
+        shell: None,
         // New in tinyflows 0.6, which arrived with the #499 pin bump. Left
         // unwired deliberately rather than pointed at the company's context
         // store: a `memory` node would then read and WRITE agent memory on

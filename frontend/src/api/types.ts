@@ -1102,3 +1102,22 @@ export class ApiError extends Error {
     this.name = "ApiError";
   }
 }
+
+/**
+ * `GET {scope}/chat/read-state` — one channel's floor for the signed-in person
+ * (issue #755).
+ *
+ * A channel with no marker is **absent** from the response rather than zero.
+ * "Never opened" and "opened before anything was said" are different states,
+ * and only the console knows which floor a never-opened channel deserves.
+ */
+export interface ReadMarker {
+  channelId: string;
+  /** Milliseconds since the epoch. At or before this is read. */
+  lastReadAt: number;
+}
+
+/** Response of `GET {scope}/chat/read-state`. */
+export interface ReadStateResponse {
+  markers: ReadMarker[];
+}

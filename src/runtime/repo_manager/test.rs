@@ -156,17 +156,62 @@ impl Drop for Scratch {
     }
 }
 
-/// Runs git in `cwd`, panicking with its stderr on failure.
+/// Runs git in `cwd`, panicking with its exit status and output on failure.
+///
+/// **Starts from an empty environment**, the same posture [`super::git::run`]
+/// takes for a host-side fetch (see its `env_clear` and the module header).
+/// These fixtures inherited the developer's whole environment, so every one of
+/// these tests read that machine's global git config — they were strictly less
+/// isolated than the code they exercise. On the machine where issue #748's
+/// flake was recorded, that config supplied both a `core.hooksPath` (the exact
+/// setting #727 showed silently disables hooks repo-wide) and the git-lfs
+/// filter triplet, so each fixture checkout also span up a `git-lfs
+/// filter-process` child. Under a full-suite run that is many such children at
+/// once, which fits #748's signature — a failure carrying *empty* stderr — far
+/// better than any git refusal does.
+///
+/// Treat that as the motivation, not a proven cause: what is verified is that
+/// the fixtures no longer read any of it, and that the flake did not recur in
+/// five consecutive full-suite runs against a baseline of three failures in
+/// four. The reason to make the change regardless is that a fixture reading the
+/// developer's config is testing the developer.
+///
+/// `PATH` is the one thing carried over, because `git` itself has to be
+/// findable. Everything else is supplied here:
+///
+/// * `GIT_CONFIG_NOSYSTEM` / `GIT_CONFIG_GLOBAL=/dev/null` — no system or user
+///   config, so no `core.hooksPath`, no `init.templateDir`, no alias.
+/// * `HOME` inside the scratch tree — anything that still resolves a home finds
+///   an empty one rather than the developer's.
+/// * `GIT_TERMINAL_PROMPT=0` — a fixture must fail, never block on a prompt.
+/// * A fixed identity, so a machine without `user.email` set is not a failure.
+///
+/// The panic reports the **status** as well as both streams: the failures in
+/// #748 arrived with empty stderr, which says nothing on its own but is exactly
+/// what a signal-killed child looks like — `status` is what distinguishes
+/// "git refused" from "git was killed".
 fn git_at(cwd: &Path, args: &[&str]) -> String {
-    let out = std::process::Command::new("git")
-        .current_dir(cwd)
-        .args(args)
-        .output()
-        .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+    let mut cmd = std::process::Command::new("git");
+    cmd.current_dir(cwd).args(args);
+    cmd.env_clear();
+    if let Some(path) = std::env::var_os("PATH") {
+        cmd.env("PATH", path);
+    }
+    cmd.env("HOME", cwd);
+    cmd.env("GIT_CONFIG_NOSYSTEM", "1");
+    cmd.env("GIT_CONFIG_GLOBAL", "/dev/null");
+    cmd.env("GIT_TERMINAL_PROMPT", "0");
+    cmd.env("GIT_AUTHOR_NAME", "oc-test");
+    cmd.env("GIT_AUTHOR_EMAIL", "oc-test@example.invalid");
+    cmd.env("GIT_COMMITTER_NAME", "oc-test");
+    cmd.env("GIT_COMMITTER_EMAIL", "oc-test@example.invalid");
+    let out = cmd.output().unwrap_or_else(|e| panic!("git {args:?}: {e}"));
     assert!(
         out.status.success(),
-        "git {args:?} failed: {}",
-        String::from_utf8_lossy(&out.stderr)
+        "git {args:?} failed ({}): stderr={} stdout={}",
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim(),
+        String::from_utf8_lossy(&out.stdout).trim()
     );
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }

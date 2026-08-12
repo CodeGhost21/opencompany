@@ -357,13 +357,15 @@ fn call_of(node: &tinyflows::model::Node) -> Option<(String, Value, Option<Strin
         // Runs a turn. Its gated calls already park through #395's drain, so
         // gating here would park the same call twice.
         NodeKind::Agent
-        // Capabilities that are explicit stubs today: `CodeRunner` and
-        // `MemoryProvider` are wired to error / left `None` (see `caps`), so
-        // there is no call to classify. **These are the next two to gate** —
-        // sandboxed code and a memory *write* are both effectful — and the
+        // Capabilities that are explicit stubs today: `CodeRunner`,
+        // `MemoryProvider`, and the `ShellRunner` (new in tinyflows 0.6.1) are
+        // wired to error / left `None` (see `caps`), so there is no call to
+        // classify. **These are the next three to gate** — sandboxed code, a
+        // memory *write*, and a shell script are all effectful — and the
         // decision belongs with whoever wires the capability, in the same PR.
         | NodeKind::Code
         | NodeKind::Memory
+        | NodeKind::Shell
         // A child graph is resolved and run *inside* the engine
         // (`run_sub_workflow`), so its nodes never pass this function at all —
         // this arm is not what excludes them. The module docs give the reason

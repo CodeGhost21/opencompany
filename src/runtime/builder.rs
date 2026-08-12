@@ -302,6 +302,7 @@ pub struct RuntimeBuilder {
     run_output_store: Option<Arc<dyn WorkflowRunOutputStore>>,
     usage: Option<Arc<dyn UsageMeter>>,
     skills: Option<Arc<dyn SkillStateStore>>,
+    read_state: Option<Arc<dyn crate::ports::read_state::ReadStateStore>>,
     users: Option<Arc<dyn UserStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
@@ -398,6 +399,7 @@ impl RuntimeBuilder {
             run_output_store: None,
             usage: None,
             skills: None,
+            read_state: None,
             users: None,
             sessions: None,
             login_codes: None,
@@ -517,6 +519,7 @@ impl RuntimeBuilder {
         self.run_output_store = Some(handles.run_outputs.clone());
         self.usage = Some(handles.usage.clone());
         self.skills = Some(handles.skills.clone());
+        self.read_state = Some(handles.read_state.clone());
         self.users = Some(handles.users.clone());
         self.sessions = Some(handles.sessions.clone());
         self.login_codes = Some(handles.login_codes.clone());
@@ -621,6 +624,15 @@ impl RuntimeBuilder {
     /// Swaps the usage meter (default: fs-backed).
     pub fn with_usage(mut self, usage: Arc<dyn UsageMeter>) -> Self {
         self.usage = Some(usage);
+        self
+    }
+
+    /// Swaps the per-person channel read markers (default: fs-backed).
+    pub fn with_read_state(
+        mut self,
+        read_state: Arc<dyn crate::ports::read_state::ReadStateStore>,
+    ) -> Self {
+        self.read_state = Some(read_state);
         self
     }
 
@@ -967,6 +979,7 @@ impl RuntimeBuilder {
                     .unwrap_or_else(|| fs_ops.clone()),
                 usage: self.usage.unwrap_or_else(|| fs_ops.clone()),
                 skills: self.skills.unwrap_or_else(|| fs_ops.clone()),
+                read_state: self.read_state.unwrap_or_else(|| fs_ops.clone()),
                 users: self.users.unwrap_or_else(|| fs_ops.clone()),
                 sessions: self.sessions.unwrap_or_else(|| fs_ops.clone()),
                 login_codes: self.login_codes.unwrap_or_else(|| fs_ops.clone()),
@@ -4041,6 +4054,259 @@ mod test {
             let _ = axum::serve(listener, app).await;
         });
         format!("http://{addr}")
+    }
+
+    /// Issue #707: a desk reorder reaches a **resident** runtime, with no
+    /// rebuild and no restart.
+    ///
+    /// This is the assertion that was missing. The neighbouring #133 test is
+    /// named `..._after_rebuild` and rebuilds the brain before asserting, so it
+    /// only ever proved the builder *seeds* the order — nobody had asked what a
+    /// live company does when the operator saves one. The answer was: keep
+    /// routing to the old lead until the process restarted, because
+    /// `HarnessBrain.record` was a build-time snapshot and the only caller of
+    /// `rebuild_company` is an inference-settings change.
+    ///
+    /// So the write here goes through the store exactly as
+    /// `set_desk_order` (`src/server/operator.rs`) does — load, mutate, save —
+    /// and then the SAME runtime object runs a second turn. No rebuild happens
+    /// anywhere in this test, which is the whole point of it.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_desk_reorder_reaches_a_resident_runtime_without_a_rebuild() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::{CompanyEvent, OverlayDeskOrder};
+        use crate::store::{FsCompanyStore, FsContextStore};
+
+        let home_dir = tmp_home("oc-707-order-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("order-co");
+
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Order Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[agent]]
+            id = "eng2"
+            role = "Engineer Two"
+
+            [[group_chat]]
+            id = "eng"
+            name = "Engineering"
+            members = ["eng1", "eng2"]
+            "#,
+        );
+
+        // The blueprint lead is `eng1`; no operator order yet.
+        let store = FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        let stub = spawn_stub("desk lead reply").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        let desk_turn = |text: &'static str| CompanyEvent::OperatorMessage {
+            parent: None,
+            text: text.to_string(),
+            by: None,
+            chat: Some("eng".to_string()),
+        };
+
+        // Baseline: the blueprint lead answers. Asserted rather than assumed, so
+        // a later failure cannot be explained away as "the desk never routed".
+        runtime
+            .run_cycle(vec![desk_turn("who leads?")])
+            .await
+            .expect("first cycle");
+        let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(home.clone()));
+        let labels = |outcomes: Vec<crate::ports::types::ChunkMeta>| -> Vec<String> {
+            outcomes.into_iter().map(|m| m.label).collect()
+        };
+        let before = labels(context.list(&id, "task-outcome/").await.unwrap());
+        assert!(
+            before.contains(&"task-outcome/eng1".to_string()),
+            "the blueprint lead must answer before the reorder; saw {before:?}"
+        );
+
+        // The console write: load, mutate, save. Nothing rebuilds.
+        let mut record = store.load(&id).await.unwrap().expect("record");
+        record.overlay_desk_order.push(OverlayDeskOrder {
+            desk_id: "eng".to_string(),
+            ordered: vec!["eng2".to_string(), "eng1".to_string()],
+        });
+        store.save(&record).await.unwrap();
+
+        // The same runtime, a second turn.
+        runtime
+            .run_cycle(vec![desk_turn("who leads now?")])
+            .await
+            .expect("second cycle");
+        let after = labels(context.list(&id, "task-outcome/").await.unwrap());
+        assert!(
+            after.contains(&"task-outcome/eng2".to_string()),
+            "the reordered lead eng2 never answered — the resident brain routed on a stale \
+             record; saw {after:?}"
+        );
+    }
+
+    /// Issue #707, the same defect through `overlay_desks` + `overlay_desk_members`:
+    /// a desk the operator creates on a **resident** runtime is reachable.
+    ///
+    /// Sharper than staleness alone, because it pins a divergence: the store
+    /// resolves the new desk's lead while the runtime routes as though the desk
+    /// does not exist. Both are asserted, at the same instant.
+    #[cfg(feature = "openhuman")]
+    #[tokio::test]
+    async fn a_new_overlay_desk_is_reachable_on_a_resident_runtime() {
+        use crate::harness::HarnessPool;
+        use crate::ports::types::{CompanyEvent, OverlayDesk, OverlayDeskMember};
+        use crate::store::{FsCompanyStore, FsContextStore};
+
+        let home_dir = tmp_home("oc-707-desk-");
+        let home = home_dir.path().to_path_buf();
+        let id = CompanyId::new("desk-co");
+
+        let manifest = parse(
+            r#"
+            [company]
+            name = "Desk Co"
+
+            [policy]
+            mode = "full"
+
+            [[agent]]
+            id = "eng1"
+            role = "Engineer One"
+
+            [[agent]]
+            id = "eng2"
+            role = "Engineer Two"
+            "#,
+        );
+
+        let store = FsCompanyStore::new(home.clone());
+        store
+            .save(&CompanyRecord {
+                id: id.clone(),
+                manifest: manifest.clone(),
+                ledger: Vec::new(),
+                lifecycle: "running".to_string(),
+                overlay_agents: Vec::new(),
+                overlay_desk_members: Vec::new(),
+                overlay_desk_order: Vec::new(),
+                overlay_desks: Vec::new(),
+                overlay_workflows: Vec::new(),
+                overlay_budgets: Vec::new(),
+                overlay_policy: None,
+                disabled_workflows: Vec::new(),
+                template_provenance: None,
+            })
+            .await
+            .unwrap();
+
+        let stub = spawn_stub("desk reply").await;
+        let runtime = RuntimeBuilder::new(home.clone(), manifest)
+            .with_id(id.clone())
+            .with_harness(Arc::new(HarnessPool::new()))
+            .with_harness_inference(
+                HostedProviderConfig {
+                    base_url: stub,
+                    credential: crate::company::Credential::from_value("k"),
+                    extra_headers: Vec::new(),
+                },
+                None,
+            )
+            .build()
+            .await
+            .unwrap();
+
+        // The console creates a desk and puts `eng2` on it.
+        let mut record = store.load(&id).await.unwrap().expect("record");
+        // Deliberately EMPTY: the `OverlayDeskMember` row below is the only
+        // membership source, so this test cannot pass by way of a desk's own
+        // founding members. Without that, it would still be green if
+        // `effective_desk_members` ignored `overlay_desk_members` outright —
+        // which is half of what it is here to prove.
+        record.overlay_desks.push(OverlayDesk {
+            id: "design".to_string(),
+            name: "Design".to_string(),
+            description: None,
+            members: Vec::new(),
+        });
+        record.overlay_desk_members.push(OverlayDeskMember {
+            desk_id: "design".to_string(),
+            agent_id: "eng2".to_string(),
+        });
+        store.save(&record).await.unwrap();
+
+        // What every already-correct consumer sees at this instant.
+        let fresh = store.load(&id).await.unwrap().unwrap();
+        assert_eq!(
+            crate::runtime::delegation_tools::desk_lead(&fresh, "design"),
+            Some("eng2".to_string()),
+            "the stored record must resolve the new desk, or this test proves nothing"
+        );
+
+        runtime
+            .run_cycle(vec![CompanyEvent::OperatorMessage {
+                parent: None,
+                text: "hello design".to_string(),
+                by: None,
+                chat: Some("design".to_string()),
+            }])
+            .await
+            .expect("cycle");
+
+        let context: Arc<dyn ContextStore> = Arc::new(FsContextStore::new(home.clone()));
+        let routed: Vec<String> = context
+            .list(&id, "task-outcome/")
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|m| m.label)
+            .collect();
+        assert!(
+            routed.contains(&"task-outcome/eng2".to_string()),
+            "a desk chat must reach the desk's member; the runtime routed as though the desk \
+             did not exist; saw {routed:?}"
+        );
     }
 
     /// Builder-level regression for the `overlay_desk_order` seeding path (#133).

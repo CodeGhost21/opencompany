@@ -67,7 +67,9 @@ pub use inference::{
     INFERENCE_SPEND_KIND, MEDULLA_PROVIDER, UNATTRIBUTED_AGENT, inference_ledger_entry,
     inference_sample, record_inference_usage,
 };
-pub use oauth::{UNKNOWN_PROVIDER, oauth_call_sample, record_oauth_call};
+pub use oauth::{
+    MCP_PROVIDER_PREFIX, UNKNOWN_PROVIDER, mcp_provider, oauth_call_sample, record_oauth_call,
+};
 pub use planning::{planning_sample, record_planning_usage};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
@@ -110,6 +112,7 @@ mod tests {
                 description: None,
                 tier: None,
                 tools: vec![],
+                delegates_to: vec![],
                 budget_usd_daily: None,
             },
             Agent {
@@ -118,6 +121,7 @@ mod tests {
                 description: None,
                 tier: None,
                 tools: vec![],
+                delegates_to: vec![],
                 budget_usd_daily: None,
             },
         ];
