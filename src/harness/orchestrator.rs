@@ -1550,10 +1550,8 @@ impl DelegateToDeskTool {
     /// Grounds `desk` against the live company record: the refusal for it, if
     /// any, plus the depth bound this company runs under.
     ///
-    /// **Fails open**: if the record cannot be read the delegation is queued
-    /// exactly as it was before this grounding existed, under the default depth.
-    /// A store hiccup must not take delegation offline; the drain-time
-    /// fall-through still records what happened.
+    /// **Fails open for the orchestrator, closed for a member** — see
+    /// [`ungrounded`](Self::ungrounded) for why the two halves differ.
     ///
     /// Order matters. Grounding (#272) runs first — "there is no such desk"
     /// outranks "you may not reach that desk", because a model told the latter
@@ -1563,15 +1561,15 @@ impl DelegateToDeskTool {
     async fn ground(&self, desk: &str) -> Grounding {
         let record = match self.store.load(&self.company).await {
             Ok(Some(record)) => record,
-            Ok(None) => return Grounding::open(),
+            Ok(None) => return self.ungrounded(desk, "this company's record is not there"),
             Err(err) => {
                 tracing::warn!(
                     company = %self.company,
                     error = %err,
-                    "[delegate_to_desk] could not read the company record to ground the desk target; \
-                     queuing the hand-off ungrounded"
+                    member = self.member.as_ref().map(|s| s.member.as_str()).unwrap_or("-"),
+                    "[delegate_to_desk] could not read the company record to ground the desk target"
                 );
-                return Grounding::open();
+                return self.ungrounded(desk, "this company's record could not be read");
             }
         };
         let max_depth = usize::from(
@@ -1594,6 +1592,34 @@ impl DelegateToDeskTool {
                 })
         });
         Grounding { refusal, max_depth }
+    }
+
+    /// What a hand-off grounds to when the record behind the grounding could
+    /// not be read at all — the two callers above.
+    ///
+    /// The **orchestrator** fails open, exactly as it has since #272: it has
+    /// nothing to authorise (its target set is every desk), so an unreadable
+    /// record costs it only the "there is no such desk" courtesy, and a store
+    /// hiccup must not take delegation offline.
+    ///
+    /// A **member** fails closed. Its allowlist and its cycle guard are checked
+    /// here and nowhere else — `run_delegation` executes what the queue holds
+    /// without re-deriving either — so queuing ungrounded would hand the member
+    /// the orchestrator's reach for the duration of the hiccup, one level below
+    /// where anyone is looking. Refusing costs a retry; queuing costs the bound.
+    fn ungrounded(&self, desk: &str, why: &str) -> Grounding {
+        let Some(scope) = self.member.as_ref() else {
+            return Grounding::open();
+        };
+        Grounding {
+            refusal: Some(format!(
+                "Could not hand `{desk}` off: {why}, so the desks {member} is allowed to reach \
+                 could not be checked. Nothing was queued — try again, or carry the work out \
+                 yourself.",
+                member = scope.member
+            )),
+            max_depth: usize::from(crate::company::DEFAULT_MAX_DELEGATION_DEPTH),
+        }
     }
 }
 
@@ -4836,6 +4862,112 @@ members = ["ceo"]
             );
             queue.clear();
         }
+    }
+
+    /// A store that cannot answer, so the grounding read has nothing to check
+    /// the target against.
+    struct BrokenStore;
+
+    #[async_trait::async_trait]
+    impl CompanyStore for BrokenStore {
+        async fn load(&self, _id: &CompanyId) -> crate::Result<Option<CompanyRecord>> {
+            Err(crate::OpenCompanyError::Store("store is down".to_string()))
+        }
+        async fn save(&self, _record: &CompanyRecord) -> crate::Result<()> {
+            Ok(())
+        }
+        async fn list(&self) -> crate::Result<Vec<CompanySummary>> {
+            Ok(Vec::new())
+        }
+        async fn append_ledger(&self, _id: &CompanyId, _entry: LedgerEntry) -> crate::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A member's hand-off fails **closed** when the record cannot be read, and
+    /// the orchestrator's still fails open.
+    ///
+    /// The asymmetry is the whole point. The allowlist and the cycle guard are
+    /// enforced at this tool boundary and nowhere else — `run_delegation`
+    /// executes whatever the queue holds without re-deriving either — so a
+    /// member queued ungrounded reaches every desk in the company for as long
+    /// as the store is unhappy. The orchestrator has no allowlist to lose, so
+    /// an unreadable record leaves it exactly where #272 left it.
+    #[tokio::test]
+    async fn a_members_hand_off_is_refused_when_the_record_cannot_be_read() {
+        let company = CompanyId::new("acme");
+        let scope = || MemberScope {
+            member: "writer".to_string(),
+            delegates_to: vec!["research".to_string()],
+        };
+
+        // Ok(None) — no record under that id.
+        let queue = DelegationQueue::default();
+        let _claim = queue.claim();
+        let missing = DelegateToDeskTool::for_member(
+            queue.clone(),
+            company.clone(),
+            Arc::new(MemStore::default()) as Arc<dyn CompanyStore>,
+            scope(),
+        );
+        let refused = missing
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(
+            refused.is_error,
+            "a member may not be queued against a record nobody could read: {}",
+            refused.output_for_llm(true)
+        );
+        let text = refused.output_for_llm(true);
+        assert!(text.contains("research"), "{text}");
+        assert!(
+            text.contains("writer"),
+            "the refusal must name whose allowlist went unchecked: {text}"
+        );
+        assert_eq!(queue.queued(), 0, "nothing may be staged ungrounded");
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            vec!["research".to_string()],
+            "the drain must be able to record the attempt on the card"
+        );
+
+        // Err(..) — the store is there and unhappy. Same answer.
+        let broken = DelegateToDeskTool::for_member(
+            queue.clone(),
+            company.clone(),
+            Arc::new(BrokenStore) as Arc<dyn CompanyStore>,
+            scope(),
+        );
+        let refused = broken
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(
+            refused.is_error,
+            "a store error must refuse too: {}",
+            refused.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 0);
+        queue.clear();
+        let _ = queue.drain_refusals(MAX_DELEGATIONS_PER_TURN);
+
+        // …and the orchestrator's copy over the same broken store still queues.
+        let orchestrator = DelegateToDeskTool::new(
+            queue.clone(),
+            company,
+            Arc::new(BrokenStore) as Arc<dyn CompanyStore>,
+        );
+        let queued = orchestrator
+            .execute(json!({ "desk": "research", "instruction": "dig into it" }))
+            .await
+            .expect("execute");
+        assert!(
+            !queued.is_error,
+            "a store hiccup must not take the orchestrator's delegation offline: {}",
+            queued.output_for_llm(true)
+        );
+        assert_eq!(queue.queued(), 1);
     }
 
     /// The depth bound comes off the **live company record**, not a build-time
