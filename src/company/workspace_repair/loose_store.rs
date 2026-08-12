@@ -31,8 +31,8 @@ use crate::error::OpenCompanyError;
 use crate::ports::now_millis;
 use crate::ports::types::CompanyId;
 use crate::ports::workspace::{
-    BlobStream, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore, one_chunk, rebind_binary,
-    stamped_binary,
+    BlobStream, FolderClaim, NodeKind, WorkspaceNode, WorkspaceOrigin, WorkspaceStore,
+    existing_folder_claim, new_folder, one_chunk, rebind_binary, stamped_binary,
 };
 
 /// A permissive, company-scoped, in-memory workspace tree.
@@ -170,6 +170,35 @@ impl WorkspaceStore for LooseWorkspace {
                 state.text.insert(node.id.clone(), content.to_string());
             }
             Ok(())
+        })
+    }
+
+    /// Atomic here for the same reason it is atomic on the real backends: the
+    /// whole read-then-write sits inside the one lock that guards this tree, so
+    /// no other caller can slip a folder in between the look and the mint.
+    ///
+    /// This double is permissive about names on [`create`](Self::create) — that
+    /// is the point of it — but the claim path is **not**, and deliberately so.
+    /// A duplicate a test built by hand must still refuse a claim, because a
+    /// tree that lost the race before the guard existed is exactly the tree this
+    /// module repairs, and gaining a third node on it would be the guard making
+    /// the damage worse. The refusals come from `existing_folder_claim`, so they
+    /// read identically to fs, sqlite and mongodb.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: WorkspaceOrigin,
+    ) -> Result<FolderClaim> {
+        self.with(company, |state, key| {
+            let tree = state.tree(&key);
+            if let Some(existing) = existing_folder_claim(tree.iter(), parent, name)? {
+                return Ok(FolderClaim::Adopted(existing));
+            }
+            let folder = new_folder(name, parent, origin);
+            tree.push(folder.clone());
+            Ok(FolderClaim::Created(folder))
         })
     }
 
