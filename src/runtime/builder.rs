@@ -4246,11 +4246,16 @@ mod test {
 
         // The console creates a desk and puts `eng2` on it.
         let mut record = store.load(&id).await.unwrap().expect("record");
+        // Deliberately EMPTY: the `OverlayDeskMember` row below is the only
+        // membership source, so this test cannot pass by way of a desk's own
+        // founding members. Without that, it would still be green if
+        // `effective_desk_members` ignored `overlay_desk_members` outright —
+        // which is half of what it is here to prove.
         record.overlay_desks.push(OverlayDesk {
             id: "design".to_string(),
             name: "Design".to_string(),
             description: None,
-            members: vec!["eng2".to_string()],
+            members: Vec::new(),
         });
         record.overlay_desk_members.push(OverlayDeskMember {
             desk_id: "design".to_string(),

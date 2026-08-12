@@ -4992,6 +4992,78 @@ members = ["engineer"]
         brain_over(dir, record_with_desk())
     }
 
+    /// Issue #707, the retention half: a store with **no persisted record**
+    /// leaves the brain's record exactly as it was.
+    ///
+    /// `Ok(None)` is not a failure and must not be treated as one — an absent
+    /// record is what a company whose bundle has not been written yet looks
+    /// like, and clearing on it would leave that company with no roster and no
+    /// desks at all. Uses the real `FsCompanyStore` over a directory nothing was
+    /// saved to, which is precisely the shape that returns `Ok(None)`.
+    #[tokio::test]
+    async fn a_refresh_with_no_persisted_record_keeps_the_one_it_has() {
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let before = brain.record();
+
+        brain
+            .refresh_record()
+            .await
+            .expect("an absent record is not an error");
+
+        let after = brain.record();
+        assert_eq!(
+            after.manifest.company.name, before.manifest.company.name,
+            "the brain kept its record"
+        );
+        assert_eq!(
+            after.manifest.agents.len(),
+            before.manifest.agents.len(),
+            "an absent record must not empty the roster"
+        );
+        assert_eq!(
+            brain.desk_lead("eng_desk"),
+            Some("engineer".to_string()),
+            "nor cost the company its desks"
+        );
+    }
+
+    /// Issue #707, the loud half: a store that **cannot be read** fails the
+    /// refresh rather than falling back to the record already in hand.
+    ///
+    /// Falling back is the defect this whole change removes, and it would come
+    /// back invisibly — a turn that looked successful while routing on state the
+    /// operator had already replaced. So the error propagates and the cycle
+    /// fails. A corrupt `company.toml` is a real way to reach that arm, and
+    /// reaching it through the real store rather than a double is what keeps
+    /// this test honest about the failure it claims to cover.
+    #[tokio::test]
+    async fn a_refresh_that_cannot_read_the_store_fails_rather_than_going_stale() {
+        use crate::ports::store::CompanyStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let (brain, _tasks) = brain_with_desk(dir.path());
+        let store = FsCompanyStore::new(dir.path());
+        store.save(&brain.record()).await.expect("seed the record");
+
+        // A bundle whose manifest no longer parses: the store reports a failure
+        // rather than an absence, which is the arm under test.
+        let toml_path =
+            crate::store::Bundle::new(dir.path().to_path_buf(), &brain.record().id).company_toml();
+        tokio::fs::write(&toml_path, b"this is not = valid toml [[[")
+            .await
+            .expect("corrupt the manifest");
+
+        let err = brain
+            .refresh_record()
+            .await
+            .expect_err("an unreadable record must fail the refresh, not be ignored");
+        assert!(
+            err.to_string().contains("company.toml"),
+            "the failure names what could not be read: {err}"
+        );
+    }
+
     /// The default responder is the `orchestrator`-tier agent, even when it is
     /// not first on the roster.
     #[test]
