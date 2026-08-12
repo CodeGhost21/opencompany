@@ -104,6 +104,58 @@ jobs:
           fi
           echo "$count \`uses:\` references, all pinned to a commit SHA."
 
+      # Issue #592, and the same argument as the pin check above. The vendored
+      # openhuman submodule init was copied into four jobs in this file and a
+      # fifth in `release.yml`, ~340 lines apart here — far enough that a reader
+      # edits one copy and never learns the others exist. The copies then
+      # drifted: `release.yml` was missing `vendor/tinyhumans-sdk` and the
+      # nested `tinycortex` init, which fails `cargo build --locked` outright at
+      # manifest resolution. It stayed invisible only because that workflow is
+      # `workflow_dispatch`-only and had never run. This job's header records
+      # the general lesson — a comment is a guard only for people who read it,
+      # and one failed to stop the `Desktop` job landing unpinned. A grep is the
+      # cheapest thing that says no.
+      #
+      # The pattern is the inline-copy signature specifically: `git -C
+      # vendor/<path> submodule update`. It deliberately does NOT match the
+      # `Report vendored openhuman drift` step's `git -C vendor/openhuman
+      # rev-parse|fetch|merge-base|rev-list` — a different command that belongs
+      # inline — nor `deploy-staging.yml`'s root-level `git submodule update
+      # --init --recursive`, which is a different shape fetching a different set
+      # (it also takes `vendor/tinyagents`, and runs against a `submodules:
+      # false` checkout).
+      - name: Vendored submodule init is not inlined
+        run: |
+          set -euo pipefail
+          failed=0
+
+          inlined=$(grep -rnE 'git[[:space:]]+-C[[:space:]]+vendor/[^[:space:]]+[[:space:]]+submodule[[:space:]]+update' \
+            .github/workflows/ || true)
+          if [ -n "$inlined" ]; then
+            echo "::error title=Inlined vendored submodule init::A workflow initializes the vendored submodules inline, running a \`submodule update\` against a \`vendor/\` checkout. That list lives in exactly one place, scripts/ci/init-vendored-submodules.sh — call the script instead. Copies drift, and a lane missing a submodule then fails on its own while its siblings stay green." >&2
+            echo "$inlined" >&2
+            failed=1
+          fi
+
+          # Zero would pass the check above while asserting nothing — the
+          # failure mode issue #555 exists to remember. A rename or a mass
+          # delete must not leave this job green while checking nothing.
+          #
+          # Anchored to the whole `run:` line, so it counts CALL SITES and not
+          # mentions. An unanchored search would match the prose in this very
+          # step, which would make this check permanently and silently green —
+          # the same vacuity it exists to catch.
+          callers=$(grep -rlE '^[[:space:]]*run:[[:space:]]*scripts/ci/init-vendored-submodules\.sh[[:space:]]*$' \
+            .github/workflows/ || true)
+          if [ -z "$callers" ]; then
+            echo "::error title=Submodule init script unreferenced::No workflow calls scripts/ci/init-vendored-submodules.sh, so the check above is green while guarding nothing. Either the script was renamed and this job was not updated, or the call sites were removed. Restore the call: \`run: scripts/ci/init-vendored-submodules.sh\`." >&2
+            failed=1
+          fi
+
+          [ "$failed" -eq 0 ] || exit 1
+          echo "Vendored submodule init is inlined nowhere and called from:"
+          echo "$callers"
+
   rust:
     name: Rust
     runs-on: ubuntu-latest
