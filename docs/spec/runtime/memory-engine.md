@@ -32,13 +32,17 @@ aborts boot, same as the storage backend.
 With the `tinycortex` feature and a data directory present, the overlay is
 `EngineCortex` (`src/store/tinycortex_engine.rs`): the OpenHuman `tinycortex`
 engine crate running **inside the pod** with durable local storage. Each company
-gets its own workspace at `<OPENCOMPANY_DATA_DIR>/memory/<company>/`, and the
-engine's canonical per-workspace SQLite database (opened + migrated through the
-crate's own shared connection) holds that company's traces, task results, and
-context chunks. The engine never makes a network call. When no data directory is
-present (tests, no-data-dir callers) the overlay falls back to the offline
-in-memory backend (`InMemoryCortex`), which is also the compiled fallback when a
-company workspace cannot be opened.
+gets its own workspace at `<OPENCOMPANY_DATA_DIR>/memory/<workspace-name>/` — the
+path-safe, stable name derived from the full company ID (`EngineCortex::workspace_name`
+sanitizes the id and appends a stable hash), the same `<workspace>` the config
+examples below render — and the engine's canonical per-workspace SQLite database
+(opened + migrated through the crate's own shared connection) holds that
+company's traces, task results, and context chunks. The local workspace
+persistence layer does not make network calls; a configured hosted embeddings
+backend may make outbound requests during embedding and recall. When no data
+directory is present (tests, no-data-dir callers) the overlay selects the
+offline in-memory backend (`InMemoryCortex`). An error opening a company
+workspace propagates to the caller rather than silently switching to in-memory.
 
 **Vector-first recall, with a loud lexical/recency fallback (188c2).** This
 slice builds the engine's `MemoryConfig` directly with `embedding.strict =
@@ -64,7 +68,8 @@ ingest/retrieval primitives, with the vector index layered beside it. Wiring
 the crate's own retrieval-scorer `Embedder` / summary-tree seal path (the
 hard-768-dim path, plus a full-corpus reconcile beyond the bounded backfill) is
 deferred to #198 — this slice injects only the `VectorStore` store+search
-compute, which is dimension-agnostic and runs at the backend's native 1024.
+compute, which is dimension-agnostic and runs at the configured embedding
+dimension (1024 by default).
 
 #### Embeddings configuration
 
