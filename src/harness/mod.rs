@@ -316,6 +316,17 @@ pub struct HarnessDeps {
     /// every node produced. `None` (the default build, and every unwired test)
     /// degrades the persist to a no-op, exactly like [`Self::events`].
     pub run_output_store: Option<Arc<dyn crate::ports::run_output::WorkflowRunOutputStore>>,
+    /// Issue #274's per-workflow snapshot ring, so the orchestrator's
+    /// `update_workflow` / `delete_workflow` tools (issue #661, M7) write
+    /// through the same undo-and-cascade path the console's `PUT`/`DELETE`
+    /// routes do — an agent edit is recoverable on exactly the terms an
+    /// operator's is.
+    ///
+    /// `None` (the default build, and every unwired test) makes those two tools
+    /// refuse rather than degrade, unlike [`Self::events`]. The asymmetry is the
+    /// point: a missing journal loses an audit line, while a missing revision
+    /// store loses the only copy of the graph being overwritten.
+    pub workflow_revisions: Option<Arc<dyn crate::ports::WorkflowRevisionStore>>,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -2724,6 +2735,7 @@ description = "Builds the product."
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 run_output_store: None,
+                workflow_revisions: None,
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -2796,6 +2808,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3480,6 +3493,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3656,6 +3670,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -4170,6 +4185,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -4339,6 +4355,7 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -4489,6 +4506,7 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),

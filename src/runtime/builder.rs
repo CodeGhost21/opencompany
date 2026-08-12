@@ -1803,6 +1803,14 @@ impl RuntimeBuilder {
                                 // here so a past run is readable from the console.
                                 // `None` degrades to no-persist, like `events`.
                                 run_output_store: self.run_output_store.clone(),
+                                // Issue #661 (M7): the SAME revision store the
+                                // console's workflow PUT/DELETE routes use, so
+                                // an agent edit snapshots the prior body and an
+                                // agent delete cascades the history exactly as
+                                // an operator's does. Taken from `ops` rather
+                                // than from `self`, which is `None` whenever the
+                                // caller did not override the filesystem default.
+                                workflow_revisions: Some(ops.workflow_revisions.clone()),
                                 // Issue #243: share the runtime's grant set, so a
                                 // grant the runtime mints on approve is the one
                                 // this agent's policy redeems on re-issue.

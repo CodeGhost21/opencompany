@@ -2409,6 +2409,10 @@ pub fn orchestrator_tools(
     workflow_runner: WorkflowRunnerHandle,
     run_supervisor: crate::runtime::RunSupervisor,
     store: Arc<dyn CompanyStore>,
+    // Issue #274's snapshot ring, for the #661 (M7) edit/delete tools. `None`
+    // makes those two refuse rather than write with no undo — see
+    // `HarnessDeps::workflow_revisions`.
+    workflow_revisions: Option<Arc<dyn crate::ports::WorkflowRevisionStore>>,
     workflow_refs: WorkflowRefQueue,
     run_outputs: RunOutputCache,
     minter: String,
@@ -2445,11 +2449,33 @@ pub fn orchestrator_tools(
     // log it journals the audit event to.
     tools.push(Box::new(CreateWorkflowTool::new(
         company.clone(),
-        workflow_source_dir,
+        workflow_source_dir.clone(),
         store.clone(),
-        events,
+        events.clone(),
         workflow_refs,
     )));
+    // Issue #661 (M7): the other three quarters of the workflow-authoring
+    // surface — read the graph, replace it, remove it. Registered right after
+    // `create_workflow` because they are its lifecycle: without them an agent
+    // that got a graph wrong could only create a second one beside it forever.
+    // All three share one handle, so the ports can never be wired to some of
+    // them and not others. See [`crate::harness::workflow_admin`].
+    let workflow_admin = crate::harness::workflow_admin::WorkflowAdmin::new(
+        company.clone(),
+        workflow_source_dir,
+        store.clone(),
+        workflow_revisions,
+        events,
+    );
+    tools.push(Box::new(
+        crate::harness::workflow_admin::ReadWorkflowTool::new(workflow_admin.clone()),
+    ));
+    tools.push(Box::new(
+        crate::harness::workflow_admin::UpdateWorkflowTool::new(workflow_admin.clone()),
+    ));
+    tools.push(Box::new(
+        crate::harness::workflow_admin::DeleteWorkflowTool::new(workflow_admin),
+    ));
     tools.push(Box::new(AddAgentTool::new(
         company,
         store,
@@ -6274,7 +6300,10 @@ name = "Morning"
     }
 
     #[test]
-    fn orchestrator_tools_includes_all_nine() {
+    fn orchestrator_tools_includes_all_twelve() {
+        use crate::harness::workflow_admin::{
+            DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
+        };
         let queue = DelegationQueue::default();
         let tools = orchestrator_tools(
             CompanyId::new("acme"),
@@ -6285,6 +6314,7 @@ name = "Morning"
             WorkflowRunnerHandle::default(),
             crate::runtime::RunSupervisor::default(),
             Arc::new(MemStore::default()),
+            None,
             WorkflowRefQueue::default(),
             RunOutputCache::default(),
             "ceo".to_string(),
@@ -6293,11 +6323,15 @@ name = "Morning"
         );
         let names: Vec<&str> = tools.iter().map(|t| t.name()).collect();
         // Six before #186; `assign_task` + `review_task` made eight; #418's
-        // `read_run_output` makes nine.
-        assert_eq!(names.len(), 9, "got {names:?}");
+        // `read_run_output` makes nine; #661's read/update/delete_workflow
+        // trio makes twelve.
+        assert_eq!(names.len(), 12, "got {names:?}");
         assert!(names.contains(&RUN_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&READ_RUN_OUTPUT_TOOL), "got {names:?}");
         assert!(names.contains(&CREATE_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&READ_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&UPDATE_WORKFLOW_TOOL), "got {names:?}");
+        assert!(names.contains(&DELETE_WORKFLOW_TOOL), "got {names:?}");
         assert!(names.contains(&ADD_AGENT_TOOL), "got {names:?}");
         assert!(names.contains(&QUERY_COMPANY_TOOL), "got {names:?}");
         assert!(names.contains(&SPAWN_TASK_TOOL), "got {names:?}");
@@ -6307,6 +6341,21 @@ name = "Morning"
         // `read_run_output` sits immediately after `run_workflow`.
         let run_at = names.iter().position(|n| *n == RUN_WORKFLOW_TOOL).unwrap();
         assert_eq!(names[run_at + 1], READ_RUN_OUTPUT_TOOL, "got {names:?}");
+        // The #661 trio sits immediately after `create_workflow`: they are its
+        // lifecycle, and a model reads the belt in order.
+        let created_at = names
+            .iter()
+            .position(|n| *n == CREATE_WORKFLOW_TOOL)
+            .unwrap();
+        assert_eq!(
+            &names[created_at + 1..created_at + 4],
+            &[
+                READ_WORKFLOW_TOOL,
+                UPDATE_WORKFLOW_TOOL,
+                DELETE_WORKFLOW_TOOL
+            ],
+            "got {names:?}"
+        );
     }
 
     #[tokio::test]
