@@ -147,11 +147,13 @@ describe("composeCopilotMessage", () => {
     expect(message).toMatch(/inside a `?config`? object/i);
     expect(message).toContain("config.slug (required)");
     expect(message).toContain('"config": {"slug": "web_search"');
-    // The enumerated kinds and the id-invention guard.
+    // The enumerated kinds and the id rule, stated by operation: an existing
+    // reference must be a listed id, while an addNode mints a new one.
     for (const kind of ["tool_call", "agent", "http_request", "sub_workflow"]) {
       expect(message).toContain(kind);
     }
-    expect(message).toMatch(/only node ids that exist/i);
+    expect(message).toMatch(/use only an id listed under ## Graph/i);
+    expect(message).toMatch(/addNode mints a NEW id/i);
   });
 
   /**
