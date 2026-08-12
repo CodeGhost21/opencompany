@@ -8305,4 +8305,327 @@ name = "Morning"
         assert_eq!(fresh.len(), 0, "an oversized run must not be cached");
         assert!(fresh.get("run-giant").is_none());
     }
+
+    // -----------------------------------------------------------------------
+    // Issue #661: the queue is scoped per claimant
+    // -----------------------------------------------------------------------
+
+    /// A card, titled so a drain can be identified by what it carried.
+    fn card(title: &str) -> Delegation {
+        Delegation::SpawnTask {
+            title: title.to_string(),
+            note: None,
+            assignee: None,
+        }
+    }
+
+    fn hand_off() -> Delegation {
+        Delegation::DelegateToDesk {
+            desk: "design".to_string(),
+            instruction: "have a look".to_string(),
+        }
+    }
+
+    fn titles(drained: Vec<Delegation>) -> Vec<String> {
+        drained
+            .into_iter()
+            .map(|d| match d {
+                Delegation::SpawnTask { title, .. } => title,
+                other => panic!("expected a card, got {other:?}"),
+            })
+            .collect()
+    }
+
+    fn stage(queue: &DelegationQueue, d: Delegation) -> Staged {
+        queue.push_within_cap(d, MAX_DELEGATIONS_PER_TURN, NO_DEPTH_BOUND)
+    }
+
+    /// **The regression this whole change exists for.**
+    ///
+    /// A workflow run taking a claim while the chat cycle has work staged must
+    /// leave that work alone. Before the scoping, `claim_as` opened with a
+    /// global `clear()`, so this exact interleaving destroyed a chat turn's
+    /// staged card and its refusal — and the turn had already told the operator
+    /// the card was opened.
+    ///
+    /// Runs are `tokio::spawn`ed and are not under the cycle lock (#401 allows
+    /// several at once), so this interleaving is reachable rather than
+    /// theoretical.
+    #[tokio::test]
+    async fn a_workflow_claim_leaves_a_concurrent_chat_turns_staged_work_intact() {
+        let queue = DelegationQueue::default();
+
+        // A chat turn is mid-flight with a card staged and a refusal recorded.
+        let _chat = queue.claim();
+        assert_eq!(stage(&queue, card("chat")), Staged::Queued);
+        queue.push_refusal("nonexistent-desk".to_string());
+
+        // A workflow run claims, concurrently. This is the moment that used to
+        // wipe the chat's bucket.
+        let run = queue.claim_board("run-1");
+        run.scoped(async { assert_eq!(stage(&queue, card("run")), Staged::Queued) })
+            .await;
+
+        // The chat's staged card and refusal are both still there…
+        assert_eq!(queue.queued(), 1);
+        assert_eq!(queue.refusals_queued(), 1);
+        assert_eq!(titles(queue.drain(MAX_DELEGATIONS_PER_TURN)), ["chat"]);
+        assert_eq!(
+            queue.drain_refusals(MAX_DELEGATIONS_PER_TURN),
+            ["nonexistent-desk"]
+        );
+
+        // …and the run still has its own, drained separately.
+        let run_drained = run
+            .scoped(async { queue.drain(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(titles(run_drained), ["run"]);
+    }
+
+    /// The half of the defect that is **live today**, with no drain wired and
+    /// nothing else changed.
+    ///
+    /// `DelegateToDeskTool` calls [`DelegationQueue::push_refusal`] on the
+    /// ungrounded path *before* it consults the claim, so an invented desk named
+    /// by a workflow node already reaches the shared vector. A chat turn's
+    /// `drain_refusals` would then take it, record it on that turn's card, and
+    /// clear it — a hand-off nobody on that turn attempted.
+    #[tokio::test]
+    async fn a_runs_ungrounded_hand_off_is_not_recorded_on_a_chat_turns_card() {
+        let queue = DelegationQueue::default();
+        let _chat = queue.claim();
+
+        let run = queue.claim_board("run-1");
+        run.scoped(async { queue.push_refusal("marketing".to_string()) })
+            .await;
+
+        // Nothing to report on the chat turn's card: it attempted no hand-off.
+        assert_eq!(queue.refusals_queued(), 0);
+        assert!(queue.drain_refusals(MAX_DELEGATIONS_PER_TURN).is_empty());
+
+        // The run's own refusal is intact and still its own to read.
+        let seen = run
+            .scoped(async { queue.drain_refusals(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(seen, ["marketing"]);
+    }
+
+    /// Two runs and the chat cycle interleaved: each sees only its own, and
+    /// neither draining nor claiming reaches across.
+    #[tokio::test]
+    async fn two_runs_and_the_chat_cycle_neither_drain_nor_clear_each_other() {
+        let queue = DelegationQueue::default();
+
+        let _chat = queue.claim();
+        assert_eq!(stage(&queue, card("chat")), Staged::Queued);
+
+        let run_a = queue.claim_board("run-a");
+        run_a
+            .scoped(async { assert_eq!(stage(&queue, card("a")), Staged::Queued) })
+            .await;
+
+        // B claims *after* A staged — the acquire-time clear must not reach A.
+        let run_b = queue.claim_board("run-b");
+        run_b
+            .scoped(async { assert_eq!(stage(&queue, card("b")), Staged::Queued) })
+            .await;
+
+        assert_eq!(queue.queued(), 1, "the chat cycle sees only its own");
+        assert_eq!(run_a.scoped(async { queue.queued() }).await, 1);
+        assert_eq!(run_b.scoped(async { queue.queued() }).await, 1);
+
+        // Draining A takes A's and only A's.
+        let drained_a = run_a
+            .scoped(async { queue.drain(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(titles(drained_a), ["a"]);
+        assert_eq!(queue.queued(), 1);
+        assert_eq!(run_b.scoped(async { queue.queued() }).await, 1);
+
+        assert_eq!(titles(queue.drain(MAX_DELEGATIONS_PER_TURN)), ["chat"]);
+        let drained_b = run_b
+            .scoped(async { queue.drain(MAX_DELEGATIONS_PER_TURN) })
+            .await;
+        assert_eq!(titles(drained_b), ["b"]);
+    }
+
+    /// A claim's `Drop` discards its own bucket and un-claims its own scope —
+    /// and reaches nothing else. A cancelled run's staged writes dying with the
+    /// run is the intended semantics; a chat turn's surviving it is the point.
+    #[tokio::test]
+    async fn dropping_a_claim_discards_only_its_own_bucket() {
+        let queue = DelegationQueue::default();
+
+        let _chat = queue.claim();
+        assert_eq!(stage(&queue, card("chat")), Staged::Queued);
+
+        {
+            let run = queue.claim_board("run-1");
+            run.scoped(async { assert_eq!(stage(&queue, card("run")), Staged::Queued) })
+                .await;
+            run.scoped(async { queue.push_refusal("ghost".to_string()) })
+                .await;
+        } // the run is cancelled here
+
+        // Its bucket went with it, and its scope is claimable again from
+        // scratch rather than left committed.
+        let after = CURRENT_SCOPE
+            .scope(DelegationScope::Run("run-1".to_string()), async {
+                (queue.queued(), queue.refusals_queued(), queue.claim_state())
+            })
+            .await;
+        assert_eq!(after, (0, 0, DrainClaim::Unclaimed));
+
+        // The chat turn is untouched — still claimed, still holding its card.
+        assert_eq!(queue.claim_state(), DrainClaim::Full);
+        assert_eq!(titles(queue.drain(MAX_DELEGATIONS_PER_TURN)), ["chat"]);
+    }
+
+    /// The #176 scope chain is per claimant, and its depth accounting is
+    /// unchanged by that.
+    ///
+    /// Depth is still exactly `chain.len()` and still gates a hand-off at the
+    /// bound; what it no longer does is count another claimant's nesting.
+    #[tokio::test]
+    async fn a_scope_chain_is_per_claimant_and_depth_is_unchanged() {
+        let queue = DelegationQueue::default();
+        let _chat = queue.claim();
+
+        let _outer = queue.enter_scope("design".to_string());
+        assert_eq!(queue.scope_depth(), 1);
+        assert_eq!(queue.scope_chain(), ["design"]);
+
+        let run = queue.claim_board("run-1");
+        run.scoped(async {
+            // A run opens its own chain at depth 0 however deep the chat is.
+            assert_eq!(queue.scope_depth(), 0);
+            assert!(queue.scope_chain().is_empty());
+
+            let _a = queue.enter_scope("eng".to_string());
+            let _b = queue.enter_scope("qa".to_string());
+            assert_eq!(queue.scope_depth(), 2);
+            assert_eq!(queue.scope_chain(), ["eng", "qa"]);
+        })
+        .await;
+
+        // The chat's chain is exactly as deep as it was left, and its guard
+        // popped from its own chain rather than the run's.
+        assert_eq!(queue.scope_depth(), 1);
+        assert_eq!(queue.scope_chain(), ["design"]);
+
+        // Depth still gates at the bound, counting this claimant's chain only:
+        // one level deep against a bound of 1 refuses…
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 1),
+            Staged::NoDrain(NoDrainReason::Depth)
+        );
+        // …and against a bound of 2 it stages, which a run's two levels would
+        // have blocked had they been counted here.
+        assert_eq!(
+            queue.push_within_cap(hand_off(), MAX_DELEGATIONS_PER_TURN, 2),
+            Staged::Queued
+        );
+    }
+
+    /// The [`DrainClaim::Board`] permit matrix: both kinds a run may perform
+    /// stage, and both it may not are refused — each for its own reason.
+    #[tokio::test]
+    async fn a_board_claim_permits_cards_and_refuses_review_and_hand_off() {
+        let queue = DelegationQueue::default();
+        let run = queue.claim_board("run-1");
+
+        run.scoped(async {
+            assert_eq!(stage(&queue, card("open a card")), Staged::Queued);
+            assert_eq!(
+                stage(
+                    &queue,
+                    Delegation::AssignTask {
+                        task_id: "t1".to_string(),
+                        assignee: "design".to_string(),
+                        note: None,
+                    }
+                ),
+                Staged::Queued
+            );
+
+            // Lifecycle is the operator's lane.
+            assert_eq!(
+                stage(
+                    &queue,
+                    Delegation::ReviewTask {
+                        task_id: "t1".to_string(),
+                        decision: ReviewDecision::Approve,
+                        note: None,
+                    }
+                ),
+                Staged::NoDrain(NoDrainReason::WorkflowLifecycle)
+            );
+            // A hand-off has nowhere to put the reply it exists for.
+            assert_eq!(
+                stage(&queue, hand_off()),
+                Staged::NoDrain(NoDrainReason::WorkflowHandOff)
+            );
+        })
+        .await;
+    }
+
+    /// The refusal text is what a model reads and reacts to, so both wordings
+    /// have to name the real cause and what the run *can* do instead — and must
+    /// not be each other's.
+    #[test]
+    fn the_two_workflow_refusals_say_what_the_run_can_do_instead() {
+        let lifecycle = no_drain(
+            REVIEW_TASK_TOOL,
+            "the card was NOT reviewed",
+            NoDrainReason::WorkflowLifecycle,
+        );
+        assert!(
+            lifecycle.contains("running inside a workflow"),
+            "{lifecycle}"
+        );
+        assert!(lifecycle.contains("operator's call"), "{lifecycle}");
+        assert!(
+            lifecycle.contains("`spawn_task`") && lifecycle.contains("`assign_task`"),
+            "it must name what the run can do instead: {lifecycle}"
+        );
+        assert!(
+            !lifecycle.contains("no conversation"),
+            "the lifecycle refusal must not borrow the hand-off's cause: {lifecycle}"
+        );
+
+        let hand_off = no_drain(
+            DELEGATE_TO_DESK_TOOL,
+            "nothing was handed to the design desk",
+            NoDrainReason::WorkflowHandOff,
+        );
+        assert!(hand_off.contains("running inside a workflow"), "{hand_off}");
+        assert!(hand_off.contains("no conversation"), "{hand_off}");
+        assert!(
+            hand_off.contains("`spawn_task`"),
+            "it must name the durable alternative: {hand_off}"
+        );
+        assert!(
+            !hand_off.contains("operator's call"),
+            "the hand-off refusal must not borrow the lifecycle's cause: {hand_off}"
+        );
+
+        // Both keep the do-not-report-it-as-done half every refusal here needs.
+        for text in [&lifecycle, &hand_off] {
+            assert!(text.contains("Do not retry this call"), "{text}");
+            assert!(text.contains("do NOT report"), "{text}");
+        }
+
+        // …and they stay countable apart in the logs, from each other and from
+        // the three that came before.
+        let labels = [
+            NoDrainReason::Unwired,
+            NoDrainReason::Triage,
+            NoDrainReason::Depth,
+            NoDrainReason::WorkflowLifecycle,
+            NoDrainReason::WorkflowHandOff,
+        ]
+        .map(|r| r.as_str());
+        let unique: std::collections::BTreeSet<_> = labels.iter().collect();
+        assert_eq!(unique.len(), labels.len(), "{labels:?}");
+    }
 }
