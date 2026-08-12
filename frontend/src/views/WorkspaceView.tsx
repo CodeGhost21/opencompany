@@ -7,6 +7,7 @@ import {
   Folder,
   FolderOpen,
   FolderPlus,
+  FolderSync,
   FolderX,
   Link2,
   Loader2,
@@ -33,7 +34,9 @@ import {
   fetchTree,
   formatBytes,
   isBinary,
+  mergeDuplicateFolders,
   originLabel,
+  residualReason,
   renameMoveNode,
   searchWorkspace,
   sweepEmptyAgentFolders,
@@ -42,6 +45,7 @@ import {
   OPERATOR_ORIGIN,
   type SearchHit,
   type SearchResults as SearchResultsPage,
+  type RepairOutcome,
   type SweptFolder,
   type WorkspaceFile,
   type WorkspaceOrigin,
@@ -71,6 +75,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 import {
+  applyRepair,
   childrenOf,
   clearLegacyLocal,
   ensureMdExt,
@@ -367,6 +372,12 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
   // folder — a count is not something an operator who disagrees can check.
   const [sweep, setSweep] = useState<SweepState | null>(null);
   const [sweeping, setSweeping] = useState(false);
+  // The duplicate-folder repair (issue #759), in the same two stages. `preview`
+  // is the plan; `done` is what the host actually did — which is not always the
+  // same list, and is never the whole story: the residuals it could not decide
+  // ride along on both.
+  const [repair, setRepair] = useState<RepairState | null>(null);
+  const [repairing, setRepairing] = useState(false);
   // The pending scratchpad partitioned by kind, once, for every surface that
   // describes or imports it: the banner's sentence, the import loops, and the
   // receipt. #500 partitioned inside `importLegacy` so the loops and the
@@ -1021,6 +1032,54 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
     }
   }
 
+  /**
+   * Ask the host what the duplicate folders in this tree would merge into
+   * (issue #759).
+   *
+   * A preview, always. The repair *moves* notes between folders rather than
+   * removing provably empty ones, so the operator sees every relocation before
+   * agreeing to any of them — and sees, up front, what the host will refuse to
+   * decide.
+   */
+  async function previewRepair() {
+    setRepairing(true);
+    try {
+      const outcome = await mergeDuplicateFolders(client, company, true);
+      if (outcome.folders.length === 0 && outcome.residuals.length === 0) {
+        toast.success("No duplicate folders to repair.");
+        return;
+      }
+      setRepair({ stage: "preview", outcome });
+    } catch (e) {
+      toast.error(message(e, "could not check for duplicate folders"));
+    } finally {
+      setRepairing(false);
+    }
+  }
+
+  /**
+   * Do it, then report what actually happened.
+   *
+   * The result is the host's, not the preview echoed back: a folder that gained
+   * a note between the two calls is left standing and says so, and a relocation
+   * the tree moved out from under turns into a residual. The local tree is
+   * replayed from that answer rather than refetched, so the open note keeps its
+   * unsaved draft.
+   */
+  async function confirmRepair() {
+    setRepairing(true);
+    try {
+      const outcome = await mergeDuplicateFolders(client, company, false);
+      setNodes((all) => applyRepair(all, outcome));
+      setRepair({ stage: "done", outcome });
+    } catch (e) {
+      toast.error(message(e, "could not repair the duplicate folders"));
+      setRepair(null);
+    } finally {
+      setRepairing(false);
+    }
+  }
+
   async function onWiki(target: string) {
     const existing = fileByTitle(nodes, target);
     if (existing) {
@@ -1096,6 +1155,21 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
             data-testid="workspace-sweep"
           >
             <FolderX className="size-4" />
+          </IconBtn>
+          {/* Issue #759. Two publishes of one deliverable can race and leave two
+              folders with the same name, after which every publish beneath that
+              path is refused as ambiguous — for every agent, forever. Stopping
+              new races does nothing for a tree already in that state, and on a
+              hosted tenant this button is the only way out of it. Operator-
+              triggered for the same reason the tidy beside it is: nothing
+              rearranges somebody's tree unasked. */}
+          <IconBtn
+            label="Repair duplicate folders"
+            disabled={repairing}
+            onClick={() => void previewRepair()}
+            data-testid="workspace-repair"
+          >
+            <FolderSync className="size-4" />
           </IconBtn>
           <input
             ref={uploadRef}
@@ -1373,6 +1447,12 @@ export function WorkspaceView({ client, company, event, initialNodeId }: Props) 
         busy={sweeping}
         onClose={() => setSweep(null)}
         onConfirm={() => void confirmSweep()}
+      />
+      <RepairDialog
+        state={repair}
+        busy={repairing}
+        onClose={() => setRepair(null)}
+        onConfirm={() => void confirmRepair()}
       />
     </div>
   );
@@ -1919,6 +1999,115 @@ function SweepDialog({
               <Button variant="destructive" disabled={busy} onClick={onConfirm}>
                 {busy && <Loader2 className="mr-1 size-4 animate-spin" />}
                 Remove {count}
+              </Button>
+            </>
+          )}
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * The duplicate-folder repair, in its two stages (issue #759).
+ *
+ * Two lists, and the second one is not optional. The folds say what the repair
+ * *can* do; the residuals say what it will not, and a dialog that showed only
+ * the first would tell an operator their tree is fixed when two rival documents
+ * are still sitting on one path. Each residual carries its own instruction,
+ * because "fileInTheWay" is the host's word for the problem and not the
+ * operator's.
+ */
+interface RepairState {
+  stage: "preview" | "done";
+  outcome: RepairOutcome;
+}
+
+function RepairDialog({
+  state,
+  busy,
+  onClose,
+  onConfirm,
+}: {
+  state: RepairState | null;
+  busy: boolean;
+  onClose: () => void;
+  onConfirm: () => void;
+}) {
+  const done = state?.stage === "done";
+  const folds = state?.outcome.folders ?? [];
+  const residuals = state?.outcome.residuals ?? [];
+  const relocations = folds.reduce((n, folder) => n + folder.moved.length, 0);
+
+  return (
+    <Dialog open={Boolean(state)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>{done ? "Repaired" : "Repair duplicate folders"}</DialogTitle>
+          <DialogDescription>
+            {done
+              ? folds.length === 0
+                ? "Nothing was merged — the tree changed before the repair ran."
+                : `Merged ${folds.length} duplicate folder${folds.length === 1 ? "" : "s"} and moved ${relocations} item${relocations === 1 ? "" : "s"}.`
+              : `${folds.length} folder${folds.length === 1 ? "" : "s"} share a name with another folder beside them, which is why publishing there fails. Their contents move into the copy that was there first. Nothing is renamed, nothing is overwritten, and no folder is removed until it is empty.`}
+          </DialogDescription>
+        </DialogHeader>
+
+        <ul className="max-h-64 space-y-1 overflow-y-auto" data-testid="workspace-repair-folders">
+          {folds.map((folder) => (
+            <li key={folder.id} className="rounded-lg px-2.5 py-1.5 text-sm">
+              <div className="flex items-center gap-2">
+                <Folder className="size-4 shrink-0 text-tone-2" />
+                <span className="truncate">{folder.name}</span>
+                <span className="ml-auto shrink-0 text-xs text-muted-foreground">
+                  {folder.moved.length === 0
+                    ? done && folder.removed
+                      ? "removed"
+                      : "empty"
+                    : `${folder.moved.length} item${folder.moved.length === 1 ? "" : "s"}`}
+                </span>
+              </div>
+              {folder.moved.length > 0 && (
+                <div className="mt-0.5 truncate pl-6 text-xs text-muted-foreground">
+                  {folder.moved.map((child) => child.name).join(", ")}
+                </div>
+              )}
+            </li>
+          ))}
+        </ul>
+
+        {residuals.length > 0 && (
+          <div className="space-y-1" data-testid="workspace-repair-residuals">
+            <p className="text-xs font-medium">
+              {done ? "Still needs you" : "These will be left for you"}
+            </p>
+            <ul className="max-h-40 space-y-1 overflow-y-auto">
+              {residuals.map((residual) => (
+                <li key={residual.id} className="rounded-lg px-2.5 py-1.5 text-sm">
+                  <div className="flex items-center gap-2">
+                    <FileText className="size-4 shrink-0 text-tone-2" />
+                    <span className="truncate">{residual.name}</span>
+                  </div>
+                  <p className="mt-0.5 pl-6 text-xs text-muted-foreground">
+                    {residualReason(residual.cause)}
+                  </p>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        <DialogFooter>
+          {done ? (
+            <Button onClick={onClose}>Done</Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={onClose}>
+                Cancel
+              </Button>
+              <Button disabled={busy || folds.length === 0} onClick={onConfirm}>
+                {busy && <Loader2 className="mr-1 size-4 animate-spin" />}
+                Merge {folds.length}
               </Button>
             </>
           )}

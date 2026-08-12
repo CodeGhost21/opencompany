@@ -361,6 +361,97 @@ export async function sweepEmptyAgentFolders(
   return (dryRun ? result.wouldRemove : result.removed) ?? [];
 }
 
+/** One node the duplicate-folder repair relocated, or would (issue #759). */
+export interface MovedChild {
+  id: string;
+  name: string;
+}
+
+/** One duplicate folder folded into its surviving twin (issue #759). */
+export interface MergedFolder {
+  id: string;
+  name: string;
+  intoId: string;
+  moved: MovedChild[];
+  /** Whether the emptied folder itself went — `false` if anything is still in it. */
+  removed: boolean;
+}
+
+/** Why the repair left a node exactly where it found it. */
+export type ResidualCause = "fileSharesTheName" | "fileInTheWay" | "treeMovedOn";
+
+/** One node the repair deliberately did not touch (issue #759). */
+export interface Residual {
+  id: string;
+  name: string;
+  parentId?: string;
+  cause: ResidualCause;
+}
+
+/** What the repair did, or would do. */
+export interface RepairOutcome {
+  folders: MergedFolder[];
+  residuals: Residual[];
+}
+
+/**
+ * The repair's answer. Exactly one fold list is present — a preview answers
+ * `wouldMerge`, a real run answers `merged` — while `residuals` is on both.
+ */
+interface RepairResult {
+  wouldMerge?: MergedFolder[];
+  merged?: MergedFolder[];
+  residuals?: Residual[];
+}
+
+/**
+ * What an operator has to do by hand, in one sentence each.
+ *
+ * Written as instructions rather than as the host's enum, because the residual
+ * list is the part of the answer that says the tree is *not* fixed yet. A row
+ * reading `fileInTheWay` tells an operator nothing about what to do with it.
+ */
+export function residualReason(cause: ResidualCause): string {
+  switch (cause) {
+    case "fileSharesTheName":
+      return "A note and a folder share this name — rename or remove one of them.";
+    case "fileInTheWay":
+      return "Both copies hold a note with this name. Merging them would discard one, so both were kept — open them and keep what you want.";
+    case "treeMovedOn":
+      return "Something changed while the repair ran, so this was left alone. Run it again.";
+  }
+}
+
+/**
+ * Merge the duplicate sibling folders a publish race left behind (issue #759),
+ * or — with `dryRun` — find out what that would do without touching anything.
+ *
+ * The two calls are the same request twice: the console previews, names every
+ * folder that gives way and every note that changes hands, and only then asks
+ * for the change. Nothing here decides what merges; the host does, and it
+ * refuses to decide a collision between two *files* because picking one would
+ * silently discard a document.
+ *
+ * Reads the fold list that matches what was asked for rather than whichever one
+ * turns up, so a preview can never render as "3 folders merged". `residuals` is
+ * read unconditionally — it is the half of the answer that says whether the tree
+ * is actually repaired, and defaulting it away would turn "two documents still
+ * on one path" into silence.
+ */
+export async function mergeDuplicateFolders(
+  client: OpenCompanyClient,
+  company: string | null,
+  dryRun: boolean,
+): Promise<RepairOutcome> {
+  const result = await client.post<RepairResult>(
+    `${client.scopeFor(company)}/workspace/merge-duplicate-folders?dry_run=${dryRun}`,
+  );
+  return {
+    folders: (dryRun ? result.wouldMerge : result.merged) ?? [],
+    residuals: result.residuals ?? [],
+  };
+}
+
 /**
  * Upload a file of any kind (issue #553).
  *
