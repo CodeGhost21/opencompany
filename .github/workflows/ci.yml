@@ -248,6 +248,33 @@ jobs:
       - name: Verify Cargo.lock is in sync
         run: cargo metadata --locked --format-version 1 > /dev/null
 
+      # Issue #770. Every lane in this file pins an explicit feature set, and
+      # cargo features are additive — so the DEFAULT FATE of a feature-gated test
+      # is "compiled by `Check (--all-features)`, executed by nothing". Nothing
+      # reports it: no lane goes red, no count reads zero, the test simply is not
+      # selected. Six features had accumulated never-executed tests that way,
+      # including the `sidecar` brain's whole offline end-to-end suite and two
+      # OAuth secret-lifecycle tests in `app::types`.
+      #
+      # This is the same family as #475, #477, #555 and #592, every one of which
+      # was found BY HAND after the fact. The steps added below fix the six known
+      # cases; this one is what makes the seventh fail at the moment it is
+      # introduced rather than months later. A new feature cannot merge until
+      # someone writes down which lane runs its tests, or why none does.
+      #
+      # HERE, on `rust`, and after the lock check specifically: the script reads
+      # `cargo metadata --locked` for its feature list — ground truth rather than
+      # a Cargo.toml grep, which would miss the implicit feature of an optional
+      # dependency named without `dep:` — so it needs this job's submodule
+      # checkout to resolve the vendored path manifests, and it should run after
+      # the step that names a stale lock as a stale lock.
+      #
+      # It compiles nothing and takes seconds, so it belongs on the fast default
+      # lane where a classification mistake is reported early, not behind the
+      # 26-minute gated compile.
+      - name: Assert every feature has a test lane or a stated reason
+        run: scripts/ci/assert-feature-lanes.sh
+
       # No `--locked` here, and none is owed: `cargo fmt` is a `rustfmt` wrapper
       # that never resolves the dependency graph, and `cargo-fmt` does not
       # accept the flag.
