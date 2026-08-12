@@ -305,6 +305,15 @@ pub struct RuntimeBuilder {
     users: Option<Arc<dyn UserStore>>,
     sessions: Option<Arc<dyn SessionStore>>,
     login_codes: Option<Arc<dyn LoginCodeStore>>,
+    /// The runtime journal's durable sink (issue #726).
+    ///
+    /// `None` selects the filesystem default below — the company bundle's
+    /// `journal.jsonl`, which is where the journal has always lived. Set from
+    /// [`with_stores`](Self::with_stores) on every backend, because on a hosted
+    /// mongodb tenant the bundle directory is ephemeral scratch and a journal
+    /// left there loses every committed effect key and every parked approval on
+    /// the next container replacement.
+    journal_store: Option<Arc<dyn crate::ports::journal::JournalStore>>,
     seed_dir: Option<PathBuf>,
     /// The repo-level shared skill library, passed to the harness so a pre-fix
     /// registry install (whose stored `SKILL.md` is a one-line stub) is healed
@@ -401,6 +410,7 @@ impl RuntimeBuilder {
             users: None,
             sessions: None,
             login_codes: None,
+            journal_store: None,
             seed_dir: None,
             skills_registry: Arc::from([]),
             template_provenance: None,
@@ -520,6 +530,7 @@ impl RuntimeBuilder {
         self.users = Some(handles.users.clone());
         self.sessions = Some(handles.sessions.clone());
         self.login_codes = Some(handles.login_codes.clone());
+        self.journal_store = Some(handles.journal.clone());
         self.with_store(handles.company.clone())
             .with_events(handles.events.clone())
             .with_memory(handles.memory.clone())
@@ -537,6 +548,22 @@ impl RuntimeBuilder {
     pub fn with_memory_overlay(self, overlay: &crate::store::MemoryOverlay) -> Self {
         self.with_memory(overlay.memory.clone())
             .with_context(overlay.context.clone())
+    }
+
+    /// Swaps just the runtime journal's durable sink (default: the company
+    /// bundle's `journal.jsonl`).
+    ///
+    /// [`with_stores`](Self::with_stores) sets this alongside every other port,
+    /// so production never calls it. It exists for the same reason
+    /// [`with_memory_overlay`](Self::with_memory_overlay) does — one port,
+    /// swapped on its own — and it is what lets a test put the at-most-once set
+    /// somewhere the company bundle is not.
+    pub fn with_journal_store(
+        mut self,
+        store: Arc<dyn crate::ports::journal::JournalStore>,
+    ) -> Self {
+        self.journal_store = Some(store);
+        self
     }
 
     /// Swaps the task board store (default: fs-backed).
@@ -1137,10 +1164,79 @@ impl RuntimeBuilder {
         let journal = match handover.as_ref() {
             Some(h) => h.journal.clone(),
             None => {
-                let journal = Arc::new(RuntimeJournal::new(
-                    Bundle::new(home.clone(), &id).journal_jsonl(),
-                ));
+                // Issue #726: the journal's sink comes from the selected backend
+                // whenever one is open, and falls back to the company bundle's
+                // `journal.jsonl` only when it is not. Never a silent fs
+                // fallback under a database backend — that is the rule
+                // `open_storage` already states for every other durable port,
+                // and the journal was the one store outside it. On a hosted
+                // mongodb tenant `/data` is documented ephemeral scratch, so a
+                // journal left there loses every committed effect key and every
+                // parked approval on the next container replacement: previously
+                // executed effects become eligible to fire again, and parked
+                // approvals and grants silently vanish.
+                let (sink, sink_name) = match self.journal_store.clone() {
+                    Some(store) => (store, "backend"),
+                    None => (
+                        Arc::new(crate::store::FsJournalStore::new(home.clone()))
+                            as Arc<dyn crate::ports::journal::JournalStore>,
+                        "filesystem",
+                    ),
+                };
+
+                // The one-time import off the filesystem, gated on the sink's
+                // own receipt. Verbatim and in file order, raw strings — so a
+                // corrupt or merged line migrates byte-for-byte and the journal's
+                // own recovery still applies to it downstream.
+                //
+                // The receipt is what makes this safe to retry: `complete_import`
+                // clears before it copies and records the receipt last, so an
+                // interrupted import re-runs the whole copy instead of leaving a
+                // truncated prefix behind a closed gate. A truncated prefix is
+                // the bug itself — it drops at-most-once keys.
+                //
+                // Fatal on failure, deliberately. Booting with an empty journal
+                // because the import errored is indistinguishable, to every
+                // effect the company then runs, from having never executed
+                // anything.
+                //
+                // The gate is closed even when there is no file to import (an
+                // import of zero lines). That is one step stronger than "import
+                // if the file exists", and the step is load-bearing: it makes a
+                // `journal.jsonl` that appears *later* — a rollback, a stray copy
+                // into the data dir — unable to wipe and replace a journal the
+                // backend has since accumulated.
+                if !sink.journal_imported(&id).await? {
+                    let legacy = Bundle::new(home.clone(), &id).journal_jsonl();
+                    let lines: Vec<String> = crate::store::fs::read_lines_lossy(&legacy)
+                        .await?
+                        .into_iter()
+                        .filter(|line| !line.trim().is_empty())
+                        .collect();
+                    let count = lines.len();
+                    sink.complete_import(&id, lines).await?;
+                    if count > 0 {
+                        tracing::info!(
+                            company = %id,
+                            lines = count,
+                            "imported the filesystem journal into the storage backend; \
+                             the source file is left in place",
+                        );
+                    }
+                }
+
+                let journal = Arc::new(RuntimeJournal::with_store(sink, id.clone()));
                 journal.load().await?;
+                // Which sink the at-most-once guarantee is actually resting on.
+                // Worth one line at boot: "filesystem" under
+                // `OPENCOMPANY_STORAGE=mongodb` would mean the guarantee is
+                // resting on scratch, and that is not a thing an operator can
+                // otherwise see.
+                tracing::info!(
+                    company = %id,
+                    sink = sink_name,
+                    "runtime journal ready",
+                );
                 // Issue #386: a damaged line no longer fails the boot, which
                 // means the company can come up on an incomplete history. That
                 // is the right trade — an operator cannot repair a journal
@@ -2560,6 +2656,7 @@ mod test {
     use super::*;
     use crate::openhuman::MockOpenHumanRpc;
     use crate::ports::types::ToolCall;
+    use crate::runtime::journal::ExecutedEffect;
 
     fn tmp_home(prefix: &str) -> tempfile::TempDir {
         tempfile::Builder::new()
@@ -2673,6 +2770,254 @@ mod test {
             steps[1].step.status,
             TurnStepStatus::Running,
             "the call that was in flight when the host died reads as in flight"
+        );
+    }
+
+    /// **Issue #726, the headline**: a company whose data directory is destroyed
+    /// keeps its at-most-once set and its parked approvals, because the journal
+    /// lives in the storage backend rather than on the filesystem.
+    ///
+    /// This is the hosted failure, reproduced: on a mongodb tenant `/data` is
+    /// documented ephemeral scratch, so container replacement — a deploy, a
+    /// reschedule, a node drain, an OOM kill — takes `journal.jsonl` with it.
+    /// Before this change every effect that had already executed became eligible
+    /// to fire a second time and every parked approval, grant and standing grant
+    /// silently vanished. The `remove_dir_all` below IS that container
+    /// replacement.
+    #[tokio::test]
+    async fn a_backend_journal_survives_the_loss_of_the_whole_data_directory() {
+        use crate::ports::journal::MemoryJournalStore;
+        use crate::ports::types::EffectGroup;
+        use crate::runtime::journal::{ApprovalConversation, TaskLink};
+
+        let home = tmp_home("opencompany-journal-durability-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = CompanyId::new("acme");
+        // One sink, shared across both boots — the database that outlives the
+        // container, standing in for sqlite/mongodb so the proof holds in the
+        // default build rather than only behind a cargo feature.
+        let sink = Arc::new(MemoryJournalStore::default());
+        let approval = crate::ports::types::ApprovalId::new("ap-1");
+        let effect = crate::ports::types::Effect {
+            kind: "filing.submit".into(),
+            group: EffectGroup::Sign,
+            amount_usd: None,
+            established_thread: false,
+            first_time_counterparty: false,
+            payload: serde_json::Value::Null,
+            agent: None,
+            run_id: None,
+        };
+
+        // --- boot 1: an effect executes at most once, and an approval parks.
+        {
+            let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+                .with_id(id.clone())
+                .with_journal_store(sink.clone())
+                .build()
+                .await
+                .expect("first boot");
+            crate::runtime::cycle::execute_effect_once(&rt, "k", &effect, Some("t-1"))
+                .await
+                .expect("execute the effect once");
+            rt.journal
+                .record_parked(
+                    &approval,
+                    &effect,
+                    1_000,
+                    TaskLink::Task { id: "t-1".into() },
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .expect("park an approval");
+            assert!(rt.journal.is_executed("k"));
+        }
+
+        // --- the container is replaced: `/data` is gone, every byte of it.
+        std::fs::remove_dir_all(home.path()).expect("destroy the data directory");
+        assert!(
+            !Bundle::new(home.path().to_path_buf(), &id)
+                .journal_jsonl()
+                .exists(),
+            "the filesystem journal must really be gone for this to prove anything"
+        );
+
+        // --- boot 2: same backend, brand new (empty) data directory.
+        let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_journal_store(sink)
+            .build()
+            .await
+            .expect("second boot");
+
+        assert!(
+            rt.journal.is_executed("k"),
+            "the committed key must survive the container: without it the effect \
+             is eligible to fire a second time"
+        );
+        let pending = rt.journal.pending();
+        assert_eq!(pending.len(), 1, "the parked approval must survive too");
+        assert_eq!(
+            pending[0].id, approval,
+            "and with its original id, so the operator's console link still resolves"
+        );
+        assert_eq!(
+            pending[0].task,
+            Some(TaskLink::Task { id: "t-1".into() }),
+            "and still linked to the card it was parked for"
+        );
+    }
+
+    /// A company's journal file, as a previous host left it: `keys` committed in
+    /// order, at the bundle path the fs journal has always used.
+    async fn seed_filesystem_journal(home: &std::path::Path, id: &CompanyId, keys: &[&str]) {
+        let journal = RuntimeJournal::new(Bundle::new(home.to_path_buf(), id).journal_jsonl());
+        for (n, key) in keys.iter().enumerate() {
+            journal
+                .record_executed(
+                    key,
+                    ExecutedEffect {
+                        kind: "filing.submit".into(),
+                        amount_usd: None,
+                        task_id: Some("t-1".into()),
+                        at_millis: 1_000 + n as u64,
+                        irreversible: true,
+                    },
+                )
+                .await
+                .expect("seed a legacy journal line");
+        }
+    }
+
+    /// **Issue #726**: an existing filesystem journal is imported into the
+    /// backend exactly **once**, and the receipt is what makes the second boot a
+    /// no-op.
+    ///
+    /// The re-import is not a cosmetic inefficiency. `complete_import` clears
+    /// before it copies, so a second import would delete every key the backend
+    /// accumulated after the first one — un-committing effects that have already
+    /// run. The gate is the only thing standing between the migration and that.
+    #[tokio::test]
+    async fn a_filesystem_journal_is_imported_once_and_the_receipt_blocks_the_rest() {
+        use crate::ports::journal::MemoryJournalStore;
+
+        let home = tmp_home("opencompany-journal-import-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = CompanyId::new("acme");
+        seed_filesystem_journal(home.path(), &id, &["k-legacy"]).await;
+
+        let sink = Arc::new(MemoryJournalStore::default());
+        let legacy_path = Bundle::new(home.path().to_path_buf(), &id).journal_jsonl();
+
+        // --- boot 1: the file is imported, and left where it was.
+        {
+            let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest.clone())
+                .with_id(id.clone())
+                .with_journal_store(sink.clone())
+                .build()
+                .await
+                .expect("first boot");
+            assert!(
+                rt.journal.is_executed("k-legacy"),
+                "the pre-existing at-most-once key must reach the backend"
+            );
+            assert!(
+                legacy_path.exists(),
+                "the source file stays in place: a rollback to an older binary \
+                 must still find the history it knows how to read"
+            );
+            // A key committed after the migration — this is what a second import
+            // would destroy.
+            rt.journal
+                .record_executed(
+                    "k-after",
+                    ExecutedEffect {
+                        kind: "payment.send".into(),
+                        amount_usd: Some(12.0),
+                        task_id: Some("t-2".into()),
+                        at_millis: 2_000,
+                        irreversible: true,
+                    },
+                )
+                .await
+                .expect("commit a key against the backend");
+        }
+
+        // --- boot 2: the receipt is closed, so nothing is re-imported.
+        let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_journal_store(sink)
+            .build()
+            .await
+            .expect("second boot");
+        assert!(
+            rt.journal.is_executed("k-after"),
+            "a re-import would have cleared this key and re-armed an effect that \
+             has already run"
+        );
+        assert!(rt.journal.is_executed("k-legacy"));
+    }
+
+    /// **Issue #726**: an import interrupted between the copy and the receipt is
+    /// re-run whole, not resumed.
+    ///
+    /// A partial copy behind a closed gate is the bug the receipt exists to
+    /// prevent — it is a set of at-most-once keys that quietly went missing. So
+    /// the retry must **replace** what the interrupted attempt wrote rather than
+    /// append to it: no duplicates, and nothing from the source left behind.
+    #[tokio::test]
+    async fn an_import_interrupted_before_its_receipt_is_re_run_whole() {
+        use crate::ports::journal::{JournalStore, MemoryJournalStore};
+
+        let home = tmp_home("opencompany-journal-partial-");
+        let manifest: CompanyManifest = toml::from_str(
+            "[company]\nname = \"Acme\"\n[[agent]]\nid = \"ceo\"\nrole = \"Chief\"\n[policy]\nmode = \"full\"\n",
+        )
+        .expect("manifest");
+        let id = CompanyId::new("acme");
+        seed_filesystem_journal(home.path(), &id, &["k-0", "k-1", "k-2"]).await;
+
+        // A crash mid-import: the first line copied, the receipt never written.
+        let sink = Arc::new(MemoryJournalStore::default());
+        let source = crate::store::fs::read_lines_lossy(
+            &Bundle::new(home.path().to_path_buf(), &id).journal_jsonl(),
+        )
+        .await
+        .expect("read the source journal");
+        sink.complete_import(&id, vec![source[0].clone()])
+            .await
+            .expect("a partial copy");
+        sink.forget_receipt(&id);
+
+        let rt = RuntimeBuilder::new(home.path().to_path_buf(), manifest)
+            .with_id(id.clone())
+            .with_journal_store(sink.clone())
+            .build()
+            .await
+            .expect("boot after the interrupted import");
+
+        for key in ["k-0", "k-1", "k-2"] {
+            assert!(
+                rt.journal.is_executed(key),
+                "{key} must be present after the retry: a resumed-rather-than-restarted \
+                 import is how at-most-once keys go missing"
+            );
+        }
+        assert_eq!(
+            sink.read_journal(&id).await.expect("read back").len(),
+            3,
+            "the retry replaces the partial copy; it must not append a second one"
+        );
+        assert!(
+            sink.journal_imported(&id).await.expect("gate"),
+            "and the retry closes the gate"
         );
     }
 
