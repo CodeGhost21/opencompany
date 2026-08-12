@@ -1242,6 +1242,15 @@ mod tests {
             standing_scope_of(WEB_FETCH, &fetching("https://a@b@evil.example/x")),
             Some("https://evil.example".to_string())
         );
+        // A backslash is a path separator per WHATWG, so it terminates the
+        // authority exactly as `/` does. Without this split the URL would read
+        // `docs.rs` as the host and let `evil.example` satisfy a grant minted
+        // for `docs.rs` — the userinfo trap re-opened through a delimiter this
+        // split never handled.
+        assert_eq!(
+            standing_scope_of(WEB_FETCH, &fetching("https://evil.example\\@docs.rs/x")),
+            Some("https://evil.example".to_string())
+        );
     }
 
     /// The host key is exact. Neither a suffix nor a subdomain of a granted host
