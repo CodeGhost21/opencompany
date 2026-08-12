@@ -5,27 +5,31 @@
 //! ## The credential never becomes an argument or a variable
 //!
 //! A token handed to `git` the obvious ways is readable by anything running as
-//! the same user for as long as the fetch lasts: `/proc/<pid>/cmdline` for an
-//! argument, `/proc/<pid>/environ` for an environment variable, and the file
-//! itself forever for a persisted `credential.helper` or a URL with userinfo in
-//! it. So none of those are used. [`run`] spawns `git` with a
+//! the same user for as long as the call lasts: `/proc/<pid>/cmdline` for an
+//! argument, `/proc/<pid>/environ` for an environment variable, and a persisted
+//! `credential.helper` or a URL with userinfo would leave it lying around long
+//! after. So none of those are used. [`run`] spawns `git` with a
 //! [`GIT_ASKPASS`](https://git-scm.com/docs/git#Documentation/git.txt-codeGITASKPASScode)
-//! helper — a fixed six-line script containing no secret — and writes the token
-//! into the child's **stdin**, which is an anonymous pipe. The helper reads one
-//! line from it and prints it back to `git`. The bytes exist in a pipe buffer
-//! and in two process memories, and nowhere else: not in argv, not in the
-//! environment, not on disk, not in any git config.
+//! helper — a fixed script containing no secret — and puts the token in a
+//! **0600 file inside a 0700 directory this process owns and unlinks on drop**
+//! (the helper's own `$HOME`). The helper reads that file on each prompt and
+//! prints the token back to `git`. The bytes are never in argv, never in the
+//! environment, never in any git config, and never in a URL — the surfaces that
+//! leak to other processes or outlive the call. They are on disk, briefly, in a
+//! private per-invocation file that is removed the moment the call returns.
 //!
 //! Two deliberate details:
 //!
-//! * **stdin, rather than a dedicated inherited descriptor.** Passing `git` an
-//!   extra open descriptor means `pre_exec` and a `dup2`, i.e. `unsafe` plus a
-//!   new `libc` dependency, to obtain a pipe with exactly the properties stdin
-//!   already has. The commands run here (`init`, `remote`, `config`,
-//!   `ls-remote`, `fetch`) read nothing from stdin, so it is free, and the
-//!   helper inherits it because `git` passes its own stdio through.
-//! * **`printf`/`echo` are shell builtins.** The helper never passes the token
-//!   to an external program, which would put it back in an argv.
+//! * **A file the helper re-reads, not a one-shot stdin pipe (issue #796).** A
+//!   `git push` authenticates twice — the ref-advertisement probe and the pack
+//!   upload — so `git` invokes the helper for the password more than once. The
+//!   token used to travel on the child's stdin, which held it once: the second
+//!   prompt read EOF and `git-remote-https`, with the OS keychain deliberately
+//!   disabled here, stalled to the network timeout instead of failing. A file
+//!   answers every prompt. A fetch authenticates once, which is why it never
+//!   showed the bug.
+//! * **`cat`/`echo` are POSIX utilities/builtins.** The helper never passes the
+//!   token to a program that would put it back in an argv.
 //!
 //! Honest limit, restated because it is easy to oversell this: the agent shell
 //! and this fetch run as the same user in the same container. This closes the
@@ -48,8 +52,6 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-
-use tokio::io::AsyncWriteExt;
 
 use crate::Result;
 use crate::error::OpenCompanyError;
@@ -74,18 +76,32 @@ const TOKEN_USERNAME: &str = "x-access-token";
 /// repository over a slow link; finite, which is the point.
 const GIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
-/// The askpass helper. Contains no credential: the password branch reads one
-/// line from stdin, which the parent wrote the token into.
+/// The askpass helper. Contains no credential: the password branch reads the
+/// token from a 0600 file the parent wrote into this helper's own private
+/// `$HOME`, so it can answer the SAME prompt more than once (issue #796).
 ///
-/// `read` and `echo` are POSIX shell builtins, so the token never appears in
-/// any process's argument list. GitHub tokens are `[A-Za-z0-9_]` only, so
-/// `echo` cannot mangle one.
+/// # Why a file and not stdin
+///
+/// A `git push` authenticates **twice** — the ref-advertisement probe
+/// (`GET …/info/refs`) and then the pack upload (`POST …/git-receive-pack`) —
+/// so git invokes this helper for the password more than once. The token was
+/// fed down stdin, a one-shot anonymous pipe: it answered the first prompt and
+/// EOF'd the second, and `git-remote-https`, handed no password and with the OS
+/// keychain deliberately disabled here, **stalled until the network timeout**
+/// rather than failing. That is exactly why the write tier's push hung for
+/// 300s. A file the helper re-reads answers every prompt. (A fetch survives on
+/// one answer, which is why it never showed the bug.)
+///
+/// The token lives only in a 0600 file inside a 0700 directory this process
+/// owns and deletes on drop, and `cat`/`echo` are POSIX built-ins so it still
+/// never reaches any process's argument list.
 const ASKPASS_SCRIPT: &str = r#"#!/bin/sh
-# Answers git's credential prompts for an OpenCompany host-side fetch.
-# Holds no secret: the password is read from stdin, an anonymous pipe.
+# Answers git's credential prompts for an OpenCompany host-side call.
+# The password is read from a 0600 file in this helper's own $HOME, so the same
+# prompt can be answered more than once (a push authenticates twice).
 case "$1" in
   Username*|username*) echo "x-access-token" ;;
-  *) IFS= read -r secret || exit 1; echo "$secret" ;;
+  *) cat "$HOME/token" 2>/dev/null || exit 1 ;;
 esac
 "#;
 
@@ -172,6 +188,29 @@ impl AskpassDir {
     /// The helper script's path, for `GIT_ASKPASS`.
     fn script(&self) -> PathBuf {
         self.path.join("askpass.sh")
+    }
+
+    /// Writes the token the helper answers with into a 0600 file in this
+    /// directory — the child's `$HOME`, where the script reads `$HOME/token`
+    /// (issue #796).
+    ///
+    /// Called once, before the child is spawned, so the helper can be re-invoked
+    /// within a single git call (a push asks for the password twice) and answer
+    /// every time. Overwrites any prior file; the whole directory is removed on
+    /// drop.
+    fn write_token(&self, token: &str) -> Result<()> {
+        let path = self.path.join("token");
+        let mut line = String::with_capacity(token.len() + 1);
+        line.push_str(token);
+        line.push('\n');
+        std::fs::write(&path, line).map_err(|e| {
+            OpenCompanyError::Store(format!(
+                "writing the git credential {}: {e}",
+                path.display()
+            ))
+        })?;
+        set_mode(&path, 0o600)?;
+        Ok(())
     }
 }
 
@@ -327,31 +366,26 @@ async fn run_bounded(
     // `git-remote-https` helper running, still holding the credential.
     cmd.kill_on_drop(true);
 
+    // The credential the askpass helper answers with, written to its private
+    // `$HOME` as a 0600 file BEFORE git runs (issue #796). git may invoke the
+    // helper more than once for a single call — a push authenticates twice — so
+    // a file answers every prompt, where the old one-shot stdin pipe EOF'd the
+    // second prompt and hung the push until the network timeout. The token is
+    // not on the argument list, not in the environment, and gone when the
+    // `AskpassDir` drops.
+    if let (Some(dir), Some(token)) = (askpass, token) {
+        dir.write_token(token)?;
+    }
+
     let mut child = cmd.spawn().map_err(|e| {
         OpenCompanyError::Store(format!(
             "could not run git (is it installed on this host?): {e}"
         ))
     })?;
 
-    // The token goes down the pipe before anything is awaited. It is a few
-    // dozen bytes against a pipe buffer measured in kilobytes, so this cannot
-    // block, and closing the pipe afterwards is what lets the helper's `read`
-    // terminate if git never asks.
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Some(token) = token {
-            let mut line = String::with_capacity(token.len() + 1);
-            line.push_str(token);
-            line.push('\n');
-            let write = stdin.write_all(line.as_bytes()).await;
-            // Deliberately not `?`: a git that exited before reading its stdin
-            // gives a broken pipe here, and its own exit status is the better
-            // error to report.
-            if let Err(err) = write {
-                tracing::debug!("git stdin closed before the credential was written: {err}");
-            }
-        }
-        drop(stdin);
-    }
+    // Close the child's stdin so a git that reads it sees EOF at once rather
+    // than blocking on input that no longer carries the credential.
+    drop(child.stdin.take());
 
     let output = match tokio::time::timeout(limit, child.wait_with_output()).await {
         Ok(result) => {
@@ -382,50 +416,40 @@ mod test {
         // The script is written verbatim to disk and executed. If a future edit
         // ever interpolates a token into it, this is the line that objects.
         assert!(!ASKPASS_SCRIPT.contains("{}"), "no interpolation");
-        assert!(ASKPASS_SCRIPT.contains("read -r secret"));
+        // The password comes from the token file the parent writes (issue #796),
+        // never from the argv or the script body.
+        assert!(ASKPASS_SCRIPT.contains("cat \"$HOME/token\""));
         assert!(ASKPASS_SCRIPT.contains(TOKEN_USERNAME));
     }
 
     #[tokio::test]
-    async fn the_helper_emits_the_token_once_and_the_username_without_consuming_it() {
-        // Drives the helper exactly as git does — two separate invocations
-        // sharing one stdin pipe — and proves the username answer does not eat
-        // the password line.
+    async fn the_helper_answers_the_password_from_its_file_on_every_prompt() {
+        // Issue #796: git asks the helper for the password more than once for a
+        // single push. Prove the file-backed helper answers each time — where the
+        // old one-shot stdin pipe answered once and hung the second — and that
+        // the username answer is a fixed literal, not the token.
         let base = std::env::temp_dir().join(format!("oc-askpass-{}", std::process::id()));
         std::fs::create_dir_all(&base).unwrap();
         let dir = AskpassDir::create(&base).unwrap();
+        dir.write_token("SENTINEL").unwrap();
         let script = dir.script();
+        let home = dir.path.clone();
 
         let run_helper = |prompt: &str| {
             let script = script.clone();
+            let home = home.clone();
             let prompt = prompt.to_string();
             async move {
-                let mut child = tokio::process::Command::new(&script)
+                let out = tokio::process::Command::new(&script)
                     .arg(&prompt)
-                    .stdin(Stdio::piped())
+                    // The helper reads its token from `$HOME/token`, exactly as
+                    // git spawns it (`SpawnPlan` sets `HOME` to the helper's dir).
+                    .env("HOME", &home)
+                    .stdin(Stdio::null())
                     .stdout(Stdio::piped())
-                    .spawn()
+                    .output()
+                    .await
                     .unwrap();
-                let mut stdin = child.stdin.take().unwrap();
-                // The username invocation answers a fixed literal *without*
-                // reading stdin — the very property this test exists to prove —
-                // so the helper can exit before this write lands and the pipe
-                // is already closed. `run_git` tolerates the same `EPIPE`
-                // deliberately for the same reason; a test that unwraps here
-                // passes only where the pipe buffer happens to win the race
-                // (macOS) and fails where the child does (Linux CI).
-                //
-                // Still asserted, not swallowed: any error other than a broken
-                // pipe is a real failure.
-                if let Err(err) = stdin.write_all(b"SENTINEL\n").await {
-                    assert_eq!(
-                        err.kind(),
-                        std::io::ErrorKind::BrokenPipe,
-                        "writing the credential failed for a reason other than the helper having already exited: {err}"
-                    );
-                }
-                drop(stdin);
-                let out = child.wait_with_output().await.unwrap();
                 String::from_utf8_lossy(&out.stdout).trim().to_string()
             }
         };
@@ -435,11 +459,15 @@ mod test {
             TOKEN_USERNAME,
             "the username answer is a fixed literal, not the token"
         );
-        assert_eq!(
-            run_helper("Password for 'https://x-access-token@github.com': ").await,
-            "SENTINEL",
-            "the password answer is the line read off stdin"
-        );
+        // The password prompt, answered TWICE from the file — the property the
+        // fix restores (a push authenticates twice).
+        for _ in 0..2 {
+            assert_eq!(
+                run_helper("Password for 'https://x-access-token@github.com': ").await,
+                "SENTINEL",
+                "the password is read from the helper's token file, every time"
+            );
+        }
 
         drop(dir);
         std::fs::remove_dir_all(&base).ok();
