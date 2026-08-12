@@ -24,12 +24,18 @@ export { ProxyTransport } from "./proxy";
  * which is exactly how a shared codebase quietly stops being shared.
  *
  * Probes `__TAURI__` — the global that `app.withGlobalTauri` in `tauri.conf.json`
- * injects — because that is the very object `bridge()` reads in `proxy.ts`.
- * Tauri v2 always injects the lower-level `__TAURI_INTERNALS__`, but only the
- * `withGlobalTauri` global carries `invoke` and `Channel`; a probe and a reader
- * that looked at different globals would select the desktop transport in an
+ * injects — because that is the very object `tauriCore()` reads. Tauri v2 always
+ * injects the lower-level `__TAURI_INTERNALS__`, but only the `withGlobalTauri`
+ * global carries `core.invoke` and `core.Channel`; a probe and a reader that
+ * looked at different globals would select the desktop transport in an
  * environment where it cannot bridge. Also probed defensively because this runs
  * under Vitest's `node` environment, where `window` does not exist at all.
+ *
+ * Presence, not shape — `tauriCore()` is what knows the shape, and the split is
+ * deliberate. A `__TAURI__` whose `core.invoke` does not resolve is a broken
+ * desktop rather than a browser, and `ProxyTransport` saying so beats
+ * `BrowserTransport` quietly failing CORS against every host
+ * ([#616](https://github.com/tinyhumansai/opencompany/issues/616)).
  */
 export function isDesktopRuntime(): boolean {
   return typeof window !== "undefined" && "__TAURI__" in window;

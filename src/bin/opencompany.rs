@@ -283,6 +283,11 @@ fn company_builder(
     .with_default_mcp_servers(state.config().default_mcp_servers.clone())
     .with_host_base_url(state.config().host_base_url())
     .with_workspace_quota(state.config().workspace_quota)
+    // Issue #752: the backend that serves this host's secrets, which the
+    // repository-credential gates refuse on. Threaded through `company_builder`
+    // rather than read from the environment further down, so a rebuild gets the
+    // same answer boot got.
+    .with_storage_kind(state.storage_kind())
     // Issue #661 / M8: the deployment's standing bootstrap admin, normalized,
     // so a fresh tenant's `owner` report reaches its creator before that first
     // sign-in mints a user record. `None` (self-hosted, no injected address) is
@@ -880,8 +885,26 @@ async fn run_openhuman(
     std::process::exit(status.code().unwrap_or(1));
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(feature = "openhuman")]
+const WORKER_STACK_BYTES: usize = openhuman_core::core::runtime::AGENT_WORKER_STACK_BYTES;
+#[cfg(not(feature = "openhuman"))]
+const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+#[cfg(feature = "openhuman")]
+const MAX_BLOCKING_THREADS: usize = openhuman_core::core::runtime::MAX_BLOCKING_THREADS;
+#[cfg(not(feature = "openhuman"))]
+const MAX_BLOCKING_THREADS: usize = 512;
+
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();

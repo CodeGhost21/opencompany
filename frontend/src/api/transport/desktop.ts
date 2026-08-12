@@ -23,10 +23,7 @@
 // from holding more than one host, and a convenience default here would
 // reintroduce it above the seam instead of below it.
 
-/** The Tauri entry points this module uses. */
-interface DesktopBridge {
-  invoke<T>(command: string, args?: Record<string, unknown>): Promise<T>;
-}
+import { tauriCore } from "./bridge";
 
 /** What `oc_embedded` answers with. Mirrors `EmbeddedInfo` in Rust. */
 export interface EmbeddedInfo {
@@ -42,6 +39,15 @@ export interface EmbeddedInfo {
    * behaviour rather than to a connection keyed on `undefined`.
    */
   instanceId?: string;
+  /**
+   * The address this host will sign a person in as (#632).
+   *
+   * A desktop install has one standing admin and no mail transport, so nobody
+   * could guess what to type and every other address gets the same silent
+   * acknowledgement. Optional for the same reason as `instanceId`: an older
+   * shell does not send it, and a blank sign-in form is the honest degrade.
+   */
+  operatorEmail?: string;
 }
 
 /**
@@ -63,12 +69,6 @@ export interface PairedDevice {
   expiresAtMillis: number;
 }
 
-function bridge(): DesktopBridge | null {
-  if (typeof window === "undefined") return null;
-  const found = (window as { __TAURI__?: DesktopBridge }).__TAURI__;
-  return typeof found?.invoke === "function" ? found : null;
-}
-
 /** Connections the core has been told about, by id. */
 const registrations = new Map<string, Promise<void>>();
 
@@ -87,7 +87,7 @@ export function registerConnection(
   baseUrl: string,
   credential: DesktopCredential = {},
 ): Promise<void> {
-  const desktop = bridge();
+  const desktop = tauriCore();
   if (!desktop) return Promise.resolve();
 
   // Chained onto whatever is already parked under this id, in both directions.
@@ -130,7 +130,7 @@ export function registerConnection(
  * it up front is what dropped the ordering in the first place.
  */
 export function forgetConnection(id: string): void {
-  const desktop = bridge();
+  const desktop = tauriCore();
   if (!desktop) {
     registrations.delete(id);
     return;
@@ -174,7 +174,7 @@ export function connectionReady(id: string): Promise<void> {
  * the desktop is that it can talk to remote hosts too.
  */
 export async function embeddedHost(): Promise<EmbeddedInfo | null> {
-  const desktop = bridge();
+  const desktop = tauriCore();
   if (!desktop) return null;
   try {
     return (await desktop.invoke<EmbeddedInfo | null>("oc_embedded")) ?? null;
@@ -199,7 +199,7 @@ export async function pairDevice(
   code: string,
   label?: string,
 ): Promise<PairedDevice> {
-  const desktop = bridge();
+  const desktop = tauriCore();
   if (!desktop) throw new Error("pairing a device needs the desktop application");
   return desktop.invoke<PairedDevice>("oc_pair_device", {
     connectionId: id,
@@ -217,7 +217,7 @@ export async function pairDevice(
  * laptop cut off another.
  */
 export async function forgetDevice(id: string): Promise<void> {
-  await bridge()?.invoke("oc_forget_device", { connectionId: id });
+  await tauriCore()?.invoke("oc_forget_device", { connectionId: id });
 }
 
 /** Test seam: forget every registration. */

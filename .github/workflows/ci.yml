@@ -126,8 +126,9 @@ jobs:
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           # tinycortex declares its own `tinyagents` path dependency, so its
           # manifest must resolve too. Harmless for the default build; required
           # for any `--features openhuman` build.
@@ -356,8 +357,9 @@ jobs:
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
             vendor/tinyagents
 
@@ -431,6 +433,11 @@ jobs:
     name: Rust (openhuman, tinycortex)
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # OpenHuman's agent loop requires the same stack its production runtimes
+      # allocate. Apply it to every test invocation in this multi-feature job;
+      # Rust's test harness otherwise creates 2 MiB threads.
+      RUST_MIN_STACK: 16777216
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -438,15 +445,15 @@ jobs:
           submodules: true
 
       # Identical to the `rust` job's init, and for the same reason: `submodules:
-      # true` is not recursive. Keep it targeted — a plain `--recursive` over
-      # `vendor/openhuman` additionally drags in the desktop-only `tauri-cef`
-      # tree, which nothing in this build touches. See that job for why
-      # `tinyhumans-sdk` is in the list despite having no `[patch]` entry.
+      # true` is not recursive. Keep it targeted to the crate submodules named
+      # by OpenHuman's manifest; see the rust job for why `tinyhumans-sdk` is in
+      # the list despite having no `[patch]` entry.
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           # tinycortex declares its own `tinyagents` path dependency, so its
           # manifest must resolve too. Harmless for the default build; required
           # for any `--features openhuman` build.
@@ -781,6 +788,16 @@ jobs:
       # the failure as one. See docs/design-system/README.md.
       - run: ./scripts/ci/assert-design-tokens.sh
 
+      # The 500-line Markdown cap, asserted rather than trusted (issue #695).
+      #
+      # `CLAUDE.md` has stated the rule since the beginning and nothing measured
+      # it, so three files drifted past — one to 699 lines — a paragraph at a
+      # time. Same family as the check above: a policy grep, no toolchain
+      # needed, and a separate step so a failure is named as a policy failure
+      # rather than a build one. It rides the Console job because that job is
+      # Node-only and cheap; the rule itself is repository-wide.
+      - run: ./scripts/ci/assert-md-line-cap.sh
+
       # No lint step: the package declares no lint script. Adding one is a
       # separate decision, not something to smuggle in here.
 
@@ -990,8 +1007,9 @@ jobs:
       - name: Init vendored openhuman crate submodules
         run: |
           git -C vendor/openhuman submodule update --init --depth 1 \
-            vendor/tinyflows vendor/tinycortex vendor/tinyjuice \
-            vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
+            vendor/tinyagents vendor/tinybus vendor/tinyflows vendor/tinycortex \
+            vendor/tinydocs vendor/tinymemory vendor/tinywallet \
+            vendor/tinyjuice vendor/tinychannels vendor/tinyplace vendor/tinyhumans-sdk
           git -C vendor/openhuman/vendor/tinycortex submodule update --init --depth 1 \
             vendor/tinyagents
 
@@ -1021,7 +1039,9 @@ jobs:
 
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          workspaces: src-tauri
+          workspaces: |
+            src-tauri
+            frontend/src-tauri
 
       - name: Format
         run: cargo fmt --manifest-path src-tauri/Cargo.toml --all -- --check
@@ -1035,3 +1055,75 @@ jobs:
       # here rather than absorbed — the desktop keeps its own `Cargo.lock`.
       - name: Test
         run: cargo test --manifest-path src-tauri/Cargo.toml --locked
+
+      # The console's Tauri wrapper is also an independent workspace. It used
+      # to inherit the root workspace metadata and lockfile, but OpenHuman now
+      # contains nested workspaces of its own, so keeping it independent is
+      # what lets Cargo compose the current vendored graph.
+      - name: Format console desktop wrapper
+        run: cargo fmt --manifest-path frontend/src-tauri/Cargo.toml --all -- --check
+
+      - name: Clippy console desktop wrapper
+        run: cargo clippy --manifest-path frontend/src-tauri/Cargo.toml --locked --all-targets --no-deps -- -D warnings
+
+      - name: Test console desktop wrapper
+        run: cargo test --manifest-path frontend/src-tauri/Cargo.toml --locked
+
+      # Everything above proves the desktop crate COMPILES. Nothing above proves
+      # it PACKAGES, and those are different claims: the steps above drive
+      # `cargo` directly and build the console themselves with
+      # `working-directory: frontend`, so `tauri.conf.json` — the file that says
+      # how the app is actually assembled — was read by nothing in this lane.
+      #
+      # It was wrong for the whole life of the split. `beforeBuildCommand` named
+      # `../frontend`, which escapes the repository from the directory Tauri ran
+      # the hook in, so `cargo tauri build` and `cargo tauri dev` failed on their
+      # first step for every developer while this lane stayed green (issue #616).
+      # A lane that never invokes the packaging entry point makes the first real
+      # launch the integration test.
+      #
+      # The console is built by the `npm run build` step above rather than by a
+      # `beforeBuildCommand`, and that is now load-bearing: Tauri runs that hook
+      # from a directory it DERIVES, by scanning for a `package.json`, and which
+      # one it picks is not stable. On a developer's macOS checkout it lands in
+      # `frontend/`; on this runner it landed in `vendor/openhuman/` — also a
+      # directory with a `package.json`, reached first because the filesystems
+      # enumerate in different orders. No relative path is correct from both, and
+      # neither is `$(git rev-parse --show-toplevel)`, which answers with the
+      # SUBMODULE's root once the hook lands inside one. So there is no hook: the
+      # console is built explicitly, before packaging, by a step whose working
+      # directory this file states outright. `frontendDist` stays relative to
+      # `src-tauri/`, which is where `tauri.conf.json` lives and is therefore the
+      # one path here that cannot drift.
+      #
+      # `--debug`, not a release build: this step exists to execute the config
+      # and link a binary, and the `Test` step above already compiled that graph
+      # in the dev profile. A release build would recompile the host from
+      # scratch — minutes, for no claim this step is making.
+      #
+      # `--no-bundle` for the same reason. Bundling produces a `.deb`/AppImage
+      # this job would only delete; the failure being gated is the one that
+      # happens before any of that, at the first step of `tauri build`.
+      #
+      # The CLI comes from `frontend/node_modules` — `npm ci` above already
+      # installed `@tauri-apps/cli`, so this costs nothing, where
+      # `cargo install tauri-cli` would compile the CLI from source.
+      #
+      # BOTH directories, because a packaging step that runs from exactly one is
+      # how #616 stayed invisible: every other step in this lane runs from the
+      # repository root, which is the one place the broken hook happened to work.
+      # Nothing cwd-dependent is left to gate today, so what these two now defend
+      # is that nothing cwd-dependent comes BACK — a reintroduced relative hook
+      # fails one of them whichever direction it is wrong in. The second run is
+      # nearly free: same profile, same cache, everything already built.
+      #
+      # These two and no others: the CLI finds a project by searching SUBFOLDERS
+      # of the working directory rather than ancestors, so from `frontend/` it
+      # would package the console wrapper above instead — a different app that
+      # happens to share this one's `productName`.
+      - name: Package (from the repository root)
+        run: ./frontend/node_modules/.bin/tauri build --debug --no-bundle
+
+      - name: Package (from src-tauri)
+        working-directory: src-tauri
+        run: ../frontend/node_modules/.bin/tauri build --debug --no-bundle

@@ -20,6 +20,10 @@ Supporting docs:
   - [ports-console.md](ports-console.md) — the WS3 console-surface stores
   - [ports-runs.md](ports-runs.md) — `RunStore`: one attempt at a task, its
     trace, and who writes it
+  - [journal.md](journal.md) — `JournalStore`: the runtime journal's durable
+    sink (at-most-once effect keys, parked approvals, grants, cycle brackets),
+    the per-backend shapes, and the one-time receipt-gated import off the old
+    `journal.jsonl` (issue #726)
 - [storage.md](storage.md) — how a backend is chosen at boot, the shipped
   backends, and the conformance suite that pins them to identical answers
   - [workspace-layout.md](workspace-layout.md) — the on-disk layout inside the
@@ -68,6 +72,10 @@ Supporting docs:
   credential reaches git without entering argv, the environment or any file, the
   alternates-not-hardlinks and refuse-not-evict departures, and the honest limit
   of same-user confinement
+- [../security/agent-isolation.md](../security/agent-isolation.md) — the threat
+  model behind that limit: what confines an agent today, what does not, and what
+  a prompt-injected agent with `shell` can still do after every planned control
+  lands
 - [users.md](users.md) — human collaborators: magic-link/password sign-in,
   sessions, invites, and chat attribution
 

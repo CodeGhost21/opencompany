@@ -221,6 +221,7 @@ function Console() {
         id: host
           ? adoptEmbeddedHost({ baseUrl: host.baseUrl, instanceId: host.instanceId })
           : null,
+        operatorEmail: host?.operatorEmail,
       });
     });
     return () => {
@@ -415,6 +416,12 @@ function Console() {
             defaultCompany={active.defaultCompany}
             notice={active.id === bootstrapId ? auth.notice : undefined}
             forceLogin={active.id === bootstrapId && auth.failed === true}
+            // Only ever the embedded host's own operator. Offering it on a
+            // remote connection would put a local address in front of someone
+            // signing in to a server that has never heard of it.
+            suggestedEmail={
+              active.id === embedded.id ? embedded.operatorEmail : undefined
+            }
           />
         ) : (
           <NoConnection starting={!embedded.resolved} />
@@ -430,6 +437,17 @@ interface EmbeddedState {
   resolved: boolean;
   /** The connection it became, or `null` when there is no embedded host. */
   id: ConnectionId | null;
+  /**
+   * The address that host signs a person in as (#632).
+   *
+   * Held here rather than on the connection because it is a fact about the host
+   * running *inside this application* — the one host this client starts itself
+   * and can therefore be told about without asking. A remote host has no such
+   * answer, and offering it one would be inventing an address.
+   *
+   * Absent on a shell predating the field, exactly as `instanceId` is.
+   */
+  operatorEmail?: string;
 }
 
 function FullScreen({ children }: { children: React.ReactNode }) {

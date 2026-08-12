@@ -117,15 +117,16 @@ record means no effect, so the failure cannot produce the duplicate it guards
 against. The flush is never retried, because a failed `fsync` may already have
 dropped the dirty pages and a retry would report success over lost data.
 
-**This guarantee is bounded by the volume underneath.** The journal is built on
-the filesystem path unconditionally, outside the storage ports, so a hosted
-tenant whose `/data` is ephemeral scratch — the documented arrangement under
-`OPENCOMPANY_STORAGE=mongodb`, see
-[storage.md](storage.md) — loses its journal to a container replacement and
-gains nothing from these flushes. Where the data directory is a real volume (the
-reference ECS deployment mounts EFS at `/data`, whose NFS client page cache is
-exactly what `sync_data` forces through) the flush buys real durability. Moving
-the journal behind the ports is tracked separately as issue #726.
+**The volume underneath used to bound this guarantee, and no longer does**
+(issue #726). The journal was built on the filesystem path unconditionally,
+outside the storage ports, so a hosted tenant whose `/data` is ephemeral scratch
+— the documented arrangement under `OPENCOMPANY_STORAGE=mongodb` — lost its
+journal to a container replacement and gained nothing from these flushes. The
+sink is now a port (`JournalStore`), selected from the same backend handles as
+every other durable store, and the two levels above travel through it: the fs
+backend answers them with `sync_data` and a flushed directory chain, sqlite with
+`synchronous=FULL` against `NORMAL`, mongodb with a `j:true` write concern
+against the default. See [journal.md](journal.md).
 
 ## The fs bundle (default store)
 

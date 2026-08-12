@@ -218,6 +218,27 @@ impl UserStore for FsOps {
         write_atomic(&path, &serde_json::to_string(&invites)?).await
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let path = self.bundle(company).user_invites_json();
+        // The same lock `delete_invite` takes, which is what makes the
+        // read-modify-write atomic against a concurrent revocation rather than
+        // merely unlikely to race with one.
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut invites = load_json_vec::<InviteRecord>(&path).await?;
+        let Some(existing) = invites.iter_mut().find(|i| i.id == id) else {
+            return Ok(false);
+        };
+        existing.notified_at_millis = Some(at_millis);
+        write_atomic(&path, &serde_json::to_string(&invites)?).await?;
+        Ok(true)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let path = self.bundle(company).user_invites_json();
         let lock = path_lock(&path);
@@ -981,6 +1002,78 @@ impl SkillStateStore for FsOps {
         }
         write_atomic(&path, &serde_json::to_string(&states)?).await?;
         Ok(true)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+/// One stored marker. The user is part of the row rather than the file name, so
+/// the whole company's markers stay one readable document.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct StoredRead {
+    user_id: String,
+    channel_id: String,
+    last_read_at: i64,
+}
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for FsOps {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let rows = load_json_vec::<StoredRead>(&self.bundle(company).read_state_json()).await?;
+        let mut out: Vec<_> = rows
+            .into_iter()
+            .filter(|r| r.user_id == user)
+            .map(|r| crate::ports::read_state::ChannelRead {
+                channel_id: r.channel_id,
+                last_read_at: r.last_read_at,
+            })
+            .collect();
+        out.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.read_state_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut rows = load_json_vec::<StoredRead>(&path).await?;
+        // Monotonic, as the port promises — see `ReadStateStore::mark`.
+        let settled = match rows
+            .iter_mut()
+            .find(|r| r.user_id == user && r.channel_id == channel_id)
+        {
+            Some(existing) => {
+                existing.last_read_at = existing.last_read_at.max(at);
+                existing.last_read_at
+            }
+            None => {
+                rows.push(StoredRead {
+                    user_id: user.to_string(),
+                    channel_id: channel_id.to_string(),
+                    last_read_at: at,
+                });
+                at
+            }
+        };
+        write_atomic(&path, &serde_json::to_string(&rows)?).await?;
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
     }
 }
 
@@ -1998,6 +2091,13 @@ mod test {
         let root_dir = tmp_root();
         let root = root_dir.path().to_path_buf();
         conformance::assert_skill_state_store(Arc::new(FsOps::new(&root))).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_read_state_store() {
+        let root_dir = tmp_root();
+        let root = root_dir.path().to_path_buf();
+        conformance::assert_read_state_store(Arc::new(FsOps::new(&root))).await;
     }
 
     #[tokio::test]

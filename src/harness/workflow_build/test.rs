@@ -658,6 +658,215 @@ async fn an_operator_move_mid_build_is_discarded() {
     assert_eq!(run_status(&runtime, &run_id).await, RunStatus::Cancelled);
 }
 
+// ---------------------------------------------------------------------------
+// Create-time copilot (issue #753)
+// ---------------------------------------------------------------------------
+
+/// A drafter answer whose graph carries a model-chosen id and per-node approval
+/// gating — both of which the host overrides — plus a real roster agent.
+const DESC_GRAPH: &str = r#"{"automatable":true,"summary":"email the weekly digest",
+    "workflow":{"id":"the-model-should-not-pick-this","name":"Weekly digest",
+        "nodes":[{"id":"start","kind":"trigger","name":"Every Monday","schedule":"0 9 * * 1","requires_approval":true},
+                 {"id":"draft","kind":"agent","name":"Draft","agent":"maya","requires_approval":false}],
+        "edges":[{"from":"start","to":"draft"}]}}"#;
+
+/// Seeds a real overlay workflow through the create path, so the drafter's host
+/// authority has something to dedup an id and name against.
+async fn seed_workflow(runtime: &Arc<CompanyRuntime>, id: &str, name: &str) {
+    let spec: WorkflowGraphSpec = serde_json::from_value(serde_json::json!({
+        "id": id,
+        "name": name,
+        "nodes": [
+            { "id": "start", "kind": "trigger", "name": "Start" },
+            { "id": "done", "kind": "output", "name": "Report" }
+        ],
+        "edges": [{ "from": "start", "to": "done" }]
+    }))
+    .unwrap();
+    let raw = raw_workflow_from_spec(&spec).unwrap();
+    crate::company::create_company_workflow(
+        runtime.id(),
+        runtime.source_dir(),
+        runtime.store(),
+        Some(runtime.events()),
+        raw,
+    )
+    .await
+    .expect("seed workflow");
+}
+
+/// The happy path: an operator's description drafts a graph, and the host owns
+/// the id, the display name and the approval gating — the model's choices for
+/// all three are overridden — while the schedule it authored survives. The
+/// drafted id/name dedup against a workflow that already exists.
+#[tokio::test]
+async fn a_description_drafts_a_graph_under_host_authority() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
+    seed_workflow(&runtime, "weekly-digest", "Weekly digest").await;
+
+    let outcome = draft_workflow_from_description(&runtime, "email the weekly digest every Monday")
+        .await
+        .expect("the drafter runs");
+    let (summary, spec) = match outcome {
+        DescriptionDraftOutcome::Graph { summary, spec } => (summary, spec),
+        DescriptionDraftOutcome::NotAutomatable(reason) => panic!("expected a graph: {reason}"),
+    };
+    assert!(summary.contains("digest"));
+    // The host mints the id (ignoring the model's) and dedups it against the seed.
+    assert_eq!(spec.id, "weekly-digest-2");
+    // …and the display name, case-insensitively, the same way.
+    assert_eq!(spec.name, "Weekly digest 2");
+    // Approval gating is the host's: both the model's `true` and `false` are gone.
+    assert!(spec.nodes.iter().all(|n| n.requires_approval.is_none()));
+    // The schedule the model authored survives into the drafted spec.
+    assert_eq!(spec.nodes[0].schedule.as_deref(), Some("0 9 * * 1"));
+}
+
+/// A not-automatable answer passes its reason straight through — the copilot
+/// never forces a workflow the model judged a one-off.
+#[tokio::test]
+async fn a_not_automatable_description_passes_the_reason_through() {
+    let reply = r#"{"automatable":false,"reason":"this only ever runs once"}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    let outcome = draft_workflow_from_description(&runtime, "do a one-off thing")
+        .await
+        .unwrap();
+    match outcome {
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            assert!(reason.contains("done once"), "reason: {reason}");
+        }
+        DescriptionDraftOutcome::Graph { .. } => panic!("expected not-automatable"),
+    }
+}
+
+/// An unparseable model answer folds to not-automatable rather than a 500 — a
+/// graph guessed from prose is exactly the broken graph.
+#[tokio::test]
+async fn an_unparseable_description_answer_is_not_automatable() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying("I'd just do this by hand.")).await;
+    let outcome = draft_workflow_from_description(&runtime, "x")
+        .await
+        .unwrap();
+    assert!(matches!(
+        outcome,
+        DescriptionDraftOutcome::NotAutomatable(_)
+    ));
+}
+
+/// A node kind outside `DESCRIPTION_NODE_KINDS` — one the copilot prompt never
+/// taught (`http_request`) — is refused by name before the courtesy pass, the
+/// same host-owns-the-vocabulary rule the card builder applies.
+#[tokio::test]
+async fn a_description_kind_outside_the_vocabulary_is_refused_by_name() {
+    let reply = r#"{"automatable":true,"summary":"call a url","workflow":{"name":"Reach out",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"call","kind":"http_request","name":"Call",
+                  "config":{"url":"http://attacker.example/x","method":"GET"}}],
+        "edges":[{"from":"start","to":"call"}]}}"#;
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(reply)).await;
+    let outcome = draft_workflow_from_description(&runtime, "call a url")
+        .await
+        .unwrap();
+    match outcome {
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            assert!(reason.contains("http_request"), "reason: {reason}");
+        }
+        DescriptionDraftOutcome::Graph { .. } => panic!("http_request must be refused"),
+    }
+}
+
+/// A `tool_call` node whose slug the company grants drafts cleanly; one whose
+/// namespace is ungranted is refused with `validate_tool_call_node`'s own
+/// message, so the copilot's grounding and courtesy validation stay in lockstep.
+/// The fixture grants `web` (not `code`), so `web_fetch` passes and `csv_export`
+/// does not.
+#[tokio::test]
+async fn a_granted_tool_call_drafts_and_an_ungranted_one_is_refused() {
+    let granted = r#"{"automatable":true,"summary":"fetch a page","workflow":{"name":"Fetcher",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"fetch","kind":"tool_call","name":"Fetch","config":{"slug":"web_fetch"}}],
+        "edges":[{"from":"start","to":"fetch"}]}}"#;
+    let (_h1, runtime) = runtime_with(ScriptedModel::replying(granted)).await;
+    let outcome = draft_workflow_from_description(&runtime, "fetch a page")
+        .await
+        .unwrap();
+    match outcome {
+        DescriptionDraftOutcome::Graph { spec, .. } => {
+            assert!(spec.nodes.iter().any(|n| n.kind == "tool_call"));
+        }
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            panic!("a granted tool_call must draft: {reason}")
+        }
+    }
+
+    let ungranted = r#"{"automatable":true,"summary":"export rows","workflow":{"name":"Exporter",
+        "nodes":[{"id":"start","kind":"trigger","name":"Start"},
+                 {"id":"exp","kind":"tool_call","name":"Export","config":{"slug":"csv_export"}}],
+        "edges":[{"from":"start","to":"exp"}]}}"#;
+    let (_h2, runtime2) = runtime_with(ScriptedModel::replying(ungranted)).await;
+    let outcome2 = draft_workflow_from_description(&runtime2, "export the rows")
+        .await
+        .unwrap();
+    match outcome2 {
+        DescriptionDraftOutcome::NotAutomatable(reason) => {
+            assert!(reason.contains("does not grant"), "reason: {reason}");
+        }
+        DescriptionDraftOutcome::Graph { .. } => panic!("an ungranted tool_call must be refused"),
+    }
+}
+
+/// The prompt grounds the model in the company's real state: the operator's
+/// description verbatim, the roster ids, the existing workflow names, and the
+/// granted tool slugs — and the system prompt carries the `tool_call` rule the
+/// card builder has no need for.
+#[tokio::test]
+async fn the_description_prompt_renders_the_company_state_verbatim() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
+    seed_workflow(&runtime, "existing-one", "Existing One").await;
+    let company = gather_company_evidence(&runtime).await.unwrap();
+    let slugs = crate::company::workflow_callable_tool_slugs(&company.record);
+
+    let description = "email the weekly digest every Monday morning";
+    let prompt = description_evidence_prompt(&company, &slugs, description);
+    assert!(
+        prompt.contains(description),
+        "the description appears verbatim"
+    );
+    assert!(prompt.contains("`maya`"), "the roster id is rendered");
+    assert!(
+        prompt.contains("Existing One"),
+        "existing names are rendered"
+    );
+    assert!(
+        prompt.contains("`web_fetch`"),
+        "granted tool slugs are rendered: {prompt}"
+    );
+    assert!(
+        description_system_prompt().contains("config.slug"),
+        "the copilot system prompt teaches the tool_call rule"
+    );
+}
+
+/// A company with no teammates and no granted tools renders the guiding lines
+/// that keep the model from authoring an `agent` or `tool_call` node it cannot
+/// ground.
+#[tokio::test]
+async fn the_description_prompt_names_an_empty_roster_and_toolset() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
+    let base = gather_company_evidence(&runtime).await.unwrap();
+    // Reuse the gathered record but blank the roster / names for the render.
+    let empty = CompanyEvidence {
+        roster: Vec::new(),
+        existing_names: Vec::new(),
+        existing_ids: HashSet::new(),
+        ..base
+    };
+    let prompt = description_evidence_prompt(&empty, &[], "do the thing");
+    assert!(prompt.contains("no teammates"), "{prompt}");
+    assert!(prompt.contains("no tools granted"), "{prompt}");
+    assert!(prompt.contains("(none yet)"), "{prompt}");
+}
+
 /// The card entering the pass is not the assignee's dispatch: no artifact, no
 /// delegation — only a proposal or a return. A `once` deliverable is never routed
 /// here, which the runtime's dispatch branch enforces; this pins that the builder

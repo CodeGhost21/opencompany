@@ -192,6 +192,13 @@ CREATE TABLE IF NOT EXISTS skill_state (
     state_json TEXT NOT NULL,
     PRIMARY KEY (company_id, slug)
 );
+CREATE TABLE IF NOT EXISTS channel_read_state (
+    company_id   TEXT NOT NULL,
+    user_id      TEXT NOT NULL,
+    channel_id   TEXT NOT NULL,
+    last_read_ms INTEGER NOT NULL,
+    PRIMARY KEY (company_id, user_id, channel_id)
+);
 CREATE TABLE IF NOT EXISTS workspace_nodes (
     company_id TEXT NOT NULL,
     id         TEXT NOT NULL,
@@ -256,6 +263,17 @@ CREATE TABLE IF NOT EXISTS schedule_fires (
 );
 CREATE INDEX IF NOT EXISTS schedule_fires_by_schedule
     ON schedule_fires (company_id, schedule_id, scheduled_for);
+CREATE TABLE IF NOT EXISTS journal (
+    company_id TEXT NOT NULL,
+    seq        INTEGER NOT NULL,
+    line       TEXT NOT NULL,
+    PRIMARY KEY (company_id, seq)
+);
+CREATE TABLE IF NOT EXISTS journal_imports (
+    company_id TEXT PRIMARY KEY,
+    at_ms      INTEGER NOT NULL,
+    lines      INTEGER NOT NULL
+);
 "#;
 
 /// Maps a `rusqlite` failure onto the crate error type without a bare `?` on
@@ -295,6 +313,25 @@ fn add_column_if_missing(conn: &Connection, table: &str, column: &str, decl: &st
     }
     conn.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN {column} {decl}"))
         .map_err(sql_err)
+}
+
+/// Runs `write` with `synchronous=FULL`, so its commit is fsynced, and restores
+/// `NORMAL` afterwards no matter how `write` ended.
+///
+/// The restore is unconditional on purpose. Leaving `FULL` set would silently
+/// buy a flush for every later write on this connection — a permanent cost from
+/// a per-record decision — and restoring only on success would leave it set
+/// exactly when something has already gone wrong. A failure to restore is
+/// reported, but never masks the write's own error: the write's result is what
+/// the caller acts on.
+fn with_full_sync<T>(conn: &Connection, write: impl FnOnce(&Connection) -> Result<T>) -> Result<T> {
+    conn.pragma_update(None, "synchronous", "FULL")
+        .map_err(sql_err)?;
+    let written = write(conn);
+    let restored = conn.pragma_update(None, "synchronous", "NORMAL");
+    let value = written?;
+    restored.map_err(sql_err)?;
+    Ok(value)
 }
 
 /// Translates a `usize` limit into a SQLite `LIMIT` value. `usize::MAX` (the
@@ -1257,6 +1294,44 @@ impl crate::ports::users::UserStore for SqliteStore {
         Ok(())
     }
 
+    async fn mark_invite_notified(
+        &self,
+        company: &CompanyId,
+        id: &str,
+        at_millis: u64,
+    ) -> Result<bool> {
+        let conn = self.conn();
+        let current: Option<String> = conn
+            .query_row(
+                "SELECT invite_json FROM user_invites WHERE company_id = ?1 AND id = ?2",
+                params![company.as_ref(), id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(sql_err)?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let mut invite: InviteRecord = serde_json::from_str(&current)?;
+        invite.notified_at_millis = Some(at_millis);
+        // UPDATE, never INSERT, and matched against the row we just read: a
+        // revocation that lands between the two statements leaves nothing to
+        // match, so the stamp becomes a no-op instead of resurrecting the row.
+        let n = conn
+            .execute(
+                "UPDATE user_invites SET invite_json = ?3 \
+                 WHERE company_id = ?1 AND id = ?2 AND invite_json = ?4",
+                params![
+                    company.as_ref(),
+                    id,
+                    serde_json::to_string(&invite)?,
+                    current
+                ],
+            )
+            .map_err(sql_err)?;
+        Ok(n > 0)
+    }
+
     async fn delete_invite(&self, company: &CompanyId, id: &str) -> Result<bool> {
         let conn = self.conn();
         let n = conn
@@ -2117,6 +2192,138 @@ impl crate::ports::schedule_fires::ScheduleFireStore for SqliteStore {
 }
 
 // ---------------------------------------------------------------------------
+// JournalStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::journal::JournalStore for SqliteStore {
+    /// One row per record, ordered by a per-company sequence.
+    ///
+    /// Sequence and insert are one statement against the `(company_id, seq)`
+    /// primary key, so the allocation cannot be observed half-done and a
+    /// duplicate seq is a constraint violation rather than a silently
+    /// overwritten record — losing a row here would un-commit an at-most-once
+    /// key. Same `COALESCE(MAX(..)+1, 0)` shape the event and ledger tables use.
+    ///
+    /// Both durability levels are honoured (issue #392), because flattening them
+    /// here would silently weaken the contract for a company moved onto sqlite:
+    ///
+    /// * [`Durability::Process`](crate::ports::journal::Durability::Process) is
+    ///   the connection's standing `synchronous=NORMAL` under WAL (see
+    ///   [`apply_pragmas`](SqliteStore::apply_pragmas)) — the write is in the WAL
+    ///   and survives process death, and a power loss can still take the last
+    ///   commits. Exactly what the filesystem backend's unflushed append gives.
+    /// * [`Durability::Host`](crate::ports::journal::Durability::Host) raises the
+    ///   pragma to `FULL` for this one statement, which fsyncs the WAL on commit.
+    ///   The pragma is restored **whatever the insert did** — leaving `FULL` set
+    ///   would silently fsync every later write on this connection, and leaving
+    ///   it set only on the error path would be worse still.
+    ///
+    /// `synchronous` is settable at any time and takes effect at the next commit;
+    /// only `journal_mode` is transaction-bound. The whole sequence runs under the
+    /// connection mutex, so no other statement can commit between the raise and
+    /// the restore.
+    async fn append_journal(
+        &self,
+        company: &CompanyId,
+        line: &str,
+        durability: crate::ports::journal::Durability,
+    ) -> Result<()> {
+        use crate::ports::journal::Durability;
+
+        let conn = self.conn();
+        let insert = |conn: &Connection| {
+            conn.execute(
+                "INSERT INTO journal (company_id, seq, line) VALUES \
+                 (?1, COALESCE((SELECT MAX(seq) + 1 FROM journal WHERE company_id = ?1), 0), ?2)",
+                params![company.as_ref(), line],
+            )
+            .map(|_| ())
+            .map_err(sql_err)
+        };
+        match durability {
+            Durability::Process => insert(&conn),
+            Durability::Host => with_full_sync(&conn, insert),
+        }
+    }
+
+    async fn read_journal(&self, company: &CompanyId) -> Result<Vec<String>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare("SELECT line FROM journal WHERE company_id = ?1 ORDER BY seq ASC")
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref()], |r| r.get::<_, String>(0))
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    async fn journal_imported(&self, company: &CompanyId) -> Result<bool> {
+        let conn = self.conn();
+        Ok(conn
+            .query_row(
+                "SELECT 1 FROM journal_imports WHERE company_id = ?1",
+                params![company.as_ref()],
+                |_| Ok(true),
+            )
+            .optional()
+            .map_err(sql_err)?
+            .unwrap_or(false))
+    }
+
+    /// Clear, copy, receipt — in **one transaction**, so the gate and the rows
+    /// it guards can never disagree.
+    ///
+    /// An interrupted import therefore leaves no rows and no receipt, and the
+    /// next boot re-runs the whole copy. The alternative — a partial copy behind
+    /// a written receipt — is the failure this port exists to prevent: a journal
+    /// missing its tail is a set of at-most-once keys that quietly went missing.
+    async fn complete_import(&self, company: &CompanyId, lines: Vec<String>) -> Result<()> {
+        let mut guard = self.conn();
+        // Host-durable, and by the same reasoning `EffectExecuted` is: what is
+        // being copied *is* the at-most-once key set, and a migration a power
+        // loss can take back has not migrated anything. Raised and restored
+        // exactly as `with_full_sync` does it — inline because the transaction
+        // needs `&mut Connection` and that helper hands out `&Connection`.
+        guard
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(sql_err)?;
+        let result = (|| {
+            let tx = guard
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(sql_err)?;
+            tx.execute(
+                "DELETE FROM journal WHERE company_id = ?1",
+                params![company.as_ref()],
+            )
+            .map_err(sql_err)?;
+            for (seq, line) in lines.iter().enumerate() {
+                tx.execute(
+                    "INSERT INTO journal (company_id, seq, line) VALUES (?1, ?2, ?3)",
+                    params![company.as_ref(), seq as i64, line],
+                )
+                .map_err(sql_err)?;
+            }
+            tx.execute(
+                "INSERT OR REPLACE INTO journal_imports (company_id, at_ms, lines) \
+                 VALUES (?1, ?2, ?3)",
+                params![company.as_ref(), now_millis() as i64, lines.len() as i64],
+            )
+            .map_err(sql_err)?;
+            tx.commit().map_err(sql_err)
+        })();
+        let restored = guard.pragma_update(None, "synchronous", "NORMAL");
+        result?;
+        restored.map_err(sql_err)?;
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // UsageMeter
 // ---------------------------------------------------------------------------
 
@@ -2226,6 +2433,73 @@ impl crate::ports::skills_state::SkillStateStore for SqliteStore {
             )
             .map_err(sql_err)?;
         Ok(n > 0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ReadStateStore
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl crate::ports::read_state::ReadStateStore for SqliteStore {
+    async fn list(
+        &self,
+        company: &CompanyId,
+        user: &str,
+    ) -> Result<Vec<crate::ports::read_state::ChannelRead>> {
+        let conn = self.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT channel_id, last_read_ms FROM channel_read_state \
+                 WHERE company_id = ?1 AND user_id = ?2 ORDER BY channel_id",
+            )
+            .map_err(sql_err)?;
+        let rows = stmt
+            .query_map(params![company.as_ref(), user], |r| {
+                Ok(crate::ports::read_state::ChannelRead {
+                    channel_id: r.get::<_, String>(0)?,
+                    last_read_at: r.get::<_, i64>(1)?,
+                })
+            })
+            .map_err(sql_err)?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err)?);
+        }
+        Ok(out)
+    }
+
+    async fn mark(
+        &self,
+        company: &CompanyId,
+        user: &str,
+        channel_id: &str,
+        at: i64,
+    ) -> Result<crate::ports::read_state::ChannelRead> {
+        let conn = self.conn();
+        // `max(excluded, existing)` in the conflict arm is the monotonicity the
+        // port promises: a late request carrying an earlier instant must not
+        // move the marker back and resurrect messages already read.
+        conn.execute(
+            "INSERT INTO channel_read_state (company_id, user_id, channel_id, last_read_ms) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(company_id, user_id, channel_id) DO UPDATE SET \
+             last_read_ms = max(excluded.last_read_ms, channel_read_state.last_read_ms)",
+            params![company.as_ref(), user, channel_id, at],
+        )
+        .map_err(sql_err)?;
+        let settled: i64 = conn
+            .query_row(
+                "SELECT last_read_ms FROM channel_read_state \
+                 WHERE company_id = ?1 AND user_id = ?2 AND channel_id = ?3",
+                params![company.as_ref(), user, channel_id],
+                |r| r.get(0),
+            )
+            .map_err(sql_err)?;
+        Ok(crate::ports::read_state::ChannelRead {
+            channel_id: channel_id.to_string(),
+            last_read_at: settled,
+        })
     }
 }
 
@@ -2913,6 +3187,66 @@ mod test {
         .expect("adding an existing column is a no-op, not an error");
     }
 
+    /// **Issue #392 through the port**: the host-durable append really does
+    /// commit under `synchronous=FULL`, and really does put it back.
+    ///
+    /// `assert_journal_store` cannot see this — a backend that ignored the
+    /// `Durability` argument entirely stores and orders every record identically
+    /// and passes the whole suite. So the raise and the restore are asserted
+    /// here, from inside and outside the closure.
+    ///
+    /// The restore matters as much as the raise. `synchronous` is connection
+    /// state, not statement state: leaving `FULL` set would silently buy an
+    /// fsync for every later write on this connection — a permanent cost from a
+    /// per-record decision — and restoring only on success would leave it set
+    /// exactly when something has already gone wrong.
+    #[test]
+    fn the_host_durable_write_runs_under_full_sync_and_restores_normal() {
+        /// `PRAGMA synchronous`: 1 = NORMAL, 2 = FULL.
+        fn synchronous(conn: &Connection) -> i64 {
+            conn.query_row("PRAGMA synchronous", [], |r| r.get(0))
+                .expect("read the pragma")
+        }
+
+        let store = SqliteStore::open_in_memory().expect("open");
+        let conn = store.conn();
+        assert_eq!(synchronous(&conn), 1, "the standing setting is NORMAL");
+
+        let seen = with_full_sync(&conn, |c| Ok(synchronous(c))).expect("the write runs");
+        assert_eq!(
+            seen, 2,
+            "the write must commit under FULL, or the host-durable level is a no-op"
+        );
+        assert_eq!(
+            synchronous(&conn),
+            1,
+            "and the connection must be left as it was found"
+        );
+
+        // A failing write restores it too, and reports its own error rather than
+        // the restore's.
+        let err = with_full_sync(&conn, |_| {
+            Err::<(), _>(OpenCompanyError::Store("the write failed".into()))
+        })
+        .expect_err("the write's error reaches the caller");
+        assert!(err.to_string().contains("the write failed"));
+        assert_eq!(
+            synchronous(&conn),
+            1,
+            "a failed write must not strand the connection on FULL"
+        );
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_store() {
+        conformance::assert_journal_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_journal_import() {
+        conformance::assert_journal_import(store()).await;
+    }
+
     #[tokio::test]
     async fn conformance_run_store() {
         conformance::assert_run_store(store()).await;
@@ -2966,6 +3300,11 @@ mod test {
     #[tokio::test]
     async fn conformance_skill_state_store() {
         conformance::assert_skill_state_store(store()).await;
+    }
+
+    #[tokio::test]
+    async fn conformance_read_state_store() {
+        conformance::assert_read_state_store(store()).await;
     }
 
     #[tokio::test]

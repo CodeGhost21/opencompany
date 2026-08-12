@@ -128,7 +128,8 @@ prompt = "Weekly review and operator digest"
 
   It never confers the orchestrator's *authority* — `assign_task`,
   `review_task`, `add_agent`, `query_company`, `run_workflow`,
-  `create_workflow` stay orchestrator-only. A member gets what it needs to pass
+  `create_workflow`, and the #661 workflow-admin trio (`read_workflow`,
+  `update_workflow`, `delete_workflow`) stay orchestrator-only. A member gets what it needs to pass
   a slice on and to leave the rest tracked, and nothing more.
 
   Three runtime guards bound what it can do, all enforced at the tool boundary
@@ -243,7 +244,7 @@ prompt = "Weekly review and operator digest"
   `supervised`, with all money/publish/filing effects gated — but a **new**
   company is given `auto`, written into its manifest explicitly rather than
   left to that default. See
-  [approvals.md](../company-brain/approvals.md#which-tier-a-new-company-gets)
+  [grants.md](../company-brain/grants.md#which-tier-a-new-company-gets)
   for why those are two separate knobs, and why moving the parse default is the
   one thing issue #605 declined to do. **A tool name is an
   effect kind** — the harness projects one onto the other — so

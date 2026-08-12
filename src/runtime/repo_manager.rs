@@ -119,6 +119,14 @@ pub struct RepoManager {
     /// would otherwise each persist a document built from a snapshot taken
     /// before the other's entry existed, and one binding would vanish.
     index_lock: Mutex<()>,
+    /// Which storage backend is serving this host's [`SecretStore`] (issue
+    /// #752). Read only to answer one question — does a bound credential end up
+    /// as plaintext on a disk the agent shell can read — and it defaults to the
+    /// refusing side, so a manager assembled without being told is treated as
+    /// unsafe rather than as safe.
+    ///
+    /// [`SecretStore`]: crate::ports::SecretStore
+    storage_kind: crate::store::StorageKind,
 }
 
 impl std::fmt::Debug for RepoManager {
@@ -146,6 +154,7 @@ impl RepoManager {
             quota_bytes: None,
             host: None,
             index_lock: Mutex::new(()),
+            storage_kind: crate::store::StorageKind::default(),
         }
     }
 
@@ -160,6 +169,24 @@ impl RepoManager {
     pub fn with_host(mut self, host: Arc<dyn RepoHost>) -> Self {
         self.host = Some(host);
         self
+    }
+
+    /// Records which storage backend serves this host's secrets (issue #752),
+    /// which is what [`bind`](Self::bind) refuses on.
+    pub fn with_storage_kind(mut self, kind: crate::store::StorageKind) -> Self {
+        self.storage_kind = kind;
+        self
+    }
+
+    /// Whether a credential bound here would be stored as plaintext on a disk
+    /// the agent shell can read (issue #752).
+    ///
+    /// Public because the harness asks the same question before wiring the repo
+    /// tools: an already-bound company predates this gate, so the bind-time
+    /// refusal alone would leave its agents holding `repo_checkout` over a
+    /// credential that is still sitting on `/data`.
+    pub fn secrets_are_plaintext_on_disk(&self) -> bool {
+        self.storage_kind.secrets_are_plaintext_on_disk()
     }
 
     /// Whether a forge client is wired, i.e. whether
@@ -271,6 +298,10 @@ impl RepoManager {
     /// alternative is the state that makes this class of feature miserable: a
     /// binding that exists, cannot fetch, and holds a credential nobody
     /// remembers installing.
+    ///
+    /// **Refused outright on a plaintext secret backend (issue #752)** — see
+    /// [`bind_validated`](Self::bind_validated), which is where that gate sits so
+    /// that no path into the credentialed half can miss it.
     pub async fn bind(&self, request: BindRequest) -> Result<RepoBinding> {
         let coords = parse_repo_url(&request.url)?;
         let token = request.token.trim().to_string();
@@ -304,6 +335,29 @@ impl RepoManager {
     /// parameter rather than deriving it lets a test drive the *real* path —
     /// token write, rollback and all — against a local `file://` fixture with no
     /// network, which is the only way the interleaving below can be exercised.
+    ///
+    /// ## The plaintext-secret refusal (issue #752)
+    ///
+    /// The first thing this does is ask *where the credential would live*. On
+    /// `fs` or `sqlite` the answer is "a file on this container's own disk", and
+    /// an agent holding `shell` runs as the uid that can read it — so binding
+    /// would hand a prompt-injected agent the credential directly, around every
+    /// tool gate the host has. There is no boundary in between and none planned
+    /// inside a tenant; `docs/spec/security/agent-isolation.md` says so at
+    /// length.
+    ///
+    /// It sits **here** rather than in [`bind`](Self::bind) precisely because
+    /// this is the one funnel every bind path reaches, including the one a test
+    /// drives directly. A gate in the public wrapper would be a gate the most
+    /// realistic exercise of the code walks straight past, which is how a
+    /// control ends up proven only against itself.
+    ///
+    /// It runs before the duplicate check and long before `secrets.set`, so a
+    /// refusal is not something the rollback has to clean up: nothing was
+    /// written to undo. The refusal is the operator's, not the request's — the
+    /// URL and the token can be perfect and this still refuses — so it reports
+    /// the deployment condition and both ways out of it rather than blaming the
+    /// input.
     async fn bind_validated(
         &self,
         coords: &RepoCoordinates,
@@ -311,6 +365,11 @@ impl RepoManager {
         token: &str,
         branches: Vec<String>,
     ) -> Result<RepoBinding> {
+        if self.secrets_are_plaintext_on_disk() {
+            return Err(OpenCompanyError::Conflict(
+                crate::store::plaintext_secret_refusal(self.storage_kind),
+            ));
+        }
         let key = coords.key();
         // Held across the duplicate check, the token write, the mirror build and
         // the index commit — the entire span in which two binds of one key can

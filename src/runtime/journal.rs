@@ -15,33 +15,28 @@
 //!   most once) rather than repeating it.
 //! * **Durable approvals.** Parked effects are journaled and rehydrated on boot,
 //!   so an approval survives a restart with its original [`ApprovalId`].
+//!
+//! Both guarantees are only as durable as what the records are written to, which
+//! is why the sink is a port ([`JournalStore`], issue #726) rather than a file
+//! path. On a hosted mongodb tenant the container's `/data` is ephemeral scratch,
+//! so a journal pinned to the filesystem there lost every committed key and every
+//! parked approval on container replacement. Everything semantic — the record
+//! enum, replay, corrupt-line recovery — lives here and is backend-agnostic; the
+//! store below it only keeps opaque lines in order.
 
 use std::collections::{HashMap, HashSet};
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex as TokioMutex;
 
 use crate::Result;
-use crate::error::OpenCompanyError;
-use crate::ports::types::{Actor, ApprovalId, Effect, EventSeq};
+use crate::ports::journal::{Durability, JournalStore};
+use crate::ports::types::{Actor, ApprovalId, CompanyId, Effect, EventSeq};
 use crate::runtime::grants::{GrantId, GrantedCall, StandingGrant};
 pub use crate::runtime::types::TaskLink;
-use crate::store::fs::{PathLocks, append_line, append_line_durable, create_dir_all_durable};
-
-/// Journal append locks, keyed by path, shared by every [`RuntimeJournal`] in
-/// the process (issue #386).
-///
-/// The lock this replaced was a field on `RuntimeJournal`, so two journals over
-/// one file serialised against nothing — which is the state the type has always
-/// been in, and which nothing stopped a caller reaching. A `static` is the only
-/// thing two independently-constructed instances can share.
-///
-/// In-process only, and deliberately so: a second *process* on the same
-/// `OPENCOMPANY_DATA_DIR` is outside any lock's reach. What keeps that case from
-/// tearing is [`append_line`]'s single `O_APPEND` write, not this.
-static JOURNAL_WRITE_LOCKS: LazyLock<PathLocks> = LazyLock::new(PathLocks::default);
+use crate::store::fs::FsJournalStore;
 
 /// One durable journal record.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -290,17 +285,6 @@ enum JournalRecord {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error: Option<String>,
     },
-}
-
-/// The failure a journal record is written to outlast (issue #392).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Durability {
-    /// In the kernel's page cache when [`RuntimeJournal::append`] returns. A
-    /// killed process cannot lose the record; a host crash or power loss can.
-    Process,
-    /// On stable storage when [`RuntimeJournal::append`] returns, at the cost of
-    /// one flush per append.
-    Host,
 }
 
 impl JournalRecord {
@@ -599,7 +583,13 @@ pub struct ExecutedEffect {
 /// (short), and the parse error names the column without quoting it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CorruptLine {
-    /// The line's 1-based number in the journal file.
+    /// The record's 1-based position in what the [`JournalStore`] read back.
+    ///
+    /// For the filesystem backend that is the line's number in `journal.jsonl`,
+    /// unchanged — the fs store returns every `\n`-separated segment, blanks
+    /// included, so a blank line does not shift the count. For a database
+    /// backend there is no file to open, and the number locates the record in
+    /// append order.
     pub line: usize,
     /// The line's length in bytes.
     pub bytes: usize,
@@ -748,37 +738,67 @@ impl State {
 /// A per-company append-only journal backing at-most-once effects and the
 /// durable approval queue.
 ///
-/// One process should own a given journal file, but [`append`](Self::append) no
-/// longer depends on that for integrity (issue #386). Every record is written
-/// whole — terminator included — in a single `O_APPEND` write that has reached
-/// the kernel before the call returns, so a concurrent writer can land a record
-/// before or after but never inside one. Writers in *this* process additionally
-/// serialise on [`JOURNAL_WRITE_LOCKS`], which keeps records in call order, so a
-/// park cannot be replayed after the resolution that drains it.
+/// One process should own a given company's journal, but [`append`](Self::append)
+/// no longer depends on that for integrity (issue #386). The filesystem store
+/// writes every record whole — terminator included — in a single `O_APPEND`
+/// write that has reached the kernel before the call returns, so a concurrent
+/// writer can land a record before or after but never inside one, and it
+/// serialises writers within the process on a per-path lock. A database backend
+/// gets the same property more cheaply: a row or document insert is atomic, and
+/// its sequence comes from the server, so two live hosts interleave without
+/// collision.
+///
+/// Writers through *one* `RuntimeJournal` additionally serialise on
+/// [`write_lock`](Self::write_lock), which keeps records in call order — so a
+/// park cannot be replayed after the resolution that drains it. That lock is
+/// held across the store call, which is what keeps a backend's sequence
+/// allocation in call order too.
+/// The company id a [`file-pinned`](RuntimeJournal::new) journal reports.
+///
+/// The store behind that constructor addresses one named file and never looks at
+/// the id, so this is what shows up in a log line rather than a key anything
+/// resolves. Named instead of empty so a stray appearance in a trace is
+/// self-explaining.
+const FILE_PINNED_COMPANY: &str = "<file-pinned journal>";
+
 pub struct RuntimeJournal {
-    path: PathBuf,
+    store: Arc<dyn JournalStore>,
+    company: CompanyId,
     state: StdMutex<State>,
-    write_lock: Arc<TokioMutex<()>>,
+    write_lock: TokioMutex<()>,
 }
 
 impl RuntimeJournal {
-    /// Opens (or prepares) the journal at `path` without loading it.
+    /// Opens the journal for `company` over `store`, without loading it.
     ///
     /// Call [`load`](Self::load) to replay an existing journal into memory.
-    ///
-    /// Two journals over one path share an append lock. The key is the
-    /// absolutised path, so a relative and an absolute spelling of one file
-    /// match; a symlinked or `..`-laden spelling still does not, and falls back
-    /// on the atomic write for its safety.
-    pub fn new(path: impl Into<PathBuf>) -> Self {
-        let path = path.into();
-        let write_lock =
-            JOURNAL_WRITE_LOCKS.get(&std::path::absolute(&path).unwrap_or_else(|_| path.clone()));
+    pub fn with_store(store: Arc<dyn JournalStore>, company: CompanyId) -> Self {
         Self {
-            path,
+            store,
+            company,
             state: StdMutex::new(State::default()),
-            write_lock,
+            write_lock: TokioMutex::new(()),
         }
+    }
+
+    /// Opens (or prepares) a filesystem journal at `path` without loading it.
+    ///
+    /// The convenience constructor over [`with_store`](Self::with_store) for the
+    /// case where a caller has a file rather than a backend — every test in the
+    /// crate, and nothing in production, which resolves its store from the
+    /// selected backend in `RuntimeBuilder`.
+    ///
+    /// The store is pinned to the named file and ignores the company id, so the
+    /// id here is a label rather than a key. Two journals over one path still
+    /// share an append lock: the key is the absolutised path, so a relative and
+    /// an absolute spelling of one file match; a symlinked or `..`-laden
+    /// spelling still does not, and falls back on the atomic write for its
+    /// safety.
+    pub fn new(path: impl Into<PathBuf>) -> Self {
+        Self::with_store(
+            Arc::new(FsJournalStore::at_file(path)),
+            CompanyId::new(FILE_PINNED_COMPANY),
+        )
     }
 
     /// Replays the on-disk journal into memory, reconstructing the executed-key
@@ -800,24 +820,17 @@ impl RuntimeJournal {
     /// about is exactly the recoverable kind, and skipping it is the outcome
     /// worth working to avoid.
     pub async fn load(&self) -> Result<()> {
-        // Read bytes, not a `String`. A torn write can split a multi-byte
-        // codepoint, and `read_to_string` would fail the whole load on that one
-        // bad byte — failing the boot for exactly the damage this function
-        // exists to survive. Decoding per line instead keeps a single mangled
-        // line on the `CorruptLine` path with the rest of the journal intact.
-        let contents = match tokio::fs::read(&self.path).await {
-            Ok(contents) => contents,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(self.io_err(e)),
-        };
+        // The store hands back lines, never bytes, and decodes lossily on the
+        // way: a torn write can split a multi-byte codepoint, and a whole-file
+        // UTF-8 decode would fail the entire load on that one bad byte — failing
+        // the boot for exactly the damage this function exists to survive.
+        // Per-line decoding keeps a single mangled line on the `CorruptLine`
+        // path with the rest of the journal intact.
+        let lines = self.store.read_journal(&self.company).await?;
 
         let mut state = State::default();
-        for (index, raw) in contents.split(|b| *b == b'\n').enumerate() {
-            // Lossy on purpose: invalid bytes become U+FFFD, the line then fails
-            // to parse as JSON, and it lands on the same skip-and-log path as
-            // any other unrecoverable line rather than aborting the replay.
-            let line = String::from_utf8_lossy(raw);
-            let line = line.as_ref();
+        for (index, line) in lines.iter().enumerate() {
+            let line = line.as_str();
             if line.trim().is_empty() {
                 continue;
             }
@@ -830,7 +843,7 @@ impl RuntimeJournal {
                         message,
                     };
                     tracing::error!(
-                        journal = %self.path.display(),
+                        company = %self.company,
                         line = corrupt.line,
                         bytes = corrupt.bytes,
                         error = %corrupt.message,
@@ -842,11 +855,11 @@ impl RuntimeJournal {
             };
             if records.len() > 1 {
                 // Recovered, not lost — so not a `CorruptLine`. Still worth
-                // saying out loud: the file carries damage from a host that
+                // saying out loud: the journal carries damage from a host that
                 // predates the write fix, and a reader looking at it by hand
                 // should know why one line holds several records.
                 tracing::warn!(
-                    journal = %self.path.display(),
+                    company = %self.company,
                     line = index + 1,
                     records = records.len(),
                     "journal line holds several records with no separator; \
@@ -1113,7 +1126,7 @@ impl RuntimeJournal {
         let mut settled = 0;
         for cycle in open {
             tracing::info!(
-                journal = %self.path.display(),
+                company = %self.company,
                 cycle = %cycle.cycle_id,
                 trigger = %cycle.trigger,
                 started_at = cycle.at_millis,
@@ -1128,7 +1141,7 @@ impl RuntimeJournal {
             {
                 Ok(()) => settled += 1,
                 Err(err) => tracing::warn!(
-                    journal = %self.path.display(),
+                    company = %self.company,
                     cycle = %cycle.cycle_id,
                     %err,
                     "could not settle an interrupted cycle; it stays open in the journal"
@@ -1687,93 +1700,53 @@ impl RuntimeJournal {
         out
     }
 
-    /// Appends one record, whole, and does not return until the write syscall
-    /// has completed — and, for the record kinds that need it, until the bytes
-    /// are on stable storage.
+    /// Appends one record, whole, and does not return until the sink has made it
+    /// durable to the level the record asked for.
     ///
     /// **Durability is per record kind, by decision (issue #392).** Every record
     /// declares which failure it must outlast through
     /// [`JournalRecord::durability`], and this is the single choke point that
-    /// honours it, exactly as it is the single choke point for
-    /// [`JOURNAL_WRITE_LOCKS`]:
+    /// passes that decision to the sink:
     ///
     /// * The three [`Durability::Host`] kinds — `EffectExecuted`,
-    ///   `GrantConsumed` and `StandingGrantRevoked` — go through
-    ///   [`append_line_durable`](crate::store::fs::append_line_durable) and are
-    ///   flushed to stable storage before this returns. So the at-most-once
-    ///   contract holds against **losing the machine** for precisely the records
-    ///   whose loss would repeat an external action, and a failed flush fails
-    ///   the append — which aborts `execute_effect_once` before `perform_effect`
-    ///   and so cannot produce the duplicate it is guarding against.
-    /// * The other ten are page-cache durable: killing the process cannot
+    ///   `GrantConsumed` and `StandingGrantRevoked` — are on stable storage
+    ///   before this returns. So the at-most-once contract holds against
+    ///   **losing the machine** for precisely the records whose loss would
+    ///   repeat an external action, and a failed flush fails the append — which
+    ///   aborts `execute_effect_once` before `perform_effect` and so cannot
+    ///   produce the duplicate it is guarding against.
+    /// * The other ten are [`Durability::Process`]: killing the process cannot
     ///   lose them, a host crash can. That is the decision, not a gap left open.
     ///   Losing any of them makes the runtime **re-ask** — an approval is parked
     ///   again, an operator is prompted again, a cycle bracket reads as
     ///   interrupted — and never re-fire. Flushing them would tax the journal's
     ///   highest-volume records to protect against a re-asked question.
     ///
-    /// **This is bounded by the volume underneath.** The journal is constructed
-    /// unconditionally on the filesystem path, outside the storage ports, so a
-    /// hosted tenant whose `/data` is ephemeral scratch (the documented
-    /// arrangement under `OPENCOMPANY_STORAGE=mongodb` — see
-    /// `docs/spec/runtime/storage.md`) does not keep its journal across a
-    /// container replacement, let alone a host crash, and gains nothing from
-    /// this flush. Where the data directory is a real volume — the reference ECS
-    /// deployment mounts EFS at `/data`, whose NFS client page cache is exactly
-    /// what `sync_data` forces through — it buys real durability. Moving the
-    /// journal behind the ports is issue #726 and is not attempted here.
+    /// What each backend does to honour the two levels is its own business and
+    /// is documented on [`append_journal`](JournalStore::append_journal): an
+    /// `O_APPEND` write with (or without) a `sync_data`, a sqlite commit under
+    /// `synchronous=FULL` (or `NORMAL`), a mongodb insert with (or without)
+    /// `j:true`.
     ///
-    /// Delegates to [`append_line`](crate::store::fs::append_line), which emits
-    /// the record **and** its newline in a single blocking `write_all` under
-    /// `O_APPEND`. This used to open a `tokio::fs::File` and write the two
-    /// halves separately, then drop the handle without flushing — and tokio's
-    /// async `File` returns from `write_all` once the write is *queued* on a
-    /// blocking task, not once it lands. Measured on this code, 199 of 200
-    /// appends returned with their bytes still in flight. Two consequences, both
-    /// live:
+    /// Issue #726 removed the bound this used to carry. The journal was
+    /// constructed unconditionally on the filesystem, so a hosted tenant whose
+    /// `/data` is ephemeral scratch did not keep its journal across a container
+    /// replacement — let alone a host crash — and gained nothing from the flush.
+    /// The sink now comes from the selected storage backend, so the flush is
+    /// bought on a volume that outlives the container.
     ///
-    /// * The queued newline could be overtaken by the next append's opening
-    ///   brace, putting two records on one physical line — the
-    ///   `serde_json` "trailing characters" failure this issue was filed for.
-    /// * `Ok(())` meant "queued", not "written". A commit that `record_executed`
-    ///   had already reported durable could still be lost to a crash, and an
-    ///   `ENOSPC` on the real write was never reported to anyone. The
-    ///   at-most-once guarantee rests on that record being on disk *before* the
-    ///   side effect runs, so this was the more serious half.
-    ///
-    /// Identical to the corruption PR #43 removed from `store::fs::append_line`
-    /// and the feedback store's copy of it; the journal was the last twin.
+    /// The write lock is taken **around the store call**, not merely around the
+    /// serialisation, and that is load-bearing: a backend that allocates a
+    /// sequence number inside the append would otherwise be free to allocate two
+    /// concurrent appends out of call order, and a park replayed after the
+    /// resolution that drains it resurrects a resolved approval.
     async fn append(&self, record: &JournalRecord) -> Result<()> {
         let line = serde_json::to_string(record)?;
         let durability = record.durability();
         let _guard = self.write_lock.lock().await;
-        if let Some(parent) = self.path.parent() {
-            match durability {
-                // The directories are part of what makes the flushed record
-                // findable. A journal's first append into a fresh data directory
-                // creates the whole chain, and a record flushed under ancestors
-                // that were never written down is lost with them.
-                Durability::Host => create_dir_all_durable(parent).await?,
-                Durability::Process => tokio::fs::create_dir_all(parent)
-                    .await
-                    .map_err(|e| self.io_err_at(parent, e))?,
-            }
-        }
-        match durability {
-            Durability::Host => append_line_durable(&self.path, &line).await,
-            Durability::Process => append_line(&self.path, &line).await,
-        }
-    }
-
-    fn io_err(&self, source: std::io::Error) -> OpenCompanyError {
-        self.io_err_at(&self.path, source)
-    }
-
-    fn io_err_at(&self, path: &Path, source: std::io::Error) -> OpenCompanyError {
-        OpenCompanyError::StoreIo {
-            path: path.to_path_buf(),
-            source,
-        }
+        self.store
+            .append_journal(&self.company, &line, durability)
+            .await
     }
 }
 
@@ -1812,13 +1785,14 @@ fn replay_line(line: &str) -> std::result::Result<Vec<JournalRecord>, String> {
 impl std::fmt::Debug for RuntimeJournal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RuntimeJournal")
-            .field("path", &self.path)
+            .field("company", &self.company)
             .finish_non_exhaustive()
     }
 }
 
 #[cfg(test)]
 mod test {
+    use std::path::Path;
     use std::sync::Arc;
 
     use super::*;
@@ -1890,6 +1864,89 @@ mod test {
         // The re-commit is also what keeps the description list free of
         // duplicates: one key, one entry, however many times it is committed.
         assert_eq!(reloaded.irreversible_effects("t-1").len(), 1);
+    }
+
+    /// **Issue #726**: a journal over a non-filesystem store replays exactly
+    /// what the same records replay over a file — and survives the loss of the
+    /// bundle directory, which is the whole point.
+    ///
+    /// Every semantic decision (the record enum, replay, the parked queue, the
+    /// grant sets) lives above the store, so this is what proves the split is
+    /// real rather than merely stated: the same call sequence through two
+    /// different sinks must produce identical state, and the sink that is not a
+    /// file must still hold it after `/data` is gone.
+    #[tokio::test]
+    async fn a_journal_over_a_non_filesystem_store_replays_identically() {
+        use crate::ports::journal::MemoryJournalStore;
+
+        let company = CompanyId::new("acme");
+        let store = Arc::new(MemoryJournalStore::default());
+
+        let dir = tmp_dir();
+        let path = dir.path().join("journal.jsonl");
+
+        // The same call sequence through both sinks: a committed key, a parked
+        // approval, a minted grant, a resolution.
+        let approval = ApprovalId::new("ap-1");
+        for journal in [
+            RuntimeJournal::with_store(store.clone(), company.clone()),
+            RuntimeJournal::new(&path),
+        ] {
+            journal
+                .record_executed("cyc:0", executed(1_000))
+                .await
+                .unwrap();
+            journal
+                .record_parked(
+                    &approval,
+                    &effect(),
+                    2_000,
+                    TaskLink::Task { id: "t-1".into() },
+                    ApprovalConversation::default(),
+                    None,
+                )
+                .await
+                .unwrap();
+            journal.record_granted(&grant("g-1", 3_000)).await.unwrap();
+        }
+
+        // The bundle directory is gone — a container replacement on a tenant
+        // whose `/data` is ephemeral scratch. The file-backed journal loses
+        // everything; the ported one loses nothing.
+        drop(dir);
+
+        let over_store = RuntimeJournal::with_store(store.clone(), company.clone());
+        over_store.load().await.unwrap();
+        let over_file = RuntimeJournal::new(&path);
+        over_file.load().await.unwrap();
+
+        assert!(
+            over_store.is_executed("cyc:0"),
+            "the at-most-once key must survive the loss of the data dir"
+        );
+        assert!(
+            !over_file.is_executed("cyc:0"),
+            "the file-backed journal is exactly what this issue is about: \
+             losing /data un-commits every key"
+        );
+        assert_eq!(
+            over_store.pending().len(),
+            1,
+            "the parked approval must survive too"
+        );
+        assert_eq!(over_store.pending()[0].id, approval, "with its original id");
+        assert_eq!(
+            over_store.replayed_grants().len(),
+            1,
+            "and so must a live grant"
+        );
+        assert!(over_store.corruption().is_empty());
+
+        // Isolation: another company on the same store sees none of it.
+        let other = RuntimeJournal::with_store(store, CompanyId::new("globex"));
+        other.load().await.unwrap();
+        assert!(!other.is_executed("cyc:0"));
+        assert!(other.pending().is_empty());
     }
 
     /// **Issue #351**: the executed record says what ran, for which card, and
