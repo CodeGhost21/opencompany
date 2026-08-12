@@ -627,8 +627,7 @@ impl RuntimeBuilder {
         self
     }
 
-    /// Swaps the skill-state store (default: fs-backed).
-    /// Overrides the per-person channel read markers (#755).
+    /// Swaps the per-person channel read markers (default: fs-backed).
     pub fn with_read_state(
         mut self,
         read_state: Arc<dyn crate::ports::read_state::ReadStateStore>,
@@ -637,6 +636,7 @@ impl RuntimeBuilder {
         self
     }
 
+    /// Swaps the skill-state store (default: fs-backed).
     pub fn with_skills(mut self, skills: Arc<dyn SkillStateStore>) -> Self {
         self.skills = Some(skills);
         self

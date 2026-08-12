@@ -2222,7 +2222,9 @@ pub async fn assert_read_state_store(reads: Arc<dyn crate::ports::read_state::Re
         2_000
     );
 
-    // Several channels for one person, listed in a stable order.
+    // Several channels for one person, ordered by channel id ascending — the
+    // order the trait documents, not each backend's insertion order.
+    // `engineering` was written first and still sorts second.
     reads.mark(&alpha, "ada", "dm:pm", 7).await.unwrap();
     let all = reads.list(&alpha, "ada").await.unwrap();
     assert_eq!(all.len(), 2);

@@ -58,6 +58,7 @@ import {
 } from "@/lib/chat";
 import { CONNECTION_PROVIDERS } from "@/lib/connections";
 import { defaultDesks, type Desk } from "@/lib/desks";
+import { mergeReadFloors, unreadCount } from "@/lib/unread";
 import { writeLastChannel } from "@/lib/last-channel";
 import { fromDto, type TeamMember } from "@/lib/team";
 import { agentDmThreads, defaultThreads, threadsFromDesks } from "@/lib/threads";
@@ -431,13 +432,7 @@ export function AppShell({
       .readState(company)
       .then(({ markers }) => {
         if (cancelled || markers.length === 0) return;
-        setLastViewedChannel((viewed) => {
-          const merged = { ...viewed };
-          for (const m of markers) {
-            merged[m.channelId] = Math.max(merged[m.channelId] ?? 0, m.lastReadAt);
-          }
-          return merged;
-        });
+        setLastViewedChannel((viewed) => mergeReadFloors(viewed, markers));
       })
       .catch(() => {
         /* host without `/chat/read-state`, or offline — the browser floor stands */
@@ -559,7 +554,7 @@ export function AppShell({
     const counts: Record<string, number> = {};
     for (const [channelId, messages] of Object.entries(transcripts)) {
       const since = lastViewedChannel[channelId] ?? unreadSince;
-      const count = messages.filter((m) => m.from !== "you" && m.at > since).length;
+      const count = unreadCount(messages, since);
       if (count > 0) counts[channelId] = count;
     }
     return counts;

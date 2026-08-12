@@ -47,6 +47,12 @@ pub trait ReadStateStore: Send + Sync {
     /// A channel with no marker is absent rather than zero — "never opened" and
     /// "opened before any message existed" are different states, and only the
     /// caller knows which floor to apply to a channel it has never seen.
+    ///
+    /// **Ordered by `channel_id`, ascending.** Part of the contract rather than
+    /// an accident of each backend: insertion order differs between a document
+    /// store and a table, and a caller diffing two reads would see spurious
+    /// churn. The conformance suite asserts it, so a backend that returns
+    /// insertion order fails rather than passing quietly.
     async fn list(&self, company: &CompanyId, user: &str) -> Result<Vec<ChannelRead>>;
 
     /// Moves one channel's marker forward, and returns where it now stands.
