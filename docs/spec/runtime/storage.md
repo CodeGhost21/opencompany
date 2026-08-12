@@ -27,6 +27,13 @@ records as inspectable TOML/JSONL bundles and the WS3 console-surface stores
 under a sibling `ops/` layout (`src/store/fs_ops.rs`); sqlite and mongodb add
 one collection/table per store.
 
+A fifteenth, `JournalStore`, joined them in issue #726. The runtime journal was
+built on the filesystem unconditionally until then, so on a mongodb tenant the
+at-most-once effect set and the parked-approval queue lived on `/data` —
+ephemeral scratch, discarded on every container replacement. It is now selected
+from the same handles as every other store, with a one-time receipt-gated import
+off the old file: [journal.md](journal.md).
+
 Three of those fourteen — `UserStore`, `SessionStore`, `LoginCodeStore` — back
 [human user authentication](users.md). Sessions and login codes are credential
 material: they hold **hashes only**, and they must never be added to the
@@ -38,6 +45,41 @@ MongoDB settings:
 - `OPENCOMPANY_MONGODB_DB` — database name (default `opencompany`).
 - `OPENCOMPANY_TENANT_ID` — tenant identity for **shared-single-DB** mode
   (default unset). See [Shared single database](#shared-single-database-mode).
+
+## Secrets at rest, and what that costs (issue #752)
+
+`fs` writes one **plaintext** file per secret under
+`<data-dir>/companies/<slug>/secrets/`; `sqlite` puts the same bytes in a
+database file on the same disk. Both are readable by the uid the server runs
+as — which is the uid an agent's `shell` tool runs as, in the same container.
+There is no boundary in between; see
+[../security/agent-isolation.md](../security/agent-isolation.md). `mongodb` is
+the only backend that keeps secrets out of the container, in the tenant
+database.
+
+**Repository credentials therefore require `OPENCOMPANY_STORAGE=mongodb`.**
+This is enforced, not advised, in three places:
+
+| Where | What happens |
+| --- | --- |
+| `POST …/repos` (bind) | `409 Conflict` with the refusal message; nothing is stored |
+| Company boot / rebuild | The company does not come up — `OpenCompanyError::Config` — when its **effective roster** grants `repo`, including an agent naming `repo` under a wildcard company allow-list |
+| Agent build | Repo tools are withheld (fail-closed, with a warning), which covers a teammate added through the console on a live runtime |
+
+The refusal names both remedies: set `OPENCOMPANY_STORAGE=mongodb` with
+`OPENCOMPANY_MONGODB_URI`, or drop the `repo` grant.
+
+**This is a breaking change for `fs` and `sqlite` deployments that have already
+bound a repository.** That is deliberate. Those are precisely the deployments
+carrying a plaintext repository token on a disk their agents can read, so a
+warning would leave the exposure in place and call it handled. Migration is one
+of the two remedies above; a bound credential on an fs host should also be
+**revoked at the forge**, since it has been readable for as long as it has been
+installed.
+
+Every *other* secret on an `fs` or `sqlite` host is still plaintext next to it.
+This gate closes one credential on one path; it does not make the filesystem
+safe.
 
 ## The root itself
 
@@ -63,9 +105,9 @@ from a `counters` collection via atomic `findOneAndUpdate {$inc}`.
 
 Collections (all uniquely indexed on `company_id` + their key):
 `companies`, `ledger`, `events`, `memory_traces`, `memory_tasks`,
-`context_chunks`, `secrets`, plus `counters` and `owners`; and the WS3
-console-surface collections `tasks`, `workspace`, `facts`, `usage`, `skills`,
-and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
+`context_chunks`, `secrets`, `journal` and `journal_imports`, plus `counters`
+and `owners`; and the WS3 console-surface collections `tasks`, `workspace`,
+`facts`, `usage`, `skills`, and `inboxes`. The `usage` collection is trimmed to the 90-day retention window
 on each `record` (see [`UsageMeter`](ports-console.md#usagemeter)).
 
 ### Multi-tenant isolation (two layers)

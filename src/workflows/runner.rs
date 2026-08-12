@@ -1050,6 +1050,7 @@ description = "Runs Acme."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: crate::harness::policy::ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -2175,6 +2176,195 @@ to = "done"
             run.output.to_string().contains("child_marker"),
             "the child workflow should have run and stamped its marker: {}",
             run.output
+        );
+    }
+
+    /// A provider that records the last user message of every inference call and
+    /// **holds the `slow` node open until the operator cancels** (bounded), so a
+    /// cancel deterministically lands while a child `sub_workflow` node is
+    /// mid-flight. It distinguishes child nodes by a marker string authored into
+    /// each node's `prompt`: the node after `slow` must never be invoked once a
+    /// parent cancel has propagated into the child run.
+    struct RecordingSlowProvider {
+        seen: Arc<std::sync::Mutex<Vec<String>>>,
+        entered_slow: Arc<tokio::sync::Notify>,
+        cancel: crate::ports::workflow_runner::RunCancel,
+    }
+
+    #[async_trait]
+    impl tinyagents::harness::model::ChatModel<()> for RecordingSlowProvider {
+        async fn invoke(
+            &self,
+            _state: &(),
+            request: tinyagents::harness::model::ModelRequest,
+        ) -> tinyagents::Result<tinyagents::harness::model::ModelResponse> {
+            // Scan the whole conversation, not just the last user turn: the
+            // openhuman harness reshapes an agent node's authored instruction
+            // into a multi-message prompt, so the node's marker can land in any
+            // role. Matching the joined text keeps the probe robust to that.
+            let all_text = request
+                .messages
+                .iter()
+                .map(|m| m.text())
+                .collect::<Vec<_>>()
+                .join("\n");
+            self.seen.lock().expect("seen mutex").push(all_text.clone());
+            if all_text.contains("SLOW-NODE") {
+                // Announce arrival, then hold the child at this node until the run
+                // is cancelled (bounded, so a broken build cannot hang CI). This
+                // pins the cancel to land while `slow` is in flight and makes the
+                // wind-down a clean node-boundary stop, not a hard abort.
+                self.entered_slow.notify_waiters();
+                tokio::select! {
+                    () = self.cancel.cancelled() => {}
+                    () = tokio::time::sleep(std::time::Duration::from_secs(5)) => {}
+                }
+            }
+            Ok(tinyagents::harness::model::ModelResponse::assistant(
+                "acknowledged".to_string(),
+            ))
+        }
+    }
+
+    impl crate::harness::provider::HarnessModel for RecordingSlowProvider {
+        fn telemetry_provider_id(&self) -> String {
+            "recording-slow".to_string()
+        }
+    }
+
+    /// **Full-stack cancel propagation into a `sub_workflow` child (issue #675).**
+    /// Parent `trigger → sub_workflow(child) → done`, child
+    /// `trigger → slow → marker → done` where `slow`/`marker` are agent nodes.
+    /// The operator cancels while the child's `slow` node is mid-flight; the
+    /// parent's `CancellationToken` must reach the child run so its `marker` node
+    /// never executes, the run settles `cancelled`, and it comes back promptly
+    /// (the clean node-boundary wind-down bounded by `slow`'s remainder — not the
+    /// hard-abort grace). Before the fix the child ran behind a fresh token, so
+    /// the cancel never crossed the boundary and `marker` executed.
+    #[tokio::test]
+    async fn a_parent_cancel_propagates_into_a_sub_workflow_child() {
+        let source = tempfile::tempdir().unwrap();
+        write_wf(
+            source.path(),
+            "child",
+            r#"
+id = "child"
+name = "Child"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "slow"
+kind = "agent"
+name = "Slow"
+agent = "ceo"
+summary = "SLOW-NODE hold here until cancelled"
+prompt = "SLOW-NODE hold here until cancelled"
+[[node]]
+id = "marker"
+kind = "agent"
+name = "Marker"
+agent = "ceo"
+summary = "MARKER-NODE must never run once cancellation propagates"
+prompt = "MARKER-NODE must never run once cancellation propagates"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "slow"
+[[edge]]
+from = "slow"
+to = "marker"
+[[edge]]
+from = "marker"
+to = "done"
+"#,
+        );
+        let parent = r#"
+id = "parent"
+name = "Parent"
+[[node]]
+id = "start"
+kind = "trigger"
+name = "Start"
+[[node]]
+id = "sub"
+kind = "sub_workflow"
+name = "Sub"
+[node.config]
+workflow_id = "child"
+[[node]]
+id = "done"
+kind = "output"
+name = "Done"
+[[edge]]
+from = "start"
+to = "sub"
+[[edge]]
+from = "sub"
+to = "done"
+"#;
+
+        let home = tempfile::tempdir().unwrap();
+        let pool = Arc::new(HarnessPool::new());
+        let rec = record();
+        let ctx = WorkflowRunContext::new(false);
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let entered = Arc::new(tokio::sync::Notify::new());
+
+        let mut deps = deps_with_source(home.path(), source.path());
+        deps.provider = Arc::new(RecordingSlowProvider {
+            seen: seen.clone(),
+            entered_slow: entered.clone(),
+            cancel: ctx.cancel.clone(),
+        });
+        deps.provider_slug = "recording-slow".to_string();
+        pool.ensure(&rec, &deps).await.expect("roster builds");
+
+        let file = parse_workflow(parent).expect("parent parses");
+        // Registered before the run starts so `slow` cannot slip past it.
+        let reached_slow = entered.notified();
+
+        let mut run = Box::pin(run_workflow(pool, deps, &rec, &file, Value::Null, &ctx));
+        tokio::select! {
+            _ = &mut run => panic!(
+                "the run finished before `slow` was reached; provider saw: {:?}",
+                seen.lock().expect("seen mutex")
+            ),
+            () = reached_slow => {}
+        }
+
+        // The operator presses Cancel while the child's `slow` node is in flight.
+        let pressed = std::time::Instant::now();
+        ctx.cancel.cancel();
+        let run = tokio::time::timeout(std::time::Duration::from_secs(30), run)
+            .await
+            .expect("the cancelled run never returned")
+            .expect("a cancelled run is Ok, not Err");
+        let elapsed = pressed.elapsed();
+
+        assert!(run.cancelled, "the run must report that it was stopped");
+
+        let seen = seen.lock().expect("seen mutex").clone();
+        assert!(
+            seen.iter().any(|m| m.contains("SLOW-NODE")),
+            "the in-flight child `slow` node ran: {seen:?}"
+        );
+        assert!(
+            !seen.iter().any(|m| m.contains("MARKER-NODE")),
+            "cancellation must propagate into the child: its `marker` node should never run, \
+             got {seen:?}"
+        );
+        // A clean node-boundary wind-down bounded by `slow`'s remainder — nowhere
+        // near the hard-abort grace, which only a wedged (never-returning) node
+        // would reach.
+        assert!(
+            elapsed < CANCEL_HARD_ABORT_GRACE,
+            "the child wound down cleanly, so settle time should be well under the hard-abort \
+             grace; took {elapsed:?}"
         );
     }
 

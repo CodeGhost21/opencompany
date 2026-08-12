@@ -29,9 +29,9 @@ use crate::ports::types::{
 };
 use crate::ports::{
     AgentEconomy, ApprovalGate, ArtifactStore, Brain, ChannelAdapter, CompanyStore, ContextStore,
-    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, RunStore, SecretStore,
-    SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter, UserStore,
-    WorkflowRevisionStore, WorkspaceStore,
+    EventLog, FactStore, InboxStore, LoginCodeStore, MemoryStore, ReadStateStore, RunStore,
+    SecretStore, SessionStore, SkillStateStore, TaskRecord, TaskStore, ToolProvider, UsageMeter,
+    UserStore, WorkflowRevisionStore, WorkspaceStore,
 };
 // Separate line (#241) so this addition is a pure append, not a reflow of the
 // grouped import that sibling store-seam branches (#274, #596) also edit.
@@ -141,6 +141,8 @@ pub struct OpsStores {
     pub usage: Arc<dyn UsageMeter>,
     /// Operator deltas over the company's skills.
     pub skills: Arc<dyn SkillStateStore>,
+    /// Per-person, per-channel read markers (#755).
+    pub read_state: Arc<dyn ReadStateStore>,
     /// The company's human collaborators and their outstanding invites.
     pub users: Arc<dyn UserStore>,
     /// Live browser sessions for those users.
@@ -917,6 +919,11 @@ impl CompanyRuntime {
     /// This company's skill-state deltas.
     pub fn skills(&self) -> &Arc<dyn SkillStateStore> {
         &self.ops.skills
+    }
+
+    /// Where each person has read to, per channel (#755).
+    pub fn read_state(&self) -> &Arc<dyn ReadStateStore> {
+        &self.ops.read_state
     }
 
     /// This company's human collaborators and their invites.

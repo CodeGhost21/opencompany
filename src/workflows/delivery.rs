@@ -1736,6 +1736,14 @@ admins = [{list}]
         ) -> crate::Result<()> {
             unreachable!("owner delivery reads only list_users")
         }
+        async fn mark_invite_notified(
+            &self,
+            _company: &CompanyId,
+            _id: &str,
+            _at_millis: u64,
+        ) -> crate::Result<bool> {
+            unreachable!("owner delivery reads only list_users")
+        }
         async fn delete_invite(&self, _company: &CompanyId, _id: &str) -> crate::Result<bool> {
             unreachable!("owner delivery reads only list_users")
         }

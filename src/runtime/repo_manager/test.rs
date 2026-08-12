@@ -87,6 +87,9 @@ impl FakeHost {
             meta: RepoMeta {
                 default_branch: "main".into(),
                 size_kb,
+                // Read-only by default: the write tier fails closed, so a test
+                // that wants a push-capable credential opts in with `pushable`.
+                can_push: false,
             },
             seen_tokens: StdMutex::new(Vec::new()),
             fail: false,
@@ -98,6 +101,13 @@ impl FakeHost {
             fail: true,
             ..Self::new(1)
         }
+    }
+
+    /// A forge whose credential the `permissions.push` probe reports as
+    /// push-capable.
+    fn pushable(mut self) -> Self {
+        self.meta.can_push = true;
+        self
     }
 }
 
@@ -267,7 +277,13 @@ fn manager(scratch: &Scratch) -> (RepoManager, Arc<MemSecrets>) {
         CompanyId::new("acme"),
         scratch.join("data/companies/acme/repos"),
         secrets.clone(),
-    );
+    )
+    // Issue #752: `bind` refuses outright on a backend that keeps secrets as
+    // plaintext on the container's disk, and `RepoManager::new` defaults to
+    // that refusing side. These tests exercise the credentialed path *past*
+    // that gate, so they stand in a deployment that clears it — which is also
+    // what `MemSecrets` actually is: secrets that never touch the disk.
+    .with_storage_kind(crate::store::StorageKind::Mongodb);
     (mgr, secrets)
 }
 
@@ -562,6 +578,109 @@ async fn a_classic_pat_is_refused_with_a_usable_instruction() {
     );
 }
 
+// -- issue #752: the plaintext-secret-backend gate -----------------------------
+
+/// The attack this gate exists to stop, run as an attack rather than as a unit
+/// test of the guard: on a host whose secrets are plaintext files on the
+/// container's own disk, install a repository credential — and then go looking
+/// for it as the agent shell would, by reading the disk.
+///
+/// It must not be there, because the bind must not have happened.
+#[tokio::test]
+async fn a_credential_cannot_be_installed_where_the_agent_shell_could_read_it() {
+    let scratch = Scratch::new("plaintext-secret-bind");
+    let url = fixture_remote(&scratch);
+    // A *real* filesystem secret store rooted in the scratch home — not the
+    // in-memory fake — so "the token is on disk" is a claim about actual bytes
+    // in an actual file, which is the only version of it worth asserting.
+    let home = scratch.join("data");
+    let secrets = Arc::new(crate::store::FsSecretStore::new(home.clone()));
+    let mgr = RepoManager::new(
+        CompanyId::new("acme"),
+        scratch.join("data/companies/acme/repos"),
+        secrets.clone(),
+    )
+    .with_storage_kind(crate::store::StorageKind::Fs);
+
+    // Exactly the call the accepted-case test makes, against the same fixture
+    // remote. The only difference between the two is which backend is holding
+    // the secrets — which is the whole claim.
+    let coords = parse_repo_url(WIDGETS_URL).unwrap();
+    let err = mgr
+        .bind_validated(&coords, &url, SENTINEL, vec!["main".into()])
+        .await
+        .unwrap_err();
+
+    assert!(matches!(err, OpenCompanyError::Conflict(_)), "{err:?}");
+    let message = err.to_string();
+    assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
+    assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
+    assert!(message.contains("`repo` grant"), "{message}");
+    // The refusal must not quote the credential back into an error string that
+    // ends up in a log line or a console toast.
+    assert!(!message.contains(SENTINEL), "{message}");
+
+    // The attack: walk the company's whole on-disk footprint the way a shell
+    // with `cat`/`grep` would, and find nothing.
+    let leaked: Vec<_> = all_files(&home)
+        .into_iter()
+        .filter(|(_, bytes)| String::from_utf8_lossy(bytes).contains(SENTINEL))
+        .map(|(path, _)| path)
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a refused credential is readable on disk: {leaked:?}"
+    );
+    // And no binding exists to hang a later fetch off.
+    assert!(mgr.list().await.unwrap().is_empty());
+}
+
+/// The other half, without which the test above only proves the feature is off:
+/// the identical credential install is *accepted* on the backend that keeps
+/// secrets out of the container, and the token really does land. Driven through
+/// `bind_validated` against the `file://` fixture — the same way every other
+/// successful-bind test here runs the real path with no network — which is also
+/// the funnel the gate sits in. `sqlite` is refused alongside `fs`: same disk,
+/// same uid.
+#[tokio::test]
+async fn the_same_bind_is_accepted_where_secrets_leave_the_container() {
+    let scratch = Scratch::new("mongodb-secret-bind");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    let coords = parse_repo_url(WIDGETS_URL).unwrap();
+    let binding = mgr
+        .bind_validated(&coords, &url, SENTINEL, vec!["main".into()])
+        .await
+        .expect("mongodb-backed secrets must clear the #752 gate");
+    assert_eq!(
+        secrets
+            .get_now("acme", &repo_token_key(&binding.key))
+            .as_deref(),
+        Some(SENTINEL)
+    );
+    assert_eq!(mgr.list().await.unwrap().len(), 1);
+
+    // Sqlite is on the same disk as fs and is refused with the same message.
+    // Driven against the same fixture remote rather than the canonical GitHub
+    // URL: if this gate is ever removed, this assertion must fail *fast* on an
+    // unexpected success, not sit for five minutes waiting out a `ls-remote` to
+    // a host the test suite has no business contacting.
+    let sqlite_mgr = RepoManager::new(
+        CompanyId::new("acme"),
+        scratch.join("data/companies/acme/repos-sqlite"),
+        Arc::new(MemSecrets::default()),
+    )
+    .with_storage_kind(crate::store::StorageKind::Sqlite);
+    let err = sqlite_mgr
+        .bind_validated(&coords, &url, SENTINEL, vec!["main".into()])
+        .await
+        .unwrap_err();
+    assert!(
+        err.to_string().contains("OPENCOMPANY_STORAGE=sqlite"),
+        "{err}"
+    );
+}
+
 #[tokio::test]
 async fn a_bad_url_or_an_empty_token_is_refused() {
     let scratch = Scratch::new("bad-url");
@@ -821,6 +940,146 @@ async fn pull_request_without_a_forge_client_says_so() {
     assert!(
         matches!(err, OpenCompanyError::Unimplemented(_)),
         "an unwired forge must not read as an empty diff: {err:?}"
+    );
+}
+
+// -- push capability (issue #734) --------------------------------------------
+
+/// A fetch probes `permissions.push` and records a push-capable credential, and
+/// in doing so **heals a binding that predates the field** without a re-bind:
+/// `bind_local` stores no capability (unknown → cannot-push), and the fetch is
+/// where the recorded answer becomes `Some(true)`.
+#[tokio::test]
+async fn a_fetch_probes_and_records_a_push_capable_credential() {
+    let scratch = Scratch::new("push-capable");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    let mgr = mgr.with_host(Arc::new(FakeHost::new(1).pushable()));
+
+    let bound = mgr
+        .bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    // The migration precondition: a binding with no probed capability reads as
+    // cannot-push, never as "unknown, allow".
+    assert_eq!(
+        bound.can_push, None,
+        "an unprobed binding must carry no push capability"
+    );
+
+    // A credential the forge answers for is what makes the re-probe run.
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    let updated = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        updated.can_push,
+        Some(true),
+        "the fetch must record the probed push capability"
+    );
+    // And it is persisted, not merely returned.
+    let listed = mgr.get("fixture").await.unwrap();
+    assert_eq!(listed.can_push, Some(true));
+}
+
+/// A read-only credential is recorded as `Some(false)` — a definite
+/// cannot-push, distinct from the unknown `None` a pre-field binding carries.
+/// This is the value the write tier fails closed on.
+#[tokio::test]
+async fn a_fetch_records_a_read_only_credential_as_cannot_push() {
+    let scratch = Scratch::new("read-only");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    // `FakeHost::new` is read-only unless made `pushable`.
+    let mgr = mgr.with_host(Arc::new(FakeHost::new(1)));
+
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    let updated = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        updated.can_push,
+        Some(false),
+        "a read-only credential must be recorded as a definite cannot-push"
+    );
+}
+
+/// With no forge client wired, a fetch cannot probe and must leave the recorded
+/// capability untouched — an unknown stays unknown (fail-closed), never
+/// silently promoted.
+#[tokio::test]
+async fn a_fetch_without_a_forge_client_leaves_push_capability_unknown() {
+    let scratch = Scratch::new("no-host-probe");
+    let url = fixture_remote(&scratch);
+    let (mgr, _) = manager(&scratch);
+
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    let updated = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        updated.can_push, None,
+        "with nothing to probe against, the capability must stay unknown"
+    );
+}
+
+/// Once the capability is known, a fetch must NOT re-probe. `fetch` runs on the
+/// agent checkout path (before every `repo_checkout`), so re-probing a known
+/// capability would add a GitHub round trip — and burn rate limit — on every
+/// checkout. Only an unknown (pre-field) capability heals; a known one is left
+/// alone. Counting the tokens the forge saw is what distinguishes "healed once"
+/// from "re-probes every time".
+#[tokio::test]
+async fn a_known_capability_is_not_re_probed_on_every_fetch() {
+    let scratch = Scratch::new("no-reprobe");
+    let url = fixture_remote(&scratch);
+    let (mgr, secrets) = manager(&scratch);
+    let host = Arc::new(FakeHost::new(1).pushable());
+    let mgr = mgr.with_host(host.clone());
+
+    mgr.bind_local(&url, "fixture", vec!["main".into()])
+        .await
+        .unwrap();
+    secrets
+        .set(
+            &CompanyId::new("acme"),
+            &repo_token_key("fixture"),
+            SecretValue(SENTINEL.into()),
+        )
+        .await
+        .unwrap();
+
+    // First fetch: the capability is unknown (bind_local records none), so it
+    // probes exactly once and records the answer.
+    let first = mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(first.can_push, Some(true));
+    assert_eq!(
+        host.seen_tokens.lock().unwrap().len(),
+        1,
+        "the first fetch heals the unknown capability with one probe"
+    );
+
+    // Second fetch: the capability is now known, so no further probe is made.
+    mgr.fetch("fixture", &[]).await.unwrap();
+    assert_eq!(
+        host.seen_tokens.lock().unwrap().len(),
+        1,
+        "a known capability must not be re-probed on a subsequent fetch"
     );
 }
 

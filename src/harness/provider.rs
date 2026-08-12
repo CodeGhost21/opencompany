@@ -531,6 +531,7 @@ fn model_response_from_payload(payload: serde_json::Value) -> TaResult<ModelResp
         raw: None,
         resolved_model: None,
         continue_turn: None,
+        served_from_cache: false,
     };
     // `with_usage` mirrors usage onto both slots; call it only when present so
     // the billing-free path leaves `usage: None` intact.
@@ -1246,6 +1247,20 @@ mod tests {
                 .is_none(),
             "billing-free response must not fabricate a charge"
         );
+    }
+
+    /// Wire responses are freshly served unless the provider explicitly
+    /// reports otherwise. Keep the compatibility default introduced with the
+    /// TinyAgents response field pinned at this parsing boundary.
+    #[test]
+    fn parsed_response_is_not_marked_as_cached() {
+        let payload = serde_json::json!({
+            "choices": [{ "message": { "content": "fresh" } }]
+        });
+
+        let response = model_response_from_payload(payload).expect("parses");
+
+        assert!(!response.served_from_cache);
     }
 
     /// The managed envelope wins for cached tokens and carries the USD charge,

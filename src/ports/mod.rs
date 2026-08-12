@@ -17,8 +17,10 @@ pub mod economy;
 pub mod events;
 pub mod facts;
 pub mod inbox;
+pub mod journal;
 pub mod login_codes;
 pub mod memory;
+pub mod read_state;
 pub mod run_output;
 pub mod runs;
 pub mod schedule_fires;
@@ -48,8 +50,10 @@ pub use events::{EventLog, PruneReport, RetentionClass, RetentionPolicy, plan_pr
 pub use facts::{FactKind, FactRecord, FactStore};
 pub use ids::{AGENT_SLUG_FALLBACK, agent_slug, generate_id, now_millis};
 pub use inbox::{EmailRecord, InboxMeta, InboxStore};
+pub use journal::{Durability, JournalStore};
 pub use login_codes::{LoginCodeRecord, LoginCodeStore};
 pub use memory::MemoryStore;
+pub use read_state::{ChannelRead, ReadStateStore};
 pub use run_output::{
     MAX_RUN_OUTPUTS_PER_COMPANY, WorkflowRunOutputRecord, WorkflowRunOutputStore, bound_node_output,
 };
@@ -104,6 +108,7 @@ mod test {
         _facts: &dyn crate::ports::facts::FactStore,
         _usage: &dyn crate::ports::usage::UsageMeter,
         _skills: &dyn crate::ports::skills_state::SkillStateStore,
+        _read_state: &dyn crate::ports::read_state::ReadStateStore,
         _users: &dyn crate::ports::users::UserStore,
         _sessions: &dyn crate::ports::sessions::SessionStore,
         _login_codes: &dyn crate::ports::login_codes::LoginCodeStore,
@@ -112,6 +117,7 @@ mod test {
         _schedule_fires: &dyn crate::ports::schedule_fires::ScheduleFireStore,
         _run_output: &dyn crate::ports::run_output::WorkflowRunOutputStore,
         _workflow_runner: &dyn crate::ports::workflow_runner::WorkflowRunner,
+        _journal: &dyn crate::ports::journal::JournalStore,
     ) {
     }
 

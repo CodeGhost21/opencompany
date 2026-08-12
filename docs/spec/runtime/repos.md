@@ -147,6 +147,11 @@ different ones, and they are named rather than implied:
 - container-level egress policy and per-agent user namespaces, which are the
   real fix and are a follow-up, not a claim made here.
 
+That follow-up is issue #752, and the threat model it owed is now written:
+[../security/agent-isolation.md](../security/agent-isolation.md). Read it before
+concluding that any of the above adds up to confinement. Its residual section
+is the part that matters — it holds after every control #752 tracks has landed.
+
 ### Repository configuration decides what runs
 
 Issue #459 reclassified `read_workspace_state` for exactly this reason: it
@@ -334,6 +339,16 @@ of knowing what the company is, and the body carries no credential material.
 
 ### Intake rules
 
+- **The host must keep secrets off its own disk** (issue #752). On
+  `OPENCOMPANY_STORAGE=fs` or `sqlite` the credential would land as plaintext
+  under the company's data directory, readable by the uid the agent shell runs
+  as, so the bind is refused with `409 Conflict` before anything is parsed or
+  written. The same condition refuses **boot** for a company whose roster grants
+  `repo`, and withholds the repo tools at agent build. Remedies:
+  `OPENCOMPANY_STORAGE=mongodb` with a Mongo URI, or drop the `repo` grant.
+  This is a breaking change for `fs` deployments that already bound one — see
+  [storage.md](storage.md) and, for why a warning would not have been honest,
+  [../security/agent-isolation.md](../security/agent-isolation.md).
 - **https://github.com/&lt;owner&gt;/&lt;repo&gt; only.** Another forge, `http`,
   `ssh`, a userinfo section, a port, extra path segments, a query string, a `..`
   — each is refused rather than normalized. A URL is the thing a credential is
@@ -443,6 +458,15 @@ is an agent that says it cannot see the code.
 commits, namespaced branches, operator approval — is a separate follow-up, and
 the confinement above is arranged so that adding it is an explicit new capability
 rather than a hole that was already open.
+
+Its groundwork (issue #734) has landed without opening that path: a `repo.write`
+grant now exists — distinct from and tighter than `repo`, so a bare `repo` (the
+read tier every company sets) never confers it and the catch-all `*` never
+confers it — and each binding records whether its bound credential can push, read
+from the forge's `permissions.push` at bind time and healed on the next fetch
+when it is still unknown. Granting `repo.write` over a read-only credential is
+fail-closed: it warns and wires nothing. No tool consumes either yet; they are
+what the push follow-up will gate on.
 
 Also absent: a distinct uid or read-only bind mount for the agent shell (the real
 filesystem boundary, named under ["The honest limit"](#the-honest-limit)), and

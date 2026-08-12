@@ -492,6 +492,13 @@ const INTRINSIC_TOOLS: &[&str] = &[
     // verbatim rather than collapsed to a class.
     "read_run_output",
     "create_workflow",
+    // #661 (M7)'s trio, and they need this more than most: their refusals are
+    // whole sentences telling the agent what to do instead ("read it first",
+    // "that one is the operator's to change"), and a refusal collapsed to a
+    // bare failure class is a refusal the agent cannot act on.
+    "read_workflow",
+    "update_workflow",
+    "delete_workflow",
     "add_agent",
     // #186's pair. Missing here until #461 noticed the drift, so an
     // `assign_task` / `review_task` refusal ("agent is not on the roster")
@@ -856,6 +863,9 @@ mod tests {
             ADD_AGENT_TOOL, ASSIGN_TASK_TOOL, CREATE_WORKFLOW_TOOL, QUERY_COMPANY_TOOL,
             READ_RUN_OUTPUT_TOOL, REVIEW_TASK_TOOL, RUN_WORKFLOW_TOOL,
         };
+        use crate::harness::workflow_admin::{
+            DELETE_WORKFLOW_TOOL, READ_WORKFLOW_TOOL, UPDATE_WORKFLOW_TOOL,
+        };
         use crate::runtime::delegation_tools::{DELEGATE_TO_DESK_TOOL, SPAWN_TASK_TOOL};
 
         let expected = [
@@ -865,6 +875,9 @@ mod tests {
             RUN_WORKFLOW_TOOL,
             READ_RUN_OUTPUT_TOOL,
             CREATE_WORKFLOW_TOOL,
+            READ_WORKFLOW_TOOL,
+            UPDATE_WORKFLOW_TOOL,
+            DELETE_WORKFLOW_TOOL,
             ADD_AGENT_TOOL,
             ASSIGN_TASK_TOOL,
             REVIEW_TASK_TOOL,

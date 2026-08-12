@@ -355,6 +355,53 @@ mod test {
         assert!(stored.is_none(), "a refused credential was stored");
     }
 
+    /// Issue #752: the operator-facing half of the plaintext-secret gate. This
+    /// host is fs-backed (the [`AppState`] default, which is what a local or
+    /// self-hosted `serve` actually is), so the route refuses the bind and says
+    /// what to do about it — rather than accepting a credential that would sit
+    /// in a file the agent shell can read.
+    #[tokio::test]
+    async fn binding_is_refused_on_a_host_that_keeps_secrets_on_its_own_disk() {
+        let home = tempfile::Builder::new()
+            .prefix("oc-repos-plaintext-")
+            .tempdir()
+            .unwrap();
+        let state = state_with(home.path()).await;
+        let runtime = state.registry().get(&CompanyId::new("acme")).unwrap();
+
+        let response = router(state.clone())
+            .oneshot(post(
+                "/api/v1/company/repos",
+                serde_json::json!({
+                    "url": "https://github.com/acme/widgets",
+                    "token": SENTINEL,
+                }),
+            ))
+            .await
+            .unwrap();
+        // 409 rather than 400: the request is fine, the deployment is not, and
+        // the operator fixes it by changing the host or the grant and retrying.
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = body_json(response).await;
+        let message = body["error"].as_str().unwrap_or_default().to_string();
+        assert!(message.contains("OPENCOMPANY_STORAGE=fs"), "{message}");
+        assert!(message.contains("OPENCOMPANY_STORAGE=mongodb"), "{message}");
+        assert!(message.contains("`repo` grant"), "{message}");
+        // The refusal must not echo the credential into a response body.
+        assert!(!message.contains(SENTINEL), "{message}");
+
+        let key =
+            crate::runtime::repo_manager::types::parse_repo_url("https://github.com/acme/widgets")
+                .unwrap()
+                .key();
+        let stored = runtime
+            .secrets()
+            .get(runtime.id(), &repo_token_key(&key))
+            .await
+            .unwrap();
+        assert!(stored.is_none(), "a refused credential was stored");
+    }
+
     #[tokio::test]
     async fn a_non_github_url_is_refused_at_the_route() {
         let home = tempfile::Builder::new()
@@ -450,6 +497,7 @@ mod test {
                 last_fetched_millis: Some(1),
                 size_bytes: 42,
                 bound_at_millis: 1,
+                can_push: None,
             }],
             pull_requests_available: false,
             granted_agents: vec!["ceo".to_string()],

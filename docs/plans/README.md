@@ -94,6 +94,26 @@ Alignment notes carried through the workstreams:
 | [08-company-content.md](08-company-content.md) | WS8 — skills library + company starter content | WS1 |
 | [09-verification.md](09-verification.md) | cross-cutting test strategy + exit criteria | all |
 
+### The WS7 email train
+
+Per-company conversational email got its own design doc and three
+implementation plans, none of which the table above indexes. All of it shipped
+in [PR #143](https://github.com/tinyhumansai/opencompany/pull/143):
+
+| Doc | Half |
+|---|---|
+| [07-workload-email-send-receive.md](07-workload-email-send-receive.md) | the design source both halves implement |
+| [07-workload-email-inbound-plan.md](07-workload-email-inbound-plan.md) | inbound: goal, architecture, constraints — plus [transport](07-workload-email-inbound-transport.md) (tasks 1–4) and [runtime wiring](07-workload-email-inbound-runtime.md) (tasks 5–7) |
+| [07-workload-email-outbound-plan.md](07-workload-email-outbound-plan.md) | outbound: the approval-gated `send_email` effect |
+| [07-workload-email-outbound-spec.md](07-workload-email-outbound-spec.md) | outbound: the effect-model spec behind that plan |
+
+**Shipped plans are retained, not deleted.** This folder is the durable record
+of how each workstream was executed — `4a086315` *moved* the WS1–WS6 pages here
+rather than removing them, and [`docs/spec/roadmap.md`](../spec/roadmap.md)
+links the folder as that record. A page whose work has landed gets a **status
+header** naming the PR and pointing at the living documentation, so a reader
+cannot mistake an intent sketch for current behaviour.
+
 ## Dependency graph & critical path
 
 ```

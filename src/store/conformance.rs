@@ -1148,6 +1148,7 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         created_at_millis: at,
         expires_at_millis: at + 1_000,
         accepted_at_millis: None,
+        notified_at_millis: None,
     };
 
     users
@@ -1201,9 +1202,70 @@ pub async fn assert_user_store(users: Arc<dyn UserStore>) {
         Some(9)
     );
 
+    // The mailed stamp round-trips through the backend, both ways (issue
+    // #584). It is what the console reads to say "invite email sent", so a
+    // backend that dropped it would render every invite as un-mailed.
+    let mut notified = invite("i1", "carol@example.com", 1);
+    notified.notified_at_millis = Some(11);
+    users.upsert_invite(&alpha, &notified).await.unwrap();
+    assert_eq!(
+        users
+            .find_invite_by_email(&alpha, "carol@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .notified_at_millis,
+        Some(11),
+        "a stored notified_at_millis must survive the round trip"
+    );
+    // And back to unset: a store that only ever wrote the field when present
+    // would leave a stale timestamp behind on a re-invite.
+    users
+        .upsert_invite(&alpha, &invite("i1", "carol@example.com", 1))
+        .await
+        .unwrap();
+    assert_eq!(
+        users
+            .find_invite_by_email(&alpha, "carol@example.com")
+            .await
+            .unwrap()
+            .unwrap()
+            .notified_at_millis,
+        None,
+        "clearing notified_at_millis must persist as cleared"
+    );
+
+    // Stamping is an update, never an upsert. Mail delivery is a network round
+    // trip, and the record the route holds across it goes stale the moment an
+    // admin revokes the invite — so a backend that implemented the stamp as a
+    // full-record write would restore an address the admin had just removed
+    // from the allowlist.
+    assert!(
+        users.mark_invite_notified(&alpha, "i1", 12).await.unwrap(),
+        "stamping an outstanding invite must report that it landed"
+    );
+    let stamped = users
+        .find_invite_by_email(&alpha, "carol@example.com")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(stamped.notified_at_millis, Some(12));
+    assert_eq!(
+        stamped.email, "carol@example.com",
+        "stamping must leave every other field alone"
+    );
+    assert_eq!(stamped.created_at_millis, 1);
+
     assert!(users.delete_invite(&alpha, "i1").await.unwrap());
     assert!(!users.delete_invite(&alpha, "i1").await.unwrap());
-    assert!(users.list_invites(&alpha).await.unwrap().is_empty());
+    assert!(
+        !users.mark_invite_notified(&alpha, "i1", 13).await.unwrap(),
+        "stamping a revoked invite must report that nothing was updated"
+    );
+    assert!(
+        users.list_invites(&alpha).await.unwrap().is_empty(),
+        "stamping must never recreate a revoked invite"
+    );
 }
 
 /// Asserts the [`SessionStore`] contract: per-company isolation, token-hash
@@ -2149,6 +2211,89 @@ pub async fn assert_usage_retention(usage: Arc<dyn UsageMeter>) {
 }
 
 /// Asserts the [`SkillStateStore`] contract: isolation, set/upsert, and remove.
+/// Every [`ReadStateStore`] must agree on these (issue #755).
+///
+/// The two properties worth pinning are the ones a backend can plausibly get
+/// wrong: **monotonicity** (a marker never moves backwards, however requests
+/// interleave) and **isolation** (per person as well as per company — a marker
+/// keyed only by channel would let one operator's reading clear another's
+/// badges).
+pub async fn assert_read_state_store(reads: Arc<dyn crate::ports::read_state::ReadStateStore>) {
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    // A channel never opened has no marker — absent, not zero.
+    assert!(reads.list(&alpha, "ada").await.unwrap().is_empty());
+
+    let first = reads
+        .mark(&alpha, "ada", "engineering", 1_000)
+        .await
+        .unwrap();
+    assert_eq!(first.last_read_at, 1_000);
+    assert_eq!(first.channel_id, "engineering");
+
+    // Forward moves.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 2_000)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+
+    // Backwards does NOT. A late request carrying an earlier instant must not
+    // resurrect messages already read, and the call answers with where the
+    // marker actually stands rather than what was asked for.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 500)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+    // Equal is not a move either, and must not error.
+    assert_eq!(
+        reads
+            .mark(&alpha, "ada", "engineering", 2_000)
+            .await
+            .unwrap()
+            .last_read_at,
+        2_000
+    );
+
+    // Per person: Grace's marker on the same channel is her own, and reading it
+    // to the past does not disturb Ada's.
+    reads
+        .mark(&alpha, "grace", "engineering", 42)
+        .await
+        .unwrap();
+    let ada = reads.list(&alpha, "ada").await.unwrap();
+    assert_eq!(ada.len(), 1);
+    assert_eq!(ada[0].last_read_at, 2_000);
+    let grace = reads.list(&alpha, "grace").await.unwrap();
+    assert_eq!(grace.len(), 1);
+    assert_eq!(grace[0].last_read_at, 42);
+
+    // Per company: the same person in another company starts empty.
+    assert!(reads.list(&beta, "ada").await.unwrap().is_empty());
+    reads.mark(&beta, "ada", "engineering", 9).await.unwrap();
+    assert_eq!(
+        reads.list(&alpha, "ada").await.unwrap()[0].last_read_at,
+        2_000
+    );
+
+    // Several channels for one person, ordered by channel id ascending — the
+    // order the trait documents, not each backend's insertion order.
+    // `engineering` was written first and still sorts second.
+    reads.mark(&alpha, "ada", "dm:pm", 7).await.unwrap();
+    let all = reads.list(&alpha, "ada").await.unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].channel_id, "dm:pm");
+    assert_eq!(all[1].channel_id, "engineering");
+}
+
 pub async fn assert_skill_state_store(skills: Arc<dyn SkillStateStore>) {
     let alpha = CompanyId::new("alpha");
     let beta = CompanyId::new("beta");
@@ -3487,4 +3632,173 @@ pub async fn assert_schedule_fire_store(
         winners, 1,
         "exactly one of {N} concurrent claimers may win the key"
     );
+}
+
+/// Every backend's [`JournalStore`](crate::ports::journal::JournalStore) must
+/// keep opaque lines byte-identically, in append order, per company (#726).
+///
+/// The runtime journal carries the at-most-once effect set and the durable
+/// approval queue, and it decides what a line *means* above this port — so all a
+/// backend owes is bytes and order. Both halves are load-bearing:
+///
+/// * **Bytes.** A line the store rewrote, trimmed or re-encoded is a record
+///   `serde_json` no longer parses, which the journal reports as corruption and
+///   skips. A skipped `EffectExecuted` un-commits its key and lets an
+///   at-most-once effect fire a second time.
+/// * **Order.** Replay folds records in sequence. A park read back *after* the
+///   resolution that drains it resurrects a resolved approval.
+///
+/// Isolation is asserted for the same reason it is everywhere else, with a
+/// sharper consequence here: one company reading another's executed keys would
+/// suppress its own effects.
+pub async fn assert_journal_store(journal: Arc<dyn crate::ports::journal::JournalStore>) {
+    use crate::ports::journal::Durability;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    assert!(
+        journal.read_journal(&alpha).await.unwrap().is_empty(),
+        "a company that has never journaled reads back nothing"
+    );
+
+    // Deliberately awkward payloads: a backend that stores these unchanged is not
+    // quietly normalising anything. No `\n` anywhere — the port's contract is one
+    // record per call, and the caller never puts a terminator inside a line.
+    let lines = [
+        r#"{"record":"EffectExecuted","key":"cyc:0"}"#,
+        r#"{"record":"EffectExecuted","key":"cyc:1","effect":{"kind":"payment.send"}}"#,
+        r#"  {"record":"leading and trailing space"}  "#,
+        "{\"record\":\"unicode\",\"memo\":\"caf\u{e9} \u{2014} \u{65e5}\u{672c}\u{8a9e}\t tabbed\"}",
+        "not json at all, and it must survive anyway",
+        "",
+    ];
+    // Both durability levels, alternating: a backend that honours only one of
+    // them (or ignores the parameter) must still store and order every record
+    // identically, and one that errored on the level it does not implement would
+    // fail here rather than in production.
+    for (n, line) in lines.iter().enumerate() {
+        let durability = if n % 2 == 0 {
+            Durability::Host
+        } else {
+            Durability::Process
+        };
+        journal
+            .append_journal(&alpha, line, durability)
+            .await
+            .unwrap();
+    }
+
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        lines,
+        "every line must read back byte-identically and in append order"
+    );
+
+    // Isolation, both ways.
+    journal
+        .append_journal(&beta, "beta-only", Durability::Host)
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.read_journal(&beta).await.unwrap(),
+        vec!["beta-only".to_string()],
+        "one company's journal must hold only its own records"
+    );
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap().len(),
+        lines.len(),
+        "and another company's append must not land in it"
+    );
+
+    // Appending after a read keeps going from the end, not from zero — a backend
+    // whose sequence restarted would overwrite the first record.
+    journal
+        .append_journal(&alpha, "later", Durability::Process)
+        .await
+        .unwrap();
+    let after = journal.read_journal(&alpha).await.unwrap();
+    assert_eq!(after.len(), lines.len() + 1);
+    assert_eq!(after.last().unwrap(), "later", "and it lands at the end");
+}
+
+/// The one-time filesystem import and the receipt that gates it (#726).
+///
+/// Only for backends that can actually *hold* an import — sqlite and mongodb.
+/// The fs backend reports itself permanently imported (its store is the file an
+/// import would copy from), so running this against it would assert nothing.
+///
+/// The receipt is not bookkeeping. `complete_import` **clears** before it copies,
+/// so a second import deletes every record the backend accumulated after the
+/// first one — un-committing effect keys that have already run. And it records
+/// the receipt **last**, so an import interrupted anywhere leaves the gate open
+/// and the next boot re-runs the whole copy rather than resuming into a truncated
+/// prefix. A truncated prefix is the failure this port exists to prevent.
+pub async fn assert_journal_import(journal: Arc<dyn crate::ports::journal::JournalStore>) {
+    use crate::ports::journal::Durability;
+
+    let alpha = CompanyId::new("alpha");
+    let beta = CompanyId::new("beta");
+
+    assert!(
+        !journal.journal_imported(&alpha).await.unwrap(),
+        "a company the backend has never seen has not been imported"
+    );
+
+    let source = vec![
+        r#"{"record":"EffectExecuted","key":"cyc:0"}"#.to_string(),
+        r#"{"record":"EffectExecuted","key":"cyc:1"}"#.to_string(),
+        "a corrupt line, migrated byte-for-byte".to_string(),
+    ];
+    journal
+        .complete_import(&alpha, source.clone())
+        .await
+        .unwrap();
+
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        source,
+        "the import copies verbatim and in file order"
+    );
+    assert!(
+        journal.journal_imported(&alpha).await.unwrap(),
+        "and closes the gate"
+    );
+    assert!(
+        !journal.journal_imported(&beta).await.unwrap(),
+        "the receipt is per company, not per database"
+    );
+
+    // Appends after the import continue the sequence rather than colliding with
+    // (or overwriting) the copied records.
+    journal
+        .append_journal(&alpha, "after-import", Durability::Host)
+        .await
+        .unwrap();
+    let after = journal.read_journal(&alpha).await.unwrap();
+    assert_eq!(
+        after.len(),
+        source.len() + 1,
+        "an append after the import must not collide with a copied record's key"
+    );
+    assert_eq!(after[..source.len()], source[..]);
+    assert_eq!(after.last().unwrap(), "after-import");
+
+    // A retry — the shape of an import interrupted before its receipt — replaces
+    // rather than appends.
+    journal
+        .complete_import(&alpha, source.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        journal.read_journal(&alpha).await.unwrap(),
+        source,
+        "a re-run import clears the partial copy; it must never append a second one"
+    );
+
+    // The empty import is how a company with no prior filesystem journal closes
+    // its gate, and it must be a real (clearing) import, not a skipped no-op.
+    journal.complete_import(&beta, Vec::new()).await.unwrap();
+    assert!(journal.journal_imported(&beta).await.unwrap());
+    assert!(journal.read_journal(&beta).await.unwrap().is_empty());
 }

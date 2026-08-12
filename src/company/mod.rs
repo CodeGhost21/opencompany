@@ -89,7 +89,8 @@ pub use types::{
     Inference, KNOWN_CHANNELS, MAX_DELEGATION_DEPTH_BOUNDS, McpServer, ORCHESTRATOR_TIER,
     PLAN_NAMES, PLAN_PERIODS, POLICY_MODES, PROVISIONED_POLICY_MODE, Place, Plan, Policy, Schedule,
     Skill, TIERS, TOOL_PROVIDERS, Tools, grants_composio_explicit, grants_media_explicit,
-    grants_repo_explicit, grants_search_explicit, grants_workspace_write_explicit, orchestrator_id,
+    grants_repo_explicit, grants_repo_write_explicit, grants_search_explicit,
+    grants_workspace_write_explicit, orchestrator_id,
 };
 pub use workflow_file::{
     WORKFLOW_DESTINATION_KINDS, WORKFLOW_NODE_KINDS, WorkflowDestinationDef, WorkflowEdgeDef,
@@ -103,6 +104,12 @@ pub(crate) use workflow_file::{
     RawEdge, RawNode, RawWorkflow, raw_workflow_from_toml, render_workflow,
     required_config_problems,
 };
+// Issue #661 (M7): the read half of the agent workflow-admin surface — a stored
+// graph projected onto the narrow agent authoring schema, plus the policy
+// residue that schema cannot carry. Lives with the parser it reads, and stays
+// crate-internal like every other raw-shape helper above.
+#[cfg(feature = "openhuman")]
+pub(crate) use workflow_file::{WorkflowSpecProjection, project_workflow_spec};
 // Crate-internal only: the shared validated-persist core (issue #112) both the
 // REST `POST …/workflows` route and the orchestrator `create_workflow` tool run.
 // Ungated: the REST route is in the default build, so gating this behind
@@ -113,9 +120,10 @@ pub(crate) use workflow_create::{
     update_company_workflow, workflow_version,
 };
 // Issue #580: the builder pass's courtesy validation, gated with the harness
-// builder that is its only caller.
+// builder that is its only caller. Issue #753 adds `workflow_callable_tool_slugs`
+// on the same footing — the create-time copilot's tool grounding.
 #[cfg(feature = "openhuman")]
-pub(crate) use workflow_create::courtesy_validate_draft;
+pub(crate) use workflow_create::{courtesy_validate_draft, workflow_callable_tool_slugs};
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
 use crate::{Result, VERSION};

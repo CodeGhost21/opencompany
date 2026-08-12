@@ -110,6 +110,13 @@ pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
+/// Issue #661 (M7): `read_workflow` / `update_workflow` / `delete_workflow` —
+/// the agent's way to fix or retire a workflow instead of only ever creating
+/// another one beside it. Kept out of `orchestrator.rs` (already the largest
+/// file in `src/harness/`) because the three share a handle, a guard and a set
+/// of refusals with each other rather than with anything there. See
+/// [`workflow_admin`].
+pub mod workflow_admin;
 /// Issue #339: the staging queue the orchestrator's `run_workflow` /
 /// `create_workflow` tools push a workflow reference onto and the
 /// [`HarnessBrain`] drains at the end of a dispatch, so a card that built or
@@ -309,6 +316,17 @@ pub struct HarnessDeps {
     /// every node produced. `None` (the default build, and every unwired test)
     /// degrades the persist to a no-op, exactly like [`Self::events`].
     pub run_output_store: Option<Arc<dyn crate::ports::run_output::WorkflowRunOutputStore>>,
+    /// Issue #274's per-workflow snapshot ring, so the orchestrator's
+    /// `update_workflow` / `delete_workflow` tools (issue #661, M7) write
+    /// through the same undo-and-cascade path the console's `PUT`/`DELETE`
+    /// routes do — an agent edit is recoverable on exactly the terms an
+    /// operator's is.
+    ///
+    /// `None` (the default build, and every unwired test) makes those two tools
+    /// refuse rather than degrade, unlike [`Self::events`]. The asymmetry is the
+    /// point: a missing journal loses an audit line, while a missing revision
+    /// store loses the only copy of the graph being overwritten.
+    pub workflow_revisions: Option<Arc<dyn crate::ports::WorkflowRevisionStore>>,
     /// The shared approval-request queue every agent's [`ApprovalPolicy`] pushes
     /// a `RequireApproval` decision onto and the [`HarnessBrain`] drains after a
     /// turn, parking each request through
@@ -2717,6 +2735,7 @@ description = "Builds the product."
                 workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
                 run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
                 run_output_store: None,
+                workflow_revisions: None,
                 approval_requests: ApprovalRequestQueue::default(),
                 secrets: None,
                 web_allowed_domains: Vec::new(),
@@ -2789,6 +2808,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3473,6 +3493,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -3649,6 +3670,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: Some(secrets.clone()),
             web_allowed_domains: Vec::new(),
@@ -3791,6 +3813,7 @@ description = "Builds the product."
             last_fetched_millis: None,
             size_bytes: 0,
             bound_at_millis: 1,
+            can_push: None,
         };
 
         pool.ensure(&rec, &deps).await.expect("first ensure");
@@ -3886,6 +3909,7 @@ description = "Builds the product."
                 last_fetched_millis: None,
                 size_bytes: 0,
                 bound_at_millis: 1,
+                can_push: None,
             }]
         }))
         .unwrap();
@@ -4163,6 +4187,7 @@ description = "Builds the product."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -4332,6 +4357,7 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -4482,6 +4508,7 @@ description = "Sets direction."
             workflow_refs: crate::harness::workflow_refs::WorkflowRefQueue::default(),
             run_outputs: crate::harness::orchestrator::RunOutputCache::default(),
             run_output_store: None,
+            workflow_revisions: None,
             approval_requests: ApprovalRequestQueue::default(),
             secrets: None,
             web_allowed_domains: Vec::new(),
@@ -5227,11 +5254,19 @@ budget_usd_daily = 0.0
             // pass while never having looked at them, which is the exact way
             // `describe_workflow` stayed invisible here while parking in
             // production.
-            deps.repos = Some(Arc::new(crate::runtime::RepoManager::new(
-                CompanyId::new("acme"),
-                dir.path().join("repos"),
-                Arc::new(crate::store::FsSecretStore::new(dir.path())),
-            )));
+            // Issue #752 added a fourth gate: a backend that keeps the
+            // credential off this container's disk. Declared here for the same
+            // reason the binding below is — without it the belt would be
+            // missing `repo_checkout` / `repo_pr` and this check would pass
+            // while never having looked at them.
+            deps.repos = Some(Arc::new(
+                crate::runtime::RepoManager::new(
+                    CompanyId::new("acme"),
+                    dir.path().join("repos"),
+                    Arc::new(crate::store::FsSecretStore::new(dir.path())),
+                )
+                .with_storage_kind(crate::store::StorageKind::Mongodb),
+            ));
             deps.repo_bindings = vec![crate::runtime::repo_manager::types::RepoBinding {
                 key: "acme-widgets-000000000000".to_string(),
                 url: "https://github.com/acme/widgets".to_string(),
@@ -5242,6 +5277,7 @@ budget_usd_daily = 0.0
                 last_fetched_millis: None,
                 size_bytes: 0,
                 bound_at_millis: 1,
+                can_push: None,
             }];
             // A registered MCP server is what puts `mcp_list_servers`,
             // `mcp_list_tools` and `mcp_call_tool` on the belt — the three

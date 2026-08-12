@@ -334,6 +334,46 @@ const DECLARED: &[Declared] = &[
     d("create_workflow", EffectGroup::Other, Reach::Nothing),
     d("assign_task", EffectGroup::Other, Reach::Nothing),
     d("review_task", EffectGroup::Other, Reach::Nothing),
+    // Issue #661 (M7). `read_workflow` is a pure read of this company's own
+    // saved graphs — the same class as `query_company`, which already lists
+    // them.
+    d("read_workflow", EffectGroup::Other, Reach::Nothing),
+    // `update_workflow` takes `create_workflow`'s classification, and gets it by
+    // re-deriving rather than by copying. Four properties separate it from
+    // `workspace_write`, which is the tool it superficially resembles and which
+    // is deliberately `Reach::Consequence`:
+    //
+    //  * every content-changing update is **undoable by construction** — issue
+    //    #274 snapshots the prior body inside the same write lock, so the thing
+    //    an operator would want to have seen is still there afterwards;
+    //  * the tool refuses a scheduled target, so every workflow it CAN edit is
+    //    manual-run only: a bad edit's consequence materialises solely through
+    //    `run_workflow`, which parks;
+    //  * `expected_version` is required, so it cannot clobber state nobody read;
+    //  * validation is identical to the console's, including #682's per-kind
+    //    config rules — an agent edit cannot persist a graph an operator's
+    //    could not.
+    //
+    // Parking every fix-up save of a draft the agent itself just created would
+    // also recreate the #558/#561 no-consequence-interrupt pattern against the
+    // exact flow M7 exists to enable.
+    //
+    // The honest residual, recorded rather than quietly carried: `Reach::Nothing`
+    // means a `readonly` desk can edit a workflow. But `create_workflow` above is
+    // already `Nothing`, so such a desk can already author one — this is a
+    // pre-existing classification, not a new hole. If it is wrong, create and
+    // update are reclassified TOGETHER; neither moves alone.
+    d("update_workflow", EffectGroup::Other, Reach::Nothing),
+    // `delete_workflow` does not, and the argument is `workspace_delete`'s
+    // (#671) almost verbatim — with the object strictly worse. Deleting a
+    // workflow removes the graph AND cascades its whole #274 revision history
+    // away in the same call, so unlike an update there is no prior body left to
+    // restore from and unlike a workspace delete there is no artifact chain
+    // outliving it. `PerCall` for #671's second reason too: a standing grant on
+    // deletion is the shape that turns one bad turn into a company whose
+    // processes are quietly gone by the end of it, and per-call parking makes
+    // each removal its own card naming its own workflow.
+    d("delete_workflow", EffectGroup::Other, Reach::Consequence),
     // Running a saved workflow performs whatever that workflow performs, which
     // this layer cannot see. It parks, and it stays a per-call decision.
     d("run_workflow", EffectGroup::Other, Reach::Consequence),
@@ -1431,6 +1471,11 @@ mod tests {
             "media_generate_video",
             "mcp_call_tool",
             "run_workflow",
+            // Issue #661 (M7): removing a workflow takes its whole revision
+            // history with it, so there is nothing to restore afterwards. Its
+            // read and update siblings deliberately do NOT park (see `DECLARED`)
+            // — naming the one that does is how that split stays a decision.
+            "delete_workflow",
             // Issue #245: both reach a forge under the company's credential and
             // pull third-party-authored content into the agent's context, and
             // one of them writes a tree.
@@ -2094,8 +2139,11 @@ mod tests {
     #[test]
     #[cfg(feature = "openhuman")]
     fn the_declared_names_are_the_names_the_tools_return() {
-        use crate::harness::{orchestrator, publish, search, workspace_tools};
+        use crate::harness::{orchestrator, publish, search, workflow_admin, workspace_tools};
         for name in [
+            workflow_admin::READ_WORKFLOW_TOOL,
+            workflow_admin::UPDATE_WORKFLOW_TOOL,
+            workflow_admin::DELETE_WORKFLOW_TOOL,
             orchestrator::QUERY_COMPANY_TOOL,
             orchestrator::SPAWN_TASK_TOOL,
             orchestrator::DELEGATE_TO_DESK_TOOL,
@@ -2128,7 +2176,7 @@ mod tests {
     /// the same file.
     const LANGUAGE_TS: &str = "frontend/src/lib/language.ts";
 
-    /// The keys of one object literal in [`LANGUAGE_TS`].
+    /// One object literal in [`LANGUAGE_TS`], read as `key -> sentence`.
     ///
     /// A line parser rather than the two alternatives, and the reasons are the
     /// same ones that make this a `cargo test` at all:
@@ -2146,7 +2194,22 @@ mod tests {
     /// parser that silently reads nothing turns this test into a green light
     /// for the exact regression it exists to catch — see the vacuity guards in
     /// [`every_consequence_tool_has_a_console_label`].
-    fn label_keys(source: &str, decl: &str) -> Vec<String> {
+    ///
+    /// It returns pairs rather than keys (issue #743) because the distinctness
+    /// half needs the sentences, and one parse feeding both halves is the point:
+    /// this test exists because a hand-maintained restatement of the declared
+    /// set drifts from it, and a second parser over the same file would be that
+    /// same mistake one level down.
+    ///
+    /// Values are taken literally — the text between the first `:` and the
+    /// trailing comma, unquoted. Every entry in both tables is a plain string
+    /// literal on one line today; a template literal or a concatenation would
+    /// arrive here as its own source text and, being unequal to any other
+    /// entry, would pass the distinctness check without asserting anything about
+    /// what an operator reads. That is the one shape to reject rather than
+    /// tolerate, and the `>=` floors below are what would catch a table that
+    /// reshaped into it wholesale.
+    fn label_pairs(source: &str, decl: &str) -> Vec<(String, String)> {
         let mut lines = source.lines();
         let opened = lines.any(|line| {
             let line = line.trim_start();
@@ -2158,19 +2221,27 @@ mod tests {
              renamed or reshaped, update this parser — do not delete the test"
         );
 
-        let mut keys = Vec::new();
+        let mut pairs = Vec::new();
         for line in lines {
             let line = line.trim();
             if line == "};" {
-                return keys;
+                return pairs;
             }
             if line.is_empty() || line.starts_with("//") || line.starts_with('*') {
                 continue;
             }
-            let Some((key, _)) = line.split_once(':') else {
+            let Some((key, value)) = line.split_once(':') else {
                 continue;
             };
-            keys.push(key.trim().trim_matches('"').to_string());
+            pairs.push((
+                key.trim().trim_matches('"').to_string(),
+                value
+                    .trim()
+                    .trim_end_matches(',')
+                    .trim()
+                    .trim_matches('"')
+                    .to_string(),
+            ));
         }
         panic!("`const {decl}` in {LANGUAGE_TS} is never closed by a `}};` line");
     }
@@ -2199,8 +2270,13 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/frontend/src/lib/language.ts"
         ));
-        let effects = label_keys(source, "EFFECT_LABELS");
-        let tools = label_keys(source, "TOOL_LABELS");
+        // Read as pairs, not keys: the distinctness half below needs the
+        // sentences. `label_keys` is the same parse, so the two halves cannot
+        // disagree about what the tables hold.
+        let effect_labels = label_pairs(source, "EFFECT_LABELS");
+        let tool_labels = label_pairs(source, "TOOL_LABELS");
+        let effects: Vec<&str> = effect_labels.iter().map(|(k, _)| k.as_str()).collect();
+        let tools: Vec<&str> = tool_labels.iter().map(|(k, _)| k.as_str()).collect();
 
         // Vacuity guards. A parse that quietly returned nothing would report
         // every gated tool as unlabelled — noisy, and therefore self-correcting.
@@ -2210,14 +2286,14 @@ mod tests {
         // to move, so a reformat of `language.ts` breaks here loudly instead.
         for anchor in ["payment.send", "workflow.approve"] {
             assert!(
-                effects.iter().any(|k| k == anchor),
+                effects.contains(&anchor),
                 "parsed EFFECT_LABELS from {LANGUAGE_TS} without `{anchor}` — \
                  the parser is reading the wrong block, not the table shrinking"
             );
         }
         for anchor in ["shell", "workspace_create"] {
             assert!(
-                tools.iter().any(|k| k == anchor),
+                tools.contains(&anchor),
                 "parsed TOOL_LABELS from {LANGUAGE_TS} without `{anchor}` — \
                  the parser is reading the wrong block, not the table shrinking"
             );
@@ -2231,8 +2307,31 @@ mod tests {
             tools.len()
         );
 
-        let mut unlabelled: Vec<&str> = declared_tools()
+        let gated: Vec<&str> = declared_tools()
             .filter(|tool| c(tool).reach.parks_under_supervision())
+            .collect();
+
+        // The walk's own vacuity guard (issue #743). A distinctness check over
+        // an empty or truncated set passes having asserted nothing, which is
+        // precisely the fail-open shape the guards above exist to refuse — and
+        // the shape that made #706's reproduction wrong by half.
+        //
+        // A floor rather than an exact count, matching the `>=` idiom above: the
+        // gated set is 25 today and grows whenever a `Reach::Consequence` line
+        // is declared, so pinning it exactly would fail every such commit for
+        // being correct. What must never happen is the walk *shrinking* toward
+        // the four hardcoded names this widened.
+        assert!(
+            gated.len() >= 20,
+            "only {} tools were selected as gated; the declaration table holds \
+             far more `Reach::Consequence` entries than that, so the walk is \
+             selecting almost nothing and everything below it is vacuous",
+            gated.len()
+        );
+
+        let mut unlabelled: Vec<&str> = gated
+            .iter()
+            .copied()
             .filter(|tool| !effects.iter().any(|k| k == tool) && !tools.iter().any(|k| k == tool))
             .collect();
         unlabelled.sort_unstable();
@@ -2245,6 +2344,46 @@ mod tests {
              EFFECT_LABELS entries do not assume and why its \
              EFFECT_DONE_LABELS mirror would demand a past-tense twin these \
              kinds never reach"
+        );
+
+        // ...and no two of them read the same sentence (issue #743).
+        //
+        // Checked after the unlabelled walk on purpose: an unlabelled pair would
+        // collide here too, on the fallback, and reporting that as "these two
+        // read alike" would name the symptom while the assertion above names the
+        // cause. Ordering the two is what keeps one failure message honest.
+        //
+        // Resolved through the console's own rung order — `EFFECT_LABELS` then
+        // `TOOL_LABELS` — because that is what `toolAction` does, and a tool
+        // present in both resolves to the effect sentence. Comparing the tables
+        // separately would miss exactly the collision that ordering creates.
+        let sentence = |tool: &str| -> &str {
+            effect_labels
+                .iter()
+                .chain(tool_labels.iter())
+                .find(|(key, _)| key == tool)
+                .map(|(_, value)| value.as_str())
+                .expect("every gated tool is labelled — asserted directly above")
+        };
+
+        let mut by_sentence: std::collections::BTreeMap<&str, Vec<&str>> = Default::default();
+        for tool in &gated {
+            by_sentence.entry(sentence(tool)).or_default().push(tool);
+        }
+        let collisions: Vec<String> = by_sentence
+            .iter()
+            .filter(|(_, sharing)| sharing.len() > 1)
+            .map(|(reads, sharing)| format!("{sharing:?} all read {reads:?}"))
+            .collect();
+        assert!(
+            collisions.is_empty(),
+            "two gated tools render the same sentence: {}. The Standing \
+             permissions list (#374) puts no payload block under a row, so two \
+             rows reading alike are two permissions an operator cannot choose \
+             between — and on an approval card the payload only disambiguates \
+             them if they happen to carry different arguments. Give each its own \
+             words in {LANGUAGE_TS}",
+            collisions.join("; ")
         );
     }
 }

@@ -289,11 +289,39 @@ async fn test_smtp(
 #[cfg(feature = "smtp")]
 pub struct LettreMailSender;
 
+/// Upper bound on one delivery (connect through the final response).
+///
+/// `lettre`'s own timeout bounds individual phases and not reliably all of
+/// them, so a relay that accepts a connection and then stalls — mid-TLS, mid
+/// -write, or before its reply — can hold a caller far longer than the caller
+/// budgeted for. Every send here happens inside an HTTP request an operator is
+/// waiting on, so the bound lives next to the socket rather than at each call
+/// site: one place, and no call site can forget it. Same placement, and same
+/// reason, as `IMAP_TIMEOUT` in `imap.rs`.
+#[cfg(feature = "smtp")]
+const SMTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[cfg(feature = "smtp")]
 #[async_trait::async_trait]
 impl crate::server::ops::mailer::MailSender for LettreMailSender {
     async fn send(
         &self,
+        creds: &MailCredentials,
+        email: &OutboundEmail,
+    ) -> Result<(), OpenCompanyError> {
+        match tokio::time::timeout(SMTP_TIMEOUT, Self::send_inner(creds, email)).await {
+            Ok(result) => result,
+            // The same variant a refused send reports, because it means the
+            // same thing to every caller: the message was not accepted, and
+            // nothing may be recorded as delivered.
+            Err(_) => Err(OpenCompanyError::Store("smtp send: timed out".into())),
+        }
+    }
+}
+
+#[cfg(feature = "smtp")]
+impl LettreMailSender {
+    async fn send_inner(
         creds: &MailCredentials,
         email: &OutboundEmail,
     ) -> Result<(), OpenCompanyError> {

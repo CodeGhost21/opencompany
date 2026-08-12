@@ -188,14 +188,10 @@ impl RepoHost for HttpRepoHost {
         let url = format!("{}/repos/{}/{}", self.base, coords.owner, coords.repo);
         let body = self.get(&url, token, "application/vnd.github+json").await?;
         let json: serde_json::Value = serde_json::from_str(&body)?;
-        Ok(RepoMeta {
-            default_branch: json
-                .get("default_branch")
-                .and_then(|v| v.as_str())
-                .unwrap_or("main")
-                .to_string(),
-            size_kb: json.get("size").and_then(|v| v.as_u64()).unwrap_or(0),
-        })
+        // Field extraction — including the `permissions.push` → `can_push`
+        // mapping the write tier fails closed on — lives on `RepoMeta` so it is
+        // tested without a live forge (issue #734).
+        Ok(RepoMeta::from_github_json(&json))
     }
 
     async fn pull_request(
