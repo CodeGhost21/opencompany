@@ -880,8 +880,26 @@ async fn run_openhuman(
     std::process::exit(status.code().unwrap_or(1));
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[cfg(feature = "openhuman")]
+const WORKER_STACK_BYTES: usize = openhuman_core::core::runtime::AGENT_WORKER_STACK_BYTES;
+#[cfg(not(feature = "openhuman"))]
+const WORKER_STACK_BYTES: usize = 2 * 1024 * 1024;
+
+#[cfg(feature = "openhuman")]
+const MAX_BLOCKING_THREADS: usize = openhuman_core::core::runtime::MAX_BLOCKING_THREADS;
+#[cfg(not(feature = "openhuman"))]
+const MAX_BLOCKING_THREADS: usize = 512;
+
+fn main() -> Result<()> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_stack_size(WORKER_STACK_BYTES)
+        .max_blocking_threads(MAX_BLOCKING_THREADS)
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
