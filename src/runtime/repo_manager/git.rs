@@ -521,6 +521,12 @@ mod test {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    // Unix-only by construction: it hands `run_bounded` a `/bin/sh` script to
+    // execute, which `Command::new` cannot spawn on Windows (no script
+    // interpreter), and marks it executable with a `chmod`. The whole test
+    // carries the gate the script's chmod already did, so a Windows lane does
+    // not build a test that can never pass there.
+    #[cfg(unix)]
     #[tokio::test]
     async fn a_git_that_overruns_its_deadline_is_stopped_and_reported() {
         // Drive the deadline against a git that deterministically blocks, not a
