@@ -166,15 +166,38 @@ fn unique_partial(keys: Document, present: &str) -> IndexModel {
 /// respectively, and MongoDB has neither across two documents, so the insert
 /// either violates the index or it does not.
 ///
-/// Files only. Folders deliberately carry no key, so the index never indexes
-/// them and a folder may still share a name with a file exactly as before —
-/// this is a race fix, not a new tree rule.
+/// Files only. Folders carry [`folder_path_key`] in a separate field instead
+/// (issue #759), so the two guards never make a folder and a file contend for
+/// one name. The key encoding is shared — see [`path_key`].
+fn file_path_key(parent_id: Option<&str>, name: &str) -> String {
+    path_key(parent_id, name)
+}
+
+/// The uniqueness key for a **folder's** path inside one company (issue #759).
+///
+/// The same `{parent}\0{name}` string as [`file_path_key`], stored in a
+/// **different field** (`folder_path_key`) behind its own partial unique index.
+/// Two fields rather than one shared key on purpose: a folder and a file are
+/// still allowed to share a name, exactly as they were before either guard
+/// existed. This is a race fix, not a new tree rule, and one key would quietly
+/// make it the latter.
+///
+/// Stamped only by [`adopt_or_create_folder`], never by plain `create` — so the
+/// console's own folder creation is unaffected and a legacy tenant carrying
+/// duplicates keeps booting (the index is partial; see [`unique_partial`]).
+///
+/// [`adopt_or_create_folder`]: crate::ports::workspace::WorkspaceStore::adopt_or_create_folder
+fn folder_path_key(parent_id: Option<&str>, name: &str) -> String {
+    path_key(parent_id, name)
+}
+
+/// The shared `{parent}\0{name}` encoding behind both path keys.
 ///
 /// NUL is the separator because [`reject_unsafe_name`](crate::store::fs_ops)
-/// keeps it out of every node name, so no name can forge a different pair's
-/// key. The root is the empty string; a node parented at the root and one
-/// parented under a folder therefore never collide.
-fn file_path_key(parent_id: Option<&str>, name: &str) -> String {
+/// keeps it out of every node name, so no name can forge a different pair's key.
+/// The root is the empty string; a node parented at the root and one parented
+/// under a folder therefore never collide.
+fn path_key(parent_id: Option<&str>, name: &str) -> String {
     format!("{}\u{0}{}", parent_id.unwrap_or(""), name)
 }
 
@@ -243,7 +266,7 @@ impl MongoStore {
         // address may have several login codes over time.
         let nonunique = |keys: Document| IndexModel::builder().keys(keys).build();
         // See `unique_partial`.
-        let plans: [(&str, IndexModel); 31] = [
+        let plans: [(&str, IndexModel); 32] = [
             ("companies", unique(doc! {"company_id": 1})),
             ("ledger", unique(doc! {"company_id": 1, "idx": 1})),
             ("events", unique(doc! {"company_id": 1, "seq": 1})),
@@ -266,6 +289,17 @@ impl MongoStore {
             (
                 "workspace_nodes",
                 unique_partial(doc! {"company_id": 1, "file_path_key": 1}, "file_path_key"),
+            ),
+            // One folder per path, for the folders the publish walk claims
+            // (issue #759). A separate field from the file key on purpose; see
+            // `folder_path_key`. Partial for the same boot-safety reason: a
+            // tenant that already lost this race must keep starting.
+            (
+                "workspace_nodes",
+                unique_partial(
+                    doc! {"company_id": 1, "folder_path_key": 1},
+                    "folder_path_key",
+                ),
             ),
             ("users", unique(doc! {"company_id": 1, "user_id": 1})),
             // Enforces one account per address per company, and backs the login
@@ -2758,6 +2792,86 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
         Ok(())
     }
 
+    /// Find-then-insert, with the **partial unique index deciding the race**
+    /// and a re-read adopting the winner when it loses (issue #759).
+    ///
+    /// This is the only backend that cannot serialize a read-then-insert: there
+    /// is no per-company lock and no transaction it can require of its
+    /// deployment, so a find that says "free" is a statement about an instant
+    /// and the insert acts on it later. The answer is the one issue #697 already
+    /// established for files — let the database hold the line — applied to a
+    /// second field.
+    ///
+    /// The re-read is what makes the loser *adopt* rather than fail. That is the
+    /// whole difference from `swap_files`: two publishers wanting one folder want
+    /// the same thing, so the one the index refuses must come back, find the
+    /// winner's folder and use it.
+    ///
+    /// The retry is bounded. Each pass either adopts, inserts, or loses to a
+    /// duplicate key — and a duplicate key means a competing folder now exists,
+    /// which the next find must see. More than a couple of passes therefore
+    /// means something is deleting folders as fast as they are created, and
+    /// looping forever on that would hang a publish rather than fail it.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        use crate::ports::workspace::{FolderClaim, NodeKind, existing_folder_claim, new_folder};
+        /// Enough to absorb a burst of concurrent claimers; see the doc above
+        /// for why an unbounded loop would be worse than a refusal.
+        const ATTEMPTS: usize = 8;
+
+        for _ in 0..ATTEMPTS {
+            let nodes = self.workspace_nodes(company).await?;
+            if let Some(parent) = parent {
+                match nodes.get(parent) {
+                    Some(p) if p.kind == NodeKind::Folder => {}
+                    Some(_) => {
+                        return Err(OpenCompanyError::InvalidRequest(
+                            "parent is not a folder".to_string(),
+                        ));
+                    }
+                    None => {
+                        return Err(OpenCompanyError::InvalidRequest(
+                            "parent folder does not exist".to_string(),
+                        ));
+                    }
+                }
+            }
+            if let Some(existing) = existing_folder_claim(nodes.values(), parent, name)? {
+                return Ok(FolderClaim::Adopted(existing));
+            }
+            let node = new_folder(name, parent, origin.clone());
+            let mut document = doc! {
+                "company_id": company.as_ref(),
+                "node_id": &node.id,
+                "node_json": serde_json::to_string(&node)?,
+                "content": "",
+                "updated_ms": node.updated_at_millis as i64,
+            };
+            document.insert("folder_path_key", folder_path_key(parent, name));
+            match self
+                .collection("workspace_nodes")
+                .insert_one(document)
+                .await
+            {
+                Ok(_) => return Ok(FolderClaim::Created(node)),
+                // Somebody else claimed the path between the find and the
+                // insert. Nothing was written — this backend's create is one
+                // document — so the next pass simply adopts their folder.
+                Err(err) if is_duplicate_key(&err) => continue,
+                Err(err) => return Err(mongo_err(err)),
+            }
+        }
+        Err(OpenCompanyError::Conflict(format!(
+            "the folder `{name}` could not be claimed after {ATTEMPTS} attempts; something is \
+             creating and removing it concurrently"
+        )))
+    }
+
     /// GridFS — the only backend where the payload cannot ride in the record.
     ///
     /// A BSON document caps at 16 MB, and the artifacts this issue exists for
@@ -2977,15 +3091,28 @@ impl crate::ports::workspace::WorkspaceStore for MongoStore {
             "node_json": serde_json::to_string(&node)?,
             "updated_ms": node.updated_at_millis as i64,
         };
-        let mut update = match node_path_key(&node) {
+        let mut unset = Document::new();
+        match node_path_key(&node) {
             Some(key) => {
                 set.insert("file_path_key", key);
-                doc! {"$set": set}
             }
-            None => doc! {"$set": set},
-        };
-        if node_path_key(&node).is_none() {
-            update.insert("$unset", doc! {"file_path_key": ""});
+            None => {
+                unset.insert("file_path_key", "");
+            }
+        }
+        // A moved folder **drops** its claim rather than carrying it (issue
+        // #759). The claim exists to decide a race between two publishers on the
+        // publish walk; an operator who moved the folder by hand has taken it
+        // out of that walk's reach, and a key that travelled with it would keep
+        // guarding the path it left — refusing that path to every later publish
+        // forever, which is the very outage this primitive exists to prevent.
+        // Demoting to unguarded is what every console-made folder already is.
+        if node.kind == NodeKind::Folder {
+            unset.insert("folder_path_key", "");
+        }
+        let mut update = doc! {"$set": set};
+        if !unset.is_empty() {
+            update.insert("$unset", unset);
         }
         self.collection("workspace_nodes")
             .update_one(doc! {"company_id": company.as_ref(), "node_id": id}, update)

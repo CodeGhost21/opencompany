@@ -2974,6 +2974,15 @@ mod tests {
         ) -> crate::Result<()> {
             unreachable!("the listing never creates")
         }
+        async fn adopt_or_create_folder(
+            &self,
+            _company: &CompanyId,
+            _parent: Option<&str>,
+            _name: &str,
+            _origin: WorkspaceOrigin,
+        ) -> crate::Result<crate::ports::workspace::FolderClaim> {
+            unreachable!("the listing never claims a folder")
+        }
         async fn rename_move(
             &self,
             _company: &CompanyId,

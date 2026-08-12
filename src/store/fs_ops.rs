@@ -1251,6 +1251,69 @@ impl WorkspaceStore for FsOps {
         self.save_index(company, &index).await
     }
 
+    /// The whole claim — look, then adopt or insert — under the one lock every
+    /// other write to this index already takes (issue #759).
+    ///
+    /// That lock is what makes it atomic here, and it is enough: the `fs`
+    /// backend is single-process per data directory by documented contract (see
+    /// `docs/spec/runtime/storage.md`), so there is no second writer for it to
+    /// miss. The other two backends have to reach for a transaction and an index
+    /// respectively because their deployments have one.
+    ///
+    /// Before this, the same claim was a `tree()` read in the caller followed by
+    /// a plain [`create`](WorkspaceStore::create). The read was honest about the
+    /// instant it happened and the create acted on it later; on this backend
+    /// `reject_path_collision` then refused the loser, so a concurrent publish
+    /// failed spuriously instead of adopting the folder it wanted.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        use crate::ports::workspace::{FolderClaim, existing_folder_claim, new_folder};
+        reject_unsafe_name(name)?;
+        let bundle = self.bundle(company);
+        bundle.ensure_dirs().await?;
+        let path = bundle.workspace_index_json();
+        let lock = path_lock(&path);
+        let _guard = lock.lock().await;
+        let mut index = self.load_index(company).await?;
+        if let Some(parent) = parent {
+            match index.get(parent) {
+                Some(p) if p.kind == NodeKind::Folder => {}
+                Some(_) => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent is not a folder".to_string(),
+                    ));
+                }
+                None => {
+                    return Err(OpenCompanyError::InvalidRequest(
+                        "parent folder does not exist".to_string(),
+                    ));
+                }
+            }
+        }
+        if let Some(existing) = existing_folder_claim(index.values(), parent, name)? {
+            return Ok(FolderClaim::Adopted(existing));
+        }
+        let node = new_folder(name, parent, origin);
+        // Still checked, and it is not the sibling check above repeated: this
+        // backend renders a node's *path* from the chain of names above it, so a
+        // legacy tree carrying duplicate-named ancestors can put two different
+        // `(parent, name)` pairs on one directory. Refusing keeps the claim
+        // fail-closed in exactly the case the sibling check cannot see.
+        reject_path_collision(&index, &node.id, &node.name, parent)?;
+        index.insert(node.id.clone(), node.clone());
+        let physical = self.physical_path(company, &index, &node.id)?;
+        tokio::fs::create_dir_all(&physical)
+            .await
+            .map_err(|e| io_err(&physical, e))?;
+        self.save_index(company, &index).await?;
+        Ok(FolderClaim::Created(node))
+    }
+
     /// Writes the payload to its real path, then indexes it.
     ///
     /// **File first, index second — the same order the text path already uses.**

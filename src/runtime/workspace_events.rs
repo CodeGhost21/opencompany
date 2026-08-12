@@ -175,6 +175,32 @@ impl WorkspaceStore for WorkspaceAnnouncer {
         Ok(())
     }
 
+    /// Claims through, and announces `opened` **only when the folder was
+    /// actually minted** (issue #759).
+    ///
+    /// An adoption changed nothing: the folder was already standing, already in
+    /// the tree the console last read, already announced when whoever created it
+    /// created it. Announcing it again would tell an open Workspace tab that
+    /// something appeared, on a publish that only walked past it — and the
+    /// publish walk adopts on nearly every publish a company ever makes, so the
+    /// noise would be the common case rather than an edge one.
+    async fn adopt_or_create_folder(
+        &self,
+        company: &CompanyId,
+        parent: Option<&str>,
+        name: &str,
+        origin: crate::ports::workspace::WorkspaceOrigin,
+    ) -> Result<crate::ports::workspace::FolderClaim> {
+        let claim = self
+            .inner
+            .adopt_or_create_folder(company, parent, name, origin)
+            .await?;
+        if let crate::ports::workspace::FolderClaim::Created(node) = &claim {
+            self.announce(company, &node.id, CHANGE_OPENED).await;
+        }
+        Ok(claim)
+    }
+
     /// A binary node appearing in the tree is the same event as a note
     /// appearing: something the operator did not type is now there to look at.
     /// An uploaded image or a published chart therefore reaches an open

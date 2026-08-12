@@ -580,6 +580,15 @@ impl WorkspaceStore for FixedTree {
     ) -> crate::Result<()> {
         unreachable!("search never creates")
     }
+    async fn adopt_or_create_folder(
+        &self,
+        _company: &CompanyId,
+        _parent: Option<&str>,
+        _name: &str,
+        _origin: WorkspaceOrigin,
+    ) -> crate::Result<crate::ports::workspace::FolderClaim> {
+        unreachable!("search never claims a folder")
+    }
     async fn create_binary(
         &self,
         _company: &CompanyId,
