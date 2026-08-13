@@ -46,6 +46,18 @@ fn urlencode(segment: &str) -> String {
         .collect()
 }
 
+/// Whether a failure is Chargebee refusing `net_term_days` because the site has
+/// no payment-terms feature.
+///
+/// Matched on the message rather than an `api_error_code`, because Chargebee
+/// reports it as a generic `invalid_request`: the specific cause lives only in
+/// the prose. Deliberately requires BOTH markers so an unrelated invalid_request
+/// mentioning one word is not swallowed.
+fn mentions_payment_terms(error: &OpenCompanyError) -> bool {
+    let text = error.to_string().to_ascii_lowercase();
+    text.contains("net_term_days") && text.contains("payment terms")
+}
+
 /// Pulls a required object out of a Chargebee response.
 ///
 /// Every write below reads one named object (`customer`, `invoice`) out of the
@@ -288,13 +300,38 @@ pub async fn send_invoice(
         form.push_indexed("charges", "amount", i, line.amount_in_minor_units);
     }
 
-    let body = client
-        .post_form(
-            "/invoices/create_for_charge_items_and_charges",
-            &form,
-            args.idempotency_key.as_deref(),
-        )
-        .await?;
+    let path = "/invoices/create_for_charge_items_and_charges";
+    let body = match client
+        .post_form(path, &form, args.idempotency_key.as_deref())
+        .await
+    {
+        Ok(body) => body,
+        // `net_term_days` is refused outright by a site that has not enabled
+        // "Payment Terms for One-Time Invoices" — a per-site feature most test
+        // sites ship without. Failing the whole invoice over a DUE DATE is the
+        // wrong trade: the operator asked for an invoice and would rather have
+        // one without terms than none at all. So the term is dropped and the
+        // call retried once, and the caller is told in the log.
+        //
+        // Narrow on purpose: only this one error, and only when we actually
+        // sent the field. Anything else propagates untouched.
+        Err(e) if args.due_days.is_some() && mentions_payment_terms(&e) => {
+            tracing::warn!(
+                "[chargebee] this site has not enabled payment terms for one-time invoices; \
+                 raising the invoice without a due date"
+            );
+            let mut retry = Form::new();
+            for (key, value) in form.pairs() {
+                if key != "net_term_days" {
+                    retry.push(key.clone(), value.clone());
+                }
+            }
+            client
+                .post_form(path, &retry, args.idempotency_key.as_deref())
+                .await?
+        }
+        Err(e) => return Err(e),
+    };
     let invoice = require(&body, "invoice")?.clone();
     let url = payment_url(client, &customer.id, &currency).await;
     Ok(summarize_invoice(&invoice, url))
@@ -691,6 +728,71 @@ mod tests {
         let invoice = result.expect("the invoice itself still succeeds");
         assert_eq!(invoice.id, "inv_1");
         assert_eq!(invoice.payment_url, None);
+    }
+
+    #[tokio::test]
+    async fn a_site_without_payment_terms_still_gets_its_invoice() {
+        // Chargebee refuses `net_term_days` outright on a site that has not
+        // enabled payment terms for one-time invoices. Failing the whole
+        // invoice over a due date is the wrong trade — the operator asked for
+        // an invoice, and one without terms beats none.
+        let mut calls = 0;
+        let (result, seen) = stub(
+            vec![
+                ("GET /customers", 200, ONE_CUSTOMER),
+                (
+                    "POST /invoices/create_for_charge_items_and_charges",
+                    200,
+                    CREATED_INVOICE,
+                ),
+                ("POST /hosted_pages/collect_now", 200, HOSTED_PAGE),
+            ],
+            |client| async move {
+                let _ = &mut calls;
+                send_invoice(
+                    &client,
+                    SendInvoiceArgs {
+                        customer_email: "alan@tinyhumans.ai".to_string(),
+                        customer_name: None,
+                        currency_code: "INR".to_string(),
+                        line_items: vec![line("Consulting", 10_000)],
+                        due_days: Some(7),
+                        invoice_note: None,
+                        idempotency_key: None,
+                    },
+                )
+                .await
+            },
+        )
+        .await;
+        // The happy path still sends the term when the site accepts it.
+        result.expect("invoice created");
+        assert!(
+            seen.iter().any(|r| r.body.contains("net_term_days=7")),
+            "the term must still be sent to a site that accepts it: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn only_the_payment_terms_refusal_triggers_the_retry() {
+        let terms = OpenCompanyError::Chargebee {
+            status: 400,
+            code: "invalid_request".to_string(),
+            message: "net_term_days : should not be sent as the Payment Terms for One-Time \
+                      Invoices feature is not enabled"
+                .to_string(),
+        };
+        assert!(mentions_payment_terms(&terms));
+
+        // An unrelated invalid_request that happens to mention one word must
+        // NOT be swallowed and silently retried.
+        let other = OpenCompanyError::Chargebee {
+            status: 400,
+            code: "invalid_request".to_string(),
+            message: "net_term_days must be a positive integer".to_string(),
+        };
+        assert!(!mentions_payment_terms(&other));
+        assert!(!mentions_payment_terms(&invalid("something else entirely")));
     }
 
     #[tokio::test]
