@@ -115,6 +115,7 @@ pub mod steer;
 pub mod steps;
 pub mod tool_dispatcher;
 pub mod toolbelt;
+pub mod triage;
 /// Issue #661 (M7): `read_workflow` / `update_workflow` / `delete_workflow` —
 /// the agent's way to fix or retire a workflow instead of only ever creating
 /// another one beside it. Kept out of `orchestrator.rs` (already the largest

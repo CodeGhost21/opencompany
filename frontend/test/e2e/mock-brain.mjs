@@ -6,8 +6,19 @@
 // Four of the suite's specs need an agent that actually executes, which needs
 // a host built with `--features openhuman,tinycortex,mcp` **and** something for
 // that harness to think with. This is that something: an OpenAI-compatible
-// chat-completions endpoint with no model behind it, whose answers are a pure
-// function of the prompt. `wiring.spec.ts`'s header has described it since the
+// chat-completions endpoint with no model behind it, whose answers are very
+// nearly a function of the prompt.
+//
+// **Very nearly, not purely** — worth knowing before you add a caller.
+// `servedDirectives` is per-process, so a `__MOCK_TOOL_CALL__` fires for the
+// FIRST request that carries it and never again. Any second call that sees the
+// same operator message therefore changes what the first one gets. Issue #678
+// hit exactly that: a triage escalation is handed the operator's raw message,
+// so it carried the directive, burned it, and left the agent's own turn with a
+// plain text reply — the tool call was logged once, for the classification.
+// `isTriageRequest` is why that no longer happens.
+//
+// `wiring.spec.ts`'s header has described it since the
 // day it was written ("a mocked inference backend that echoes a `__MOCK_LLM__`
 // marker"); until now nobody had committed one, so the specs it describes were
 // skipped rather than run.
@@ -342,9 +353,43 @@ function alreadyServed(messages, index) {
  * @param {any} body the parsed request
  * @returns {any} an OpenAI-shaped chat completion
  */
+/**
+ * Whether this request is a triage escalation rather than an agent turn
+ * (issue #678).
+ *
+ * Keyed on the opening sentence of the system prompt that
+ * `src/harness/triage.rs` owns. Coupling a fixture to prose is ordinarily a
+ * smell; the alternative here is worse, because the only other thing telling
+ * the two apart is "carries no tools", and an agent whose belt happens to be
+ * empty would be misread as a classification.
+ *
+ * @param {any[]} messages
+ * @returns {boolean}
+ */
+function isTriageRequest(messages) {
+  const first = messages[0];
+  return typeof textOf(first) === "string" && textOf(first).includes("You classify one message");
+}
+
 function chatCompletion(body) {
   const messages = Array.isArray(body?.messages) ? body.messages : [];
   const model = typeof body?.model === "string" ? body.model : "mock-brain";
+
+  // A triage escalation is a classification, not a turn (issue #678). It is
+  // handed the operator's RAW message, so it carries any `__MOCK_TOOL_CALL__`
+  // the message carried — and `servedDirectives` is per-process, so serving it
+  // here would burn the directive and leave the real turn with a plain text
+  // reply. Observed exactly that way: the tool call was logged once, for the
+  // classification, and the agent's own turn never made it.
+  //
+  // Answered `chatter` rather than refused, so the suite stays on the ungated
+  // path it was written for: only an `answer` verdict narrows the delegation
+  // claim.
+  if (isTriageRequest(messages)) {
+    process.stderr.write("[mock brain] triage classification (no directive consumed)\n");
+    return completion(model, { role: "assistant", content: "chatter" }, "stop");
+  }
+
   const directive = findDirective(messages);
 
   if (

@@ -53,6 +53,7 @@ pub mod oauth;
 /// attribution rule. See [`planning`].
 pub mod planning;
 pub mod search;
+pub mod triage;
 mod types;
 mod usage;
 /// Issue #580: the workflow-builder pass's usage sample and its
@@ -74,6 +75,7 @@ pub use planning::{planning_sample, record_planning_usage};
 pub use search::{
     FALLBACK_SEARCH_COST_USD, MANAGED_SEARCH_PROVIDER, record_search_call, search_call_sample,
 };
+pub use triage::{record_triage_usage, triage_sample};
 pub use types::{
     AgentTokens, CategorySpend, Direction, Finances, ProviderCalls, Transaction, Usage, UsagePoint,
     UsageRange, UsageTotals,
