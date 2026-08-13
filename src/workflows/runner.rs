@@ -1432,7 +1432,7 @@ to = "done"
 
     /// A graph whose terminal `output` node routes its report to the operator
     /// channel. `trigger → output` only, so it needs no roster.
-    const REPORT_TO_OPERATOR: &str = r#"
+    const REPORT_TO_DESK: &str = r#"
 id = "report"
 name = "Report"
 [[node]]
@@ -1445,7 +1445,7 @@ kind = "output"
 name = "Owner summary"
 [node.destination]
 kind = "channel"
-target = "operator"
+target = "engineering"
 [[edge]]
 from = "start"
 to = "done"
@@ -1458,10 +1458,10 @@ to = "done"
     /// same function, which is why delivery lives here.
     #[tokio::test]
     async fn a_run_delivers_its_output_report_through_the_runner() {
-        use crate::runtime::channel::OperatorChannel;
+        use crate::runtime::channel::RecordingChannel;
 
         let dir = tempfile::tempdir().unwrap();
-        let channel = OperatorChannel::new();
+        let channel = RecordingChannel::new("engineering");
         let mut deps = deps(dir.path());
         deps.delivery = Some(crate::workflows::WorkflowDeliveryDeps {
             mail: None,
@@ -1474,7 +1474,7 @@ to = "done"
             events: Arc::new(crate::store::FsEventLog::new(dir.path())),
         });
 
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
         let run = run_workflow(
             Arc::new(HarnessPool::new()),
             deps,
@@ -1509,7 +1509,7 @@ to = "done"
     #[tokio::test]
     async fn an_unwired_runtime_still_runs_but_says_the_report_was_not_sent() {
         let dir = tempfile::tempdir().unwrap();
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
         let run = run_workflow(
             Arc::new(HarnessPool::new()),
             deps(dir.path()),
@@ -3140,7 +3140,7 @@ to = "gate"
     fn deps_delivering_to_channel(
         dir: &std::path::Path,
         events: Arc<dyn crate::ports::EventLog>,
-        channel: crate::runtime::channel::OperatorChannel,
+        channel: crate::runtime::channel::RecordingChannel,
         consult_journal: bool,
     ) -> HarnessDeps {
         let mut deps = deps(dir);
@@ -3173,14 +3173,14 @@ to = "gate"
     /// assertion fails, which is what makes the guard provably load-bearing.
     #[tokio::test]
     async fn a_crashed_runs_delivery_is_not_repeated_on_an_independent_re_run() {
-        use crate::runtime::channel::OperatorChannel;
+        use crate::runtime::channel::RecordingChannel;
 
         let dir = tempfile::tempdir().unwrap();
         let events: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path()));
-        let channel = OperatorChannel::new();
+        let channel = RecordingChannel::new("engineering");
         let rec = record();
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
 
         // Run 1 delivers, then "crashes": run_workflow returns, but nothing
         // journals a WorkflowRunFinished for it.
@@ -3244,14 +3244,14 @@ to = "gate"
     /// re-delivery the whole issue is about happens.
     #[tokio::test]
     async fn without_the_durable_consult_a_crashed_runs_report_is_re_delivered() {
-        use crate::runtime::channel::OperatorChannel;
+        use crate::runtime::channel::RecordingChannel;
 
         let dir = tempfile::tempdir().unwrap();
         let events: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path()));
-        let channel = OperatorChannel::new();
+        let channel = RecordingChannel::new("engineering");
         let rec = record();
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
 
         let deps1 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
         let ctx1 = WorkflowRunContext::new(false);
@@ -3300,14 +3300,14 @@ to = "gate"
     /// day, because a clean finish clears the durable ledger.
     #[tokio::test]
     async fn a_clean_finish_lets_the_next_run_deliver_again() {
-        use crate::runtime::channel::OperatorChannel;
+        use crate::runtime::channel::RecordingChannel;
 
         let dir = tempfile::tempdir().unwrap();
         let events: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path()));
-        let channel = OperatorChannel::new();
+        let channel = RecordingChannel::new("engineering");
         let rec = record();
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
 
         // Run 1 delivers…
         let deps1 = deps_delivering_to_channel(dir.path(), events.clone(), channel.clone(), true);
@@ -4229,10 +4229,10 @@ to = "done"
     /// for the run.
     #[tokio::test]
     async fn t4_dry_run_delivers_nothing_and_journals_nothing() {
-        use crate::runtime::channel::OperatorChannel;
+        use crate::runtime::channel::RecordingChannel;
 
         let dir = tempfile::tempdir().unwrap();
-        let channel = OperatorChannel::new();
+        let channel = RecordingChannel::new("engineering");
         let events: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path()));
         let mut deps = deps(dir.path());
@@ -4247,7 +4247,7 @@ to = "done"
             events: events.clone(),
         });
 
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
         let run = run_workflow(
             Arc::new(HarnessPool::new()),
             deps,
@@ -4289,10 +4289,10 @@ to = "done"
     /// behaviours.
     #[tokio::test]
     async fn t5_the_same_graph_run_for_real_dispatches_and_journals() {
-        use crate::runtime::channel::OperatorChannel;
+        use crate::runtime::channel::RecordingChannel;
 
         let dir = tempfile::tempdir().unwrap();
-        let channel = OperatorChannel::new();
+        let channel = RecordingChannel::new("engineering");
         let events: Arc<dyn crate::ports::EventLog> =
             Arc::new(crate::store::FsEventLog::new(dir.path()));
         let mut deps = deps(dir.path());
@@ -4307,7 +4307,7 @@ to = "done"
             events: events.clone(),
         });
 
-        let file = parse_workflow(REPORT_TO_OPERATOR).expect("parses");
+        let file = parse_workflow(REPORT_TO_DESK).expect("parses");
         let run = run_workflow(
             Arc::new(HarnessPool::new()),
             deps,

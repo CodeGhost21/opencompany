@@ -126,6 +126,55 @@ impl std::fmt::Debug for OperatorChannel {
     }
 }
 
+/// A durable-looking channel that records what it was sent, for tests whose
+/// subject is the runner's delivery bookkeeping rather than any one adapter.
+///
+/// Those tests used [`OperatorChannel`] as their spy, which stopped working
+/// when workflow delivery began refusing `operator` outright: the count they
+/// assert is "how many times did the report reach the channel", and a refusal
+/// answers a different question. This carries an ordinary channel id so it
+/// clears the refusal, and keeps the buffer so the counting still works.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct RecordingChannel {
+    id: String,
+    sent: Arc<StdMutex<Vec<OutboundMessage>>>,
+}
+
+#[cfg(test)]
+impl RecordingChannel {
+    pub(crate) fn new(id: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            sent: Arc::default(),
+        }
+    }
+
+    pub(crate) fn sent(&self) -> Vec<OutboundMessage> {
+        self.sent.lock().expect("recording buffer poisoned").clone()
+    }
+}
+
+#[cfg(test)]
+#[async_trait]
+impl ChannelAdapter for RecordingChannel {
+    fn channel_id(&self) -> &str {
+        &self.id
+    }
+
+    fn inbound(&self) -> BoxStream<'static, InboundMessage> {
+        Box::pin(stream::empty())
+    }
+
+    async fn send(&self, msg: OutboundMessage) -> Result<()> {
+        self.sent
+            .lock()
+            .expect("recording buffer poisoned")
+            .push(msg);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
