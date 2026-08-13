@@ -104,6 +104,9 @@ pub const HUB_PROVIDERS: &[HubProvider] = &[
 /// Nothing here needs to change when it does: the origin this builds on comes
 /// from [`AppConfig::host_base_url`](crate::AppConfig::host_base_url), so
 /// hosted is `OPENCOMPANY_PUBLIC_URL=https://…` and no code edit.
+///
+/// Until then, [`hub_accepts_redirect_uri`] is what keeps a console from
+/// offering a button that lands on that `400`.
 pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> String {
     format!(
         "{}/auth/{}/login?redirectUri={}",
@@ -111,6 +114,49 @@ pub fn login_start_url(api_url: &str, provider: &str, redirect_uri: &str) -> Str
         provider,
         percent_encode(redirect_uri),
     )
+}
+
+/// Whether the hub will accept `redirect_uri` as a sign-in return target.
+///
+/// A copy of somebody else's rule, held here for one reason: so a console can
+/// decline to render a button that cannot complete. That is the same judgement
+/// `hub_providers` already makes for a host with no exchange at all — the
+/// difference between a console that says "sign in with a link" and one that
+/// sends someone to Google and back into a bare `400`.
+///
+/// Mirrors the platform backend's RFC 8252 check (`isLoopbackHttpUri`, in
+/// `src/utils/deepLinkRedirect.ts`): `http://` on `127.0.0.1`, `localhost`, or
+/// `[::1]`, port and path irrelevant. Every hosted `https://<slug>.<domain>`
+/// origin fails it, which is the whole of issue #512.
+///
+/// ## Delete this when the gate moves
+///
+/// `tinyhumansai/backend#1243` teaches that gate to accept provisioned tenant
+/// origins. When it lands, this function and its single call site in
+/// `server::users::routes::hub_providers` both go, and hosted consoles start
+/// offering the buttons with no other change. Nothing else calls it, and it
+/// deliberately owns no configuration — a knob to turn it off would outlive the
+/// condition it exists for.
+///
+/// Divergence is one-directional by construction: an input this rejects and the
+/// hub would have accepted costs a hidden button, never a broken sign-in.
+pub fn hub_accepts_redirect_uri(redirect_uri: &str) -> bool {
+    let Some((scheme, rest)) = redirect_uri.split_once("://") else {
+        return false;
+    };
+    if !scheme.eq_ignore_ascii_case("http") {
+        return false;
+    }
+    // The authority is everything before the path, query, or fragment...
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or_default();
+    // ...minus any userinfo, which `new URL(…).hostname` also discards.
+    let host_port = authority.rsplit('@').next().unwrap_or_default();
+    let host = match host_port.strip_prefix('[') {
+        // An IPv6 literal keeps its own colons; a port, if any, follows `]`.
+        Some(inner) => inner.split(']').next().unwrap_or_default(),
+        None => host_port.split(':').next().unwrap_or_default(),
+    };
+    matches!(host, "127.0.0.1" | "localhost" | "::1")
 }
 
 /// Percent-encodes `value` for use as a single query-string value.
@@ -223,6 +269,80 @@ impl HubIdentityExchange for MockHubIdentityExchange {
                 email: email.clone(),
             })
             .ok_or_else(rejected)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    /// The exact string the hub's gate receives from a hosted console.
+    ///
+    /// Pinned because it is the thing `tinyhumansai/backend#1243` has to accept,
+    /// and it is **not** a bare origin — the `?company=` rides along. A gate that
+    /// compares this string against a registry of provisioned origins rejects
+    /// every real request and reproduces issue #512 exactly; only the origin
+    /// component is stable, and in shared-single-DB mode the company id is
+    /// namespaced `<tenant>--<id>` and varies per tenant and over time.
+    #[test]
+    fn a_hosted_start_url_carries_the_tenant_origin_and_its_company() {
+        let start = login_start_url(
+            "https://hub.example.com",
+            "google",
+            "https://smoke1.example.com/?company=smoke1",
+        );
+
+        assert_eq!(
+            start,
+            "https://hub.example.com/auth/google/login\
+             ?redirectUri=https%3A%2F%2Fsmoke1.example.com%2F%3Fcompany%3Dsmoke1"
+        );
+    }
+
+    #[test]
+    fn a_local_console_is_a_loopback_uri_the_hub_accepts() {
+        // Every shape RFC 8252 allows, since the bind is operator-chosen.
+        assert!(hub_accepts_redirect_uri(
+            "http://127.0.0.1:8080/?company=acme"
+        ));
+        assert!(hub_accepts_redirect_uri(
+            "http://localhost:3000/?company=acme"
+        ));
+        assert!(hub_accepts_redirect_uri("http://[::1]:8080/?company=acme"));
+        assert!(hub_accepts_redirect_uri("http://127.0.0.1/"));
+        assert!(hub_accepts_redirect_uri("HTTP://127.0.0.1:8080/"));
+    }
+
+    #[test]
+    fn a_hosted_origin_is_not_one_the_hub_accepts() {
+        // The whole of issue #512: `https` fails the check on scheme alone, so
+        // no hosted tenant can pass it whatever its hostname.
+        assert!(!hub_accepts_redirect_uri(
+            "https://smoke1.example.com/?company=smoke1"
+        ));
+        assert!(!hub_accepts_redirect_uri("https://127.0.0.1:8080/"));
+    }
+
+    #[test]
+    fn a_host_that_merely_looks_loopback_is_not_accepted() {
+        // The near misses a substring or prefix test would wave through. Each is
+        // a public hostname that anyone can point at an address they control.
+        assert!(!hub_accepts_redirect_uri("http://127.0.0.1.example.com/"));
+        assert!(!hub_accepts_redirect_uri("http://localhost.example.com/"));
+        assert!(!hub_accepts_redirect_uri("http://evil.com/127.0.0.1"));
+        assert!(!hub_accepts_redirect_uri("http://evil.com/?x=localhost"));
+        // Userinfo is the classic one: the host here is `evil.com`, and both
+        // this and `new URL(…).hostname` say so.
+        assert!(!hub_accepts_redirect_uri("http://127.0.0.1@evil.com/"));
+        // Not the loopback *address*, just inside its /8.
+        assert!(!hub_accepts_redirect_uri("http://127.0.0.2:8080/"));
+    }
+
+    #[test]
+    fn something_that_is_not_a_url_is_not_accepted() {
+        assert!(!hub_accepts_redirect_uri(""));
+        assert!(!hub_accepts_redirect_uri("127.0.0.1:8080"));
+        assert!(!hub_accepts_redirect_uri("http://"));
     }
 }
 
