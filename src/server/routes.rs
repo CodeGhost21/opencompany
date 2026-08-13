@@ -74,6 +74,7 @@ fn router_with_console(state: AppState, console_dir: Option<PathBuf>) -> Router 
         .merge(crate::server::operator::router())
         .merge(crate::server::ops::router())
         .merge(crate::server::hooks::router())
+        .merge(crate::server::hooks_chargebee::router())
         .merge(crate::server::provision::router())
         .merge(crate::server::feedback::router())
         .merge(crate::server::users::router())
