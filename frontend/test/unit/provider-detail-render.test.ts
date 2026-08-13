@@ -6,23 +6,25 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import type { OpenCompanyClient } from "@/api/client";
 import type { ComposioConnectedAccount, ComposioToolkitEntry } from "@/api/composio";
-import type { ConnectionState, UsageDto } from "@/api/types";
+import type { ConnectionState, McpHealth, McpServer, UsageDto } from "@/api/types";
 import type { ComposioReach } from "@/lib/connections";
 import { buildGridProviders, type GridProvider } from "@/lib/provider-grid";
-import { ProviderDetail } from "@/views/connections/ProviderDetail";
+import { ProviderDetail, type ConnectionSubject } from "@/views/connections/ProviderDetail";
 
 /**
- * The provider detail view's claims (issue #404).
+ * The connection detail view's claims (issues #404, #821).
  *
  * This suite is normally for pure functions — see `vitest.config.ts`. The
  * exception is earned the same way `select-popup-width` earns it: the thing
  * under test *is* what reaches the operator's eye. The issue is not asking for
  * fields on a panel, it is asking that every sentence on the panel be one the
- * system can back, and three of them cannot be checked anywhere but here:
+ * system can back, and four of them cannot be checked anywhere but here:
  *
  *  1. no account is marked as the one agents use, because none is;
  *  2. a missing connection date says so rather than showing a blank;
- *  3. a member is not offered a disconnect the host will refuse (#403).
+ *  3. a member is not offered a disconnect the host will refuse (#403);
+ *  4. an MCP server's usage is read under `mcp:<server>` and never as the
+ *     same-named Composio toolkit's (#698, #821).
  */
 
 const OPEN: ComposioReach = {
@@ -91,18 +93,30 @@ async function render(
   client = clientWith([]),
   noCredential = false,
 ) {
+  await open(
+    {
+      kind: "composio",
+      provider,
+      noCredential,
+      onConnectAnother: () => {},
+      onDisconnectAccount: () => {},
+    },
+    canManage,
+    client,
+  );
+}
+
+/** Open the panel on any subject — the shared half of `render` and `openMcp`. */
+async function open(subject: ConnectionSubject, canManage: boolean, client = clientWith([])) {
   await act(async () => {
     root.render(
       createElement(ProviderDetail, {
         client,
         company: null,
-        provider,
+        subject,
         canManage,
-        noCredential,
         busy: false,
         onClose: () => {},
-        onConnectAnother: () => {},
-        onDisconnectAccount: () => {},
       }),
     );
   });
@@ -241,5 +255,123 @@ describe("the provider detail view", () => {
     // A detail view is where that would look healthiest, so it is stated.
     await render(gmail([account()], ["composio", "native"]), true);
     expect(text()).toContain("No agent reads it");
+  });
+});
+
+/** A server as `.../mcp/servers` returns it. */
+function mcpServer(over: Partial<McpServer> = {}): McpServer {
+  return {
+    name: "linear",
+    endpoint: "https://mcp.linear.app/mcp",
+    source: "runtime",
+    enabled: true,
+    allowedTools: [],
+    disallowedTools: [],
+    timeoutSecs: 30,
+    authConfigured: true,
+    ...over,
+  };
+}
+
+async function openMcp(
+  server: McpServer,
+  health: McpHealth | undefined = undefined,
+  canManage = true,
+  client = clientWith([]),
+) {
+  await open({ kind: "mcp", server, health }, canManage, client);
+}
+
+describe("the same panel, opened on a remote MCP server (#821)", () => {
+  it("says which of the three systems this is, and what it is calling as", async () => {
+    await openMcp(mcpServer());
+    expect(text()).toContain("MCP");
+    expect(text()).toContain("on, calling with a stored credential");
+    // What an operator opened it to see: the URL their agents actually call.
+    expect(text()).toContain("https://mcp.linear.app/mcp");
+  });
+
+  it("does not report a probe that was never run as a health verdict", async () => {
+    // The case with no honest single-badge rendering. A server nobody has
+    // pressed Test on is neither reachable nor broken, and the list's badge
+    // renders nothing at all for it — which on a detail view reads as "fine".
+    await openMcp(mcpServer(), undefined);
+    expect(text()).toContain("has not been probed from here");
+    expect(text()).not.toContain("reachable —");
+    expect(text()).not.toContain("last probed");
+  });
+
+  it("keeps 'turned off' apart from 'unreachable'", async () => {
+    // Two independent facts one badge would collapse: a disabled server whose
+    // endpoint answers perfectly still contributes nothing, and that is the
+    // fact the panel was opened to learn.
+    await openMcp(
+      mcpServer({ enabled: false }),
+      { status: "ok", message: "", toolCount: 9, checkedAtMillis: 1_760_000_000_000 },
+    );
+    expect(text()).toContain("turned off");
+    expect(text()).toContain("reachable — 9 tools on the last probe");
+    expect(text()).toContain("no teammate receives its tools");
+  });
+
+  it("reads usage under mcp:<server>, never as the same-named toolkit's", async () => {
+    // The collision `mcp:` was named to prevent (#698). A company with a
+    // Composio `linear` and an MCP server called `linear` has two connections,
+    // and one row's total is not the other's.
+    await openMcp(mcpServer({ name: "linear" }), undefined, true, clientWith([
+      { provider: "mcp:linear", calls: 31 },
+      { provider: "linear", calls: 4 },
+    ]));
+    expect(text()).toContain("31");
+    expect(text()).toContain("in the last 30 days");
+    expect(text()).toContain("mcp:linear");
+    expect(text()).not.toContain("4 calls");
+  });
+
+  it("does not report a zero when the host records no usage at all", async () => {
+    const broken = {
+      usage: async () => {
+        throw new Error("no usage route on this host");
+      },
+    } as unknown as OpenCompanyClient;
+    await openMcp(mcpServer(), undefined, true, broken);
+    expect(text()).toContain("does not report usage");
+    expect(text()).not.toContain("0 calls");
+  });
+
+  it("says a connection date is not recorded, and why there is none to record", async () => {
+    // The same answer the native path gets, for the same reason — MCP has no
+    // connect step at all. A blank here would read as "never connected".
+    await openMcp(mcpServer());
+    expect(text()).toContain("connection date not recorded");
+    expect(text()).toContain("no connect step to record one");
+  });
+
+  it("states what removing a runtime server reaches, and what it does not", async () => {
+    await openMcp(mcpServer({ source: "runtime" }));
+    expect(text()).toContain("drops it from every agent's tool belt on the next turn");
+    expect(text()).toContain("Nothing is revoked at the server's own end");
+  });
+
+  it("does not offer to remove a server the manifest owns", async () => {
+    // A manifest server can be disabled but not deleted, and it returns on the
+    // next boot — a "removing it deletes it" sentence would be false there.
+    await openMcp(mcpServer({ source: "manifest" }));
+    expect(text()).toContain("cannot be removed from the console");
+    expect(text()).toContain("returns on the next boot");
+  });
+
+  it("tells a member the controls are an admin's rather than offering them", async () => {
+    await openMcp(mcpServer(), undefined, false);
+    expect(text()).toContain("Only an admin can turn a tool server off");
+  });
+
+  it("flags an enabled server no agent's grants cover", async () => {
+    // #568, restated where the panel can afford the sentence the row could not:
+    // usage above it is history, not evidence that it is reachable now.
+    await openMcp(mcpServer({ reachableBy: [] }));
+    expect(text()).toContain("No agent can reach this server");
+    await openMcp(mcpServer({ reachableBy: ["ceo", "engineer"] }));
+    expect(text()).toContain("ceo, engineer");
   });
 });
