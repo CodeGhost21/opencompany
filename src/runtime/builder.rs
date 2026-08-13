@@ -1569,6 +1569,10 @@ impl RuntimeBuilder {
         // way via `CompanyRuntime::set_builder` below.
         #[cfg(feature = "openhuman")]
         let mut builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>> = None;
+        #[cfg(feature = "openhuman")]
+        let mut workflow_wired_namespaces: Option<
+            std::collections::BTreeSet<&'static str>,
+        > = None;
 
         // Load the persisted record BEFORE constructing the brain so the brain's
         // in-memory record carries the operator overlays (team, desk memberships,
@@ -2179,6 +2183,8 @@ impl RuntimeBuilder {
                                 // brain's `CheckoutJanitor`.
                                 checkouts: crate::harness::repo::CheckoutLedger::default(),
                             };
+                            workflow_wired_namespaces =
+                                Some(crate::workflows::caps::wired_workflow_namespaces(&deps));
                             let record = CompanyRecord {
                                 id: id.clone(),
                                 manifest: self.manifest.clone(),
@@ -2479,6 +2485,10 @@ impl RuntimeBuilder {
         #[cfg(feature = "openhuman")]
         if let Some(builder) = builder {
             runtime.set_builder(builder);
+        }
+        #[cfg(feature = "openhuman")]
+        if let Some(namespaces) = workflow_wired_namespaces {
+            runtime.set_wired_workflow_namespaces(namespaces);
         }
 
         // Boot lifecycle step 3: going-public. Best-effort and non-blocking —

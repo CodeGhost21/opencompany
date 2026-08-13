@@ -1227,11 +1227,12 @@ fn description_system_prompt() -> String {
 
 /// Renders the company evidence plus the operator's description as the single
 /// user message for a create-time copilot draft (issue #753). The description is
-/// laid out as data (not instructions), and the granted tool slugs are named so
+/// laid out as data (not instructions), and the effective tool slugs are named so
 /// a `tool_call` node the model authors is one courtesy validation will accept.
 fn description_evidence_prompt(
     e: &CompanyEvidence,
-    granted_slugs: &[String],
+    effective_slugs: &[String],
+    granted_but_unwired_slugs: &[String],
     description: &str,
 ) -> String {
     let mut out = String::new();
@@ -1255,10 +1256,10 @@ fn description_evidence_prompt(
         "\n## Tools (a `tool_call` node's `config.slug` must be one of these, exactly; put the \
          tool's arguments under `config.args`)\n",
     );
-    if granted_slugs.is_empty() {
+    if effective_slugs.is_empty() {
         out.push_str("- (no tools granted — do not use a tool_call node)\n");
     }
-    for slug in granted_slugs {
+    for slug in effective_slugs {
         // Ground each slug in its honest capability and required args (issue
         // #813) so the model does not reach for a tool that cannot do what the
         // step needs (a `read_workspace_state` that cannot read a file), or emit
@@ -1273,6 +1274,17 @@ fn description_evidence_prompt(
             }
             None => out.push_str(&format!("- `{slug}`\n")),
         }
+    }
+    out.push_str(
+        "\nAdvisory: granted but not wired on this deployment — do not author these; if the task \
+         needs one, say so.\n",
+    );
+    if granted_but_unwired_slugs.is_empty() {
+        out.push_str("- (none)\n");
+    } else {
+        out.push_str("- ");
+        out.push_str(&granted_but_unwired_slugs.join(", "));
+        out.push('\n');
     }
 
     out.push_str("\n## Workflows that already exist (do not clash with these names)\n");
@@ -1647,14 +1659,22 @@ pub(crate) async fn draft_workflow_from_description(
     };
     let description = cap(description, MAX_DESCRIPTION_CHARS);
     let company = gather_company_evidence(runtime).await?;
-    let granted_slugs = crate::company::workflow_callable_tool_slugs(&company.record);
+    let wired = runtime.wired_workflow_namespaces();
+    let effective_slugs = crate::company::workflow_effective_tool_slugs(&company.record, wired);
+    let granted_but_unwired_slugs =
+        crate::company::workflow_granted_but_unwired_tool_slugs(&company.record, wired);
 
     // A synchronous request mints no attempt row, but its spend is still metered
     // against a fresh id — see the doc. BOTH attempts share this id.
     let run_id = generate_id();
 
     let system = description_system_prompt();
-    let base_user = description_evidence_prompt(&company, &granted_slugs, &description);
+    let base_user = description_evidence_prompt(
+        &company,
+        &effective_slugs,
+        &granted_but_unwired_slugs,
+        &description,
+    );
 
     // The user message for the current attempt: the grounding prompt first, then
     // — on the second attempt — the corrective prompt built from attempt one's

@@ -129,7 +129,10 @@ pub(crate) use workflow_create::{
 // builder that is its only caller. Issue #753 adds `workflow_callable_tool_slugs`
 // on the same footing — the create-time copilot's tool grounding.
 #[cfg(feature = "openhuman")]
-pub(crate) use workflow_create::{courtesy_validate_draft, workflow_callable_tool_slugs};
+pub(crate) use workflow_create::{
+    courtesy_validate_draft, workflow_callable_tool_slugs, workflow_effective_tool_slugs,
+    workflow_granted_but_unwired_tool_slugs,
+};
 pub use workspace_seed::{NodeKind, SeedNode, extract_wikilinks, walk_workspace};
 
 use crate::{Result, VERSION};

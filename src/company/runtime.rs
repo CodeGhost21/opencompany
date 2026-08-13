@@ -316,6 +316,8 @@ pub struct CompanyRuntime {
     /// and the boot reaper settles any run left mid-build.
     #[cfg(feature = "openhuman")]
     pub(crate) builder: Option<Arc<crate::harness::workflow_build::WorkflowBuilder>>,
+    #[cfg(feature = "openhuman")]
+    pub(crate) workflow_wired_namespaces: Option<std::collections::BTreeSet<&'static str>>,
     /// MCP installs and live connections for this runtime. The wrapper owns a
     /// company-home-scoped OpenHuman config while the live registry remains
     /// shared in-process with harness agents.
@@ -387,6 +389,8 @@ impl CompanyRuntime {
             planner: None,
             #[cfg(feature = "openhuman")]
             builder: None,
+            #[cfg(feature = "openhuman")]
+            workflow_wired_namespaces: None,
             #[cfg(feature = "mcp")]
             mcp: None,
         }
@@ -475,6 +479,19 @@ impl CompanyRuntime {
     #[cfg(feature = "openhuman")]
     pub fn builder(&self) -> Option<&Arc<crate::harness::workflow_build::WorkflowBuilder>> {
         self.builder.as_ref()
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub fn wired_workflow_namespaces(&self) -> Option<&std::collections::BTreeSet<&'static str>> {
+        self.workflow_wired_namespaces.as_ref()
+    }
+
+    #[cfg(feature = "openhuman")]
+    pub fn set_wired_workflow_namespaces(
+        &mut self,
+        namespaces: std::collections::BTreeSet<&'static str>,
+    ) {
+        self.workflow_wired_namespaces = Some(namespaces);
     }
 
     /// Attaches the embedded MCP runtime used by REST and harness agents.

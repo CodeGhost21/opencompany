@@ -853,7 +853,7 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     let slugs = crate::company::workflow_callable_tool_slugs(&company.record);
 
     let description = "email the weekly digest every Monday morning";
-    let prompt = description_evidence_prompt(&company, &slugs, description);
+    let prompt = description_evidence_prompt(&company, &slugs, &[], description);
     assert!(
         prompt.contains(description),
         "the description appears verbatim"
@@ -898,6 +898,27 @@ async fn the_description_prompt_renders_the_company_state_verbatim() {
     );
 }
 
+#[tokio::test]
+async fn the_description_prompt_excludes_granted_but_unwired_tools() {
+    let (_home, runtime) = runtime_with(ScriptedModel::replying(DESC_GRAPH)).await;
+    let company = gather_company_evidence(&runtime).await.unwrap();
+    let mut record = company.record.clone();
+    record.manifest.tools.allow.push("search".to_string());
+    let wired: std::collections::BTreeSet<&'static str> =
+        ["shell", "code", "web"].into_iter().collect();
+    let effective = crate::company::workflow_effective_tool_slugs(&record, Some(&wired));
+    let unwired = crate::company::workflow_granted_but_unwired_tool_slugs(&record, Some(&wired));
+    assert!(!effective.iter().any(|slug| slug == "web_search"));
+    assert_eq!(unwired, vec!["web_search".to_string()]);
+
+    let evidence = CompanyEvidence { record, ..company };
+    let prompt = description_evidence_prompt(&evidence, &effective, &unwired, "search the web");
+    assert!(!prompt.contains("web_search —"));
+    assert!(prompt.contains("granted but not wired"));
+    assert!(prompt.contains("web_search"));
+    assert!(prompt.contains("if the task needs one, say so"));
+}
+
 /// A company with no teammates and no granted tools renders the guiding lines
 /// that keep the model from authoring an `agent` or `tool_call` node it cannot
 /// ground.
@@ -912,7 +933,7 @@ async fn the_description_prompt_names_an_empty_roster_and_toolset() {
         existing_ids: HashSet::new(),
         ..base
     };
-    let prompt = description_evidence_prompt(&empty, &[], "do the thing");
+    let prompt = description_evidence_prompt(&empty, &[], &[], "do the thing");
     assert!(prompt.contains("no teammates"), "{prompt}");
     assert!(prompt.contains("no tools granted"), "{prompt}");
     assert!(prompt.contains("(none yet)"), "{prompt}");
