@@ -345,4 +345,10 @@ test("submitting with an empty id surfaces the validation message on-screen (#81
   const banner = dialog.getByText("Give the workflow an id.");
   await expect(banner).toBeVisible();
   await expect(banner).toBeInViewport();
+
+  // ...and the banner takes focus, so a keyboard/screen-reader user is landed on
+  // the reason Create did nothing rather than left at the pressed button.
+  const bannerBox = dialog.getByTestId("create-error");
+  await expect(bannerBox).toBeFocused();
+  await expect(bannerBox).toContainText("Give the workflow an id.");
 });

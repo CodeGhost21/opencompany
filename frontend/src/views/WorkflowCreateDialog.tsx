@@ -180,7 +180,7 @@ function scheduleProblem(schedule: string): string | null {
  * same thing. `destination_messages_match_the_console` in
  * `src/company/workflow_file.rs` fails if either side is reworded alone.
  */
-function destinationTargetProblem(
+export function destinationTargetProblem(
   kind: DraftNode["destinationKind"],
   target: string,
   wiredChannels: string[],
@@ -1166,7 +1166,12 @@ export function WorkflowCreateDialog({
         {error && (
           // Wrapper carries the ref/focus target so it works regardless of
           // whether `Alert` forwards a ref (#813 defect 6).
-          <div ref={errorRef} tabIndex={-1} className="outline-none">
+          <div
+            ref={errorRef}
+            tabIndex={-1}
+            data-testid="create-error"
+            className="outline-none"
+          >
             <Alert variant="destructive">
               <AlertDescription>{error}</AlertDescription>
             </Alert>
