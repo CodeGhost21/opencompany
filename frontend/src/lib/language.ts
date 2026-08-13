@@ -2,7 +2,7 @@
 // never exposes runtime internals ("agent graph", "tier", "dispatch", "cycle",
 // "checkpoint", "A2A"). Everything a person sees goes through this layer.
 
-import type { ApprovalSummary, FeedbackCategory } from "../api/types";
+import type { ApprovalSummary, FeedbackCategory, StandingGrant } from "../api/types";
 
 /**
  * A company's lifecycle state, in plain language, with a status tone.
@@ -285,6 +285,79 @@ export function approvalAction(a: ApprovalSummary): string {
  */
 export function toolAction(kind: string): string {
   return labelFor(EFFECT_LABELS, kind) ?? labelFor(TOOL_LABELS, kind) ?? "Use one of its tools";
+}
+
+/**
+ * What one standing permission actually covers, in one line (#457).
+ *
+ * {@link toolAction} alone answers "which tool", which is the whole sentence for
+ * `file_write` and only half of it for `composio_execute`: that name carries
+ * every action of every connected provider, so a row reading "Act in one of its
+ * connected accounts" leaves an operator unable to tell a permission over their
+ * code host from one over their mailbox — and a permission you cannot read is
+ * one you cannot decide to revoke. When the host names a scope, the row names
+ * what it narrows to.
+ *
+ * Composed as a suffix rather than a second phrasing table: the tool's own words
+ * stay in {@link toolAction}, so there is nothing here to drift out of step
+ * with it.
+ *
+ * Lives here rather than in the view because it now has a branch worth naming
+ * ({@link scopeLabel}), and the branch is the whole of issue #785.
+ */
+export function grantHeadline(g: StandingGrant): string {
+  const action = toolAction(g.tool);
+  return g.scope ? `${action} — ${scopeLabel(g.scope)} only` : action;
+}
+
+/**
+ * A grant's scope as a person would read it (#785).
+ *
+ * `StandingGrant.scope` is one string carrying **two different kinds** of value,
+ * minted by two arms of the same host function (`standing_scope_of`):
+ *
+ * * a **Composio toolkit** identifier — `microsoft_teams` — which is a slug and
+ *   has to be spelled out before an operator can read it;
+ * * a **URL origin** — `https://docs.rs` — added for `web_fetch` by #673/#739,
+ *   which is already exactly what the operator approved and must survive
+ *   untouched.
+ *
+ * Issue #785 was the second kind going through the first kind's speller:
+ * `https://docs.rs` has no `_`, so it stayed one "word" and came out as
+ * `Https://docs.rs`. A scheme is not a proper noun, and an operator reading a
+ * row *in order to decide whether to revoke it* should not have to wonder
+ * whether the display is lying about the rest of the string too.
+ *
+ * The kinds are told apart here, on the value, rather than by a discriminator
+ * on the wire. `scope` is the enforcement key — the host matches a live call
+ * against it with exact string equality (`StandingGrant::admits_scope`) and it
+ * is replayed from the journal — so retyping it is a persisted-format change to
+ * a security-relevant comparison, not a label fix. What that suggestion is
+ * really worth is naming the two kinds at the type, which the doc comments on
+ * both sides now do. If a third kind ever arrives, this function is the one
+ * place that has to learn about it.
+ */
+function scopeLabel(scope: string): string {
+  return scope.includes("://") ? scope : toolkitLabel(scope);
+}
+
+/**
+ * A toolkit identifier as a person would write it: `microsoft_teams` →
+ * "Microsoft Teams".
+ *
+ * Mechanical on purpose. A lookup table of pretty provider names would render
+ * the ~30 toolkits it knew and the raw slug for everything else, and the ones it
+ * did not know would be exactly the ones added most recently.
+ *
+ * Toolkit slugs only — see {@link scopeLabel} for why a URL origin must never
+ * reach this.
+ */
+function toolkitLabel(scope: string): string {
+  return scope
+    .split("_")
+    .filter(Boolean)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
 }
 
 /** A one-line, human summary of what needs approval. */
