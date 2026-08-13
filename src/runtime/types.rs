@@ -215,6 +215,36 @@ pub struct ApprovalSummary {
     /// before, and a console that reads no such field is unaffected.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub contents_hidden: bool,
+    /// Which turn's gated calls this one belongs to (issue #842) — an opaque
+    /// grouping key shared by every approval a single agent turn parked.
+    ///
+    /// **Presentation, not a new unit of truth.** One research turn that
+    /// reaches three sites parks three approvals, and each stays exactly what
+    /// it was: its own record, its own decision, its own host-scoped grant on
+    /// approve (issue #739). This field only says that they were asked for
+    /// together, so the conversation can ask once — "three sites" with the
+    /// hosts listed — instead of interrupting three times. The Approvals page
+    /// deliberately keeps rendering one row per approval, matching how
+    /// `Standing permissions` lists one revocable row per grant.
+    ///
+    /// The value is the parking turn key issue #469 already journals, so the
+    /// batch a card consolidates is by construction the same batch the runtime
+    /// continues exactly once. Nothing else may be inferred from it: it is an
+    /// opaque id, not an ordering, a count, or an address.
+    ///
+    /// `None` — and omitted from the wire — for an approval raised outside a
+    /// cycle (a workflow node, a scheduler tick) and for every park journaled
+    /// before #469. A console groups those alone, which is the pre-#842
+    /// rendering, so an old host and a new one both produce a card an operator
+    /// can decide.
+    ///
+    /// Survives role redaction on purpose:
+    /// [`approval_visibility`](crate::server::approval_visibility) withholds
+    /// *contents*, and which requests arrived together is not contents. A
+    /// Member sees a batch of three withheld cards rather than three unrelated
+    /// ones, which is less information than an admin gets and still the truth.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub batch: Option<String>,
 }
 
 #[cfg(test)]

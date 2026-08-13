@@ -1787,6 +1787,12 @@ impl CompanyRuntime {
                 // happens at the edge, in `server::approval_visibility`, so
                 // per-role logic stays out of the domain layer.
                 contents_hidden: false,
+                // Issue #842: which turn asked for it, so the conversation can
+                // ask about a turn's gated calls once. Projected, never
+                // derived — grouping by "same agent, same thread, close
+                // together" would guess at a fact the journal already records,
+                // and would guess wrong exactly when two turns overlap.
+                batch: p.batch,
             })
             .collect()
     }
