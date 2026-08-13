@@ -705,6 +705,10 @@ working on):\n{}\n]",
         if outcome == ResolveOutcome::NotParked {
             return Ok(ResolveReceipt::AlreadyResolved);
         }
+        // Issue #796: the approval has left the parked set — drop its pending
+        // mark. On approve the grant minted just below now names the task; on
+        // deny nothing does, so its held checkout becomes sweepable.
+        self.rt.grants.clear_pending(id);
         self.rt.journal.record_resolved(id).await?;
         if let ResolveOutcome::Approved(effect) = outcome {
             self.settle_approved_effect(id, effect, by.clone(), scope)
@@ -865,6 +869,9 @@ working on):\n{}\n]",
             // within it; both come from one read so they cannot disagree.
             origin_thread: conversation.thread,
             origin_parent: conversation.parent,
+            // Issue #796: the task this call was parked from, carried so a
+            // standing grant can reclaim the task's checkout across parks.
+            origin_task: self.approval_work_key(id),
             // Issue #457: which slice of the tool the card was actually about.
             // Read off the **parked effect's own payload** — the arguments the
             // operator was shown — rather than re-derived from anything live, so
@@ -909,6 +916,9 @@ working on):\n{}\n]",
             // the thread within it; one read, so the pair cannot disagree.
             origin_thread: conversation.thread,
             origin_parent: conversation.parent,
+            // Issue #796: the task this call was parked from, so the
+            // re-dispatched turn can reclaim its held-across-park checkout.
+            origin_task: self.approval_work_key(id),
         };
         self.rt.journal.record_granted(&grant).await?;
         self.rt.grants.grant(grant);
@@ -918,6 +928,34 @@ working on):\n{}\n]",
             "[approval] minted a single-use grant; the agent will re-issue the call"
         );
         Ok(())
+    }
+
+    /// The work unit a parked approval belongs to, for stamping a grant's
+    /// `origin_task` (issue #796).
+    ///
+    /// A task card names it directly. A DM/chat has no card, but its conversation
+    /// is just as much a unit of work — the agent checks out, edits, commits and
+    /// publishes across a batch of approvals raised in the same thread — so the
+    /// thread stands in, sanitised to a single safe branch segment. The checkout
+    /// retention and `repo_publish`'s `oc/<company>/<unit>` branch then key on one
+    /// value for both, and the whole task-scoped machinery covers a DM unchanged.
+    ///
+    /// `None` only when there is neither a card nor a usable thread.
+    fn approval_work_key(&self, id: &ApprovalId) -> Option<String> {
+        if let Some(task) = self
+            .rt
+            .journal
+            .approval_task(id)
+            .flatten()
+            .and_then(|task| task.task_id().map(str::to_string))
+        {
+            return Some(task);
+        }
+        self.rt
+            .journal
+            .approval_conversation(id)
+            .and_then(|c| c.thread)
+            .and_then(|thread| sanitize_work_segment(&thread))
     }
 
     /// Describes a grant the agent just redeemed, so an operator-approved tool
@@ -947,6 +985,8 @@ working on):\n{}\n]",
         Some(ExecutedEffect {
             kind: effect.kind.clone(),
             amount_usd: effect.amount_usd,
+            // The card this call was on, for the retry confirmation (#351) — a
+            // real task only, never the #796 DM work key, which is not a card.
             task_id: self
                 .rt
                 .journal
@@ -1431,6 +1471,35 @@ async fn recipient_is_established(rt: &CompanyRuntime, to: &str) -> bool {
         .unwrap_or(false) // fail closed → parks for approval
 }
 
+/// Maps a conversation thread into a single safe branch segment (issue #796).
+///
+/// The write tier's branch is `oc/<company>/<unit>`, and for a DM the unit is
+/// its thread — which, unlike a card id, can hold anything. Keep the characters
+/// `RepoManager::validate_task_segment` accepts, fold the rest to `-`, and
+/// prefix `dm-` so the result cannot lead with `-`, cannot be empty, cannot
+/// collide with a card id, and reads as "a conversation's branch" in `git log`.
+/// `None` when nothing usable survives.
+fn sanitize_work_segment(thread: &str) -> Option<String> {
+    let cleaned: String = thread
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let cleaned = cleaned.trim_matches(['-', '.']);
+    if cleaned.is_empty() {
+        return None;
+    }
+    // Bound the body well under `validate_task_segment`'s 128-char cap; the
+    // characters are all ASCII, so a byte take is a char take.
+    let body: String = cleaned.chars().take(100).collect();
+    Some(format!("dm-{body}"))
+}
+
 /// The board task a cycle is working, read off its own trigger events
 /// (issue #333) — the correlation key every approval this cycle parks carries.
 ///
@@ -1910,6 +1979,21 @@ impl<'a> CycleHostImpl<'a> {
                 Some(self.cycle_id.clone()),
             )
             .await?;
+        // Issue #796: a parked approval mints no grant until it resolves, so
+        // until then neither grant map names this work unit. Mark it pending on
+        // the shared grant set so an unrelated turn's `sweep_orphans` treats the
+        // checkout this parked step is holding as live rather than orphaned. The
+        // key is derived exactly as `approval_work_key` derives the grant's
+        // `origin_task` (the card, else the sanitised thread), so the pending
+        // mark and the grant it becomes name one unit; cleared when the approval
+        // is settled or expires.
+        if let Some(work) = self
+            .task_id
+            .clone()
+            .or_else(|| self.thread_id.as_deref().and_then(sanitize_work_segment))
+        {
+            self.rt.grants.mark_pending(&approval_id, work);
+        }
         // …and armed on the live counter in the same breath. A turn that parks
         // four calls is blocked on four decisions; the runtime holds its
         // continuation until the last of them lands and then runs it once.
@@ -2254,6 +2338,27 @@ impl CycleHost for CycleHostImpl<'_> {
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// Issue #796: a DM's thread becomes a safe, `dm-`-prefixed branch segment
+    /// `RepoManager::validate_task_segment` accepts; an empty or all-garbage
+    /// thread yields nothing, so `repo_publish` refuses rather than build a
+    /// broken ref.
+    #[test]
+    fn sanitize_work_segment_makes_a_safe_branch_segment() {
+        assert_eq!(sanitize_work_segment("coder"), Some("dm-coder".into()));
+        // Colons, slashes and spaces fold to '-'.
+        assert_eq!(
+            sanitize_work_segment("dm:coder/main x"),
+            Some("dm-dm-coder-main-x".into())
+        );
+        // Leading/trailing separators are trimmed before the prefix.
+        assert_eq!(sanitize_work_segment("--weird--"), Some("dm-weird".into()));
+        // Dots and underscores are already valid and survive.
+        assert_eq!(sanitize_work_segment("a_b.c"), Some("dm-a_b.c".into()));
+        // Nothing usable.
+        assert_eq!(sanitize_work_segment(""), None);
+        assert_eq!(sanitize_work_segment("///"), None);
+    }
     use std::sync::Arc;
     use std::sync::atomic::AtomicUsize;
 
@@ -3439,6 +3544,7 @@ mod test {
             at_millis: 0,
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         });
         // A fresh one, to prove the sweep is selective rather than a flush.
         rt.grants.grant(GrantedCall {
@@ -3449,6 +3555,7 @@ mod test {
             at_millis: now_millis(),
             origin_thread: None,
             origin_parent: None,
+            origin_task: None,
         });
 
         let expired = rt.sweep_expired_grants().await.unwrap();

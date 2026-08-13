@@ -1499,6 +1499,10 @@ impl CompanyRuntime {
         let expired = self.approval_gate.sweep_expired(now);
         for id in &expired {
             self.journal.record_expired(id, now).await?;
+            // Issue #796: the parked approval is gone, so its work unit is no
+            // longer awaiting a resume — drop the pending mark so the checkout it
+            // was holding across the park becomes sweepable.
+            self.grants.clear_pending(id);
             // Issue #469: releasing the turn this approval was blocking, and
             // running its continuation when this expiry was the last thing it
             // waited on. Spawned rather than awaited: the continuation is a full

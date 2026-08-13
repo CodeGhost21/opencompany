@@ -551,6 +551,154 @@ fn purging_a_path_that_is_already_gone_succeeds() {
     assert_eq!(ledger.purge(), 1);
 }
 
+/// A checkout retained for a task survives the turn's purge, comes back on
+/// reclaim, and is deleted by the turn's janitor only once the task finishes —
+/// the lifecycle that lets a checkout outlive an approval park (issue #796).
+#[test]
+fn a_retained_checkout_survives_a_purge_and_returns_on_reclaim() {
+    let scratch = Scratch::new("retain");
+    let tree = scratch.join("held");
+    std::fs::create_dir_all(&tree).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(tree.clone());
+    assert!(ledger.has_active(&tree));
+
+    // Parked: move it off the turn-scoped list, under the task.
+    ledger.retain_for_task("t-1");
+    assert!(
+        !ledger.has_active(&tree),
+        "retain left it on the active list"
+    );
+    assert_eq!(ledger.retained_tasks(), vec!["t-1".to_string()]);
+
+    // The turn's janitor now purges nothing — the tree is held.
+    assert_eq!(ledger.purge(), 0);
+    assert!(
+        tree.is_dir(),
+        "a retained checkout was purged with the turn"
+    );
+
+    // Resumed: reclaim brings it back under the turn's janitor.
+    ledger.reclaim("t-1");
+    assert!(ledger.has_active(&tree));
+    assert!(ledger.retained_tasks().is_empty());
+
+    // ...and now the janitor deletes it, the task having finished.
+    assert_eq!(ledger.purge(), 1);
+    assert!(!tree.exists());
+}
+
+/// `purge_task` deletes a task's held checkout directly — the task-end path,
+/// where the work resumed and finished rather than being reclaimed by a turn.
+/// A second call, or an unknown task, is a no-op.
+#[test]
+fn purge_task_deletes_a_held_checkout() {
+    let scratch = Scratch::new("purge-task");
+    let tree = scratch.join("held");
+    std::fs::create_dir_all(&tree).unwrap();
+    let ledger = CheckoutLedger::default();
+    ledger.record(tree.clone());
+    ledger.retain_for_task("t-1");
+
+    assert_eq!(ledger.purge_task("t-1"), 1);
+    assert!(!tree.exists());
+    assert!(ledger.retained_tasks().is_empty());
+    assert_eq!(ledger.purge_task("t-1"), 0);
+    assert_eq!(ledger.purge_task("nope"), 0);
+}
+
+/// `sweep_orphans` deletes a held checkout the moment no live grant names its
+/// task — the denied/expired cleanup — and leaves a task still awaiting its
+/// resume alone (issue #796).
+#[test]
+fn sweep_orphans_purges_only_tasks_with_no_live_grant() {
+    let scratch = Scratch::new("sweep-orphans");
+    let live = scratch.join("live");
+    let dead = scratch.join("dead");
+    std::fs::create_dir_all(&live).unwrap();
+    std::fs::create_dir_all(&dead).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(live.clone());
+    ledger.retain_for_task("t-live");
+    ledger.record(dead.clone());
+    ledger.retain_for_task("t-dead");
+
+    // Only `t-live` still has a grant behind it.
+    let removed = ledger.sweep_orphans(|task| task == "t-live");
+    assert_eq!(removed, 1);
+    assert!(live.is_dir(), "a task still awaiting its resume was swept");
+    assert!(!dead.exists(), "an orphaned task's checkout survived");
+    assert_eq!(ledger.retained_tasks(), vec!["t-live".to_string()]);
+}
+
+/// A parked-but-unresolved approval mints no grant, yet the checkout its step is
+/// holding must survive an unrelated turn's sweep. `any_for_task` counts a
+/// pending approval as live, so `sweep_orphans` spares the task until the
+/// operator decides — closing the window between a park and its resolution that
+/// would otherwise reopen the #796 deadlock one turn upstream. Once the approval
+/// resolves (here, denied — clearing the mark), the next sweep reclaims it.
+#[test]
+fn sweep_orphans_spares_a_task_whose_approval_is_still_parked() {
+    use crate::ports::types::ApprovalId;
+    use crate::runtime::grants::GrantSet;
+
+    let scratch = Scratch::new("sweep-pending");
+    let held = scratch.join("held");
+    std::fs::create_dir_all(&held).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(held.clone());
+    ledger.retain_for_task("t-parked");
+
+    // The task parked a new step: an approval awaits the operator, so no grant
+    // names the task yet. The shared grant set is the sweep's liveness oracle.
+    let grants = GrantSet::default();
+    let approval = ApprovalId::new("appr-parked");
+    grants.mark_pending(&approval, "t-parked".to_string());
+
+    // An unrelated turn claims the janitor and sweeps. The parked task has no
+    // grant, but its pending approval keeps it live — the checkout survives.
+    let removed = ledger.sweep_orphans(|task| grants.any_for_task(task));
+    assert_eq!(removed, 0, "a task with a parked approval was swept");
+    assert!(held.is_dir(), "the parked step's checkout was deleted");
+    assert_eq!(ledger.retained_tasks(), vec!["t-parked".to_string()]);
+
+    // The operator denies it: the mark clears, nothing names the task, and the
+    // next sweep reclaims the disk.
+    grants.clear_pending(&approval);
+    let removed = ledger.sweep_orphans(|task| grants.any_for_task(task));
+    assert_eq!(removed, 1);
+    assert!(
+        !held.exists(),
+        "a denied task's checkout survived the sweep"
+    );
+    assert!(ledger.retained_tasks().is_empty());
+}
+
+/// A second park of the same task merges its paths in rather than replacing the
+/// set, so a checkout retained by the first park survives the second (issue
+/// #796).
+#[test]
+fn retaining_a_task_twice_keeps_both_checkouts() {
+    let scratch = Scratch::new("retain-twice");
+    let first = scratch.join("first");
+    let second = scratch.join("second");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+
+    let ledger = CheckoutLedger::default();
+    ledger.record(first.clone());
+    ledger.retain_for_task("t-1");
+    ledger.record(second.clone());
+    ledger.retain_for_task("t-1");
+
+    assert_eq!(ledger.purge_task("t-1"), 2);
+    assert!(!first.exists());
+    assert!(!second.exists());
+}
+
 /// The boot sweep removes every agent's `workspace/repos` under **this**
 /// company and leaves its siblings — the tenant-scoping that keeps one
 /// company's boot from deleting another's bytes.
@@ -720,6 +868,65 @@ async fn a_successful_checkout_reports_a_relative_path_and_records_it() {
     // And the janitor's contract, end to end.
     ledger.purge();
     assert!(!tree.exists());
+}
+
+/// A second `repo_checkout` of a repo the task already holds is reused only when
+/// it asks for the **same** ref. A different branch — or a pull request — is
+/// refused by name rather than silently returning the held tree (the wrong ref)
+/// or cloning over the commits the parked step is holding (issue #796).
+#[tokio::test]
+async fn a_second_checkout_at_a_different_ref_is_refused_not_silently_reused() {
+    let scratch = Scratch::new("reuse-ref");
+    let (manager, binding) = bound(&scratch, &["main", "topic"]).await;
+    let ctx = context(&scratch, manager, vec![binding]);
+    let tools = repo_tools(ctx);
+    let checkout = &tools[tool_named(&tools, REPO_CHECKOUT_TOOL)];
+
+    // First checkout materializes `main` and records it on the shared ledger.
+    let first = checkout
+        .execute(json!({ "repo": "fixture", "ref": "main" }))
+        .await
+        .unwrap();
+    assert!(!first.is_error, "{first:?}");
+
+    // Same ref: the held tree is on `main`, so it is reused, not re-cloned.
+    let same = checkout
+        .execute(json!({ "repo": "fixture", "ref": "main" }))
+        .await
+        .unwrap();
+    assert!(!same.is_error, "same ref must reuse: {same:?}");
+    assert!(
+        same.text().contains("already have") && same.text().contains("branch main"),
+        "the reuse notice must name the ref: {}",
+        same.text()
+    );
+
+    // A different branch: refused, naming both what it is on and what was asked.
+    let other = checkout
+        .execute(json!({ "repo": "fixture", "ref": "topic" }))
+        .await
+        .unwrap();
+    assert!(other.is_error, "a different ref must be refused: {other:?}");
+    assert!(
+        other.text().contains("branch main") && other.text().contains("branch topic"),
+        "the refusal must name the held ref and the requested one: {}",
+        other.text()
+    );
+
+    // A pull request over the same held branch: refused the same way.
+    let pr = checkout
+        .execute(json!({ "repo": "fixture", "pr": 7 }))
+        .await
+        .unwrap();
+    assert!(
+        pr.is_error,
+        "a pr over a held branch must be refused: {pr:?}"
+    );
+    assert!(
+        pr.text().contains("branch main") && pr.text().contains("pull request #7"),
+        "the refusal must name the held branch and the requested pr: {}",
+        pr.text()
+    );
 }
 
 /// A checkout that would push the company past its cap is refused **before**
