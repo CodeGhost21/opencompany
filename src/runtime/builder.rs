@@ -4329,6 +4329,13 @@ mod test {
         assert_eq!(runtime.channels.len(), 2);
         assert!(runtime.channels.iter().any(|c| c.channel_id() == "email"));
 
+        // The #813 accessor the console's channel picker reads names BOTH: the
+        // always-wired `operator` and the openhuman-backed provider channel, so
+        // a workflow author can target either.
+        let wired = runtime.wired_channel_ids();
+        assert!(wired.contains(&"operator".to_string()));
+        assert!(wired.contains(&"email".to_string()));
+
         // A granted call routes through the OpenHuman transport.
         let result = runtime
             .tools
